@@ -1,0 +1,1782 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>ネットワークラボ エミュレーター</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#000;--bg2:#0a0a0a;--bg3:#111;--bg4:#1a1a1a;
+  --border:#2a2a2a;--border2:#3a3a3a;
+  --green:#00c800;--amber:#c8c800;--red:#c80000;
+  --cyan:#00c8c8;--blue:#0070c0;--text:#c0c0c0;--text2:#606060;
+  --sir:#00c840;--srs:#00a0ff;--cat:#1e90ff;--cisco:#e05a00;
+}
+body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+/* タイトルバー */
+#titlebar{background:linear-gradient(to bottom,#1a3a6a,#0d2040);padding:3px 8px;display:flex;align-items:center;gap:8px;flex-shrink:0;border-bottom:1px solid #0a1828}
+#titlebar .title{flex:1;font-size:12px;color:#8ab4e0}
+#mode-badge{padding:1px 8px;border-radius:2px;font-size:10px;font-weight:bold}
+.badge-rules{background:#1a1a00;color:var(--amber);border:1px solid var(--amber)}
+.badge-ollama{background:#001a00;color:var(--green);border:1px solid var(--green)}
+.tbtn{width:16px;height:14px;background:#606060;border:1px outset #808080;font-size:9px;display:flex;align-items:center;justify-content:center;color:#000;cursor:pointer}
+
+/* メニューバー */
+#menubar{background:#161616;border-bottom:1px solid var(--border);padding:2px 6px;display:flex;gap:2px;align-items:center;flex-shrink:0;font-size:11px;flex-wrap:wrap}
+.mitem{padding:2px 8px;cursor:pointer;border-radius:2px;color:var(--text2);user-select:none}
+.mitem:hover{background:var(--bg4);color:var(--text)}
+.msep{width:1px;height:14px;background:var(--border);margin:0 4px}
+
+/* タブ */
+#tabbar{background:#111;border-bottom:2px solid var(--border);display:flex;gap:2px;padding:3px 6px 0;flex-shrink:0}
+.tab{padding:3px 14px;border:1px solid var(--border);border-bottom:none;background:#1a1a1a;color:var(--text2);cursor:pointer;font-size:11px;border-radius:2px 2px 0 0;position:relative;top:1px;user-select:none}
+.tab.active{background:var(--bg);color:var(--green);border-color:var(--border2);z-index:1}
+.tab:hover:not(.active){color:var(--text)}
+
+/* メイン */
+#main{flex:1;display:flex;overflow:hidden}
+
+/* ════ 起動選択画面 ════ */
+#launcher{position:fixed;inset:0;z-index:9999;background:#000;display:flex;align-items:center;justify-content:center;flex-direction:column}
+#launcher-box{background:#0a0f18;border:1px solid #1a3a5a;border-radius:6px;width:520px;max-width:95vw;overflow:hidden;box-shadow:0 4px 32px rgba(0,80,160,.4)}
+#launcher-hdr{background:linear-gradient(to bottom,#1a3a6a,#0d2040);padding:10px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #1a3a5a}
+#launcher-hdr .lh-title{flex:1;font-size:14px;color:#80c8ff;font-weight:bold}
+#launcher-body{padding:16px}
+.dev-sel-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid #1a3a2a;border-radius:4px;margin-bottom:6px;cursor:pointer;transition:background .1s}
+.dev-sel-row:hover{background:#0a1a0a}
+.dev-sel-row.active{background:#051a05;border-color:#1a5a1a}
+.dev-sel-row input[type=checkbox]{width:16px;height:16px;cursor:pointer;accent-color:#00c800}
+.dev-sel-dot{width:12px;height:12px;border-radius:3px;flex-shrink:0}
+.dev-sel-name{font-size:12px;font-weight:bold;flex:1}
+.dev-sel-model{font-size:10px;color:var(--text2)}
+.dev-sel-hostname{font-size:10px;color:var(--text2);margin-left:auto}
+.add-dev-row{display:flex;flex-wrap:wrap;gap:4px;margin:8px 0}
+.launcher-add-btn{padding:3px 10px;background:var(--bg4);border:1px solid var(--border);font-size:10px;cursor:pointer;border-radius:3px;font-family:'Courier New',monospace;color:var(--text2)}
+.launcher-add-btn:hover{border-color:var(--text);color:var(--text)}
+#launcher-foot{padding:12px 16px;border-top:1px solid #1a3a5a;display:flex;align-items:center;gap:10px;background:#060e18}
+#btn-launch{flex:1;padding:8px;background:#0a3a0a;border:1px solid #00c800;color:#00c800;font-size:13px;font-weight:bold;cursor:pointer;border-radius:4px;font-family:'Courier New',monospace;transition:background .15s}
+#btn-launch:hover{background:#0a5a0a}
+#launcher-count{font-size:10px;color:var(--text2)}
+#panel-lab{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#topo-bar{background:#111;border-bottom:1px solid var(--border);padding:3px 8px;display:flex;gap:6px;align-items:center;flex-shrink:0;flex-wrap:wrap;font-size:10px}
+.topo-node{display:flex;align-items:center;gap:3px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:2px 6px;font-size:10px;cursor:default}
+.nd{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+#terminal-grid{flex:1;display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:1fr;gap:3px;padding:3px;overflow:hidden;background:#050505;min-height:0}
+
+/* ターミナルウィンドウ */
+.term-win{display:flex;flex-direction:column;overflow:hidden;background:#000;border:1px solid var(--border);min-height:0}
+.tw-title{padding:2px 6px;display:flex;align-items:center;gap:5px;flex-shrink:0;font-size:10px;border-bottom:1px solid var(--border);background:#0a0a0a}
+.tw-icon{width:10px;height:10px;border-radius:2px;flex-shrink:0}
+.tw-name{font-size:10px;font-weight:bold}
+.tw-buf{flex:1;overflow-y:auto;padding:2px 4px;font-size:12px;line-height:1.35;cursor:text;scrollbar-width:thin;scrollbar-color:#222 #000;min-height:0}
+.tw-buf::-webkit-scrollbar{width:5px}
+.tw-buf::-webkit-scrollbar-thumb{background:#222}
+.tline{white-space:pre-wrap;word-break:break-all;min-height:1.35em}
+.col-g{color:var(--green)}.col-y{color:var(--amber)}.col-r{color:var(--red)}.col-c{color:var(--cyan)}.col-d{color:var(--text2)}.col-w{color:#fff}
+.thinking{color:var(--cyan);font-size:10px;padding:0 4px;animation:blink .5s step-end infinite;flex-shrink:0;display:none}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+.input-line{display:flex;align-items:center;white-space:pre;font-size:12px;line-height:1.35;min-height:1.35em;padding:0 4px;flex-shrink:0}
+.cur{display:inline-block;width:8px;height:1.1em;background:var(--text);animation:cur-blink 1.2s step-end infinite;vertical-align:text-bottom;position:relative;top:1px}
+@keyframes cur-blink{0%,100%{opacity:1}50%{opacity:0}}
+.hid{position:fixed;left:-9999px;opacity:0;width:1px;height:1px}
+
+/* トポロジーパネル（Canvas） */
+#panel-topo{display:none;flex:1;overflow:hidden;flex-direction:column}
+#panel-topo.active{display:flex}
+.topo-editor{flex:1;display:flex;gap:4px;padding:6px;overflow:hidden}
+.topo-left{width:280px;flex-shrink:0;display:flex;flex-direction:column;gap:6px;overflow-y:auto}
+.topo-right{flex:1;display:flex;flex-direction:column;gap:6px;overflow:hidden}
+.tbox{background:var(--bg2);border:1px solid var(--border);border-radius:4px;overflow:hidden}
+.tbox-hdr{background:var(--bg3);padding:4px 10px;font-size:10px;color:var(--amber);border-bottom:1px solid var(--border)}
+.tbox-body{padding:8px 10px}
+#topo-canvas{flex:1;position:relative;overflow:hidden;min-height:200px;background:#050505;border:1px solid var(--border);border-radius:3px}
+#topo-cvs{position:absolute;top:0;left:0;width:100%;height:100%}
+#topo-hint{position:absolute;pointer-events:none;background:#0d2a0d;border:1px solid var(--green);border-radius:4px;padding:5px 10px;font-size:10px;color:var(--green);white-space:nowrap;display:none;z-index:100;box-shadow:0 2px 8px rgba(0,200,0,.2)}
+@keyframes blink-border{0%,100%{border-color:var(--green);box-shadow:0 0 6px rgba(0,200,0,.4)}50%{border-color:#00ff00;box-shadow:0 0 14px rgba(0,255,0,.7)}}
+.dev-add-btn{padding:3px 8px;background:var(--bg4);border:1px solid var(--border);font-size:10px;cursor:pointer;border-radius:2px;font-family:'Courier New',monospace;margin:2px}
+.dev-add-btn:hover{background:var(--bg3)}
+.lab-btn{padding:3px 10px;background:var(--bg4);border:1px solid var(--border2);color:var(--text);font-size:10px;cursor:pointer;border-radius:2px;font-family:'Courier New',monospace}
+.lab-btn:hover{border-color:var(--text);color:#fff}
+.lab-btn.prim{border-color:var(--green);color:var(--green)}
+.lab-btn.warn{border-color:var(--amber);color:var(--amber)}
+.lab-btn.dang{border-color:var(--red);color:var(--red)}
+
+/* 設定パネル */
+#panel-config{display:none;flex:1;overflow:hidden}
+#panel-config.active{display:flex}
+.cfg-wrap{flex:1;display:flex;gap:4px;padding:4px;overflow:hidden}
+.cfg-left{width:300px;flex-shrink:0;overflow-y:auto;display:flex;flex-direction:column;gap:6px}
+.cfg-right{flex:1;display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--border);background:#000}
+.cfg-hdr{background:#001428;padding:3px 8px;font-size:10px;color:var(--text2);display:flex;justify-content:space-between;flex-shrink:0}
+#config-out{flex:1;overflow-y:auto;padding:6px;font-size:11px;color:var(--green);white-space:pre-wrap;scrollbar-width:thin}
+.gbox{border:1px solid var(--border);border-radius:3px;overflow:hidden;background:var(--bg2)}
+.gbox-hdr{background:var(--bg3);padding:4px 8px;font-size:10px;color:var(--amber);border-bottom:1px solid var(--border)}
+.gbox-body{padding:6px 8px}
+.gf{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.gf label{width:110px;font-size:10px;color:var(--text2);flex-shrink:0;text-align:right}
+.gf input,.gf select,.gf textarea{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 5px;font-size:10px;font-family:'Courier New',monospace;outline:none;border-radius:2px}
+.gf input:focus,.gf select:focus{border-color:var(--cyan)}
+.gf textarea{resize:vertical;min-height:40px}
+
+/* リンクリスト */
+.link-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border:1px solid var(--border);border-radius:3px;margin-bottom:4px;font-size:10px;background:var(--bg3)}
+.lr-del{color:var(--red);cursor:pointer;padding:0 4px}
+.lr-del:hover{color:#ff4444}
+
+/* 右クリックメニュー */
+#ctx-menu{position:fixed;z-index:8000;display:none;background:#1a2a3a;border:1px solid #2a5a8a;border-radius:3px;box-shadow:0 2px 12px rgba(0,0,0,.6);min-width:180px;font-family:'Courier New',monospace;overflow:hidden}
+.ctx-item{padding:5px 14px;font-size:11px;color:#a0c0d8;cursor:pointer;display:flex;align-items:center;gap:8px;white-space:nowrap}
+.ctx-item:hover{background:#1a3a6a}
+.ctx-sep{height:1px;background:#1a3a5a;margin:2px 0}
+
+/* ステータスバー */
+#statusbar{background:#060e18;border-top:1px solid var(--border);padding:2px 8px;display:flex;gap:12px;font-size:10px;flex-shrink:0;flex-wrap:wrap}
+.sb-item{display:flex;align-items:center;gap:4px;color:var(--text2)}
+.sb-dot{width:6px;height:6px;border-radius:50%}
+
+/* 流し込みモーダル */
+#flow-overlay{position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,.82);display:none;align-items:center;justify-content:center}
+#flow-box{background:#0d1a2a;border:1px solid #2a5a8a;border-radius:5px;width:540px;max-width:95vw;overflow:hidden;box-shadow:0 4px 24px rgba(0,80,160,.4);font-family:'Courier New',monospace}
+.flow-hdr{background:#1a3a6a;padding:7px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #2a5a8a}
+#flow-text{width:100%;height:200px;background:#050e18;border:1px solid #1a3a5a;color:#00c800;font-family:'Courier New',monospace;font-size:12px;padding:8px;outline:none;resize:vertical;line-height:1.5;display:block}
+#flow-log{height:60px;overflow-y:auto;background:#050e18;border:1px solid #1a3a5a;padding:4px 8px;font-size:10px;scrollbar-width:thin;margin-top:6px;color:#406060}
+</style>
+</head>
+<body>
+
+<!-- ════ 起動選択画面 ════ -->
+<div id="launcher">
+  <div id="launcher-box">
+    <div id="launcher-hdr">
+      <div style="font-size:20px">🖥</div>
+      <div class="lh-title">ネットワークラボ エミュレーター<br><span style="font-size:10px;color:#4080a0;font-weight:normal">使用する装置を選択してください</span></div>
+      <span id="launcher-mode-badge" class="badge-rules" style="padding:2px 8px;border-radius:2px;font-size:10px;font-weight:bold;cursor:pointer" onclick="toggleModeHelp()" title="クリックで説明">● ルールベース ℹ</span>
+    </div>
+    <!-- モード説明パネル -->
+    <div id="mode-help" style="display:none;background:#060e18;border-bottom:1px solid #1a3a5a;padding:10px 16px;font-size:11px;line-height:1.8">
+      <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div style="flex:1;min-width:180px">
+          <div style="color:var(--amber);font-weight:bold;margin-bottom:4px">Rule-based mode (current)</div>
+          <div style="color:var(--text2)">
+            OK: No internet required, fully offline<br>
+            OK: Fast response (instant)<br>
+            OK: Manual-compliant output format<br>
+            NOTE: Fixed commands only
+          </div>
+        </div>
+        <div style="flex:1;min-width:180px">
+          <div style="color:var(--green);font-weight:bold;margin-bottom:4px">Ollama mode (not detected)</div>
+          <div style="color:var(--text2)">
+            OK: AI responds to any command<br>
+            OK: More natural responses<br>
+            NOTE: Ollama must be installed separately<br>
+            NOTE: Speed depends on PC specs
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:8px;padding:6px 10px;background:#0a1a0a;border:1px solid #1a3a1a;border-radius:3px;color:var(--text2);font-size:10px">
+        Ollama: https://ollama.com then run: ollama pull llama3
+      </div>
+    </div>
+
+    <!-- ランチャー本体 -->
+    <div id="launcher-body">
+      <div id="dev-sel-list"></div>
+      <div style="font-size:10px;color:var(--text2);margin:8px 0 4px">Add device:</div>
+      <div class="add-dev-row">
+        <button class="launcher-add-btn" onclick="launcherAddDev('sir')"            style="border-color:#00c840;color:#00c840">+ Si-R G120</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('srs')"            style="border-color:#00a0ff;color:#00a0ff">+ SR-S324TR1</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('catalyst')"       style="border-color:#1e90ff;color:#1e90ff">+ Catalyst 9300</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('cisco')"          style="border-color:#e05a00;color:#e05a00">+ Cisco ISR4321</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('nexus')"          style="border-color:#ff6a00;color:#ff6a00">+ Nexus 9300</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('apresia')"        style="border-color:#00d4aa;color:#00d4aa">+ APRESIA</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('generic-router')" style="border-color:#a040c0;color:#a040c0">+ Generic Router</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('generic-switch')" style="border-color:#408040;color:#408040">+ Generic Switch</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('pc')"             style="border-color:#606060;color:#808080">+ PC</button>
+      </div>
+      <!-- 接続設定 -->
+      <div style="margin-top:10px;border-top:1px solid #1a3a5a;padding-top:10px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-size:11px;color:var(--cyan);font-weight:bold">Link / Topology</span>
+          <span style="font-size:9px;color:var(--text2)">Can also edit in Topology tab after launch</span>
+          <button class="launcher-add-btn" onclick="addLauncherLink()" style="margin-left:auto;border-color:var(--cyan);color:var(--cyan)">+ Add Link</button>
+        </div>
+        <div id="launcher-links" style="max-height:120px;overflow-y:auto"></div>
+        <div id="launcher-links-empty" style="font-size:10px;color:var(--text2);padding:4px 0">
+          No links -- click "+ Add Link" to connect devices
+        </div>
+      </div>
+    </div>
+    <div id="launcher-foot">
+      <span id="launcher-count">0台選択中</span>
+      <button id="btn-launch" onclick="launchLab()">▶ ラボ起動</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════ メイン画面 ════ -->
+<div id="titlebar">
+  <div class="title">🖥 ネットワークラボ エミュレーター — Si-R × SR-S × Catalyst × Cisco</div>
+  <span id="mode-badge" class="badge-rules">● ルールベース</span>
+  <div style="display:flex;gap:3px;margin-left:8px"><div class="tbtn">_</div><div class="tbtn">□</div><div class="tbtn">×</div></div>
+</div>
+
+<div id="menubar">
+  <div class="mitem">ファイル</div>
+  <div class="mitem">編集</div>
+  <div class="msep"></div>
+  <div class="mitem" onclick="setGrid(2)">2列</div>
+  <div class="mitem" onclick="setGrid(3)">3列</div>
+  <div class="mitem" onclick="setGrid(5)">全台</div>
+  <div class="msep"></div>
+  <div class="mitem" onclick="openFlowModal(focusedId,'')">📋 流し込み</div>
+  <div class="mitem" onclick="triggerVrrpFailover()">⚡ VRRPフェイルオーバー</div>
+  <div class="mitem" onclick="triggerVrrpRecover()">♻ VRRP復旧</div>
+  <div class="msep"></div>
+  <div class="mitem" id="ollama-toggle" onclick="toggleOllama()" style="color:var(--text2)">Ollama: 確認中...</div>
+</div>
+
+<div id="tabbar">
+  <div class="tab active" data-tab="lab">🖥 CLIターミナル</div>
+  <div class="tab" data-tab="topo">🔗 トポロジー</div>
+  <div class="tab" data-tab="config">⚙ 設定生成</div>
+</div>
+
+<div id="main">
+
+<!-- ラボパネル -->
+<div id="panel-lab">
+  <div id="topo-bar">
+    <span style="color:var(--text2)">トポロジー:</span>
+    <div id="topo-display"></div>
+    <button class="lab-btn" style="margin-left:auto" onclick="switchTab('topo')">✏ 編集</button>
+  </div>
+  <div id="terminal-grid"></div>
+</div>
+
+<!-- トポロジーパネル -->
+<div id="panel-topo">
+  <div class="topo-editor">
+    <div class="topo-left">
+      <div class="tbox">
+        <div class="tbox-hdr">➕ 装置追加</div>
+        <div class="tbox-body" style="display:flex;flex-wrap:wrap">
+          <button class="dev-add-btn" onclick="addDevice('sir')"      style="border-color:var(--sir);color:var(--sir)">＋ Si-R</button>
+          <button class="dev-add-btn" onclick="addDevice('srs')"      style="border-color:var(--srs);color:var(--srs)">＋ SR-S</button>
+          <button class="dev-add-btn" onclick="addDevice('catalyst')"  style="border-color:var(--cat);color:var(--cat)">＋ Catalyst</button>
+          <button class="dev-add-btn" onclick="addDevice('nexus')"    style="border-color:#ff6a00;color:#ff6a00">＋ Nexus 9300</button>
+          <button class="dev-add-btn" onclick="addDevice('cisco')"    style="border-color:var(--cisco);color:var(--cisco)">＋ Cisco Router</button>
+          <button class="dev-add-btn" onclick="addDevice('apresia')"  style="border-color:#00d4aa;color:#00d4aa">＋ APRESIA</button>
+          <button class="dev-add-btn" onclick="addDevice('generic-router')" style="border-color:#a040c0;color:#a040c0">＋ 汎用Router</button>
+          <button class="dev-add-btn" onclick="addDevice('generic-switch')" style="border-color:#408040;color:#408040">＋ 汎用Switch</button>
+          <button class="dev-add-btn" onclick="addDevice('pc')"       style="border-color:#606060;color:#808080">＋ PC</button>
+        </div>
+      </div>
+      <div class="tbox">
+        <div class="tbox-hdr">🔗 接続の作り方（手順）</div>
+        <div class="tbox-body" style="font-size:11px;line-height:1.9">
+          <div style="background:#001a00;border:1px solid #1a5a1a;border-radius:3px;padding:6px 8px;margin-bottom:8px">
+            <div style="color:var(--green);font-weight:bold;margin-bottom:4px">📌 接続手順</div>
+            <div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:4px">
+              <span style="background:#0a3a0a;color:var(--green);border:1px solid var(--green);border-radius:50%;width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:10px;flex-shrink:0">1</span>
+              <span style="color:var(--text)">接続元の装置を<b style="color:var(--green)">ダブルクリック</b></span>
+            </div>
+            <div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:4px">
+              <span style="background:#0a3a0a;color:var(--green);border:1px solid var(--green);border-radius:50%;width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:10px;flex-shrink:0">2</span>
+              <span style="color:var(--text)">緑の点線が出たら<b style="color:var(--green)">接続先をクリック</b></span>
+            </div>
+            <div style="display:flex;align-items:flex-start;gap:6px">
+              <span style="background:#0a3a0a;color:var(--green);border:1px solid var(--green);border-radius:50%;width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:10px;flex-shrink:0">3</span>
+              <span style="color:var(--text)">線が繋がれば完成！<br><span style="color:var(--text2);font-size:9px">Escキーでキャンセル</span></span>
+            </div>
+          </div>
+          <div style="background:#0a0a1a;border:1px solid #1a1a5a;border-radius:3px;padding:6px 8px;margin-bottom:6px">
+            <div style="color:#80a8ff;font-weight:bold;margin-bottom:3px">🖱 その他の操作</div>
+            <div style="color:var(--text2)">
+              <span style="color:var(--text)">ドラッグ</span> — 装置を移動<br>
+              <span style="color:var(--text)">右クリック</span> — 接続・削除メニュー<br>
+              <span style="color:var(--text)">ホイール</span> — 拡大／縮小<br>
+              <span style="color:var(--text)">空白ドラッグ</span> — 画面を移動<br>
+              <span style="color:var(--text)">⊡ボタン</span> — 全体表示
+            </div>
+          </div>
+          <div id="link-mode-ind" style="display:none;padding:5px 8px;background:#001a00;border:1px solid var(--green);border-radius:3px;color:var(--green);font-size:11px;animation:blink-border 1s ease-in-out infinite">
+            🔗 リンクモード中<br>
+            <span style="font-size:10px;color:#60a860">接続先の装置をクリック</span><br>
+            <span style="font-size:9px;color:var(--text2)">Escキーでキャンセル</span>
+          </div>
+        </div>
+      </div>
+      <div class="tbox">
+        <div class="tbox-hdr">🔗 リンク設定</div>
+        <div class="tbox-body">
+          <div class="gf"><label>回線タイプ</label>
+            <select id="lnk-type"><option value="trunk">Trunk</option><option value="access">Access</option><option value="routed">Routed</option><option value="serial">Serial</option></select>
+          </div>
+          <div class="gf"><label>VLAN</label><input id="lnk-vlan" value="10,20"></div>
+        </div>
+      </div>
+      <div class="tbox">
+        <div class="tbox-hdr">📋 リンク一覧</div>
+        <div class="tbox-body" id="link-list" style="max-height:160px;overflow-y:auto"></div>
+      </div>
+      <div class="tbox">
+        <div class="tbox-hdr">⚡ VRRP制御</div>
+        <div class="tbox-body">
+          <div style="font-size:10px;display:flex;gap:8px;align-items:center;margin-bottom:6px">
+            Router-A: <span id="vrrp-a-badge" style="padding:1px 6px;background:#002200;color:var(--green);border:1px solid var(--green);border-radius:2px;font-size:9px">Master</span>
+            Router-B: <span id="vrrp-b-badge" style="padding:1px 6px;background:#1a1a00;color:var(--amber);border:1px solid var(--amber);border-radius:2px;font-size:9px">Backup</span>
+          </div>
+          <div style="display:flex;gap:6px">
+            <button class="lab-btn dang" onclick="triggerVrrpFailover()">⚡ フェイルオーバー</button>
+            <button class="lab-btn prim" onclick="triggerVrrpRecover()">♻ 復旧</button>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;padding:0 4px">
+        <button class="lab-btn prim" onclick="applyTopology()">✔ 適用</button>
+        <button class="lab-btn" onclick="switchTab('lab')">← 戻る</button>
+        <button class="lab-btn warn" onclick="resetTopology()">↺ リセット</button>
+      </div>
+    </div>
+    <div class="topo-right">
+      <div class="tbox" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+        <div class="tbox-hdr" style="display:flex;align-items:center;gap:6px">
+          <span>🗺 ネットワーク図</span>
+          <span style="font-size:9px;color:var(--text2)">ダブルクリック→リンク / ドラッグ→移動</span>
+          <div style="margin-left:auto;display:flex;gap:4px">
+            <button class="lab-btn" style="padding:1px 7px" onclick="topoZoom(1.2)">＋</button>
+            <button class="lab-btn" style="padding:1px 7px" onclick="topoZoom(0.8)">−</button>
+            <button class="lab-btn" style="padding:1px 7px" onclick="topoFitAll()">⊡</button>
+            <button class="lab-btn dang" id="btn-del-sel" style="display:none;padding:1px 7px" onclick="deleteSelectedNode()">🗑</button>
+          </div>
+        </div>
+        <div id="topo-canvas"><canvas id="topo-cvs"></canvas><div id="topo-hint">💡 ダブルクリックで接続</div></div>
+      </div>
+      <div class="tbox" id="node-detail-box" style="display:none">
+        <div class="tbox-hdr">📋 選択中の装置</div>
+        <div class="tbox-body" id="node-detail-body"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 設定パネル -->
+<div id="panel-config">
+  <div class="cfg-wrap">
+    <div class="cfg-left">
+      <div class="gbox"><div class="gbox-hdr">対象装置</div><div class="gbox-body">
+        <div class="gf"><label>装置</label><select id="cfg-target">
+          <option value="sir-a">Router-A (Si-R)</option>
+          <option value="sir-b">Router-B (Si-R)</option>
+          <option value="srs">Core-SW (SR-S)</option>
+          <option value="catalyst">Dist-SW (Catalyst)</option>
+          <option value="cisco">GW-Router (Cisco)</option>
+        </select></div>
+      </div></div>
+      <div class="gbox"><div class="gbox-hdr">基本設定</div><div class="gbox-body">
+        <div class="gf"><label>ホスト名</label><input id="cg-host" value="Router-A"></div>
+        <div class="gf"><label>パスワード</label><input type="password" id="cg-pass"></div>
+      </div></div>
+      <div class="gbox"><div class="gbox-hdr">IPアドレス</div><div class="gbox-body">
+        <div class="gf"><label>LAN IP/prefix</label><input id="cg-lan" value="192.168.1.1/24"></div>
+        <div class="gf"><label>WAN IP/prefix</label><input id="cg-wan" value="203.0.113.1/30"></div>
+        <div class="gf"><label>デフォルトGW</label><input id="cg-gw" value="203.0.113.2"></div>
+      </div></div>
+      <div class="gbox"><div class="gbox-hdr">VRRP / HSRP</div><div class="gbox-body">
+        <div class="gf"><label>VRRP有効</label><select id="cg-vrrp"><option value="on">有効</option><option value="off">無効</option></select></div>
+        <div class="gf"><label>VRID / Group</label><input id="cg-vrid" value="10"></div>
+        <div class="gf"><label>優先度</label><input id="cg-vpri" value="254"></div>
+        <div class="gf"><label>仮想IP</label><input id="cg-vip" value="192.168.1.254"></div>
+      </div></div>
+      <div class="gbox"><div class="gbox-hdr">追加要件</div><div class="gbox-body">
+        <div class="gf"><label>その他</label><textarea id="cg-extra" placeholder="OSPF有効、VLAN10追加..."></textarea></div>
+      </div></div>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <button class="lab-btn prim" onclick="generateConfig()">▶ 設定生成</button>
+        <button class="lab-btn" onclick="validateConfig()">✔ 検証</button>
+        <button class="lab-btn dang" onclick="document.getElementById('config-out').textContent=''">✕</button>
+      </div>
+    </div>
+    <div class="cfg-right">
+      <div class="cfg-hdr"><span>構成定義コマンド出力</span>
+        <button class="lab-btn" style="padding:1px 8px;font-size:10px" onclick="copyConfig()">コピー</button>
+      </div>
+      <pre id="config-out" style="color:var(--text2);font-style:italic">← 設定を入力して「設定生成」を押してください</pre>
+    </div>
+  </div>
+</div>
+
+</div><!-- /main -->
+
+<!-- 右クリックメニュー -->
+<div id="ctx-menu"></div>
+
+<!-- 流し込みモーダル -->
+<div id="flow-overlay">
+  <div id="flow-box">
+    <div class="flow-hdr">
+      <span style="flex:1;font-size:12px;color:#80c8ff">📋 設定ファイル流し込み — <span id="flow-target-label"></span></span>
+      <span id="flow-close-btn" style="color:#606080;cursor:pointer;font-size:16px;padding:0 4px">✕</span>
+    </div>
+    <div style="padding:10px 14px">
+      <div style="font-size:10px;color:#607080;margin-bottom:6px"># コメント行はスキップ / 1行ずつ順番に実行</div>
+      <textarea id="flow-text" placeholder="# コマンドを貼り付けてください&#10;hostname Router-A&#10;configure&#10;lan 0 ip address 192.168.1.1/24&#10;save"></textarea>
+      <div style="margin-top:6px;display:flex;align-items:center;gap:8px">
+        <label style="font-size:10px;color:#607080">対象:</label>
+        <select id="flow-dev-sel" style="background:#0a1828;border:1px solid #1a3a5a;color:#c0c0c0;font-size:10px;padding:2px 6px;font-family:'Courier New',monospace"></select>
+        <label style="font-size:10px;color:#607080">間隔:</label>
+        <select id="flow-delay" style="background:#0a1828;border:1px solid #1a3a5a;color:#c0c0c0;font-size:10px;padding:2px 6px;font-family:'Courier New',monospace">
+          <option value="200">速い</option><option value="500" selected>標準</option><option value="1000">遅い</option>
+        </select>
+        <span id="flow-prog" style="font-size:10px;color:#406080;margin-left:auto"></span>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:6px">
+        <button class="lab-btn prim" id="flow-run-btn" style="flex:1">▶ 実行</button>
+        <button class="lab-btn dang" id="flow-stop-btn" style="display:none">■ 停止</button>
+        <button class="lab-btn" onclick="document.getElementById('flow-text').value=''">クリア</button>
+      </div>
+      <div id="flow-log"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ステータスバー -->
+<div id="statusbar">
+  <div class="sb-item"><div class="sb-dot" style="background:var(--sir)"></div>A: <span id="sb-sir-a" style="color:var(--sir)">exec</span></div>
+  <div class="sb-item"><div class="sb-dot" style="background:#00a040"></div>B: <span id="sb-sir-b" style="color:#00a040">exec</span></div>
+  <div class="sb-item"><div class="sb-dot" style="background:var(--srs)"></div>SW: <span id="sb-srs" style="color:var(--srs)">exec</span></div>
+  <div class="sb-item"><div class="sb-dot" style="background:var(--cat)"></div>Cat: <span id="sb-cat" style="color:var(--cat)">exec</span></div>
+  <div class="sb-item"><div class="sb-dot" style="background:var(--cisco)"></div>GW: <span id="sb-cisco" style="color:var(--cisco)">exec</span></div>
+  <div class="sb-item" style="margin-left:auto">VRRP: <span id="sb-vrrp" style="color:var(--green)">A=Master B=Backup</span></div>
+  <div class="sb-item" id="sb-time"></div>
+</div>
+
+<script>
+// ════════════════════════════════════════════
+// 装置定義
+// ════════════════════════════════════════════
+const DEVICES = {
+  'sir-a':    {name:'Router-A', model:'Si-R G120',          color:'#00c840', type:'sir',      hostname:'Router-A', mode:'exec'},
+  'sir-b':    {name:'Router-B', model:'Si-R G120',          color:'#00a040', type:'sir',      hostname:'Router-B', mode:'exec'},
+  'srs':      {name:'Core-SW',  model:'SR-S324TR1',         color:'#00a0ff', type:'srs',      hostname:'Core-SW',  mode:'exec'},
+  'catalyst': {name:'Dist-SW',  model:'Catalyst 9300',      color:'#1e90ff', type:'catalyst', hostname:'Dist-SW',  mode:'exec'},
+  'cisco':    {name:'GW-Router',model:'Cisco ISR4321',      color:'#e05a00', type:'cisco',    hostname:'GW-Router',mode:'exec'},
+  'nexus-a':  {name:'Nexus-A',  model:'Nexus 9300',         color:'#ff6a00', type:'nexus',    hostname:'Nexus-A',  mode:'exec'},
+  'nexus-b':  {name:'Nexus-B',  model:'Nexus 9300',         color:'#cc5500', type:'nexus',    hostname:'Nexus-B',  mode:'exec'},
+  'apresia':  {name:'AP-SW',    model:'APRESIA ApresiaLight',color:'#00d4aa', type:'apresia',  hostname:'AP-SW',    mode:'exec'},
+};
+let LINKS = [
+  {id:'l1',a:'sir-a',pa:'lan0',      b:'srs',      pb:'ether 1',             type:'access',vlan:'10',  active:true},
+  {id:'l2',a:'sir-b',pa:'lan0',      b:'srs',      pb:'ether 2',             type:'access',vlan:'10',  active:true},
+  {id:'l3',a:'srs',  pa:'ether 10',  b:'catalyst', pb:'GigabitEthernet1/0/1',type:'trunk', vlan:'10,20',active:true},
+  {id:'l4',a:'catalyst',pa:'GigabitEthernet1/0/24',b:'cisco',pb:'GigabitEthernet0/0/0',type:'routed',vlan:'',active:true},
+];
+const NODE_POS = {'cisco':{x:400,y:60},'catalyst':{x:400,y:180},'srs':{x:400,y:300},'sir-a':{x:220,y:420},'sir-b':{x:580,y:420}};
+const TERMS = {};
+const VRRP = {master:'sir-a', backup:'sir-b', vrid:10, vip:'192.168.1.254'};
+let focusedId = 'sir-a';
+let devCounter = 10;
+
+// ── 装置テンプレート（ランチャーより前に定義） ──
+const DEV_TEMPLATES = {
+  'sir':            {icon:'R', color:'#00c840', model:'Si-R G120',          prefix:'SiR',    type:'sir'},
+  'srs':            {icon:'S', color:'#00a0ff', model:'SR-S324TR1',          prefix:'SW',     type:'srs'},
+  'catalyst':       {icon:'S', color:'#1e90ff', model:'Catalyst 9300',       prefix:'Cat',    type:'catalyst'},
+  'cisco':          {icon:'R', color:'#e05a00', model:'Cisco ISR4321',       prefix:'Cisco',  type:'cisco'},
+  'nexus':          {icon:'N', color:'#ff6a00', model:'Nexus 9300',          prefix:'Nexus',  type:'nexus'},
+  'apresia':        {icon:'A', color:'#00d4aa', model:'APRESIA ApresiaLight', prefix:'AP',    type:'apresia'},
+  'generic-router': {icon:'R', color:'#a040c0', model:'Generic Router',      prefix:'Router', type:'cisco'},
+  'generic-switch': {icon:'S', color:'#408040', model:'Generic Switch',      prefix:'SW',     type:'srs'},
+  'pc':             {icon:'H', color:'#606060', model:'Host PC',             prefix:'PC',     type:'pc'},
+};
+
+// ════════════════════════════════════════════
+// 起動選択画面（ランチャー）
+// ════════════════════════════════════════════
+
+// ランチャー用の装置リスト（選択状態を管理）
+const LAUNCHER_DEVICES = {
+  'sir-a':    {checked:true,  name:'Router-A', model:'Si-R G120',     color:'#00c840', type:'sir'},
+  'sir-b':    {checked:false, name:'Router-B', model:'Si-R G120',     color:'#00a040', type:'sir'},
+  'srs':      {checked:false, name:'Core-SW',  model:'SR-S324TR1',    color:'#00a0ff', type:'srs'},
+  'catalyst': {checked:false, name:'Dist-SW',  model:'Catalyst 9300', color:'#1e90ff', type:'catalyst'},
+  'cisco':    {checked:false, name:'GW-Router',model:'Cisco ISR4321', color:'#e05a00', type:'cisco'},
+};
+let launcherDevCounter = 10;
+
+function renderLauncherList() {
+  const el = document.getElementById('dev-sel-list');
+  if (!el) return;
+  el.innerHTML = Object.entries(LAUNCHER_DEVICES).map(([id, d]) => {
+    const isDefault = ['sir-a','sir-b','srs','catalyst','cisco'].includes(id);
+    const checked = d.checked ? 'checked' : '';
+    const active  = d.checked ? 'active' : '';
+    const del     = isDefault ? '' :
+      '<span onclick="event.stopPropagation();deleteLauncherDev(\'' + id + '\')" ' +
+      'style="color:var(--red);cursor:pointer;padding:0 6px;font-size:14px;line-height:1">x</span>';
+    return '<div class="dev-sel-row ' + active + '" onclick="toggleLauncherDev(\'' + id + '\')">' +
+      '<input type="checkbox" ' + checked + ' onclick="event.stopPropagation();toggleLauncherDev(\'' + id + '\')">' +
+      '<div class="dev-sel-dot" style="background:' + d.color + '"></div>' +
+      '<div style="flex:1">' +
+        '<div class="dev-sel-name" style="color:' + d.color + '">' + d.name + '</div>' +
+        '<div class="dev-sel-model">' + d.model + '</div>' +
+      '</div>' +
+      '<div class="dev-sel-hostname" style="color:' + d.color + ';font-size:10px">' + d.name + '</div>' +
+      del +
+      '</div>';
+  }).join('');
+  updateLauncherCount();
+}
+
+function toggleLauncherDev(id) {
+  if (LAUNCHER_DEVICES[id]) {
+    LAUNCHER_DEVICES[id].checked = !LAUNCHER_DEVICES[id].checked;
+    renderLauncherList();
+  }
+}
+
+function deleteLauncherDev(id) {
+  delete LAUNCHER_DEVICES[id];
+  renderLauncherList();
+}
+
+function launcherAddDev(typeKey) {
+  const tpl = DEV_TEMPLATES[typeKey];
+  if (!tpl) return;
+  launcherDevCounter++;
+  const newId = typeKey + '-' + launcherDevCounter;
+  LAUNCHER_DEVICES[newId] = {
+    checked: true,
+    name: tpl.prefix + launcherDevCounter,
+    model: tpl.model,
+    color: tpl.color,
+    type: tpl.type,
+  };
+  renderLauncherList();
+}
+
+function updateLauncherCount() {
+  const count = Object.values(LAUNCHER_DEVICES).filter(d => d.checked).length;
+  const el = document.getElementById('launcher-count');
+  if (el) el.textContent = count + ' devices selected';
+  const btn = document.getElementById('btn-launch');
+  if (!btn) return;
+  // disabledにせずスタイルだけ変える（disabledだとクリックできなくなる）
+  if (count === 0) {
+    btn.style.opacity = '0.5';
+    btn.style.background = '#1a1a1a';
+    btn.style.borderColor = '#444';
+    btn.style.color = '#666';
+  } else {
+    btn.style.opacity = '1';
+    btn.style.background = '';
+    btn.style.borderColor = '';
+    btn.style.color = '';
+  }
+}
+
+function launchLab() {
+  const selected = Object.entries(LAUNCHER_DEVICES).filter(([,d]) => d.checked);
+  if (!selected.length) {
+    // 0台の場合は警告を表示
+    const btn = document.getElementById('btn-launch');
+    const orig = btn.textContent;
+    btn.textContent = '⚠ 装置を1台以上選択してください';
+    btn.style.background = '#3a1a00';
+    btn.style.borderColor = 'var(--amber)';
+    btn.style.color = 'var(--amber)';
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.style.background = '';
+      btn.style.borderColor = '';
+      btn.style.color = '';
+    }, 2500);
+    return;
+  }
+
+  // DEVICESをリセットして選択装置だけ登録
+  Object.keys(DEVICES).forEach(id => delete DEVICES[id]);
+  Object.keys(NODE_POS).forEach(id => delete NODE_POS[id]);
+  Object.keys(TERMS).forEach(id => delete TERMS[id]);
+  document.getElementById('terminal-grid').innerHTML = '';
+
+  // 配置位置を自動計算
+  const positions = calcPositions(selected.length);
+  selected.forEach(([id, d], i) => {
+    DEVICES[id] = {
+      name: d.name, model: d.model, hostname: d.name,
+      color: d.color, type: d.type, mode: 'exec',
+    };
+    NODE_POS[id] = positions[i];
+    TERMS[id] = {busy:false, typed:'', cur:0, history:[], histIdx:-1};
+    // バックエンドに登録
+    fetch('/api/device', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id, type:d.type, hostname:d.name})
+    });
+  });
+
+  // グリッド列数を自動調整
+  const count = selected.length;
+  const cols = count <= 1 ? 1 : count <= 2 ? 2 : count <= 4 ? 2 : 3;
+  document.getElementById('terminal-grid').style.gridTemplateColumns = `repeat(${cols},1fr)`;
+
+  // ランチャーで設定したリンクをLINKSに反映
+  LINKS.length = 0;
+  launcherLinks.forEach(function(l) {
+    // 選択された装置同士のリンクのみ有効
+    var aSel = selected.some(function(s){ return s[0] === l.a; });
+    var bSel = selected.some(function(s){ return s[0] === l.b; });
+    if (aSel && bSel) {
+      LINKS.push({id:l.id, a:l.a, pa:l.pa, b:l.b, pb:l.pb,
+                  type:l.type, vlan:l.vlan, active:true});
+    }
+  });
+
+  // vnetにリンクを同期（プロトコルパケットが流れるようになる）
+  fetch('/api/links/sync', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({links: LINKS.map(function(l){ return {a:l.a, b:l.b}; })})
+  });
+
+  // ターミナルDOM構築
+  initTerminals();
+
+  // ランチャーを隠してメイン画面を表示
+  document.getElementById('launcher').style.display = 'none';
+
+  renderTopoDisplay();
+  renderLinkList();
+  updateStatusBar();
+  updateVrrpBadges();
+  updateFlowDevSel();
+
+  // 起動ログ
+  setTimeout(() => {
+    selected.forEach(([id, d]) => {
+      const bootMap = {
+        'sir': [[`  ${d.model} 基本ソフトウェア V20.00`,'col-g'],['  Copyright (c) FSAS Technologies Inc.','col-d']],
+        'srs': [[`  ${d.model} V20 セキュアスイッチ`,'col-srs'],['  Copyright (c) FSAS Technologies Inc.','col-d']],
+        'catalyst': [[`  Cisco IOS XE Software, ${d.model}`,''],['  Copyright (c) Cisco Systems, Inc.','col-d']],
+        'cisco':    [[`  Cisco IOS Software, ${d.model}`,''],['  Copyright (c) Cisco Systems, Inc.','col-d']],
+        'pc':       [[`  ${d.name} - Host PC`,'col-d']],
+      };
+      const msgs = bootMap[d.type] || [[`  ${d.model}`,'col-d']];
+      msgs.forEach(([t,c], i) => setTimeout(() => { print(id,t,c); renderInput(id); }, i*30));
+      // VRRP表示
+      if (d.type === 'sir') {
+        const isA = id === 'sir-a' || id.endsWith('-a') || id.includes('router-a');
+        const vrrpState = isA ? 'Master (pri:254)' : 'Backup (pri:100)';
+        setTimeout(() => {
+          print(id,'');
+          print(id, `  VRRP: lan0 vrid 10 state -> ${vrrpState}`, isA?'col-g':'col-y');
+          renderInput(id);
+        }, msgs.length*30+20);
+      }
+    });
+    focusTerm(selected[0][0]);
+    checkStatus();
+  }, 100);
+}
+
+function calcPositions(count) {
+  // Canvas用の配置を自動計算
+  const positions = [];
+  if (count === 1) return [{x:400, y:240}];
+  if (count === 2) return [{x:250,y:240},{x:550,y:240}];
+  if (count === 3) return [{x:400,y:80},{x:220,y:300},{x:580,y:300}];
+  if (count === 4) return [{x:220,y:100},{x:580,y:100},{x:220,y:320},{x:580,y:320}];
+  if (count === 5) return [{x:400,y:60},{x:400,y:180},{x:400,y:300},{x:220,y:420},{x:580,y:420}];
+  // 6台以上は格子状
+  for (let i = 0; i < count; i++) {
+    const cols = 3, row = Math.floor(i/cols), col = i%cols;
+    positions.push({x: 150 + col*250, y: 80 + row*200});
+  }
+  return positions;
+}
+
+// ランチャー用リンク管理
+let launcherLinks = [];
+let launcherLinkCounter = 0;
+
+function addLauncherLink() {
+  const checked = Object.entries(LAUNCHER_DEVICES).filter(([,d]) => d.checked);
+  if (checked.length < 2) {
+    alert('接続を追加するには装置を2台以上選択してください');
+    return;
+  }
+  launcherLinkCounter++;
+  const lid = 'pre-l' + launcherLinkCounter;
+  // デフォルト: 最初の2台を繋ぐ
+  const aId = checked[0][0], bId = checked[1][0];
+  const aD = checked[0][1], bD = checked[1][1];
+  launcherLinks.push({
+    id: lid,
+    a: aId, pa: defLauncherPort(aD.type, launcherLinkCounter),
+    b: bId, pb: defLauncherPort(bD.type, launcherLinkCounter + 1),
+    type: 'access', vlan: '10',
+  });
+  renderLauncherLinks();
+}
+
+function defLauncherPort(type, n) {
+  if (type === 'sir')      return `lan${n % 3}`;
+  if (type === 'srs')      return `ether ${n}`;
+  if (type === 'catalyst') return `GigabitEthernet1/0/${n}`;
+  if (type === 'cisco')    return `GigabitEthernet0/0/${n % 2}`;
+  return `eth${n}`;
+}
+
+function deleteLauncherLink(lid) {
+  launcherLinks = launcherLinks.filter(l => l.id !== lid);
+  renderLauncherLinks();
+}
+
+function renderLauncherLinks() {
+  const el    = document.getElementById('launcher-links');
+  const empty = document.getElementById('launcher-links-empty');
+  if (!el) return;
+  if (!launcherLinks.length) {
+    el.innerHTML = '';
+    if (empty) empty.style.display = 'block';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  const checkedIds = Object.entries(LAUNCHER_DEVICES)
+    .filter(function(e){ return e[1].checked; }).map(function(e){ return e[0]; });
+
+  var html = '';
+  launcherLinks.forEach(function(l) {
+    var aD = LAUNCHER_DEVICES[l.a], bD = LAUNCHER_DEVICES[l.b];
+    var aCol = aD ? aD.color : '#fff';
+    var bCol = bD ? bD.color : '#fff';
+    var optA = checkedIds.map(function(id) {
+      return '<option value="' + id + '"' + (id===l.a?' selected':'') + '>' + (LAUNCHER_DEVICES[id]?LAUNCHER_DEVICES[id].name:id) + '</option>';
+    }).join('');
+    var optB = checkedIds.map(function(id) {
+      return '<option value="' + id + '"' + (id===l.b?' selected':'') + '>' + (LAUNCHER_DEVICES[id]?LAUNCHER_DEVICES[id].name:id) + '</option>';
+    }).join('');
+    html += '<div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:#0a1020;border:1px solid #1a3a4a;border-radius:3px;margin-bottom:4px;font-size:10px;flex-wrap:wrap">';
+    html += '<select onchange="launcherLinks.find(function(x){return x.id===\'' + l.id + '\';}).a=this.value;renderLauncherLinks()" style="background:#050e18;border:1px solid #1a3a5a;color:' + aCol + ';font-size:10px;padding:1px 4px;max-width:110px">' + optA + '</select>';
+    html += '<input value="' + l.pa + '" onchange="launcherLinks.find(function(x){return x.id===\'' + l.id + '\';}).pa=this.value" style="background:#050e18;border:1px solid #1a3a5a;color:#80a8c8;font-size:10px;padding:1px 4px;width:75px">';
+    html += '<span style="color:#2a5a3a">---</span>';
+    html += '<input value="' + l.pb + '" onchange="launcherLinks.find(function(x){return x.id===\'' + l.id + '\';}).pb=this.value" style="background:#050e18;border:1px solid #1a3a5a;color:#80a8c8;font-size:10px;padding:1px 4px;width:75px">';
+    html += '<select onchange="launcherLinks.find(function(x){return x.id===\'' + l.id + '\';}).b=this.value;renderLauncherLinks()" style="background:#050e18;border:1px solid #1a3a5a;color:' + bCol + ';font-size:10px;padding:1px 4px;max-width:110px">' + optB + '</select>';
+    html += '<select onchange="launcherLinks.find(function(x){return x.id===\'' + l.id + '\';}).type=this.value" style="background:#050e18;border:1px solid #1a3a5a;color:#888;font-size:9px;padding:1px 4px">';
+    html += '<option value="access"' + (l.type==='access'?' selected':'') + '>Access</option>';
+    html += '<option value="trunk"'  + (l.type==='trunk' ?' selected':'') + '>Trunk</option>';
+    html += '<option value="routed"' + (l.type==='routed'?' selected':'') + '>Routed</option>';
+    html += '</select>';
+    html += '<input value="' + l.vlan + '" placeholder="vlan" onchange="launcherLinks.find(function(x){return x.id===\'' + l.id + '\';}).vlan=this.value" style="background:#050e18;border:1px solid #1a3a5a;color:#c8a800;font-size:9px;padding:1px 4px;width:45px">';
+    html += '<span onclick="deleteLauncherLink(\'' + l.id + '\')" style="color:var(--red);cursor:pointer;padding:0 4px;margin-left:auto;font-size:13px">x</span>';
+    html += '</div>';
+  });
+  el.innerHTML = html;
+}
+
+function toggleModeHelp() {
+  var el = document.getElementById('mode-help');
+  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+async function initLauncher() {
+  renderLauncherList();
+  const badge = document.getElementById('launcher-mode-badge');
+  try {
+    // タイムアウト2秒で確認（失敗しても起動を妨げない）
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    const r = await fetch('/api/status', { signal: controller.signal });
+    clearTimeout(timer);
+    const d = await r.json();
+    if (d.mode === 'ollama') {
+      badge.textContent = '● Ollama (' + d.ollama_model + ') ℹ';
+      badge.className = 'badge-ollama';
+    } else {
+      badge.textContent = '● ルールベース ℹ';
+      badge.className = 'badge-rules';
+    }
+  } catch(e) {
+    // サーバー未起動またはタイムアウト → ルールベースとして扱う
+    badge.textContent = '● ルールベース ℹ';
+    badge.className = 'badge-rules';
+  }
+}
+
+// ════════════════════════════════════════════
+// ターミナル初期化
+// ════════════════════════════════════════════
+function initTerminals() {
+  Object.entries(DEVICES).forEach(([id,d]) => {
+    TERMS[id] = {busy:false, typed:'', cur:0, history:[], histIdx:-1};
+    addTermDOM(id);
+  });
+  updateFlowDevSel();
+}
+
+function addTermDOM(id) {
+  const d = DEVICES[id];
+  const grid = document.getElementById('terminal-grid');
+  const el = document.createElement('div');
+  el.className = 'term-win'; el.id = 'tw-'+id;
+  el.style.borderTop = `2px solid ${d.color}`;
+  el.innerHTML = `
+    <div class="tw-title">
+      <div class="tw-icon" style="background:${d.color}"></div>
+      <span class="tw-name" style="color:${d.color}">${d.model} — ${d.hostname}</span>
+      <span style="margin-left:auto;display:flex;align-items:center;gap:3px">
+        <button onclick="pasteToTerm('${id}')" title="クリップボードから貼り付け"
+          style="background:#1a3a1a;border:1px solid #2a6a2a;color:#00cc44;font-size:9px;padding:0px 5px;border-radius:2px;cursor:pointer;line-height:1.6">📋貼付</button>
+        <button onclick="copyLastOutput('${id}')" title="最後の出力をコピー"
+          style="background:#1a2a3a;border:1px solid #2a4a6a;color:#4488cc;font-size:9px;padding:0px 5px;border-radius:2px;cursor:pointer;line-height:1.6">📄コピー</button>
+        <span style="font-size:9px;color:var(--text2);margin-left:2px" id="lbl-${id}">offline</span>
+      </span>
+    </div>
+    <div class="tw-buf" id="buf-${id}" onclick="focusTerm('${id}')"></div>
+    <div class="thinking" id="think-${id}">■ 処理中...</div>
+    <div class="input-line" id="il-${id}">
+      <span id="pr-${id}" style="color:${d.color}">${d.hostname}# </span><span id="ty-${id}"></span><span class="cur" id="cu-${id}"> </span><span id="tl-${id}"></span>
+    </div>
+    <input class="hid" id="hi-${id}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">`;
+  grid.appendChild(el);
+  bindKeys(id);
+  // 右クリック
+  document.getElementById('buf-'+id).addEventListener('contextmenu', e => {
+    e.preventDefault(); showCtxMenu(e.clientX, e.clientY, id);
+  });
+}
+
+function bindKeys(id) {
+  const hi = document.getElementById('hi-'+id);
+  hi.addEventListener('keydown', e => {
+    const t = TERMS[id];
+    if (t.busy && e.key!=='c'){e.preventDefault();return;}
+    switch(e.key){
+      case 'Enter':e.preventDefault();runCmd(id,t.typed);break;
+      case 'Tab':
+        e.preventDefault();
+        // Tab補完: バックエンドの /api/complete に問い合わせ
+        (async () => {
+          const partial = t.typed.slice(0, t.cur);
+          if (!partial.trim()) return;
+          try {
+            const r = await fetch('/api/complete', {
+              method: 'POST',
+              headers: {'Content-Type':'application/json'},
+              body: JSON.stringify({device_id: id, partial: partial})
+            });
+            const d2 = await r.json();
+            if (d2.completed && d2.completed !== partial) {
+              t.typed = d2.completed + t.typed.slice(t.cur);
+              t.cur = d2.completed.length;
+              renderInput(id);
+            }
+          } catch(err) {}
+        })();
+        break;
+      case 'Backspace':e.preventDefault();if(t.cur>0){t.typed=t.typed.slice(0,t.cur-1)+t.typed.slice(t.cur);t.cur--;renderInput(id);}break;
+      case 'Delete':e.preventDefault();if(t.cur<t.typed.length){t.typed=t.typed.slice(0,t.cur)+t.typed.slice(t.cur+1);renderInput(id);}break;
+      case 'ArrowLeft':e.preventDefault();if(t.cur>0){t.cur--;renderInput(id);}break;
+      case 'ArrowRight':e.preventDefault();if(t.cur<t.typed.length){t.cur++;renderInput(id);}break;
+      case 'Home':e.preventDefault();t.cur=0;renderInput(id);break;
+      case 'End':e.preventDefault();t.cur=t.typed.length;renderInput(id);break;
+      case 'ArrowUp':e.preventDefault();if(t.histIdx<t.history.length-1){t.histIdx++;t.typed=t.history[t.histIdx];t.cur=t.typed.length;renderInput(id);}break;
+      case 'ArrowDown':e.preventDefault();if(t.histIdx>0){t.histIdx--;t.typed=t.history[t.histIdx];t.cur=t.typed.length;}else{t.histIdx=-1;t.typed='';t.cur=0;}renderInput(id);break;
+      case 'c':if(e.ctrlKey){e.preventDefault();if(!t.busy){print(id,'^C','col-y');t.typed='';t.cur=0;renderInput(id);}}break;
+      case 'l':if(e.ctrlKey){e.preventDefault();clearBuf(id);}break;
+    }
+  });
+  // ? キーをinputで検出して即座にヘルプ表示
+  hi.addEventListener('input', e => {
+    const t = TERMS[id]; if(t.busy){hi.value='';return;}
+    if (!hi.value) return;
+    // ? が入力された場合はヘルプを実行
+    if (hi.value === '?') {
+      hi.value = '';
+      const partial = t.typed.slice(0, t.cur) + '?';
+      runCmd(id, partial);
+      return;
+    }
+    t.typed = t.typed.slice(0, t.cur) + hi.value + t.typed.slice(t.cur);
+    t.cur += hi.value.length; hi.value = ''; renderInput(id);
+  });
+  hi.addEventListener('paste',e=>{
+    e.preventDefault();const t=TERMS[id];if(t.busy)return;
+    const txt=(e.clipboardData||window.clipboardData).getData('text');
+    const lines=txt.split(/\r?\n/).map(l=>l.trimEnd()).filter(l=>l!=='');
+    if(lines.length===1){t.typed=t.typed.slice(0,t.cur)+lines[0]+t.typed.slice(t.cur);t.cur+=lines[0].length;renderInput(id);}
+    else if(lines.length>1){openFlowModal(id,lines.join('\n'));}
+  });
+}
+
+// ════════════════════════════════════════════
+// 描画
+// ════════════════════════════════════════════
+function getPrompt(id) {
+  const d = DEVICES[id];
+  const mode = d.mode||'exec';
+  const suffix = mode==='config'?'(config)':mode==='config-if'?'(config-if)':mode==='config-router'?'(config-router)':mode==='config-vlan'?'(config-vlan)':mode==='config-vpc-domain'?'(config-vpc-domain)':'';
+  return `${d.hostname}${suffix}# `;
+}
+function renderInput(id) {
+  const t = TERMS[id];
+  document.getElementById('pr-'+id).textContent = getPrompt(id);
+  document.getElementById('ty-'+id).textContent = t.typed.slice(0,t.cur);
+  document.getElementById('cu-'+id).textContent = t.typed[t.cur]||' ';
+  document.getElementById('tl-'+id).textContent = t.typed.slice(t.cur+1);
+  const buf = document.getElementById('buf-'+id);
+  if (buf) buf.scrollTop = buf.scrollHeight;
+}
+function print(id, text, cls='') {
+  const buf = document.getElementById('buf-'+id);
+  const il  = document.getElementById('il-'+id);
+  if(!buf||!il) return;
+  (text+'').split('\n').forEach(line=>{
+    const d=document.createElement('div');
+    d.className='tline'+(cls?' '+cls:'');d.textContent=line;
+    if(il.parentNode===buf)buf.insertBefore(d,il);else buf.appendChild(d);
+  });
+  buf.scrollTop=buf.scrollHeight;
+}
+function printEcho(id,cmd){
+  const buf=document.getElementById('buf-'+id),il=document.getElementById('il-'+id);
+  if(!buf||!il)return;
+  const d=document.createElement('div');d.className='tline';
+  const sp=document.createElement('span');sp.style.color=DEVICES[id].color;sp.textContent=getPrompt(id);
+  d.appendChild(sp);d.appendChild(document.createTextNode(cmd));
+  if(il.parentNode===buf)buf.insertBefore(d,il);else buf.appendChild(d);
+  buf.scrollTop=buf.scrollHeight;
+}
+function clearBuf(id){
+  const buf=document.getElementById('buf-'+id),il=document.getElementById('il-'+id);
+  if(buf&&il)while(buf.firstChild!==il)buf.removeChild(buf.firstChild);
+}
+function focusTerm(id){focusedId=id;document.getElementById('hi-'+id)?.focus();}
+
+// ════════════════════════════════════════════
+// コマンド実行（FastAPI経由）
+// ════════════════════════════════════════════
+// プロトコルログのポーリング（隣接確立・ルート学習などを遅延表示）
+const protoPollTimers = {};
+function pollProtocolLog(id, times) {
+  times = times || 0;
+  if (times > 6) return;  // 最大6回（約6秒）
+  if (protoPollTimers[id]) clearTimeout(protoPollTimers[id]);
+  protoPollTimers[id] = setTimeout(async function() {
+    try {
+      const r = await fetch('/api/protocol-log/' + id);
+      const d = await r.json();
+      if (d.logs && d.logs.length) {
+        d.logs.forEach(function(log) {
+          var line = (typeof log === 'string') ? log : (log.message || JSON.stringify(log));
+          var cls = 'col-d';
+          if (line.indexOf('up') >= 0 || line.indexOf('Up') >= 0 ||
+              line.indexOf('FULL') >= 0 || line.indexOf('Established') >= 0 ||
+              line.indexOf('学習') >= 0 || line.indexOf('root') >= 0 ||
+              line.indexOf('alive') >= 0 || line.indexOf('Primary') >= 0) cls = 'col-g';
+          else if (line.indexOf('down') >= 0 || line.indexOf('Down') >= 0 ||
+                   line.indexOf('dead') >= 0 || line.indexOf('suspended') >= 0 ||
+                   line.indexOf('期限切れ') >= 0) cls = 'col-y';
+          else if (line.indexOf('%') === 0) cls = 'col-c';
+          print(id, line, cls);
+          // vPC ロール検出
+          if (typeof log === 'object' && log.type === 'vpc_log') {
+            if (log.role && log.role !== 'none') {
+              vpcSetRole(id, log.role);
+            } else {
+              var ll = line.toLowerCase();
+              if (ll.includes('operational primary') || ll.includes('oper')) vpcSetRole(id, 'primary (oper)');
+              else if (ll.includes('to primary') || ll.includes('role changed to primary')) vpcSetRole(id, 'primary');
+              else if (ll.includes('to secondary') || ll.includes('role changed to secondary')) vpcSetRole(id, 'secondary');
+            }
+          }
+        });
+        renderInput(id);
+        drawCanvas();
+      }
+    } catch(e) {}
+    pollProtocolLog(id, times + 1);
+  }, 1000);
+}
+
+async function runCmd(id, cmd) {
+  const t = TERMS[id];
+  if(t.busy)return;
+  cmd=cmd.trimEnd();
+  printEcho(id,cmd);
+  t.typed='';t.cur=0;renderInput(id);
+  if(!cmd.trim())return;
+  if(t.history[0]!==cmd)t.history.unshift(cmd);
+  if(t.history.length>200)t.history.pop();
+  t.histIdx=-1;
+
+  // クリアはローカル処理
+  if(/^cls$|^clear screen$/i.test(cmd.trim())){clearBuf(id);return;}
+
+  t.busy=true;
+  document.getElementById('think-'+id).style.display='block';
+  document.getElementById('cu-'+id).classList.add('hide');
+
+  try {
+    const res = await fetch('/api/cli', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({device_id:id, command:cmd})
+    });
+    const data = await res.json();
+
+    // ホスト名・モード更新
+    if(data.hostname) DEVICES[id].hostname = data.hostname;
+    if(data.mode)     DEVICES[id].mode     = data.mode;
+
+    // ── VRRP コマンド検出 ──
+    // lan <n> vrrp group <g> id <vrid> <priority> <vip>
+    var vrrpM = cmd.match(/lan\s+\d+\s+vrrp\s+group\s+\d+\s+id\s+(\d+)\s+(\d+)\s+([\d.]+)/i);
+    if (vrrpM) {
+      var vrid     = parseInt(vrrpM[1]);
+      var priority = parseInt(vrrpM[2]);
+      var vip      = vrrpM[3];
+      VRRP.vrid = vrid;
+      VRRP.vip  = vip;
+      // 優先度が高い方がMaster
+      if (!DEVICES[id].vrrpPri) DEVICES[id].vrrpPri = priority;
+      DEVICES[id].vrrpPri = priority;
+      // 全Si-R装置の中で最高優先度を持つものがMaster
+      var highestId = id, highestPri = priority;
+      Object.entries(DEVICES).forEach(function(e) {
+        if (e[1].type === 'sir' && e[1].vrrpPri && e[1].vrrpPri > highestPri) {
+          highestPri = e[1].vrrpPri;
+          highestId  = e[0];
+        }
+      });
+      // Master/Backup切り替え
+      var prevMaster = VRRP.master;
+      VRRP.master = highestId;
+      // Backup は他のSi-R装置で最高優先度以外
+      Object.keys(DEVICES).forEach(function(did) {
+        if (DEVICES[did].type === 'sir' && did !== highestId) VRRP.backup = did;
+      });
+      // 状態変化ログ
+      var newState = (id === VRRP.master) ? 'Master' : 'Backup';
+      var col = newState === 'Master' ? 'col-g' : 'col-y';
+      print(id, '');
+      print(id, 'VRRP: lan0 vrid ' + vrid + ' priority=' + priority + ' vip=' + vip, 'col-d');
+      if (prevMaster !== VRRP.master) {
+        print(id, '%VRRP-6-STATECHANGE: lan0 Grp ' + vrid + ' state -> ' + newState + ' (pri:' + priority + ')', col);
+        if (newState === 'Master') {
+          print(id, 'Gratuitous ARP sent for ' + vip, 'col-g');
+        }
+      } else {
+        print(id, 'VRRP: state ' + newState + ' (pri:' + priority + ')', col);
+      }
+      // バッジ・ステータスバー更新
+      updateVrrpBadges();
+      updateStatusBar();
+      // トポロジー図更新
+      drawCanvas();
+    }
+
+    // ── VRRP 有効化 (lan <n> vrrp use on) ──
+    if (/lan\s+\d+\s+vrrp\s+use\s+on/i.test(cmd)) {
+      print(id, 'VRRP: enabled on lan0', 'col-d');
+    }
+
+    // ── vPC コマンド検出 ──
+    // feature vpc 有効化
+    if (/^feature\s+vpc$/i.test(cmd.trim())) {
+      if (!VPC.domains[id]) VPC.domains[id] = {role:'none', keepalive:'pending', peer_link:'down'};
+    }
+    // vpc domain
+    var vpcDomM = cmd.match(/^vpc\s+domain\s+(\d+)/i);
+    if (vpcDomM) {
+      if (!VPC.domains[id]) VPC.domains[id] = {role:'none', keepalive:'pending', peer_link:'down'};
+      VPC.domains[id].domain_id = parseInt(vpcDomM[1]);
+    }
+    // vpc peer failure / peer-link failure → ログポーリングで状態更新
+    if (/^vpc\s+peer\s+(failure|link\s+failure)/i.test(cmd.trim())) {
+      // 少し待ってからpollProtocolLogで状態を取得
+      setTimeout(function(){ pollProtocolLog(id, 0); }, 200);
+    }
+
+    // ── hostname / sysname 反映 ──
+    var hnM = cmd.match(/^(?:hostname|sysname)\s+(\S+)/i);
+    if (hnM) {
+      DEVICES[id].hostname = hnM[1];
+      renderInput(id);
+      renderTopoDisplay();
+      drawCanvas();
+    }
+
+    // クリア信号
+    if(data.output==='\x0c'){clearBuf(id);}
+    else if(data.output){print(id,data.output);}
+
+    renderInput(id);
+    updateStatusBar();
+
+    // プロトコルログをポーリングして表示
+    pollProtocolLog(id);
+  } catch(e) {
+    print(id,'% サーバーに接続できません。python app.py を起動してください。','col-r');
+  }
+
+  t.busy=false;
+  document.getElementById('think-'+id).style.display='none';
+  document.getElementById('cu-'+id).classList.remove('hide');
+  renderInput(id);
+}
+
+// ════════════════════════════════════════════
+// ステータス確認 & Ollama
+// ════════════════════════════════════════════
+let ollamaEnabled = false;
+async function checkStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    const badge = document.getElementById('mode-badge');
+    const toggle = document.getElementById('ollama-toggle');
+    if(d.mode==='ollama'){
+      badge.textContent='● Ollama ('+d.ollama_model+')';
+      badge.className='badge-ollama';
+      toggle.textContent='Ollama: ON ✓';
+      toggle.style.color='var(--green)';
+      ollamaEnabled=true;
+    } else {
+      badge.textContent='● ルールベース';
+      badge.className='badge-rules';
+      toggle.textContent='Ollama: オフライン';
+      toggle.style.color='var(--text2)';
+      ollamaEnabled=false;
+    }
+    // ステータスOK→各装置にオンライン表示
+    Object.keys(DEVICES).forEach(id=>{
+      const el=document.getElementById('lbl-'+id);
+      if(el)el.textContent='接続';
+    });
+  } catch(e) {
+    document.getElementById('mode-badge').textContent='● サーバー未起動';
+    document.getElementById('mode-badge').className='badge-rules';
+  }
+}
+function toggleOllama(){
+  alert(ollamaEnabled
+    ? 'Ollama使用中。無効にするにはOllamaを停止してください。'
+    : 'Ollamaが検出されませんでした。\nollama pull llama3 を実行後、python app.py を再起動してください。');
+}
+
+// ════════════════════════════════════════════
+// VRRP
+// ════════════════════════════════════════════
+function triggerVrrpFailover(){
+  const old=VRRP.master,bkp=VRRP.backup;
+  VRRP.master=bkp;VRRP.backup=old;
+  const ts=new Date().toLocaleTimeString();
+  print(old,'');print(old,`%VRRP-6-STATECHANGE: lan0 Grp ${VRRP.vrid} state Master -> Init`,'col-y');
+  print(bkp,'');print(bkp,`%VRRP-6-STATECHANGE: lan0 Grp ${VRRP.vrid} state Backup -> Master`,'col-g');
+  print(bkp,`Gratuitous ARP sent for ${VRRP.vip}`,'col-g');
+  print('srs','');print('srs',`${ts}: VRRP failover — new Master: ${DEVICES[bkp].hostname}`,'col-y');
+  updateVrrpBadges();updateStatusBar();
+}
+function triggerVrrpRecover(){
+  const highPri='sir-a';
+  if(VRRP.master===highPri){print('sir-a','VRRP: Already optimal.','col-d');return;}
+  VRRP.master=highPri;VRRP.backup='sir-b';
+  print(highPri,'');print(highPri,`%VRRP-6-STATECHANGE: lan0 Grp ${VRRP.vrid} state Backup -> Master (preempt)`,'col-g');
+  print('sir-b','');print('sir-b',`%VRRP-6-STATECHANGE: lan0 Grp ${VRRP.vrid} state Master -> Backup`,'col-y');
+  updateVrrpBadges();updateStatusBar();
+}
+function updateVrrpBadges(){
+  // 全Si-R装置のバッジを更新
+  Object.keys(DEVICES).forEach(function(id) {
+    var badge = document.getElementById('vrrp-badge-'+id);
+    if (badge) {
+      var isM = id === VRRP.master;
+      badge.textContent = isM ? 'Master' : 'Backup';
+      badge.style.background = isM ? '#002200' : '#1a1a00';
+      badge.style.color = isM ? 'var(--green)' : 'var(--amber)';
+      badge.style.border = '1px solid ' + (isM ? 'var(--green)' : 'var(--amber)');
+    }
+  });
+  // トポロジーパネルのバッジ
+  var ba = document.getElementById('vrrp-a-badge');
+  var bb = document.getElementById('vrrp-b-badge');
+  if (ba) {
+    var ma = VRRP.master === 'sir-a';
+    ba.textContent = ma ? 'Master' : 'Backup';
+    ba.style.background = ma ? '#002200' : '#1a1a00';
+    ba.style.color = ma ? 'var(--green)' : 'var(--amber)';
+    ba.style.border = '1px solid ' + (ma ? 'var(--green)' : 'var(--amber)');
+  }
+  if (bb) {
+    var mb = VRRP.master === 'sir-b';
+    bb.textContent = mb ? 'Master' : 'Backup';
+  }
+}
+
+// ════════════════════════════════════════════
+// トポロジーCanvas
+// ════════════════════════════════════════════
+const CVS={cvs:null,ctx:null,W:800,H:600,scale:1,offsetX:0,offsetY:0,
+  dragging:null,panning:false,panStart:null,linkMode:false,linkFrom:null,
+  linkMouse:null,selected:null,hoveredLink:null};
+const NODE_W=110,NODE_H=46;
+
+function initCanvas(){
+  const container=document.getElementById('topo-canvas');
+  CVS.cvs=document.getElementById('topo-cvs');
+  if(!CVS.cvs)return;
+  function resize(){
+    CVS.W=container.clientWidth;CVS.H=container.clientHeight;
+    CVS.cvs.width=CVS.W;CVS.cvs.height=CVS.H;drawCanvas();
+  }
+  new ResizeObserver(resize).observe(container);
+  CVS.ctx=CVS.cvs.getContext('2d');
+  resize();
+  CVS.cvs.addEventListener('mousedown',onMD);
+  CVS.cvs.addEventListener('mousemove',onMM);
+  CVS.cvs.addEventListener('mouseup',  onMU);
+  CVS.cvs.addEventListener('wheel',    onMW,{passive:false});
+  CVS.cvs.addEventListener('contextmenu',onCR);
+  CVS.cvs.addEventListener('dblclick', onDC);
+  CVS.cvs.addEventListener('mouseleave',()=>{const h=document.getElementById('topo-hint');if(h)h.style.display='none';});
+  document.addEventListener('keydown', onKey);
+}
+function s2w(sx,sy){return{x:(sx-CVS.offsetX)/CVS.scale,y:(sy-CVS.offsetY)/CVS.scale};}
+function hitNode(wx,wy){
+  for(const id of Object.keys(DEVICES)){
+    const p=NODE_POS[id];if(!p)continue;
+    if(wx>=p.x-NODE_W/2&&wx<=p.x+NODE_W/2&&wy>=p.y-NODE_H/2&&wy<=p.y+NODE_H/2)return id;
+  }return null;
+}
+function hitLink(wx,wy){
+  for(const l of LINKS){
+    const pa=NODE_POS[l.a],pb=NODE_POS[l.b];if(!pa||!pb)continue;
+    const dx=pb.x-pa.x,dy=pb.y-pa.y,len=Math.sqrt(dx*dx+dy*dy);if(len<1)continue;
+    const t=((wx-pa.x)*dx+(wy-pa.y)*dy)/(len*len);if(t<0||t>1)continue;
+    const px=pa.x+t*dx,py=pa.y+t*dy;
+    if(Math.sqrt((wx-px)**2+(wy-py)**2)<8/CVS.scale)return l.id;
+  }return null;
+}
+function onMD(e){
+  const r=CVS.cvs.getBoundingClientRect(),{x:wx,y:wy}=s2w(e.clientX-r.left,e.clientY-r.top);
+  const hitId=hitNode(wx,wy);
+  if(CVS.linkMode){
+    if(hitId&&hitId!==CVS.linkFrom){commitLink(CVS.linkFrom,hitId);exitLinkMode();}
+    else if(!hitId)exitLinkMode();
+    return;
+  }
+  if(hitId){
+    CVS.dragging={id:hitId,ox:wx-NODE_POS[hitId].x,oy:wy-NODE_POS[hitId].y};
+    CVS.selected=hitId;showNodeDetail(hitId);
+    document.getElementById('btn-del-sel').style.display='';drawCanvas();
+  }else{
+    CVS.selected=null;document.getElementById('btn-del-sel').style.display='none';
+    document.getElementById('node-detail-box').style.display='none';
+    CVS.panning=true;CVS.panStart={mx:e.clientX,my:e.clientY,ox:CVS.offsetX,oy:CVS.offsetY};
+    CVS.cvs.style.cursor='grabbing';drawCanvas();
+  }
+}
+function onMM(e){
+  const r=CVS.cvs.getBoundingClientRect(),{x:wx,y:wy}=s2w(e.clientX-r.left,e.clientY-r.top);
+  if(CVS.dragging){const p=NODE_POS[CVS.dragging.id];if(p){p.x=wx-CVS.dragging.ox;p.y=wy-CVS.dragging.oy;}drawCanvas();return;}
+  if(CVS.panning&&CVS.panStart){CVS.offsetX=CVS.panStart.ox+(e.clientX-CVS.panStart.mx);CVS.offsetY=CVS.panStart.oy+(e.clientY-CVS.panStart.my);drawCanvas();return;}
+  const hitId=hitNode(wx,wy),hitLid=hitId?null:hitLink(wx,wy);
+  CVS.cvs.style.cursor=hitId?'pointer':hitLid?'pointer':CVS.linkMode?'crosshair':'default';
+  CVS.hoveredLink=hitLid;
+
+  // ホバーヒント表示
+  const hint = document.getElementById('topo-hint');
+  if(hint){
+    if(hitId && !CVS.linkMode){
+      hint.textContent = '💡 ダブルクリックで接続 / ドラッグで移動 / 右クリックでメニュー';
+      hint.style.display = 'block';
+      hint.style.left = (e.clientX - r.left + 12) + 'px';
+      hint.style.top  = (e.clientY - r.top  - 36) + 'px';
+    } else if(hitId && CVS.linkMode){
+      hint.textContent = '🔗 クリックで接続！';
+      hint.style.display = 'block';
+      hint.style.left = (e.clientX - r.left + 12) + 'px';
+      hint.style.top  = (e.clientY - r.top  - 36) + 'px';
+    } else if(hitLid){
+      hint.textContent = '右クリックでリンク削除';
+      hint.style.display = 'block';
+      hint.style.left = (e.clientX - r.left + 12) + 'px';
+      hint.style.top  = (e.clientY - r.top  - 36) + 'px';
+    } else {
+      hint.style.display = 'none';
+    }
+  }
+
+  if(CVS.linkMode){CVS.linkMouse={wx,wy};drawCanvas();}
+}
+function onMU(){CVS.dragging=null;CVS.panning=false;CVS.panStart=null;CVS.cvs.style.cursor=CVS.linkMode?'crosshair':'default';renderLinkList();renderTopoDisplay();}
+function onMW(e){
+  e.preventDefault();
+  const r=CVS.cvs.getBoundingClientRect(),sx=e.clientX-r.left,sy=e.clientY-r.top;
+  const f=e.deltaY<0?1.12:0.88,ns=Math.max(0.2,Math.min(4,CVS.scale*f));
+  CVS.offsetX=sx-(sx-CVS.offsetX)*(ns/CVS.scale);CVS.offsetY=sy-(sy-CVS.offsetY)*(ns/CVS.scale);
+  CVS.scale=ns;drawCanvas();
+}
+function onCR(e){
+  e.preventDefault();
+  const r=CVS.cvs.getBoundingClientRect(),{x:wx,y:wy}=s2w(e.clientX-r.left,e.clientY-r.top);
+  const hitId=hitNode(wx,wy),hitLid=hitId?null:hitLink(wx,wy);
+  if(hitId){
+    showCtxMenu(e.clientX,e.clientY,[
+      {action:'link_from',icon:'🔗',label:'ここからリンク接続'},
+      '---',
+      {action:'rename',icon:'✏',label:'名前変更'},
+      '---',
+      {action:'del_node',icon:'🗑',label:'装置を削除',color:'var(--red)'},
+    ],{nodeId:hitId});
+  }else if(hitLid){
+    showCtxMenu(e.clientX,e.clientY,[{action:'del_link',icon:'✕',label:'リンクを削除',color:'var(--red)'}],{linkId:hitLid});
+  }
+}
+function onDC(e){
+  const r=CVS.cvs.getBoundingClientRect(),{x:wx,y:wy}=s2w(e.clientX-r.left,e.clientY-r.top);
+  const hitId=hitNode(wx,wy);if(hitId&&!CVS.linkMode)enterLinkMode(hitId);
+}
+function onKey(e){
+  if(e.key==='Escape')exitLinkMode();
+  if((e.key==='Delete'||e.key==='Backspace')&&CVS.selected&&document.activeElement===document.body)deleteSelectedNode();
+}
+function enterLinkMode(id){
+  CVS.linkMode=true;CVS.linkFrom=id;CVS.cvs.style.cursor='crosshair';
+  const ind=document.getElementById('link-mode-ind');
+  ind.style.display='block';ind.textContent=`🔗 ${DEVICES[id]?.hostname||id} → 接続先をクリック (Escでキャンセル)`;
+  drawCanvas();
+}
+function exitLinkMode(){CVS.linkMode=false;CVS.linkFrom=null;CVS.linkMouse=null;CVS.cvs.style.cursor='default';document.getElementById('link-mode-ind').style.display='none';drawCanvas();}
+function commitLink(aId,bId){
+  const d=DEVICES[aId],e=DEVICES[bId];if(!d||!e)return;
+  const type=document.getElementById('lnk-type').value,vlan=document.getElementById('lnk-vlan').value;
+  const pa=defPort(d.type,Object.values(LINKS).length),pb=defPort(e.type,Object.values(LINKS).length+1);
+  const lid='l'+Date.now();
+  LINKS.push({id:lid,a:aId,pa,b:bId,pb,type,vlan,active:true});
+  print(aId,'');print(aId,`%LINK-3-UPDOWN: Interface ${pa}, changed state to up`,'col-g');
+  print(bId,'');print(bId,`%LINK-3-UPDOWN: Interface ${pb}, changed state to up`,'col-g');
+  renderLinkList();renderTopoDisplay();drawCanvas();
+  syncLinksToBackend();
+}
+function syncLinksToBackend(){
+  // vnetにリンクを同期（プロトコルパケットが流れる）
+  fetch('/api/links/sync',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({links:LINKS.map(function(l){return {a:l.a,b:l.b};})})});
+}
+function defPort(type,n){
+  if(type==='sir')return`lan${n%3}`;
+  if(type==='srs')return`ether ${n+1}`;
+  if(type==='catalyst')return`GigabitEthernet1/0/${n+1}`;
+  if(type==='cisco')return`GigabitEthernet0/0/${n%2}`;
+  return`eth${n}`;
+}
+function addDevice(tplKey){
+  const tpl=DEV_TEMPLATES[tplKey];if(!tpl)return;
+  devCounter++;
+  const newId=tplKey+'-'+devCounter;
+  const cx=(CVS.W/2-CVS.offsetX)/CVS.scale,cy=(CVS.H/2-CVS.offsetY)/CVS.scale;
+  NODE_POS[newId]={x:cx+(Math.random()-.5)*200,y:cy+(Math.random()-.5)*150};
+  DEVICES[newId]={name:tpl.prefix+devCounter,model:tpl.model,hostname:tpl.prefix+devCounter,color:tpl.color,type:tpl.type,mode:'exec'};
+  TERMS[newId]={busy:false,typed:'',cur:0,history:[],histIdx:-1};
+  addTermDOM(newId);
+  // バックエンドにも登録
+  fetch('/api/device',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({id:newId,type:tpl.type,hostname:tpl.prefix+devCounter})});
+  renderLinkList();renderTopoDisplay();drawCanvas();updateFlowDevSel();
+}
+function deleteSelectedNode(){
+  const id=CVS.selected;if(!id)return;
+  const defaults=['sir-a','sir-b','srs','catalyst','cisco'];
+  if(defaults.includes(id)){alert(`${DEVICES[id]?.hostname} はデフォルト装置のため削除できません`);return;}
+  if(!confirm(`「${DEVICES[id]?.hostname}」を削除しますか？`))return;
+  LINKS=LINKS.filter(l=>l.a!==id&&l.b!==id);
+  delete DEVICES[id];delete NODE_POS[id];delete TERMS[id];
+  document.getElementById('tw-'+id)?.remove();
+  fetch('/api/device/'+id,{method:'DELETE'});
+  CVS.selected=null;document.getElementById('btn-del-sel').style.display='none';
+  document.getElementById('node-detail-box').style.display='none';
+  renderLinkList();renderTopoDisplay();drawCanvas();updateFlowDevSel();
+}
+function showNodeDetail(id){
+  const d=DEVICES[id];
+  document.getElementById('node-detail-box').style.display='';
+  document.getElementById('node-detail-body').innerHTML=`
+    <div style="display:flex;gap:8px;margin-bottom:6px">
+      <div style="flex:1"><div style="font-size:9px;color:var(--text2)">ホスト名</div>
+        <input style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 5px;font-size:11px;font-family:'Courier New',monospace;outline:none"
+          value="${d.hostname}" onchange="DEVICES['${id}'].hostname=this.value;renderInput('${id}');renderTopoDisplay();drawCanvas();fetch('/api/device/${id}/hostname',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({hostname:this.value})})">
+      </div>
+    </div>
+    <div style="display:flex;gap:6px">
+      <button class="lab-btn" onclick="enterLinkMode('${id}')">🔗 リンク</button>
+      <button class="lab-btn dang" onclick="CVS.selected='${id}';deleteSelectedNode()">🗑 削除</button>
+    </div>`;
+}
+function drawCanvas(){
+  const ctx=CVS.ctx;if(!ctx)return;
+  ctx.clearRect(0,0,CVS.W,CVS.H);
+  ctx.save();ctx.translate(CVS.offsetX,CVS.offsetY);ctx.scale(CVS.scale,CVS.scale);
+  // グリッド
+  ctx.strokeStyle='#1a1a1a';ctx.lineWidth=0.5/CVS.scale;
+  const gs=40,sx=Math.floor(-CVS.offsetX/CVS.scale/gs)*gs,sy=Math.floor(-CVS.offsetY/CVS.scale/gs)*gs;
+  for(let x=sx;x<sx+CVS.W/CVS.scale+gs*2;x+=gs){ctx.beginPath();ctx.moveTo(x,sy);ctx.lineTo(x,sy+CVS.H/CVS.scale+gs*2);ctx.stroke();}
+  for(let y=sy;y<sy+CVS.H/CVS.scale+gs*2;y+=gs){ctx.beginPath();ctx.moveTo(sx,y);ctx.lineTo(sx+CVS.W/CVS.scale+gs*2,y);ctx.stroke();}
+  // リンク
+  LINKS.forEach(l=>{
+    const pa=NODE_POS[l.a],pb=NODE_POS[l.b];if(!pa||!pb)return;
+    ctx.save();
+    const ho=l.id===CVS.hoveredLink;
+    ctx.strokeStyle=ho?'#00ff88':l.type==='trunk'?'#1a5a3a':l.type==='routed'?'#5a4a1a':l.type==='serial'?'#5a1a1a':'#2a4a2a';
+    ctx.lineWidth=(ho?3:2)/CVS.scale;
+    ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(pb.x,pb.y);ctx.stroke();
+    if(CVS.scale>0.6){
+      ctx.fillStyle='#70c870';ctx.font=`${10/CVS.scale}px Courier New`;ctx.textAlign='center';
+      ctx.fillText(`${l.pa}↔${l.pb}`,(pa.x+pb.x)/2,(pa.y+pb.y)/2-6/CVS.scale);
+    }
+    ctx.restore();
+  });
+  // リンクモード仮線
+  if(CVS.linkMode&&CVS.linkFrom&&CVS.linkMouse){
+    const pa=NODE_POS[CVS.linkFrom];
+    if(pa){ctx.save();ctx.strokeStyle='rgba(0,200,0,.5)';ctx.lineWidth=2/CVS.scale;ctx.setLineDash([5/CVS.scale,5/CVS.scale]);ctx.beginPath();ctx.moveTo(pa.x,pa.y);ctx.lineTo(CVS.linkMouse.wx,CVS.linkMouse.wy);ctx.stroke();ctx.restore();}
+  }
+  // ノード
+  Object.entries(NODE_POS).forEach(([id,p])=>{
+    const d=DEVICES[id];if(!d)return;
+    const sel=id===CVS.selected,lsrc=id===CVS.linkFrom,nw=NODE_W,nh=NODE_H;
+    ctx.save();
+    if(sel||lsrc){ctx.shadowColor=lsrc?'#00ff00':d.color;ctx.shadowBlur=16/CVS.scale;}
+    ctx.fillStyle='#0d0d0d';ctx.strokeStyle=lsrc?'#00ff00':sel?'#fff':d.color;ctx.lineWidth=(sel||lsrc?2.5:1.5)/CVS.scale;
+    rRect(ctx,p.x-nw/2,p.y-nh/2,nw,nh,5/CVS.scale);ctx.fill();ctx.stroke();
+    ctx.shadowBlur=0;
+    // アイコン
+    const tpl=Object.values(DEV_TEMPLATES).find(t=>t.model===d.model)||{icon:'?'};
+    ctx.fillStyle=d.color+'30';ctx.beginPath();ctx.arc(p.x-nw/2+16/CVS.scale,p.y,12/CVS.scale,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=d.color;ctx.font=`bold ${10/CVS.scale}px Courier New`;ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(tpl.icon||'?',p.x-nw/2+16/CVS.scale,p.y);
+    // ホスト名
+    ctx.fillStyle=d.color;ctx.font=`bold ${13/CVS.scale}px Courier New`;ctx.textAlign='left';
+    ctx.fillText(d.hostname,p.x-nw/2+32/CVS.scale,p.y-7/CVS.scale);
+    // モデル
+    ctx.fillStyle='#a0b0c0';ctx.font=`${10/CVS.scale}px Courier New`;
+    ctx.fillText(d.model,p.x-nw/2+32/CVS.scale,p.y+7/CVS.scale);
+    // VRRP
+    if(id===VRRP.master||id===VRRP.backup){
+      const isM=id===VRRP.master;
+      ctx.fillStyle=isM?'#003300':'#1a1a00';ctx.strokeStyle=isM?'#00c800':'#c8c800';ctx.lineWidth=1/CVS.scale;
+      rRect(ctx,p.x+nw/2-52/CVS.scale,p.y-nh/2-10/CVS.scale,50/CVS.scale,10/CVS.scale,2/CVS.scale);
+      ctx.fill();ctx.stroke();
+      ctx.fillStyle=isM?'#00c800':'#c8c800';ctx.font=`bold ${7/CVS.scale}px Courier New`;ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText(isM?'VRRP Master':'VRRP Backup',p.x+nw/2-27/CVS.scale,p.y-nh/2-5/CVS.scale);
+    }
+    // vPC
+    const vpcInfo = VPC.domains[id];
+    if(vpcInfo && vpcInfo.role && vpcInfo.role !== 'none'){
+      const isPri = vpcInfo.role.includes('primary');
+      const isSec = vpcInfo.role.includes('secondary');
+      const isOper = vpcInfo.role.includes('oper');
+      const bgC   = isPri ? '#001a33' : '#1a0a00';
+      const borC  = isPri ? '#0080ff' : '#ff6a00';
+      const txtC  = isPri ? '#4db8ff' : '#ff9944';
+      const label = isPri && isOper ? 'vPC Oper-Pri'
+                  : isPri           ? 'vPC Primary'
+                  : isSec           ? 'vPC Secondary' : 'vPC';
+      ctx.fillStyle=bgC; ctx.strokeStyle=borC; ctx.lineWidth=1/CVS.scale;
+      const bw=62/CVS.scale, bh=10/CVS.scale;
+      rRect(ctx,p.x-nw/2,p.y-nh/2-12/CVS.scale,bw,bh,2/CVS.scale);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle=txtC; ctx.font=`bold ${7/CVS.scale}px Courier New`;
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(label,p.x-nw/2+bw/2,p.y-nh/2-7/CVS.scale);
+    }
+    ctx.restore();
+  });
+  ctx.restore();
+}
+
+// ── vPC 状態管理 ──
+const VPC = {
+  domains: {},   // device_id → {domain_id, role, keepalive, peer_link, members}
+};
+function vpcSetRole(device_id, role) {
+  if (!VPC.domains[device_id]) VPC.domains[device_id] = {};
+  VPC.domains[device_id].role = role;
+  drawCanvas();
+}
+function vpcSetKeepalive(device_id, state) {
+  if (!VPC.domains[device_id]) VPC.domains[device_id] = {};
+  VPC.domains[device_id].keepalive = state;
+}
+
+function rRect(ctx,x,y,w,h,r){
+  ctx.beginPath();ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.arcTo(x+w,y,x+w,y+r,r);
+  ctx.lineTo(x+w,y+h-r);ctx.arcTo(x+w,y+h,x+w-r,y+h,r);ctx.lineTo(x+r,y+h);ctx.arcTo(x,y+h,x,y+h-r,r);
+  ctx.lineTo(x,y+r);ctx.arcTo(x,y,x+r,y,r);ctx.closePath();
+}
+function topoZoom(f){const cx=CVS.W/2,cy=CVS.H/2,ns=Math.max(0.2,Math.min(4,CVS.scale*f));CVS.offsetX=cx-(cx-CVS.offsetX)*(ns/CVS.scale);CVS.offsetY=cy-(cy-CVS.offsetY)*(ns/CVS.scale);CVS.scale=ns;drawCanvas();}
+function topoFitAll(){
+  const ps=Object.values(NODE_POS);if(!ps.length)return;
+  const xs=ps.map(p=>p.x),ys=ps.map(p=>p.y);
+  const minX=Math.min(...xs)-80,maxX=Math.max(...xs)+80,minY=Math.min(...ys)-60,maxY=Math.max(...ys)+60;
+  CVS.scale=Math.min(CVS.W/(maxX-minX||1),CVS.H/(maxY-minY||1),2)*.9;
+  CVS.offsetX=CVS.W/2-((minX+maxX)/2)*CVS.scale;CVS.offsetY=CVS.H/2-((minY+maxY)/2)*CVS.scale;
+  drawCanvas();
+}
+function deleteLink(lid){
+  const lnk=LINKS.find(l=>l.id===lid);if(!lnk)return;
+  if(!confirm(`${DEVICES[lnk.a]?.hostname} ↔ ${DEVICES[lnk.b]?.hostname} のリンクを削除しますか？`))return;
+  print(lnk.a,'');print(lnk.a,`%LINK-3-UPDOWN: Interface ${lnk.pa}, changed state to down`,'col-r');
+  print(lnk.b,'');print(lnk.b,`%LINK-3-UPDOWN: Interface ${lnk.pb}, changed state to down`,'col-r');
+  LINKS=LINKS.filter(l=>l.id!==lid);renderLinkList();renderTopoDisplay();drawCanvas();
+  syncLinksToBackend();
+}
+function renderLinkList(){
+  const el=document.getElementById('link-list');if(!el)return;
+  if(!LINKS.length){el.innerHTML='<div style="color:var(--text2);font-size:10px">リンクなし</div>';return;}
+  el.innerHTML=LINKS.map(l=>`<div class="link-row">
+    <span style="flex:1;color:${DEVICES[l.a]?.color||'#fff'};font-size:10px">${DEVICES[l.a]?.hostname||l.a}<br><span style="color:var(--text2);font-size:9px">${l.pa}</span></span>
+    <span style="color:var(--border2)">━</span>
+    <span style="flex:1;color:${DEVICES[l.b]?.color||'#fff'};font-size:10px;text-align:right">${DEVICES[l.b]?.hostname||l.b}<br><span style="color:var(--text2);font-size:9px">${l.pb}</span></span>
+    <span style="font-size:9px;color:var(--text2);padding:0 4px">${l.type}</span>
+    <span class="lr-del" onclick="deleteLink('${l.id}')">✕</span>
+  </div>`).join('');
+}
+function renderTopoDisplay(){
+  const el=document.getElementById('topo-display');if(!el)return;
+  el.innerHTML=Object.entries(DEVICES).map(([id,d])=>
+    `<div class="topo-node"><div class="nd" style="background:${d.color}"></div><span>${d.hostname}</span></div>`
+  ).join('');
+}
+function applyTopology(){renderTopoDisplay();drawCanvas();Object.keys(DEVICES).forEach(id=>{print(id,'');print(id,'%TOPOLOGY-CHANGE: Network topology updated.','col-c');});switchTab('lab');}
+function resetTopology(){
+  if(!confirm('デフォルトにリセットしますか？'))return;
+  ['sir-a','sir-b','srs','catalyst','cisco'].forEach(id=>{if(!DEVICES[id])return;});
+  Object.keys(DEVICES).filter(id=>!['sir-a','sir-b','srs','catalyst','cisco'].includes(id)).forEach(id=>{
+    delete DEVICES[id];delete NODE_POS[id];delete TERMS[id];document.getElementById('tw-'+id)?.remove();
+    fetch('/api/device/'+id,{method:'DELETE'});
+  });
+  NODE_POS['cisco']={x:400,y:60};NODE_POS['catalyst']={x:400,y:180};NODE_POS['srs']={x:400,y:300};NODE_POS['sir-a']={x:220,y:420};NODE_POS['sir-b']={x:580,y:420};
+  LINKS=[
+    {id:'l1',a:'sir-a',pa:'lan0',b:'srs',pb:'ether 1',type:'access',vlan:'10',active:true},
+    {id:'l2',a:'sir-b',pa:'lan0',b:'srs',pb:'ether 2',type:'access',vlan:'10',active:true},
+    {id:'l3',a:'srs',pa:'ether 10',b:'catalyst',pb:'GigabitEthernet1/0/1',type:'trunk',vlan:'10,20',active:true},
+    {id:'l4',a:'catalyst',pa:'GigabitEthernet1/0/24',b:'cisco',pb:'GigabitEthernet0/0/0',type:'routed',vlan:'',active:true},
+  ];
+  renderLinkList();renderTopoDisplay();drawCanvas();updateFlowDevSel();
+}
+
+// ════════════════════════════════════════════
+// 右クリックメニュー
+// ════════════════════════════════════════════
+function showCtxMenu(x,y,items,ctx={}){
+  const menu=document.getElementById('ctx-menu');
+  menu.innerHTML=items.map(item=>item==='---'
+    ?'<div class="ctx-sep"></div>'
+    :`<div class="ctx-item" data-action="${item.action}" style="${item.color?'color:'+item.color:''}">
+       <span>${item.icon||''}</span><span>${item.label}</span></div>`
+  ).join('');
+  menu.querySelectorAll('.ctx-item').forEach(el=>{
+    el.addEventListener('mouseenter',()=>el.style.background='#1a3a6a');
+    el.addEventListener('mouseleave',()=>el.style.background='');
+    el.addEventListener('click',e=>{
+      e.stopPropagation();const a=el.dataset.action;hideCtxMenu();
+      if(a==='paste'){navigator.clipboard.readText().then(txt=>{const lines=txt.split(/\r?\n/).map(l=>l.trimEnd()).filter(l=>l!=='');if(lines.length===1){const t=TERMS[items._id||focusedId];if(t){t.typed+=lines[0];t.cur=t.typed.length;renderInput(items._id||focusedId);}}else openFlowModal(items._id||focusedId,lines.join('\n'));}).catch(()=>{});}
+      else if(a==='flow')openFlowModal(ctx.nodeId||focusedId,'');
+      else if(a==='link_from')enterLinkMode(ctx.nodeId);
+      else if(a==='del_node'){CVS.selected=ctx.nodeId;deleteSelectedNode();}
+      else if(a==='del_link')deleteLink(ctx.linkId);
+      else if(a==='clear')clearBuf(ctx.nodeId||focusedId);
+    });
+  });
+  // ターミナルの右クリックの場合(_idを使用)
+  if(typeof items==='string'){
+    // showCtxMenu(x,y,id) パターン
+    const id=items;
+    showCtxMenu(x,y,[
+      {action:'paste',icon:'⎘',label:'貼り付け'},
+      {action:'flow', icon:'▶',label:'設定流し込み...'},
+      '---',
+      {action:'clear',icon:'🗑',label:'画面クリア'},
+    ],{nodeId:id});
+    return;
+  }
+  menu.style.display='block';
+  const r=menu.getBoundingClientRect();
+  menu.style.left=Math.min(x,window.innerWidth-r.width-4)+'px';
+  menu.style.top=Math.min(y,window.innerHeight-r.height-4)+'px';
+}
+function hideCtxMenu(){document.getElementById('ctx-menu').style.display='none';}
+document.addEventListener('click',hideCtxMenu);
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){hideCtxMenu();exitLinkMode();}});
+
+// ════════════════════════════════════════════
+// 流し込みモーダル
+// ════════════════════════════════════════════
+let flowStop=false,flowRunning=false;
+function openFlowModal(id,text){
+  if(id)document.getElementById('flow-dev-sel').value=id;
+  if(text)document.getElementById('flow-text').value=text;
+  document.getElementById('flow-target-label').textContent=DEVICES[document.getElementById('flow-dev-sel').value]?.hostname||'';
+  document.getElementById('flow-overlay').style.display='flex';
+  document.getElementById('flow-log').innerHTML='';
+  if(text){const n=text.split('\n').filter(l=>l&&!l.startsWith('#')).length;addFlowLog(`📋 ${n}行を読み込みました`,'#00c8c8');}
+}
+document.getElementById('flow-close-btn').onclick=()=>{flowStop=true;document.getElementById('flow-overlay').style.display='none';};
+document.getElementById('flow-dev-sel').onchange=function(){document.getElementById('flow-target-label').textContent=DEVICES[this.value]?.hostname||'';};
+document.getElementById('flow-run-btn').onclick=async()=>{
+  if(flowRunning)return;
+  const tid=document.getElementById('flow-dev-sel').value;
+  const text=document.getElementById('flow-text').value;
+  const lines=text.split('\n').map(l=>l.trimEnd()).filter(l=>l&&!l.startsWith('#'));
+  if(!lines.length){addFlowLog('コマンドがありません','#c8c800');return;}
+  const delay=parseInt(document.getElementById('flow-delay').value);
+  flowStop=false;flowRunning=true;
+  document.getElementById('flow-run-btn').style.display='none';
+  document.getElementById('flow-stop-btn').style.display='';
+  addFlowLog(`▶ ${DEVICES[tid]?.hostname} に ${lines.length}行実行`,  '#00c8c8');
+  for(let i=0;i<lines.length;i++){
+    if(flowStop)break;
+    document.getElementById('flow-prog').textContent=`${i+1}/${lines.length}`;
+    addFlowLog(`  ${i+1}: ${lines[i]}`,'#00c800');
+    await runCmd(tid,lines[i]);
+    await new Promise(r=>setTimeout(r,delay));
+  }
+  if(!flowStop)addFlowLog(`✔ 完了 (${lines.length}行)`,'#00c800');
+  document.getElementById('flow-prog').textContent='';
+  document.getElementById('flow-stop-btn').style.display='none';
+  document.getElementById('flow-run-btn').style.display='';
+  flowRunning=false;
+};
+document.getElementById('flow-stop-btn').onclick=()=>{flowStop=true;document.getElementById('flow-stop-btn').style.display='none';document.getElementById('flow-run-btn').style.display='';addFlowLog('■ 停止','#c8c800');flowRunning=false;};
+function addFlowLog(text,color){const el=document.getElementById('flow-log');const d=document.createElement('div');d.style.color=color||'#406060';d.textContent=text;el.appendChild(d);el.scrollTop=el.scrollHeight;}
+function updateFlowDevSel(){const sel=document.getElementById('flow-dev-sel');const prev=sel?.value;if(!sel)return;sel.innerHTML=Object.entries(DEVICES).map(([id,d])=>`<option value="${id}"${id===prev?' selected':''}>${d.hostname} (${d.model})</option>`).join('');}
+
+// ════════════════════════════════════════════
+// 設定生成（ルールベース）
+// ════════════════════════════════════════════
+async function generateConfig(){
+  const target=document.getElementById('cfg-target').value;
+  const out=document.getElementById('config-out');
+  out.style.color='var(--cyan)';out.style.fontStyle='normal';out.textContent='設定生成中...';
+  const params={
+    device_id:target,
+    command:'show running-config',
+  };
+  try{
+    const res=await fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(params)});
+    const data=await res.json();
+    out.textContent=data.output||'生成できませんでした';
+    out.style.color='var(--green)';
+  }catch(e){out.textContent='エラー: サーバーに接続できません';out.style.color='var(--red)';}
+}
+async function validateConfig(){
+  const configText=document.getElementById('config-out').textContent;
+  if(!configText||configText.startsWith('←')||configText.startsWith('設定')){alert('先に設定を生成してください');return;}
+  document.getElementById('config-out').style.color='var(--cyan)';
+  document.getElementById('config-out').textContent='検証中...';
+  await new Promise(r=>setTimeout(r,500));
+  // ルールベース検証
+  const lines=configText.split('\n').filter(l=>l.trim()&&!l.startsWith('!'));
+  const warns=[],errs=[];
+  if(!lines.some(l=>/hostname/i.test(l)))warns.push('⚠️ hostname が設定されていません');
+  if(!lines.some(l=>/password|secret/i.test(l)))warns.push('⚠️ パスワードが設定されていません');
+  if(lines.some(l=>/no shutdown/i.test(l))){}
+  const result=[
+    `✅ 構文チェック: ${lines.length}行 正常`,
+    ...warns,...errs,
+    warns.length===0&&errs.length===0?'✅ 問題は検出されませんでした':'',
+  ].filter(Boolean).join('\n');
+  document.getElementById('config-out').textContent=result;
+  document.getElementById('config-out').style.color='var(--text)';
+}
+function copyConfig(){navigator.clipboard.writeText(document.getElementById('config-out').textContent).then(()=>{const b=document.querySelector('.cfg-hdr button');b.textContent='✓ コピー済み';setTimeout(()=>b.textContent='コピー',2000);});}
+
+// ════════════════════════════════════════════
+// タブ切り替え・ステータスバー
+// ════════════════════════════════════════════
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelector(`[data-tab="${name}"]`)?.classList.add('active');
+  document.getElementById('panel-lab').style.display=name==='lab'?'flex':'none';
+  const pt=document.getElementById('panel-topo'),pc=document.getElementById('panel-config');
+  pt.classList.toggle('active',name==='topo');
+  pc.classList.toggle('active',name==='config');
+  if(name==='lab')focusTerm(focusedId);
+  if(name==='topo'){renderLinkList();renderTopoDisplay();setTimeout(()=>{if(!CVS.ctx)initCanvas();else{drawCanvas();topoFitAll();}},50);}
+}
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>switchTab(t.dataset.tab)));
+
+function setGrid(cols){
+  const g=document.getElementById('terminal-grid');
+  g.style.gridTemplateColumns=`repeat(${cols===5?5:cols},1fr)`;
+}
+function updateStatusBar(){
+  ['sir-a','sir-b','srs','catalyst','cisco'].forEach(id=>{
+    const d=DEVICES[id];if(!d)return;
+    const mode=d.mode||'exec';
+    const sbMap={'sir-a':'sb-sir-a','sir-b':'sb-sir-b','srs':'sb-srs','catalyst':'sb-cat','cisco':'sb-cisco'};
+    const el=document.getElementById(sbMap[id]);
+    if(el)el.textContent=mode;
+  });
+  document.getElementById('sb-vrrp').textContent=`${DEVICES[VRRP.master]?.hostname||VRRP.master}=Master ${DEVICES[VRRP.backup]?.hostname||VRRP.backup}=Backup`;
+}
+
+// ════════════════════════════════════════════
+// 起動
+// ════════════════════════════════════════════
+setInterval(()=>document.getElementById('sb-time').textContent=new Date().toLocaleTimeString('ja'),1000);
+renderTopoDisplay();renderLinkList();updateStatusBar();updateVrrpBadges();
+
+// 定期的にステータス確認
+setInterval(checkStatus, 30000);
+
+// ランチャーを起動
+initLauncher();
+
+// ── コピペ機能 ──
+async function pasteToTerm(id) {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text) return;
+    // 複数行の場合は1行ずつ実行
+    const lines = text.trim().split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      TERMS[id].typed = trimmed;
+      TERMS[id].cur = trimmed.length;
+      renderInput(id);
+      await runCmd(id, trimmed);
+      await new Promise(r => setTimeout(r, 150));
+    }
+  } catch(e) {
+    // クリップボードへのアクセスが拒否された場合
+    alert('クリップボードへのアクセスを許可してください（ブラウザの設定）');
+  }
+}
+
+function copyLastOutput(id) {
+  const buf = document.getElementById('buf-'+id);
+  if (!buf) return;
+  const text = buf.innerText || buf.textContent;
+  // 最後のコマンド出力だけ取得（最後の区切りから）
+  const lines = text.split('\n');
+  const lastPromptIdx = lines.map((l,i)=>({l,i}))
+    .filter(({l}) => l.includes('#') && (l.includes('(config)') || l.endsWith('# ') || l.match(/\w+#\s*$/)))
+    .slice(-2, -1);
+  let copyText = text;
+  if (lastPromptIdx.length > 0) {
+    copyText = lines.slice(lastPromptIdx[0].i + 1).join('\n').trim();
+  }
+  navigator.clipboard.writeText(copyText || text).then(() => {
+    const btn = document.querySelector(`#il-${id} button:last-child`);
+    if (btn) { const orig = btn.textContent; btn.textContent='✅コピー済'; setTimeout(()=>btn.textContent=orig, 1500); }
+  });
+}
+
+</script>
+</body>
+</html>

@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>BGP ラボ実習</title>
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Segoe UI','メイリオ',sans-serif; background:#0d1117; color:#c9d1d9; }
+  header { background:#161b22; border-bottom:2px solid #d29922; padding:16px 24px; display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:20px; color:#d29922; }
+  .badge { border-radius:4px; padding:2px 8px; font-size:12px; border:1px solid; }
+  .badge-bgp { background:#d2992222; color:#d29922; border-color:#d29922; }
+  .badge-topo { background:#bc8cff22; color:#bc8cff; border-color:#bc8cff; }
+  .layout { display:grid; grid-template-columns:1fr 1fr; height:calc(100vh - 56px); }
+  .panel { padding:20px; overflow-y:auto; }
+  .panel-left { border-right:1px solid #30363d; }
+  h2 { font-size:13px; color:#d29922; text-transform:uppercase; letter-spacing:1px; margin-bottom:12px; }
+  .topology { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:20px; margin-bottom:16px; }
+  .topo-diagram { display:flex; align-items:center; justify-content:center; gap:0; padding:12px 0; }
+  .device { text-align:center; }
+  .device-box { background:#21262d; border:2px solid #30363d; border-radius:8px; padding:10px 14px; min-width:120px; }
+  .device-box.cat { border-color:#d29922; }
+  .device-box.sir { border-color:#bc8cff; }
+  .device-name { font-size:13px; font-weight:bold; color:#e6edf3; }
+  .device-type { font-size:10px; color:#8b949e; margin-top:2px; }
+  .device-ip { font-size:11px; margin-top:4px; font-family:monospace; }
+  .as-badge { font-size:11px; padding:2px 8px; border-radius:3px; margin-top:6px; font-weight:bold; }
+  .as1 { background:#1c1108; color:#d29922; border:1px solid #d29922; }
+  .as2 { background:#1a1030; color:#bc8cff; border:1px solid #bc8cff; }
+  .link { display:flex; align-items:center; flex-direction:column; padding:0 8px; }
+  .link-line { width:80px; height:2px; background:#30363d; position:relative; }
+  .link-line::after { content:'eBGP'; position:absolute; top:-16px; left:50%; transform:translateX(-50%); font-size:10px; color:#d29922; white-space:nowrap; }
+  .link-label { font-size:10px; color:#8b949e; margin-top:4px; font-family:monospace; }
+  .task-card { background:#161b22; border:1px solid #30363d; border-radius:8px; margin-bottom:10px; overflow:hidden; }
+  .task-header { padding:10px 14px; display:flex; align-items:center; gap:8px; cursor:pointer; }
+  .task-num { background:#9e6a03; color:white; border-radius:50%; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:bold; flex-shrink:0; }
+  .task-title { font-size:13px; color:#e6edf3; flex:1; }
+  .task-status { font-size:11px; padding:2px 8px; border-radius:10px; }
+  .task-status.todo { background:#21262d; color:#8b949e; border:1px solid #30363d; }
+  .task-status.done { background:#1a4731; color:#3fb950; border:1px solid #2ea043; }
+  .task-body { padding:12px 14px; border-top:1px solid #21262d; display:none; }
+  .task-body.open { display:block; }
+  .task-body p { font-size:12px; color:#8b949e; margin-bottom:10px; line-height:1.6; }
+  .cmd-block { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:10px 12px; margin:8px 0; font-family:'Consolas',monospace; font-size:12px; }
+  .p1 { color:#d29922; }
+  .p2 { color:#bc8cff; }
+  .cmd { color:#e6edf3; }
+  .comment { color:#8b949e; }
+  .expected { background:#1c1108; border-left:3px solid #d29922; padding:8px 12px; margin-top:8px; font-size:11px; font-family:monospace; color:#e3b341; border-radius:0 4px 4px 0; white-space:pre; }
+  .hint { background:#1c2128; border-left:3px solid #f0883e; padding:8px 12px; margin-top:8px; font-size:11px; color:#f0883e; border-radius:0 4px 4px 0; }
+  .info { background:#0d1f38; border-left:3px solid #58a6ff; padding:8px 12px; margin-top:8px; font-size:11px; color:#79c0ff; border-radius:0 4px 4px 0; }
+  .check-btn { background:#9e6a03; color:white; border:none; border-radius:6px; padding:6px 14px; font-size:12px; cursor:pointer; margin-top:10px; }
+  .check-btn:hover { background:#d29922; }
+  .verify-box { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px; margin-bottom:12px; }
+  .verify-cmd { display:flex; align-items:center; gap:8px; margin:6px 0; }
+  .verify-cmd code { font-size:12px; font-family:monospace; color:#e3b341; background:#0d1117; padding:3px 8px; border-radius:4px; flex:1; }
+  .verify-cmd span { font-size:11px; color:#8b949e; }
+  .copy-btn { background:#21262d; color:#8b949e; border:1px solid #30363d; border-radius:4px; padding:2px 8px; font-size:11px; cursor:pointer; }
+  .copy-btn:hover { color:#e6edf3; }
+  .point-list { list-style:none; }
+  .point-list li { padding:6px 0; font-size:12px; color:#8b949e; border-bottom:1px solid #21262d; display:flex; gap:8px; }
+  .point-list li::before { content:"▸"; color:#d29922; flex-shrink:0; }
+  .progress-bar { background:#21262d; border-radius:4px; height:6px; margin:8px 0; overflow:hidden; }
+  .progress-fill { background:#d29922; height:100%; border-radius:4px; transition:width 0.3s; }
+  .progress-text { font-size:11px; color:#8b949e; margin-bottom:12px; }
+  table { width:100%; font-size:11px; border-collapse:collapse; margin-top:8px; }
+  th { padding:6px 10px; text-align:left; color:#8b949e; background:#21262d; }
+  td { padding:6px 10px; border-bottom:1px solid #21262d; }
+  .state-flow { display:flex; align-items:center; gap:4px; flex-wrap:wrap; margin:10px 0; }
+  .state { background:#21262d; border:1px solid #30363d; border-radius:4px; padding:3px 8px; font-size:11px; font-family:monospace; }
+  .state.active-state { background:#1c1108; border-color:#d29922; color:#d29922; }
+  .arrow { color:#8b949e; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🟡 BGP ラボ実習</h1>
+  <span class="badge badge-bgp">Border Gateway Protocol</span>
+  <span class="badge badge-topo" style="margin-left:auto;">Catalyst (AS65001) ↔ Si-R (AS65002)</span>
+</header>
+<div class="layout">
+<div class="panel panel-left">
+  <h2>📋 実習課題</h2>
+  <div class="progress-bar"><div class="progress-fill" id="pf" style="width:0%"></div></div>
+  <div class="progress-text" id="pt">0 / 7 完了</div>
+
+  <!-- Task 1 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(1)">
+      <div class="task-num">1</div>
+      <div class="task-title">BGPの役割を理解する</div>
+      <div class="task-status todo" id="s1">未完了</div>
+    </div>
+    <div class="task-body" id="b1">
+      <p>BGP設定の前に、このラボの構成を確認します。</p>
+      <div class="info">
+📌 このラボの構成<br><br>
+GW-Router (Catalyst) = AS65001<br>
+Router-A  (Si-R)     = AS65002<br><br>
+異なるAS間でeBGPセッションを確立します。<br>
+インターネット上のISP間接続を模したシナリオです。
+      </div>
+      <div class="hint">💡 BGPはTCP 179番ポートを使います。OSPFやRIPと違いUDPではありません</div>
+      <button class="check-btn" onclick="done(1)">✅ 理解しました</button>
+    </div>
+  </div>
+
+  <!-- Task 2 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(2)">
+      <div class="task-num">2</div>
+      <div class="task-title">GW-Router (Catalyst / AS65001) に BGP を設定する</div>
+      <div class="task-status todo" id="s2">未完了</div>
+    </div>
+    <div class="task-body" id="b2">
+      <p>CatalystにBGPプロセスを起動し、Si-Rをネイバーとして登録します。</p>
+      <div class="cmd-block">
+        <div class="comment"># AS65001でBGPを起動</div>
+        <div><span class="p1">GW-Router# </span><span class="cmd">router bgp 65001</span></div>
+        <div class="comment"># Si-R(10.0.0.2)をAS65002のネイバーとして登録</div>
+        <div><span class="p1">GW-Router(config-router)# </span><span class="cmd">neighbor 10.0.0.2 remote-as 65002</span></div>
+        <div class="comment"># 自分のネットワークをBGPで広告</div>
+        <div><span class="p1">GW-Router(config-router)# </span><span class="cmd">network 192.168.10.0 mask 255.255.255.0</span></div>
+      </div>
+      <button class="check-btn" onclick="done(2)">✅ 設定完了</button>
+    </div>
+  </div>
+
+  <!-- Task 3 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(3)">
+      <div class="task-num">3</div>
+      <div class="task-title">Router-A (Si-R / AS65002) に BGP を設定する</div>
+      <div class="task-status todo" id="s3">未完了</div>
+    </div>
+    <div class="task-body" id="b3">
+      <p>Si-RはCisco形式に近いコマンドでBGPを設定します。</p>
+      <div class="cmd-block">
+        <div class="comment"># AS65002でBGPを起動</div>
+        <div><span class="p2">Router-A# </span><span class="cmd">router bgp 65002</span></div>
+        <div class="comment"># Catalyst(10.0.0.1)をAS65001のネイバーとして登録</div>
+        <div><span class="p2">Router-A(config-router)# </span><span class="cmd">neighbor 10.0.0.1 remote-as 65001</span></div>
+        <div class="comment"># 自分のネットワークを広告</div>
+        <div><span class="p2">Router-A(config-router)# </span><span class="cmd">network 192.168.1.0 mask 255.255.255.0</span></div>
+      </div>
+      <div class="hint">💡 Si-RのBGPコマンドはCiscoとほぼ同じ形式です</div>
+      <button class="check-btn" onclick="done(3)">✅ 設定完了</button>
+    </div>
+  </div>
+
+  <!-- Task 4 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(4)">
+      <div class="task-num">4</div>
+      <div class="task-title">BGP セッションの確立を確認する</div>
+      <div class="task-status todo" id="s4">未完了</div>
+    </div>
+    <div class="task-body" id="b4">
+      <p>BGPセッションの状態遷移を確認します。<br><strong>State/PfxRcd</strong> 欄が数字になれば Established 成功です。</p>
+      <div class="state-flow">
+        <div class="state">Idle</div><div class="arrow">→</div>
+        <div class="state">Active</div><div class="arrow">→</div>
+        <div class="state">OpenSent</div><div class="arrow">→</div>
+        <div class="state">OpenConfirm</div><div class="arrow">→</div>
+        <div class="state active-state">Established ✅</div>
+      </div>
+      <div class="cmd-block">
+        <div><span class="p1">GW-Router# </span><span class="cmd">show ip bgp summary</span></div>
+        <div><span class="p2">Router-A# </span><span class="cmd">show ip bgp summary</span></div>
+      </div>
+      <div class="expected">Neighbor        V    AS MsgRcvd MsgSent TblVer InQ OutQ Up/Down  State/PfxRcd
+10.0.0.2        4 65002     136      56      1    0    0 00:00:04  0</div>
+      <div class="hint">💡 State欄が「Active」のまま→対向が未設定。「Established」→成功</div>
+      <button class="check-btn" onclick="done(4)">✅ 確認完了</button>
+    </div>
+  </div>
+
+  <!-- Task 5 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(5)">
+      <div class="task-num">5</div>
+      <div class="task-title">BGP テーブルを確認する</div>
+      <div class="task-status todo" id="s5">未完了</div>
+    </div>
+    <div class="task-body" id="b5">
+      <p>BGPで学習したプレフィックスを確認します。</p>
+      <div class="cmd-block">
+        <div><span class="p1">GW-Router# </span><span class="cmd">show ip bgp</span></div>
+      </div>
+      <div class="expected">Network       Next Hop    Metric LocPrf Weight Path
+* 192.168.1.0  10.0.0.2         0              0 65002 i</div>
+      <div class="hint">💡 「*」= 有効経路、「&gt;」= ベストパス、Path欄にAS番号が並ぶ（AS_PATH）</div>
+      <button class="check-btn" onclick="done(5)">✅ 確認完了</button>
+    </div>
+  </div>
+
+  <!-- Task 6 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(6)">
+      <div class="task-num">6</div>
+      <div class="task-title">show run で BGP 設定を確認する</div>
+      <div class="task-status todo" id="s6">未完了</div>
+    </div>
+    <div class="task-body" id="b6">
+      <p>投入したBGP設定がrunning-configに正しく反映されているか確認します。</p>
+      <div class="cmd-block">
+        <div><span class="p1">GW-Router# </span><span class="cmd">show run</span></div>
+      </div>
+      <div class="expected">router bgp 65001
+ neighbor 10.0.0.2 remote-as 65002
+ network 192.168.10.0 mask 255.255.255.0</div>
+      <button class="check-btn" onclick="done(6)">✅ 確認完了</button>
+    </div>
+  </div>
+
+  <!-- Task 7 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(7)">
+      <div class="task-num">7</div>
+      <div class="task-title">ping で疎通確認する</div>
+      <div class="task-status todo" id="s7">未完了</div>
+    </div>
+    <div class="task-body" id="b7">
+      <p>BGPで経路を交換した後、ping で疎通を確認します。</p>
+      <div class="cmd-block">
+        <div><span class="p1">GW-Router# </span><span class="cmd">ping 192.168.1.1</span></div>
+        <div><span class="p2">Router-A# </span><span class="cmd">ping 192.168.10.1</span></div>
+      </div>
+      <div class="expected">!!!!!
+Success rate is 100 percent (5/5)</div>
+      <button class="check-btn" onclick="done(7)">✅ 疎通確認完了</button>
+    </div>
+  </div>
+</div>
+
+<!-- 右パネル -->
+<div class="panel">
+  <h2>🖧 ネットワーク構成</h2>
+  <div class="topology">
+    <div class="topo-diagram">
+      <div class="device">
+        <div class="device-box cat">
+          <div class="device-name">GW-Router</div>
+          <div class="device-type">Catalyst 9300</div>
+          <div class="device-ip" style="color:#d29922">Vlan10: 192.168.10.1/24</div>
+          <div class="device-ip" style="color:#d29922">Gi0: 10.0.0.1/30</div>
+        </div>
+        <div class="as-badge as1">AS65001</div>
+      </div>
+      <div class="link">
+        <div class="link-line"></div>
+        <div class="link-label">10.0.0.0/30<br>TCP 179</div>
+      </div>
+      <div class="device">
+        <div class="device-box sir">
+          <div class="device-name">Router-A</div>
+          <div class="device-type">Si-R G120</div>
+          <div class="device-ip" style="color:#bc8cff">lan0: 192.168.1.1/24</div>
+          <div class="device-ip" style="color:#bc8cff">wan0: 10.0.0.2/30</div>
+        </div>
+        <div class="as-badge as2">AS65002</div>
+      </div>
+    </div>
+    <div style="text-align:center;font-size:11px;color:#8b949e;margin-top:8px;">
+      eBGP セッション（異なるAS間）
+    </div>
+  </div>
+
+  <h2>🔍 確認コマンド</h2>
+  <div class="verify-box">
+    <div class="verify-cmd"><code>show ip bgp summary</code><span>ネイバー一覧・Established確認</span><button class="copy-btn" onclick="copy('show ip bgp summary')">コピー</button></div>
+    <div class="verify-cmd"><code>show ip bgp</code><span>BGPテーブル・プレフィックス</span><button class="copy-btn" onclick="copy('show ip bgp')">コピー</button></div>
+    <div class="verify-cmd"><code>show ip bgp neighbor</code><span>ネイバー詳細</span><button class="copy-btn" onclick="copy('show ip bgp neighbor')">コピー</button></div>
+    <div class="verify-cmd"><code>show ip route</code><span>ルーティングテーブル（B=BGP）</span><button class="copy-btn" onclick="copy('show ip route')">コピー</button></div>
+    <div class="verify-cmd"><code>show run</code><span>実行中コンフィグ</span><button class="copy-btn" onclick="copy('show run')">コピー</button></div>
+    <div class="verify-cmd"><code>ping 192.168.1.1</code><span>疎通確認</span><button class="copy-btn" onclick="copy('ping 192.168.1.1')">コピー</button></div>
+  </div>
+
+  <h2>📚 学習ポイント</h2>
+  <ul class="point-list">
+    <li>BGPはAS間の経路制御プロトコル（iBGP=AS内、eBGP=AS間）</li>
+    <li>TCP 179番ポートを使用（信頼性のある接続）</li>
+    <li>メトリックではなくポリシー（AS_PATH, LOCAL_PREF等）でパス選択</li>
+    <li>eBGP AD値=20、iBGP AD値=200</li>
+    <li>AS番号 64512〜65534 = プライベートAS（組織内使用）</li>
+    <li>neighbor コマンドで対向IPと相手AS番号を指定</li>
+    <li>異ベンダー間（Cisco ↔ Si-R）でも同じコマンド体系で設定可能</li>
+  </ul>
+
+  <h2 style="margin-top:16px">⚡ IGP vs BGP</h2>
+  <table>
+    <tr><th>項目</th><th>RIP/OSPF (IGP)</th><th>BGP</th></tr>
+    <tr><td>用途</td><td>AS内ルーティング</td><td>AS間ルーティング</td></tr>
+    <tr style="background:#161b22"><td>プロトコル</td><td>UDP</td><td>TCP 179</td></tr>
+    <tr><td>メトリック</td><td>ホップ数/コスト</td><td>AS_PATH等</td></tr>
+    <tr style="background:#161b22"><td>収束速度</td><td>速い</td><td>遅い（安定性重視）</td></tr>
+    <tr><td>スケール</td><td>組織内</td><td>インターネット全体</td></tr>
+  </table>
+</div>
+</div>
+<script>
+function toggle(n){ document.getElementById('b'+n).classList.toggle('open'); }
+const done_set=new Set();
+const TOTAL=7;
+function done(n){
+  done_set.add(n);
+  document.getElementById('s'+n).textContent='完了 ✅';
+  document.getElementById('s'+n).className='task-status done';
+  const pct=Math.round(done_set.size/TOTAL*100);
+  document.getElementById('pf').style.width=pct+'%';
+  document.getElementById('pt').textContent=done_set.size+' / '+TOTAL+' 完了';
+}
+function copy(cmd){ navigator.clipboard.writeText(cmd); }
+toggle(1);
+</script>
+</body>
+</html>

@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RIP ラボ実習</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', 'メイリオ', sans-serif; background: #0d1117; color: #c9d1d9; }
+  header { background: #161b22; border-bottom: 2px solid #21c65b; padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 20px; color: #21c65b; }
+  header .badge { background: #21c65b22; color: #21c65b; border: 1px solid #21c65b; border-radius: 4px; padding: 2px 8px; font-size: 12px; }
+  .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 0; height: calc(100vh - 56px); }
+  .panel { padding: 20px; overflow-y: auto; }
+  .panel-left { border-right: 1px solid #30363d; }
+  h2 { font-size: 14px; color: #58a6ff; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+  h3 { font-size: 13px; color: #e6edf3; margin: 16px 0 8px; }
+
+  /* トポロジー図 */
+  .topology { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+  .topo-diagram { display: flex; align-items: center; justify-content: center; gap: 0; padding: 12px 0; }
+  .device { text-align: center; }
+  .device-box { background: #21262d; border: 2px solid #30363d; border-radius: 8px; padding: 10px 14px; min-width: 110px; }
+  .device-box.router { border-color: #21c65b; }
+  .device-box.switch { border-color: #58a6ff; }
+  .device-name { font-size: 13px; font-weight: bold; color: #e6edf3; }
+  .device-type { font-size: 10px; color: #8b949e; margin-top: 2px; }
+  .device-ip { font-size: 11px; color: #21c65b; margin-top: 4px; font-family: monospace; }
+  .link { display: flex; align-items: center; flex-direction: column; padding: 0 8px; }
+  .link-line { width: 60px; height: 2px; background: #30363d; position: relative; }
+  .link-label { font-size: 10px; color: #8b949e; margin-top: 4px; font-family: monospace; }
+
+  /* 課題カード */
+  .task-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+  .task-header { padding: 10px 14px; display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  .task-num { background: #1f6feb; color: white; border-radius: 50%; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: bold; flex-shrink: 0; }
+  .task-title { font-size: 13px; color: #e6edf3; flex: 1; }
+  .task-status { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+  .task-status.todo { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+  .task-status.done { background: #1a4731; color: #3fb950; border: 1px solid #2ea043; }
+  .task-body { padding: 12px 14px; border-top: 1px solid #21262d; display: none; }
+  .task-body.open { display: block; }
+  .task-body p { font-size: 12px; color: #8b949e; margin-bottom: 10px; line-height: 1.6; }
+  .cmd-block { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px 12px; margin: 8px 0; font-family: 'Consolas', monospace; font-size: 12px; }
+  .cmd-block .prompt { color: #58a6ff; }
+  .cmd-block .cmd { color: #e6edf3; }
+  .cmd-block .comment { color: #8b949e; }
+  .expected { background: #0f2922; border-left: 3px solid #21c65b; padding: 8px 12px; margin-top: 8px; font-size: 11px; font-family: monospace; color: #7ee787; border-radius: 0 4px 4px 0; }
+  .hint { background: #1c2128; border-left: 3px solid #f0883e; padding: 8px 12px; margin-top: 8px; font-size: 11px; color: #f0883e; border-radius: 0 4px 4px 0; }
+  .check-btn { background: #238636; color: white; border: none; border-radius: 6px; padding: 6px 14px; font-size: 12px; cursor: pointer; margin-top: 10px; }
+  .check-btn:hover { background: #2ea043; }
+
+  /* 確認コマンド */
+  .verify-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  .verify-cmd { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .verify-cmd code { font-size: 12px; font-family: monospace; color: #79c0ff; background: #0d1117; padding: 3px 8px; border-radius: 4px; flex: 1; }
+  .verify-cmd span { font-size: 11px; color: #8b949e; }
+  .copy-btn { background: #21262d; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
+  .copy-btn:hover { color: #e6edf3; }
+
+  /* 学習ポイント */
+  .point-list { list-style: none; }
+  .point-list li { padding: 6px 0; font-size: 12px; color: #8b949e; border-bottom: 1px solid #21262d; display: flex; gap: 8px; }
+  .point-list li:last-child { border-bottom: none; }
+  .point-list li::before { content: "▸"; color: #21c65b; flex-shrink: 0; }
+
+  /* プログレス */
+  .progress-bar { background: #21262d; border-radius: 4px; height: 6px; margin: 8px 0; overflow: hidden; }
+  .progress-fill { background: #21c65b; height: 100%; border-radius: 4px; transition: width 0.3s; }
+  .progress-text { font-size: 11px; color: #8b949e; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🌐 RIP ラボ実習</h1>
+  <span class="badge">Routing Information Protocol</span>
+  <span class="badge" style="margin-left:auto; color:#58a6ff; border-color:#58a6ff; background:#1f6feb22;">Si-R ↔ Catalyst</span>
+</header>
+
+<div class="layout">
+<!-- 左パネル: 課題 -->
+<div class="panel panel-left">
+  <h2>📋 実習課題</h2>
+
+  <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+  <div class="progress-text" id="progressText">0 / 6 完了</div>
+
+  <!-- Task 1 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggleTask(1)">
+      <div class="task-num">1</div>
+      <div class="task-title">Si-R (Router-A) に RIP を設定する</div>
+      <div class="task-status todo" id="status1">未完了</div>
+    </div>
+    <div class="task-body" id="body1">
+      <p>Si-RでRIPを有効化し、ネットワークを登録します。<br>
+      Router-A の端末にコマンドを入力してください。</p>
+      <div class="cmd-block">
+        <div class="comment"># RIPを有効化</div>
+        <div><span class="prompt">Router-A# </span><span class="cmd">ip rip use use</span></div>
+        <div class="comment"># 配信するネットワークを登録</div>
+        <div><span class="prompt">Router-A# </span><span class="cmd">ip rip network 192.168.1.0/24</span></div>
+        <div><span class="prompt">Router-A# </span><span class="cmd">ip rip network 10.0.0.0/30</span></div>
+      </div>
+      <div class="hint">💡 Si-RのRIPコマンドは「ip rip use use」から始まります（Ciscoと異なります）</div>
+      <button class="check-btn" onclick="completeTask(1)">✅ 設定完了</button>
+    </div>
+  </div>
+
+  <!-- Task 2 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggleTask(2)">
+      <div class="task-num">2</div>
+      <div class="task-title">Catalyst (Dist-SW) に RIP を設定する</div>
+      <div class="task-status todo" id="status2">未完了</div>
+    </div>
+    <div class="task-body" id="body2">
+      <p>CatalystでRIPを有効化します。<br>
+      Cisco形式のコマンドで設定してください。</p>
+      <div class="cmd-block">
+        <div><span class="prompt">Dist-SW# </span><span class="cmd">router rip</span></div>
+        <div><span class="prompt">Dist-SW(config-router)# </span><span class="cmd">version 2</span></div>
+        <div><span class="prompt">Dist-SW(config-router)# </span><span class="cmd">network 192.168.2.0</span></div>
+        <div><span class="prompt">Dist-SW(config-router)# </span><span class="cmd">network 10.0.0.0</span></div>
+      </div>
+      <div class="hint">💡 CiscoのRIPはClassfulなので /24 などマスクを書かずネットワークアドレスだけ書きます</div>
+      <button class="check-btn" onclick="completeTask(2)">✅ 設定完了</button>
+    </div>
+  </div>
+
+  <!-- Task 3 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggleTask(3)">
+      <div class="task-num">3</div>
+      <div class="task-title">RIPネイバーが確立したことを確認する</div>
+      <div class="task-status todo" id="status3">未完了</div>
+    </div>
+    <div class="task-body" id="body3">
+      <p>両ルーターでRIPネイバーを確認します。<br>
+      学習元のIPアドレスと最終更新時刻が表示されれば成功です。</p>
+      <div class="cmd-block">
+        <div><span class="prompt">Router-A# </span><span class="cmd">show ip rip neighbor</span></div>
+        <div><span class="prompt">Dist-SW# </span><span class="cmd">show ip rip neighbor</span></div>
+      </div>
+      <div class="expected">期待される出力例:
+Index   IP Address        Last Update   Bad Pkts   Bad Routes
+1       10.0.0.2          00:00:15      0          0</div>
+      <button class="check-btn" onclick="completeTask(3)">✅ 確認完了</button>
+    </div>
+  </div>
+
+  <!-- Task 4 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggleTask(4)">
+      <div class="task-num">4</div>
+      <div class="task-title">RIPルーティングテーブルを確認する</div>
+      <div class="task-status todo" id="status4">未完了</div>
+    </div>
+    <div class="task-body" id="body4">
+      <p>「*R」が付いた行がRIPで学習した経路です。<br>
+      メトリック（ホップ数）も確認してください。</p>
+      <div class="cmd-block">
+        <div><span class="prompt">Router-A# </span><span class="cmd">show ip rip route</span></div>
+        <div><span class="prompt">Dist-SW# </span><span class="cmd">show ip rip route</span></div>
+      </div>
+      <div class="expected">期待される出力（*R = RIP学習経路）:
+FP Destination/Mask  Gateway  Metric  Time    Interface
+*C 192.168.1.0/24             1       none    lan0
+*R 192.168.2.0/24   Dist-SW  2       00:00   lan0</div>
+      <div class="hint">💡 メトリック=2 は「1ホップ先から受信してカウントアップ」したホップ数です</div>
+      <button class="check-btn" onclick="completeTask(4)">✅ 確認完了</button>
+    </div>
+  </div>
+
+  <!-- Task 5 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggleTask(5)">
+      <div class="task-num">5</div>
+      <div class="task-title">show running-config で設定を確認する</div>
+      <div class="task-status todo" id="status5">未完了</div>
+    </div>
+    <div class="task-body" id="body5">
+      <p>投入したRIP設定がrunning-configに反映されているか確認します。</p>
+      <div class="cmd-block">
+        <div><span class="prompt">Router-A# </span><span class="cmd">show run</span></div>
+        <div><span class="prompt">Dist-SW# </span><span class="cmd">show run</span></div>
+      </div>
+      <div class="expected">Dist-SW の期待される出力（抜粋）:
+router rip
+ version 2
+ network 192.168.2.0
+ network 10.0.0.0</div>
+      <button class="check-btn" onclick="completeTask(5)">✅ 確認完了</button>
+    </div>
+  </div>
+
+  <!-- Task 6 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggleTask(6)">
+      <div class="task-num">6</div>
+      <div class="task-title">ping で疎通確認する</div>
+      <div class="task-status todo" id="status6">未完了</div>
+    </div>
+    <div class="task-body" id="body6">
+      <p>RIPで経路を学習した後、ping で実際に通信できるか確認します。</p>
+      <div class="cmd-block">
+        <div><span class="prompt">Router-A# </span><span class="cmd">ping 192.168.2.1</span></div>
+      </div>
+      <div class="expected">期待される出力:
+Sending 5, 100-byte ICMP Echos to 192.168.2.1, timeout is 2 seconds:
+!!!!!
+Success rate is 100 percent (5/5)</div>
+      <div class="hint">💡「!!!!!」が5個表示されれば疎通成功！「.....」は失敗（経路なし）</div>
+      <button class="check-btn" onclick="completeTask(6)">✅ 疎通確認完了</button>
+    </div>
+  </div>
+</div>
+
+<!-- 右パネル: トポロジーと参考情報 -->
+<div class="panel">
+  <h2>🖧 ネットワーク構成</h2>
+  <div class="topology">
+    <div class="topo-diagram">
+      <div class="device">
+        <div class="device-box router">
+          <div class="device-name">Router-A</div>
+          <div class="device-type">Si-R G120</div>
+          <div class="device-ip">lan0: 192.168.1.1/24</div>
+          <div class="device-ip">wan0: 10.0.0.1/30</div>
+        </div>
+      </div>
+      <div class="link">
+        <div class="link-line"></div>
+        <div class="link-label">10.0.0.0/30</div>
+      </div>
+      <div class="device">
+        <div class="device-box switch">
+          <div class="device-name">Dist-SW</div>
+          <div class="device-type">Catalyst 9300</div>
+          <div class="device-ip">Gi0/0: 10.0.0.2/30</div>
+          <div class="device-ip">Vlan10: 192.168.2.1/24</div>
+        </div>
+      </div>
+    </div>
+    <div style="text-align:center; font-size:11px; color:#8b949e; margin-top:8px;">
+      ← PC-A: 192.168.1.0/24 &nbsp;&nbsp;&nbsp;&nbsp; PC-B: 192.168.2.0/24 →
+    </div>
+  </div>
+
+  <h2>🔍 確認コマンド一覧</h2>
+  <div class="verify-box">
+    <div class="verify-cmd">
+      <code>show ip rip route</code>
+      <span>RIPルーティングテーブル</span>
+      <button class="copy-btn" onclick="copyCmd('show ip rip route')">コピー</button>
+    </div>
+    <div class="verify-cmd">
+      <code>show ip rip neighbor</code>
+      <span>RIPネイバー一覧</span>
+      <button class="copy-btn" onclick="copyCmd('show ip rip neighbor')">コピー</button>
+    </div>
+    <div class="verify-cmd">
+      <code>show ip rip status</code>
+      <span>RIPプロトコル状態</span>
+      <button class="copy-btn" onclick="copyCmd('show ip rip status')">コピー</button>
+    </div>
+    <div class="verify-cmd">
+      <code>show ip route</code>
+      <span>統合ルーティングテーブル</span>
+      <button class="copy-btn" onclick="copyCmd('show ip route')">コピー</button>
+    </div>
+    <div class="verify-cmd">
+      <code>show run</code>
+      <span>実行中のコンフィグ</span>
+      <button class="copy-btn" onclick="copyCmd('show run')">コピー</button>
+    </div>
+    <div class="verify-cmd">
+      <code>ping 192.168.2.1</code>
+      <span>疎通確認</span>
+      <button class="copy-btn" onclick="copyCmd('ping 192.168.2.1')">コピー</button>
+    </div>
+  </div>
+
+  <h2>📚 学習ポイント</h2>
+  <ul class="point-list">
+    <li>RIPはホップ数をメトリックとする距離ベクトル型プロトコル</li>
+    <li>最大ホップ数は15（16=到達不能）</li>
+    <li>30秒ごとにルーティングテーブル全体を広告（Update）</li>
+    <li>Si-Rは「ip rip use use」、Ciscoは「router rip」で有効化</li>
+    <li>「*R」= RIP学習経路、「*C」= 直接接続（Connected）</li>
+    <li>AD値（Administrative Distance）= 120</li>
+    <li>RIPv2 はクラスレスルーティング対応（サブネットマスクを含む）</li>
+  </ul>
+
+  <h2 style="margin-top:16px">⚡ RIP vs OSPF</h2>
+  <table style="width:100%; font-size:11px; border-collapse:collapse; margin-top:8px;">
+    <tr style="background:#21262d;">
+      <th style="padding:6px 10px; text-align:left; color:#8b949e;">項目</th>
+      <th style="padding:6px 10px; text-align:left; color:#21c65b;">RIP</th>
+      <th style="padding:6px 10px; text-align:left; color:#58a6ff;">OSPF</th>
+    </tr>
+    <tr style="border-bottom:1px solid #21262d;">
+      <td style="padding:6px 10px; color:#8b949e;">タイプ</td>
+      <td style="padding:6px 10px;">距離ベクトル</td>
+      <td style="padding:6px 10px;">リンクステート</td>
+    </tr>
+    <tr style="border-bottom:1px solid #21262d; background:#161b22">
+      <td style="padding:6px 10px; color:#8b949e;">メトリック</td>
+      <td style="padding:6px 10px;">ホップ数（最大15）</td>
+      <td style="padding:6px 10px;">コスト（帯域幅）</td>
+    </tr>
+    <tr style="border-bottom:1px solid #21262d;">
+      <td style="padding:6px 10px; color:#8b949e;">収束速度</td>
+      <td style="padding:6px 10px;">遅い（30秒）</td>
+      <td style="padding:6px 10px;">速い（即時）</td>
+    </tr>
+    <tr style="background:#161b22">
+      <td style="padding:6px 10px; color:#8b949e;">AD値</td>
+      <td style="padding:6px 10px;">120</td>
+      <td style="padding:6px 10px;">110</td>
+    </tr>
+  </table>
+</div>
+</div>
+
+<script>
+function toggleTask(n) {
+  const body = document.getElementById('body'+n);
+  body.classList.toggle('open');
+}
+
+const completed = new Set();
+function completeTask(n) {
+  completed.add(n);
+  document.getElementById('status'+n).textContent = '完了 ✅';
+  document.getElementById('status'+n).className = 'task-status done';
+  const pct = Math.round(completed.size / 6 * 100);
+  document.getElementById('progressFill').style.width = pct + '%';
+  document.getElementById('progressText').textContent = completed.size + ' / 6 完了';
+}
+
+function copyCmd(cmd) {
+  navigator.clipboard.writeText(cmd).then(() => {
+    // コピー成功（サイレント）
+  });
+}
+
+// 最初のタスクを開く
+toggleTask(1);
+</script>
+</body>
+</html>

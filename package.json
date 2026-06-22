@@ -1,0 +1,30 @@
+{
+  "name": "network-lab",
+  "version": "1.0.0",
+  "description": "ネットワークラボ エミュレーター",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build-win": "electron-builder --win",
+    "build-mac": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.networklab.emulator",
+    "productName": "ネットワークラボ",
+    "win": {
+      "target": "nsis",
+      "icon": "icon.ico"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "extraResources": [
+      { "from": ".", "to": "app",
+        "filter": ["app.py","engine/**","static/**","requirements.txt",".env"] }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^29.0.0",
+    "electron-builder": "^24.0.0"
+  }
+}

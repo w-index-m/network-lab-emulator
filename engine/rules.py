@@ -1,0 +1,2965 @@
+"""
+ルールベースCLIエンジン
+Si-R / SR-S / Catalyst 9300 / Cisco IOS の出力を決定論的に生成
+マニュアル原文フォーマット準拠
+"""
+import re
+import time
+import random
+from datetime import datetime, timedelta
+
+# ══════════════════════════════════════════
+# デバイス状態（セッション単位で保持）
+# ══════════════════════════════════════════
+class DeviceState:
+    def __init__(self, device_type: str, hostname: str):
+        self.device_type = device_type  # sir / srs / catalyst / cisco / apresia / nexus
+        self.hostname = hostname
+        self.mode = "exec"              # exec / config / config-if / config-router / config-vlan / config-vpc-domain
+        self.current_if = None
+        self.startup_time = datetime.now() - timedelta(hours=random.randint(1,72))
+
+        # NX-OS (Nexus 9000)
+        if device_type == "nexus":
+            self.interfaces = {
+                **{f"Ethernet1/{i}": {
+                    "ip": "", "prefix": 0,
+                    "status": "connected" if i <= 4 else "notconnect",
+                    "vlan": "1", "speed": "10G", "duplex": "full",
+                    "desc": f"To Device-{i}" if i <= 4 else "",
+                    "type": "10Gbase-SR",
+                } for i in range(1, 49)},
+                **{f"port-channel{i}": {
+                    "ip": "", "prefix": 0,
+                    "status": "connected" if i <= 2 else "notconnect",
+                    "vlan": "trunk", "speed": "10G", "duplex": "full",
+                    "desc": f"Port-Channel{i}",
+                } for i in range(1, 5)},
+                "mgmt0": {
+                    "ip": "192.168.100.1", "prefix": 24,
+                    "status": "connected", "speed": "1000", "duplex": "full",
+                    "desc": "Out-of-Band Management",
+                },
+            }
+            self.routes = [
+                {"code":"C","dest":"192.168.100.0/24","gw":"directly","dist":0,"iface":"mgmt0"},
+            ]
+            self.vlans = {1: {'name':'default','status':'active','ports':[]}}
+            self.arp_table = []
+            self.vrrp = {}
+            self.acls = {}
+            self.syslog_servers = []
+            self.logging_level = 'informational'
+            self.snmp_community = []
+            self.snmp_hosts = []
+            self.snmp_location = ''
+            self.banner = ''
+            return
+
+        # 設定値
+        self.interfaces = {
+            "lan0": {"ip": "192.168.1.1", "prefix": 24, "status": "up", "mac": "00:0e:0e:f1:41:dc"},
+            "lan1": {"ip": "", "prefix": 24, "status": "down", "mac": "00:0e:0e:f1:41:dd"},
+            "wan1": {"ip": "203.0.113.1", "prefix": 30, "status": "up", "mac": "00:0e:0e:f1:41:de"},
+        } if device_type == "sir" else ({
+            # APRESIA: Port1/0/1〜Port1/0/24 形式（ApresiaLightGM200マニュアル準拠）
+            **{f"Port1/0/{i}": {
+                "ip": "", "prefix": 0,
+                "status": "connected" if i <= 2 else "notconnect",
+                "vlan": "10" if i <= 2 else "1",
+                "speed": "1000" if i <= 2 else "auto",
+                "duplex": "full" if i <= 2 else "auto",
+                "desc": f"To PC-{i}" if i <= 2 else "",
+                "type": "1000BASE-T",
+                "loopdetect": "enabled",
+            } for i in range(1, 24)},
+            "Port1/0/24": {"ip": "", "prefix": 0, "status": "connected",
+                           "vlan": "trunk", "speed": "1000", "duplex": "full",
+                           "desc": "To Uplink", "type": "1000BASE-T",
+                           "allowed_vlan": "1,10,20"},
+            "Vlan10": {"ip": "192.168.10.1", "prefix": 24, "status": "up", "desc": "Management"},
+        }) if device_type == "apresia" else ({
+            **{f"GigabitEthernet1/0/{i}": {
+                "ip": "", "prefix": 0,
+                "status": ("connected" if i <= 2 else
+                           "err-disabled" if i == 3 else
+                           "disabled" if i == 17 else "notconnect"),
+                "vlan": "10" if i <= 2 else "1",
+                "speed": "1000" if i <= 2 else "auto",
+                "duplex": "full" if i <= 2 else "auto",
+                "desc": f"#### To PC-{i} ####" if i <= 3 else "",
+                "type": "1000BaseLX SFP" if i == 17 else "10/100/1000BaseTX",
+                "err_reason": "bpduguard" if i == 3 else "",
+            } for i in range(1, 24)},
+            "GigabitEthernet1/0/24": {"ip": "", "prefix": 0, "status": "connected",
+                                      "vlan": "trunk", "speed": "1000", "duplex": "full",
+                                      "desc": "#### To Router ####", "type": "10/100/1000BaseTX",
+                                      "native_vlan": "1", "allowed_vlan": "1,10,200"},
+            "Vlan10": {"ip": "192.168.10.1", "prefix": 24, "status": "up", "desc": ""},
+        }) if device_type in ("catalyst", "srs") else {
+            "GigabitEthernet0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
+            "GigabitEthernet0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
+            "GigabitEthernet0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
+        }
+
+        self.routes = [
+            {"fp":"*C","dest":"192.168.1.0/24","gw":"192.168.1.1","dist":0, "iface":"lan0"},
+            {"fp":"*S","dest":"0.0.0.0/0",     "gw":"203.0.113.1","dist":200,"iface":"wan1"},
+        ] if device_type == "sir" else [
+            {"code":"C","dest":"192.168.10.0/24","gw":"directly","dist":0, "iface":"Vlan10"},
+            {"code":"S","dest":"0.0.0.0/0",      "gw":"203.0.113.1","dist":1,"iface":"GigabitEthernet1/0/24"},
+        ]
+
+        self.arp_table = [
+            {"ip":"192.168.1.100","mac":"00:1a:2b:3c:4d:5e","iface":"lan0","age":120},
+            {"ip":"192.168.1.200","mac":"00:5e:6f:70:81:92","iface":"lan0","age":45},
+        ]
+        self.vrrp = {"vrid":10,"state":"Master","priority":254,"vip":"192.168.1.254","iface":"lan0"}
+        self.rip_table = [
+            {"fp":"*C","net":"192.168.1.0/24","gw":"0.0.0.0",       "metric":1,"time":"none","iface":"lan0"},
+            {"fp":"*R","net":"192.168.2.0/24","gw":"192.168.1.254", "metric":2,"time":"02:49","iface":"lan0"},
+        ]
+        self.vlans = {
+            1:   {"name":"default",    "status":"active","ports":["Gi1/0/3","Gi1/0/4"]},
+            10:  {"name":"LAN-Segment","status":"active","ports":["Gi1/0/1","Gi1/0/2"]},
+            20:  {"name":"Management", "status":"active","ports":["Gi1/0/10"]},
+            100: {"name":"Server",     "status":"active","ports":[]},
+        }
+        self.stp = {"mode":"rapid-pvst","root":"8001.00:0e:0e:f1:00:01","priority":32768,"root_port":"Gi1/0/24"}
+        self.cdp_neighbors = [
+            {"device":"Core-SW",  "local_if":"Gi1/0/24","hold":150,"cap":"S","platform":"SR-S324TR1","port":"ether 10"},
+            {"device":"GW-Router","local_if":"Gi1/0/1", "hold":120,"cap":"R","platform":"ISR4321",   "port":"Gi0/0/0"},
+        ]
+        self.hsrp = {"group":1,"vip":"192.168.1.254","priority":110,"state":"Active","preempt":True,"iface":"GigabitEthernet1/0/1"}
+        self.ospf = {"process":1,"router_id":"10.0.0.1","area":"0.0.0.0",
+            "neighbors":[{"id":"10.0.0.2","state":"FULL","iface":"Gi1/0/24","dead":"00:00:35"}]}
+        self.bgp = {"asn":65001,"router_id":"10.1.0.1",
+            "neighbors":[{"ip":"10.1.0.2","asn":65002,"state":"Established","uptime":"01:23:45","pfx":12}]}
+        self.eigrp = {"asn":100,
+            "neighbors":[{"ip":"10.0.0.2","iface":"Gi0/0/0","hold":12,"uptime":"01:23:45","srtt":5,"rto":200}]}
+
+        # syslog / SNMP trap 設定（全機種共通）
+        self.syslog_servers  = []   # [{"host":"x.x.x.x","port":514,"facility":"local7","level":"informational"}]
+        self.snmp_hosts      = []   # [{"host":"x.x.x.x","community":"public","version":"2c","traps":"all"}]
+        self.snmp_community  = []   # [{"name":"public","perm":"ro"},{"name":"private","perm":"rw"}]
+        self.snmp_location   = ""
+        self.snmp_contact    = ""
+        self.logging_level   = "informational"   # emergencies/alerts/critical/errors/warnings/notifications/informational/debugging
+
+    def uptime_str(self):
+        delta = datetime.now() - self.startup_time
+        h = int(delta.total_seconds() // 3600)
+        m = int((delta.total_seconds() % 3600) // 60)
+        if h >= 24:
+            return f"{h//24} days, {h%24} hours, {m} minutes"
+        return f"{h} hours, {m} minutes"
+
+
+# ══════════════════════════════════════════
+# コマンドエンジン本体
+# ══════════════════════════════════════════
+class RuleEngine:
+
+    # ── CLI略称展開テーブル（Cisco IOS準拠）──────────────────
+    # 先頭トークンの展開
+    _ABBREV_FIRST = {
+        'sh':    'show',
+        'sho':   'show',
+        'in':    'interface',
+        'int':   'interface',
+        'inte':  'interface',
+        'inter': 'interface',
+        'conf':  'configure',
+        'confi': 'configure',
+        'config':'configure',
+        'ro':    'router',
+        'rou':   'router',
+        'rout':  'router',
+        'no':    'no',
+        'en':    'enable',
+        'ex':    'exit',
+        'exi':   'exit',
+        'end':   'end',
+        'do':    'do',
+        'pi':    'ping',
+        'pin':   'ping',
+        'tr':    'traceroute',
+        'tra':   'traceroute',
+        'trac':  'traceroute',
+        'wr':    'write',
+        'wri':   'write',
+        'writ':  'write',
+        'cop':   'copy',
+        'cl':    'clear',
+        'cle':   'clear',
+        'clea':  'clear',
+        'deb':   'debug',
+        'debu':  'debug',
+        'un':    'undebug',
+        'und':   'undebug',
+    }
+
+    # サブコマンドの展開（前のトークンをキーに）
+    _ABBREV_SUB = {
+        'show': {
+            'ver':   'version',
+            'vers':  'version',
+            'versi': 'version',
+            'versio':'version',
+            'run':   'running-config',
+            'runn':  'running-config',
+            'runni': 'running-config',
+            'runnin':'running-config',
+            'running':'running-config',
+            'start': 'startup-config',
+            'star':  'startup-config',
+            'ip':    'ip',
+            'int':   'interfaces',
+            'inte':  'interfaces',
+            'inter': 'interfaces',
+            'interf':'interfaces',
+            'vl':    'vlan',
+            'vla':   'vlan',
+            'span':  'spanning-tree',
+            'spann': 'spanning-tree',
+            'spanni':'spanning-tree',
+            'mac':   'mac',
+            'log':   'logging',
+            'logg':  'logging',
+            'arp':   'arp',
+            'cdp':   'cdp',
+            'lldp':  'lldp',
+            'sp':    'spanning-tree',
+            'spa':   'spanning-tree',
+            'eth':   'etherchannel',
+            'ethe':  'etherchannel',
+            'ether': 'etherchannel',
+            'ethc':  'etherchannel',
+            'etherchannel': {
+                '_desc':   'EtherChannel information',
+                'summary': 'One-line summary per channel-group',
+                'detail':  'Detailed information of channel-groups',
+                'port-channel': 'Port-channel information',
+            },
+            'vr':    'vrrp',
+            'vrr':   'vrrp',
+            'st':    'standby',
+            'stan':  'standby',
+            'stand': 'standby',
+            'ar':    'arp',
+            'standby': {
+                '_desc': 'HSRP information',
+                'brief': 'Brief status of standby groups',
+                'all':   'All HSRP groups',
+            },
+            'cl':    'clock',
+            'clo':   'clock',
+            'mod':   'module',
+            'modu':  'module',
+            'feat':  'feature',
+            'featu': 'feature',
+            'vpc':   {
+                '_desc':         'vPC information (NX-OS)',
+                'brief':         'Brief vPC status',
+                'peer-keepalive':'Peer keepalive status',
+                'role':          'vPC role information',
+                'consistency-parameters': 'Consistency parameters',
+            },
+        },
+        'show ip': {
+            'ro':    'route',
+            'rou':   'route',
+            'rout':  'route',
+            'route': 'route',
+            'os':    'ospf',
+            'osp':   'ospf',
+            'ospf':  'ospf',
+            'ri':    'rip',
+            'rip':   'rip',
+            'bg':    'bgp',
+            'bgp':   'bgp',
+            'arp':   'arp',
+            'int':   'interface',
+        },
+        'show ip ospf': {
+            'ne':    'neighbor',
+            'nei':   'neighbor',
+            'neig':  'neighbor',
+            'neigh': 'neighbor',
+            'in':    'interface',
+            'int':   'interface',
+            'da':    'database',
+            'dat':   'database',
+            'data':  'database',
+            'datab': 'database',
+            'ro':    'route',
+        },
+        'show ip rip': {
+            'ne':    'neighbor',
+            'ro':    'route',
+            'st':    'status',
+        },
+        'show ip bgp': {
+            'su':    'summary',
+            'sum':   'summary',
+            'summ':  'summary',
+            'ne':    'neighbor',
+        },
+        'show vpc': {
+            'br':    'brief',
+            'bri':   'brief',
+            'peer':  'peer-keepalive',
+            'peer-k':'peer-keepalive',
+            'peer-ke':'peer-keepalive',
+            'ro':    'role',
+            'consi': 'consistency-parameters',
+            'consist':'consistency-parameters',
+        },
+        'show interfaces': {
+            'st':    'status',
+            'sta':   'status',
+            'stat':  'status',
+            'tr':    'trunk',
+            'tru':   'trunk',
+            'trun':  'trunk',
+            'de':    'description',
+            'des':   'description',
+            'desc':  'description',
+            'co':    'counters',
+            'cou':   'counters',
+        },
+        'configure': {
+            't':     'terminal',
+            'te':    'terminal',
+            'ter':   'terminal',
+            'term':  'terminal',
+            'terminal':'terminal',
+        },
+        'write': {
+            'me':    'memory',
+            'mem':   'memory',
+            'memo':  'memory',
+            'memory':'memory',
+            'ter':   'terminal',
+        },
+        'show spanning-tree': {
+            'su':    'summary',
+            'sum':   'summary',
+            'br':    'brief',
+            'bri':   'brief',
+            'vl':    'vlan',
+            'vla':   'vlan',
+        },
+        'router': {
+            'os':    'ospf',
+            'osp':   'ospf',
+            'ri':    'rip',
+            'rip':   'rip',
+            'bg':    'bgp',
+            'bgp':   'bgp',
+            'ei':    'eigrp',
+        },
+        'interface': {
+            'gi':    'gigabitethernet',
+            'Gi':    'GigabitEthernet',
+            'fa':    'fastethernet',
+            'Fa':    'FastEthernet',
+            'te':    'tengigabitethernet',
+            'po':    'port-channel',
+            'Po':    'Port-channel',
+            'lo':    'loopback',
+            'Lo':    'Loopback',
+            'vl':    'vlan',
+            'Vl':    'Vlan',
+            'tu':    'tunnel',
+        },
+        'no': {
+            'sh':    'shutdown',
+            'shu':   'shutdown',
+            'shut':  'shutdown',
+            'ro':    'router',
+            'in':    'interface',
+        },
+        'copy': {
+            'run':   'running-config',
+            'star':  'startup-config',
+        },
+        'clear': {
+            'ip':    'ip',
+            'arp':   'arp',
+            'mac':   'mac',
+            'span':  'spanning-tree',
+        },
+    }
+
+    def _expand_abbreviation(self, cmd: str) -> str:
+        """
+        Cisco IOS準拠のCLI略称を展開する。
+        例: 'sh ip ro' → 'show ip route'
+            'in gi1/0/1' → 'interface GigabitEthernet1/0/1'
+            'ro os 1' → 'router ospf 1'
+        """
+        if not cmd.strip():
+            return cmd
+        tokens = cmd.strip().split()
+        if not tokens:
+            return cmd
+
+        result = []
+        ctx = ''  # 現在のコンテキスト（展開済みトークンの累積）
+
+        for i, tok in enumerate(tokens):
+            tok_lower = tok.lower()
+
+            if i == 0:
+                # 先頭トークン展開
+                expanded = self._ABBREV_FIRST.get(tok_lower, tok)
+                result.append(expanded)
+                ctx = expanded.lower()
+            else:
+                # サブコマンド展開（コンテキスト依存）
+                expanded = tok
+                # 現在のコンテキストで展開を試みる
+                for ctx_key in [ctx, ctx.split()[-1] if ' ' in ctx else ctx]:
+                    sub_map = self._ABBREV_SUB.get(ctx_key, {})
+                    if tok_lower in sub_map:
+                        expanded = sub_map[tok_lower]
+                        break
+                    # インターフェース略称の特殊処理
+                    # gi1/0/1 → GigabitEthernet1/0/1
+                    # ただし既にフル名（GigabitEthernetで始まる等）の場合はスキップ
+                    if ctx_key in ('interface', 'show interfaces'):
+                        _full_prefixes = ('gigabitethernet','fastethernet',
+                                          'tengigabitethernet','port-channel',
+                                          'loopback','vlan','tunnel')
+                        if not any(tok_lower.startswith(fp) for fp in _full_prefixes):
+                            for abbr, full in self._ABBREV_SUB.get('interface', {}).items():
+                                if tok_lower.startswith(abbr) and len(tok) > len(abbr):
+                                    rest = tok[len(abbr):]
+                                    expanded = full + rest
+                                    break
+                result.append(expanded)
+                ctx = ' '.join(result).lower()
+
+        return ' '.join(result)
+
+
+    def process(self, cmd: str, state: DeviceState) -> str:
+        cmd = cmd.strip()
+        if not cmd:
+            return ""
+
+        # ── ? ヘルプ（実機準拠）──
+        # "?" / "show ?" / "show ip ?" などに対応
+        if '?' in cmd:
+            return cli_completion.get_help(cmd, state)
+
+        # CLI略称展開（sh → show, in → interface 等）
+        cmd = self._expand_abbreviation(cmd)
+
+        c = cmd.lower().strip()
+
+        # ── コマンド検証（エラー検出）──
+        error = self._validate_command(cmd, c, state)
+        if error:
+            return error
+
+        # APRESIAはOSコマンド体系が独自 → 専用ハンドラへ
+        if state.device_type == 'apresia':
+            return self._apresia_process(cmd, c, state)
+
+        # モード遷移
+        if c in ("exit", "end", "quit"):
+            return self._cmd_exit(cmd, state)
+        # Cisco/Catalyst/SR-S: t または terminal が必須
+        if state.device_type in ("catalyst", "cisco", "srs"):
+            if c in ("configure terminal", "conf t", "conf terminal",
+                     "config t", "config terminal",
+                     "enable configure", "en conf"):
+                return self._cmd_configure(state)
+            if re.match(r'^conf(?:ig)?\s+te', c):
+                return self._cmd_configure(state)
+            # "configure" 単体はNG
+            if c in ("configure", "conf", "config"):
+                return f"% Invalid input detected at '^' marker.\n  {c}\n  ^"
+        # Si-R / APRESIA: conf / config / configure 単体でOK（t/terminal不要）
+        else:
+            if c in ("configure", "conf", "config",
+                     "configure terminal", "conf t", "config t"):
+                return self._cmd_configure(state)
+        if re.match(r'^interface\s+\S+', c):
+            return self._cmd_interface(cmd, state)
+        if re.match(r'^router\s+(ospf|bgp|eigrp|rip)(\s+\d+)?', c):
+            return self._cmd_router_mode(cmd, state)
+        if re.match(r'^vlan\s+\d+$', c) and state.mode == "config":
+            return self._cmd_vlan_mode(cmd, state)
+
+        # show系
+        if c.startswith("show "):
+            return self._cmd_show(cmd, state)
+
+        # 設定コマンド
+        if state.mode in ("config", "config-if", "config-router", "config-vlan"):
+            return self._cmd_config(cmd, state)
+
+        # 運用コマンド
+        if c.startswith("ping "):
+            return self._cmd_ping(cmd, state)
+        if c.startswith("traceroute "):
+            return self._cmd_traceroute(cmd, state)
+        if c in ("write memory", "write", "copy running-config startup-config", "save", "commit"):
+            return self._cmd_save(state)
+        if c in ("reload", "reset"):
+            return "Proceed with reload? [confirm] y\nSystem configuration has been modified. Save? [yes/no]: \n%SYS-5-RELOAD: Reload requested."
+        if c in ("enable", "admin"):
+            return ""
+        if c in ("disable",):
+            return ""
+        if c in ("cls", "clear screen"):
+            return "\x0c"  # フロントエンドでクリア処理
+
+        # 不明コマンド
+        return self._unknown(cmd, state)
+
+    # ─── モード遷移 ───────────────────────────
+    def _cmd_exit(self, cmd, state):
+        if state.mode == "config-if":
+            state.mode = "config"
+        elif state.mode in ("config-router", "config-vlan", "config-vpc-domain"):
+            state.mode = "config"
+        elif state.mode == "config":
+            state.mode = "exec"
+        return ""
+
+    def _cmd_configure(self, state):
+        state.mode = "config"
+        return "Enter configuration commands, one per line.  End with CNTL/Z."
+
+    def _cmd_interface(self, cmd, state):
+        m = re.match(r'^interface\s+(\S+)', cmd, re.I)
+        if m:
+            state.current_if = m.group(1)
+            state.mode = "config-if"
+        return ""
+
+    def _cmd_router_mode(self, cmd, state):
+        state.mode = "config-router"
+        return ""
+
+    def _cmd_vlan_mode(self, cmd, state):
+        m = re.match(r'^vlan\s+(\d+)', cmd, re.I)
+        if m:
+            vid = int(m.group(1))
+            if vid not in state.vlans:
+                state.vlans[vid] = {"name": f"VLAN{vid:04d}", "status": "active", "ports": []}
+            state.mode = "config-vlan"
+        return ""
+
+    # ─── show コマンド ────────────────────────
+    def _cmd_show(self, cmd, state):
+        c = cmd.lower().strip()
+        dt = state.device_type
+
+        # ── show version ──
+        if re.match(r'^show\s+version$', c):
+            return self._show_version(state)
+
+        # ── show interfaces ──
+        # 記事「Cisco動作確認を極める ～インターフェイス状態編～」準拠の7コマンド
+        if re.match(r'^show\s+interfaces?\s+status\s+err-disabled$', c):
+            return self._show_int_status_errdisabled(state)
+        if re.match(r'^show\s+interfaces?\s+status$', c):
+            return self._show_interfaces_status(state)
+        if re.match(r'^show\s+interfaces?\s+description$', c):
+            return self._show_int_description(state)
+        if re.match(r'^show\s+interfaces?\s+trunk$', c):
+            return self._show_int_trunk(state)
+        if re.match(r'^show\s+interfaces?\s+transceiver$', c):
+            return self._show_int_transceiver(state)
+        if re.match(r'^show\s+interfaces?\s+counters\s+errors$', c):
+            return self._show_int_counters_errors(state)
+        if re.match(r'^show\s+interfaces?\s+brief$', c) or re.match(r'^show\s+ip\s+interfaces?\s+brief$', c):
+            return self._show_ip_int_brief(state)
+
+        # ── Stack（3.1章）──
+        if re.match(r'^show\s+switch\s+detail', c):
+            return self._show_switch_detail(state)
+        if re.match(r'^show\s+switch', c):
+            return self._show_switch(state)
+
+        # ── IOS Management（3.2章）──
+        if re.match(r'^show\s+ntp\s+status', c):
+            return self._show_ntp_status(state)
+        if re.match(r'^show\s+ntp\s+associations', c):
+            return self._show_ntp_associations(state)
+        if re.match(r'^show\s+logging', c):
+            return self._show_logging(state)
+        if re.match(r'^show\s+snmp', c):
+            return self._show_snmp(state)
+
+        # ── Security（3.5章）──
+        psec_int = re.match(r'^show\s+port-security\s+interface\s+(\S+)', c)
+        if psec_int:
+            return self._show_port_security_interface(psec_int.group(1), state)
+        if re.match(r'^show\s+port-security', c):
+            return self._show_port_security(state)
+        if re.match(r'^show\s+ip\s+dhcp\s+snooping', c):
+            return self._show_dhcp_snooping(state)
+        if re.match(r'^show\s+ip\s+arp\s+inspection', c):
+            return self._show_dai(state)
+        if re.match(r'^show\s+interfaces?$', c):
+            return self._show_interfaces(state)
+        if re.match(r'^show\s+interfaces?\s+(\S+)$', c):
+            m = re.match(r'^show\s+interfaces?\s+(\S+)$', c)
+            return self._show_interface_detail(m.group(1), state)
+
+        # ── show ip route ──
+        if re.match(r'^show\s+ip\s+route', c):
+            return self._show_ip_route(state)
+
+        # ── show arp ──
+        if re.match(r'^show\s+(ip\s+)?arp', c):
+            return self._show_arp(state)
+
+        # ── show vlan ──
+        if re.match(r'^show\s+vlan', c):
+            return self._show_vlan(state)
+
+        # ── show spanning-tree ──
+        if re.match(r'^show\s+spanning-tree', c):
+            return self._show_spanning_tree(state)
+
+        # ── show cdp ──
+        if re.match(r'^show\s+cdp\s+neighbors\s+detail', c):
+            return self._show_cdp_detail(state)
+        if re.match(r'^show\s+cdp\s+neighbors', c):
+            return self._show_cdp(state)
+
+        # ── show standby (HSRP) ──
+        if re.match(r'^show\s+standby', c):
+            return self._show_standby(state)
+
+        # ── show ip ospf ──
+        if re.match(r'^show\s+ip\s+ospf\s+neighbor', c):
+            return self._show_ospf_neighbor(state)
+        if re.match(r'^show\s+ip\s+ospf\s+database', c):
+            return self._show_ospf_database(state)
+        if re.match(r'^show\s+ip\s+ospf$', c):
+            return self._show_ospf(state)
+
+        # ── show bgp ──
+        if re.match(r'^show\s+(ip\s+)?bgp\s+summary', c):
+            return self._show_bgp_summary(state)
+        if re.match(r'^show\s+(ip\s+)?bgp$', c):
+            return self._show_bgp_table(state)
+
+        # ── show ip eigrp ──
+        if re.match(r'^show\s+ip\s+eigrp\s+neighbor', c):
+            return self._show_eigrp_neighbors(state)
+        if re.match(r'^show\s+ip\s+eigrp\s+topology', c):
+            return self._show_eigrp_topology(state)
+
+        # ── show vrrp (Si-R) ──
+        if re.match(r'^show\s+vrrp\s+brief', c):
+            return self._show_vrrp_brief(state)
+        if re.match(r'^show\s+vrrp', c):
+            return self._show_vrrp(state)
+
+        # ── show ip rip (Si-R) ──
+        if re.match(r'^show\s+ip\s+rip\s+route', c):
+            return self._show_rip_route(state)
+        if re.match(r'^show\s+ip\s+rip\s+protocol', c):
+            return self._show_rip_protocol(state)
+
+        # ── show ether (Si-R/SR-S) ──
+        if re.match(r'^show\s+ether\s+brief$', c):
+            return self._show_ether_brief(state)
+        if re.match(r'^show\s+ether', c):
+            return self._show_ether(state)
+
+        # ── show system (Si-R) ──
+        if re.match(r'^show\s+system\s+information', c):
+            return self._show_system_info(state)
+        if re.match(r'^show\s+system\s+status', c):
+            return self._show_system_status(state)
+
+        # ── show mac address-table ──
+        if re.match(r'^show\s+mac\s+(address-table|address\s+table)', c):
+            return self._show_mac_table(state)
+
+        # ── show vtp ──
+        if re.match(r'^show\s+vtp\s+status', c):
+            return self._show_vtp(state)
+
+        # ── show running-config / candidate-config ──
+        if re.match(r'^show\s+(run(ning-config)?|candidate-config|start(up-config)?|conf?(ig)?)\b', c) \
+           or c in ('show run', 'sh run', 'show start', 'write terminal'):
+            return self._show_running_config(state)
+
+        # ── show logging ──
+        if re.match(r'^show\s+logging', c):
+            return self._show_logging(state)
+
+        # ── show processes cpu ──
+        if re.match(r'^show\s+(processes\s+cpu|cpu)', c):
+            return f"CPU utilization for five seconds: {random.randint(2,15)}%/{random.randint(1,8)}%; one minute: {random.randint(3,12)}%; five minutes: {random.randint(3,10)}%"
+
+        # ── show memory ──
+        if re.match(r'^show\s+(processes\s+)?memory', c):
+            return f"Total: 512MB, Used: {random.randint(120,200)}MB, Free: {random.randint(300,390)}MB"
+
+        return f"% Invalid input detected at '^' marker.\n  {cmd}\n  ^"
+
+    # ─── show version ─────────────────────────
+    def _show_version(self, state):
+        now = datetime.now()
+        if state.device_type == "sir":
+            return f"""  Current-time : {now.strftime('%a %b %d %H:%M:%S %Y')}
+  Startup-time : {state.startup_time.strftime('%a %b %d %H:%M:%S %Y')}
+  System : Si-R G120
+  Serial No. : 00000001
+  ROM Ver. : U-Boot 2018.03
+  Firm Ver. : V20.00 NY0001 Sun Sep  1 10:11:05 JST 2024
+  Running-firmware : firmware1
+  Firmware1 Ver. : V20.00 NY0001
+  Firmware2 Ver. : V20.00 NY0001
+  MAC : 000e0ef141dc-000e0ef141dc
+  Memory : 320MB"""
+        elif state.device_type == "srs":
+            return f"""  SR-S324TR1 V20 セキュアスイッチ
+  Serial No. : SRS00000001
+  Firm Ver. : V20.00 NY0001
+  MAC : 000e0ef14200
+  Memory : 256MB
+  Startup-time : {state.startup_time.strftime('%a %b %d %H:%M:%S %Y')}"""
+        elif state.device_type == "nexus":
+            return f"""Cisco Nexus Operating System (NX-OS) Software
+TAC support: http://www.cisco.com/tac
+Copyright (C) 2002-2024, Cisco and/or its affiliates.
+All rights reserved.
+
+Software
+  BIOS: version 07.39
+  NXOS: version 10.2(7)M
+  BIOS compile time: 05/29/2023
+  NXOS image file is: bootflash:///nxos64-cs.10.2.7.M.bin
+  NXOS compile time: 1/26/2024 3:00:00 [01/26/2024 11:25:04]
+
+Hardware
+  cisco Nexus9000 C9364C-GX Chassis ("Supervisor Module")
+  Intel(R) Xeon(R) CPU E5-2650 v4 @ 2.20GHz with 24534016 kB of memory.
+  Processor Board ID FDO23521LKP
+
+  Device name: {state.hostname}
+  bootflash:   53298520 kB
+Kernel uptime is {state.uptime_str()}
+
+Last reset at 123456 usecs after  Mon Jan  1 00:00:00 2024
+  Reason: Reset Requested by CLI command reload
+  System version: 10.2(6)
+  Service: 
+
+plugin
+  Core Plugin, Ethernet Plugin"""
+        elif state.device_type == "catalyst":
+            return f"""Cisco IOS XE Software, Version 17.09.01
+Cisco IOS Software [Cupertino], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.1
+Technical Support: http://www.cisco.com/techsupport
+Copyright (c) 1986-2022 by Cisco Systems, Inc.
+
+cisco C9300-24T (X86) processor with 1474560K/6147K bytes of memory.
+Processor board ID FCW2xxx0001
+
+8 Virtual Ethernet interfaces
+56 Gigabit Ethernet interfaces
+2048K bytes of non-volatile configuration memory.
+4194304K bytes of physical memory.
+
+Base Ethernet MAC Address          : 00:0e:0e:f1:42:00
+Motherboard Assembly Number        : 73-18506-04
+System serial number               : FCW2xxx0001
+
+Configuration register is 0x102
+
+{state.hostname} uptime is {state.uptime_str()}"""
+        else:
+            return f"""Cisco IOS Software [Cupertino], ISR Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 17.9.1
+Technical Support: http://www.cisco.com/techsupport
+Copyright (c) 1986-2022 by Cisco Systems, Inc.
+
+Cisco ISR4321/K9 (1RU) processor with 1647295K/6147K bytes of memory.
+Processor board ID FLM2xxx0001
+
+2 Gigabit Ethernet interfaces
+32768K bytes of non-volatile configuration memory.
+4194304K bytes of physical memory.
+
+{state.hostname} uptime is {state.uptime_str()}
+System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
+
+    # ─── show interfaces ──────────────────────
+    def _show_interfaces(self, state):
+        lines = []
+        for name, iface in state.interfaces.items():
+            status = iface.get("status","up")
+            ip = iface.get("ip","")
+            prefix = iface.get("prefix",24)
+            mac = iface.get("mac","00:00:00:00:00:00")
+            up = "up" if status in ("up","connected") else "down"
+            lines.append(f"""{name}                MTU 1500      <{'UP' if up=='up' else 'DOWN'},BROADCAST,{'RUNNING,' if up=='up' else ''}MULTICAST>
+     Status: {up} since {state.startup_time.strftime('%b %d %H:%M:%S %Y')}
+     MAC address: {mac}""")
+            if ip:
+                lines.append(f"     IP address/masklen:\n       {ip}/{prefix}")
+            lines.append("")
+        return "\n".join(lines)
+
+    def _show_interfaces_status(self, state):
+        # 記事準拠フォーマット: Port Name Status Vlan Duplex Speed Type
+        lines = ["",
+                 "Port      Name               Status       Vlan       Duplex  Speed Type"]
+        for name, iface in state.interfaces.items():
+            short = name.replace("GigabitEthernet","Gi").replace("Vlan","Vl").replace("Port-channel","Po")
+            desc = iface.get("desc","")[:18]
+            status = iface.get("status","notconnect")
+            vlan = iface.get("vlan","1")
+            # notconnectのトランクはVlanに1と表示（記事の注意点）
+            if status == "notconnect" and vlan == "trunk":
+                vlan = "1"
+            duplex = iface.get("duplex","auto")
+            speed = iface.get("speed","auto")
+            # connectedなら a- プレフィックス（オートネゴ結果）
+            if status == "connected":
+                dstr = f"a-{duplex}"
+                sstr = f"a-{speed}"
+            else:
+                dstr = duplex
+                sstr = speed
+            typ = iface.get("type","10/100/1000BaseTX") if not name.startswith("Vlan") else ""
+            lines.append(f"{short:<10}{desc:<19}{status:<13}{vlan:<11}{dstr:<8}{sstr:<7}{typ}")
+        return "\n".join(lines)
+
+    def _show_int_status_errdisabled(self, state):
+        """show interfaces status err-disabled（記事準拠）"""
+        lines = ["",
+                 "Port      Name               Status       Reason               Err-disabled Vlans"]
+        found = False
+        for name, iface in state.interfaces.items():
+            if iface.get("status") == "err-disabled":
+                found = True
+                short = name.replace("GigabitEthernet","Gi")
+                desc = iface.get("desc","")[:18]
+                reason = iface.get("err_reason","bpduguard")
+                lines.append(f"{short:<10}{desc:<19}err-disabled {reason}")
+        if not found:
+            lines.append("(err-disabledのポートはありません)")
+        return "\n".join(lines)
+
+    def _show_int_description(self, state):
+        """show interfaces description（記事準拠・200文字まで折り返し）"""
+        lines = ["Interface                      Status         Protocol Description"]
+        for name, iface in state.interfaces.items():
+            short = name.replace("GigabitEthernet","Gi").replace("Vlan","Vl").replace("Port-channel","Po")
+            status = iface.get("status","notconnect")
+            if status in ("connected","up"):
+                st, proto = "up", "up"
+            elif status == "disabled":
+                st, proto = "admin down", "down"
+            elif status == "err-disabled":
+                st, proto = "err-disabled", "down"
+            else:
+                st, proto = "down", "down"
+            desc = iface.get("desc","")
+            lines.append(f"{short:<31}{st:<15}{proto:<9}{desc}")
+        return "\n".join(lines)
+
+    def _show_int_trunk(self, state):
+        """show interfaces trunk（記事準拠・リンクアップしたトランクのみ）"""
+        trunks = [(n,i) for n,i in state.interfaces.items()
+                  if i.get("vlan")=="trunk" and i.get("status")=="connected"]
+        if not trunks:
+            return "(トランクポートでconnectedのものはありません)"
+        lines = ["", "Port        Mode             Encapsulation  Status        Native vlan"]
+        for name, iface in trunks:
+            short = name.replace("GigabitEthernet","Gi").replace("Port-channel","Po")
+            native = iface.get("native_vlan","1")
+            lines.append(f"{short:<12}on               802.1q         trunking      {native}")
+        lines.append("")
+        lines.append("Port        Vlans allowed on trunk")
+        for name, iface in trunks:
+            short = name.replace("GigabitEthernet","Gi").replace("Port-channel","Po")
+            lines.append(f"{short:<12}1-4094")
+        lines.append("")
+        lines.append("Port        Vlans allowed and active in management domain")
+        for name, iface in trunks:
+            short = name.replace("GigabitEthernet","Gi").replace("Port-channel","Po")
+            allowed = iface.get("allowed_vlan","1,10,200")
+            lines.append(f"{short:<12}{allowed}")
+        lines.append("")
+        lines.append("Port        Vlans in spanning tree forwarding state and not pruned")
+        for name, iface in trunks:
+            short = name.replace("GigabitEthernet","Gi").replace("Port-channel","Po")
+            allowed = iface.get("allowed_vlan","1,10,200")
+            lines.append(f"{short:<12}{allowed}")
+        return "\n".join(lines)
+
+    def _show_int_transceiver(self, state):
+        """show interfaces transceiver（記事準拠・光ポートのみ）"""
+        # SFP/光ポートを持つものだけ表示（type に SFP/LX を含む）
+        optical = [(n,i) for n,i in state.interfaces.items()
+                   if "SFP" in i.get("type","") or "LX" in i.get("type","")]
+        lines = [
+            "If device is externally calibrated, only calibrated values are printed.",
+            "++ : high alarm, +  : high warning, -  : low warning, -- : low alarm.",
+            "NA or N/A: not applicable, Tx: transmit, Rx: receive.",
+            "mA: milliamperes, dBm: decibels (milliwatts).",
+            "",
+            "                                 Optical   Optical",
+            "           Temperature  Voltage  Tx Power  Rx Power",
+            "Port       (Celsius)    (Volts)  (dBm)     (dBm)",
+            "---------  -----------  -------  --------  --------",
+        ]
+        if not optical:
+            lines.append("(光接続ポートはありません。SFP-LX等を接続してください)")
+            return "\n".join(lines)
+        import random as _r
+        for name, iface in optical:
+            short = name.replace("GigabitEthernet","Gi")
+            temp = round(_r.uniform(30,40),1)
+            volt = round(_r.uniform(3.2,3.4),2)
+            tx = round(_r.uniform(-5,-3),1)
+            rx = round(_r.uniform(-10,-6),1)
+            lines.append(f"{short:<11}{temp:<13}{volt:<9}{tx:<10}{rx}")
+        return "\n".join(lines)
+
+    def _show_int_counters_errors(self, state):
+        """show interfaces counters errors（記事準拠・エラーカウンタ）"""
+        lines = ["",
+                 "Port        Align-Err     FCS-Err    Xmit-Err     Rcv-Err  UnderSize  OutDiscards"]
+        phys = [(n,i) for n,i in state.interfaces.items()
+                if n.startswith("GigabitEthernet")]
+        for name, iface in phys:
+            short = name.replace("GigabitEthernet","Gi")
+            # 正常時は全部0
+            lines.append(f"{short:<12}{'0':<14}{'0':<11}{'0':<12}{'0':<9}{'0':<11}0")
+        lines.append("")
+        lines.append("Port      Single-Col  Multi-Col   Late-Col  Excess-Col  Carri-Sen      Runts     Giants")
+        for name, iface in phys:
+            short = name.replace("GigabitEthernet","Gi")
+            lines.append(f"{short:<10}{'0':<12}{'0':<11}{'0':<11}{'0':<12}{'0':<11}{'0':<11}0")
+        return "\n".join(lines)
+
+    def _show_ip_int_brief(self, state):
+        lines = ["Interface              IP-Address      OK? Method Status                Protocol"]
+        for name, iface in state.interfaces.items():
+            ip = iface.get("ip") or "unassigned"
+            ok = "YES" if iface.get("ip") else "YES"
+            method = "NVRAM" if iface.get("ip") else "unset"
+            status = "up" if iface.get("status") in ("up","connected") else "administratively down"
+            proto = "up" if iface.get("status") in ("up","connected") else "down"
+            lines.append(f"{name:<23}{ip:<16}{ok:<4}{method:<8}{status:<22}{proto}")
+        return "\n".join(lines)
+
+    def _show_interface_detail(self, ifname, state):
+        # 記事準拠の個別インタフェース詳細（Cisco IOS形式）
+        target = None
+        tname = ifname.lower().replace("gigabitethernet","gi").replace("gi","gi")
+        for name, iface in state.interfaces.items():
+            short = name.lower().replace("gigabitethernet","gi").replace("vlan","vl")
+            if name.lower() == ifname.lower() or short == ifname.lower():
+                target = (name, iface)
+                break
+        if not target:
+            return f"% Invalid input detected: interface {ifname} not found"
+        if state.device_type == "sir":
+            return self._show_interfaces(state)
+        name, iface = target
+        status = iface.get("status","notconnect")
+        up = status in ("up","connected")
+        line_proto = "up (connected)" if up else ("down (notconnect)" if status=="notconnect"
+                     else "down (err-disabled)" if status=="err-disabled" else "administratively down")
+        mac = "5061.bfda." + f"{abs(hash(name))%10000:04d}"
+        desc = iface.get("desc","")
+        duplex = iface.get("duplex","auto")
+        speed = iface.get("speed","auto")
+        dup_str = "Full-duplex" if duplex in ("full","a-full") else ("Half-duplex" if duplex=="half" else "Auto-duplex")
+        spd_str = f"{speed}Mb/s" if speed not in ("auto","a-1000","a-100") else "1000Mb/s"
+        typ = iface.get("type","10/100/1000BaseTX")
+        L = []
+        L.append(f"{name} is {'up' if up else 'down'}, line protocol is {'up' if up else 'down'} ({'connected' if up else 'notconnect'})")
+        L.append(f"  Hardware is Gigabit Ethernet, address is {mac} (bia {mac})")
+        if desc:
+            L.append(f"  Description: {desc}")
+        L.append("  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,")
+        L.append("     reliability 255/255, txload 1/255, rxload 1/255")
+        L.append("  Encapsulation ARPA, loopback not set")
+        L.append("  Keepalive set (10 sec)")
+        L.append(f"  {dup_str}, {spd_str}, media type is {typ}")
+        L.append("  input flow-control is off, output flow-control is unsupported")
+        L.append("  ARP type: ARPA, ARP Timeout 04:00:00")
+        L.append("  Last input 00:00:01, output 00:00:01, output hang never")
+        L.append('  Last clearing of "show interface" counters never')
+        L.append("  Input queue: 0/75/0/0 (size/max/drops/flushes); Total output drops: 0")
+        L.append("  Queueing strategy: fifo")
+        L.append("  Output queue: 0/40 (size/max)")
+        L.append("  5 minute input rate 0 bits/sec, 0 packets/sec")
+        L.append("  5 minute output rate 0 bits/sec, 0 packets/sec")
+        L.append("     5 packets input, 1568 bytes, 0 no buffer")
+        L.append("     Received 5 broadcasts (5 multicasts)")
+        L.append("     0 runts, 0 giants, 0 throttles")
+        L.append("     0 input errors, 0 CRC, 0 frame, 0 overrun, 0 ignored")
+        L.append("     0 watchdog, 5 multicast, 0 pause input")
+        L.append("     0 input packets with dribble condition detected")
+        L.append("     1781 packets output, 163390 bytes, 0 underruns")
+        L.append("     0 output errors, 0 collisions, 1 interface resets")
+        L.append("     0 unknown protocol drops")
+        L.append("     0 babbles, 0 late collision, 0 deferred")
+        L.append("     0 lost carrier, 0 no carrier, 0 pause output")
+        L.append("     0 output buffer failures, 0 output buffers swapped out")
+        return "\n".join(L)
+
+    # ─── show ip route ────────────────────────
+    def _show_ip_route(self, state):
+        if state.device_type == "sir":
+            lines = ["FP Destination/Mask    Gateway         Distance UpTime    Interface",
+                     "--- ------------------ --------------- -------- --------- ------------------"]
+            for r in state.routes:
+                lines.append(f"{r['fp']:<3} {r['dest']:<19}{r['gw']:<16}{str(r['dist']):<9}00:01:23  {r['iface']}")
+        else:
+            lines = ["Codes: C - connected, S - static, R - RIP, O - OSPF, B - BGP",
+                     "       D - EIGRP, EX - EIGRP external, i - IS-IS",
+                     "       * - candidate default",
+                     ""]
+            for r in state.routes:
+                code = r.get("code","C")
+                lines.append(f"{code}     {r['dest']} [{r['dist']}/0] via {r['gw']}, {r['iface']}")
+        return "\n".join(lines)
+
+    # ─── show arp ─────────────────────────────
+    def _show_arp(self, state):
+        if state.device_type == "sir":
+            lines = ["IP Address      MAC Address       F Rest  Interface",
+                     "--------------- ----------------- -- ----- ---------"]
+            for a in state.arp_table:
+                lines.append(f"{a['ip']:<16}{a['mac']:<18}  {str(a['age']).rjust(5)}  {a['iface']}")
+            lines.append(f"    Entry:{len(state.arp_table)}")
+        else:
+            lines = ["Protocol  Address          Age (min)  Hardware Addr   Type   Interface"]
+            for a in state.arp_table:
+                lines.append(f"Internet  {a['ip']:<17}{a['age']:<11}{a['mac']:<16}ARPA   {a['iface']}")
+        return "\n".join(lines)
+
+    # ─── show ether (Si-R / SR-S) ─────────────
+    def _show_ether(self, state):
+        lines = []
+        for i, (name, iface) in enumerate(state.interfaces.items(), 1):
+            grp = 1 if i <= 4 else 2
+            port = ((i-1) % 4) + 1
+            status = iface.get("status","up")
+            speed = "1000M Full" if status == "up" else "down"
+            lines.append(f"[ETHER GROUP-{grp} PORT-{port}]")
+            lines.append(f"description      : {name}")
+            lines.append(f"status           : {'auto '+speed if status=='up' else 'down'} MDI-X")
+            lines.append(f"media            : Metal")
+            lines.append(f"flow control     : send on, receive on")
+            lines.append(f"type             : Normal")
+            lines.append(f"since            : {state.startup_time.strftime('%b %d %H:%M:%S %Y')}")
+            lines.append(f"config           : mode(auto), mdi(auto), media(-)")
+            lines.append("")
+        return "\n".join(lines)
+
+    def _show_ether_brief(self, state):
+        lines = ["Group Port  Status           Type",
+                 "----- ----- ---------------- -------"]
+        for i, (name, iface) in enumerate(state.interfaces.items(), 1):
+            grp = 1 if i <= 4 else 2
+            port = ((i-1) % 4) + 1
+            status = "1000M Full" if iface.get("status") == "up" else "down"
+            lines.append(f"{grp:<6}{port:<6}{status:<17}Normal")
+        return "\n".join(lines)
+
+    # ─── show system info (Si-R) ──────────────
+    def _show_system_info(self, state):
+        now = datetime.now()
+        return f"""  Current-time : {now.strftime('%a %b %d %H:%M:%S %Y')}
+  Startup-time : {state.startup_time.strftime('%a %b %d %H:%M:%S %Y')}
+  System : Si-R G120
+  Serial No. : 00000001
+  ROM Ver. : U-Boot 2018.03-00070
+  Firm Ver. : V20.00 NY0001 Sun Sep  1 10:11:05 JST 2024
+  Running-firmware : firmware1
+  Firmware1 Ver. : V20.00 NY0001
+  Firmware2 Ver. : V20.00 NY0001
+  Startup-config : {state.startup_time.strftime('%a %b %d %H:%M:%S %Y')}
+  Running-config : {state.startup_time.strftime('%a %b %d %H:%M:%S %Y')}
+  MAC : 000e0ef141dc-000e0ef141dc
+  Memory : 320MB
+  USB     : ------
+  WWAN1   : ------"""
+
+    def _show_system_status(self, state):
+        now = datetime.now()
+        temp = random.randint(42, 55)
+        return f"""  Current-time         : {now.strftime('%a %b %d %H:%M:%S %Y')}
+  Startup-time         : {state.startup_time.strftime('%a %b %d %H:%M:%S %Y')}
+  restart_cause        : power on
+  machine_state        : RUNNING
+  corefile             : empty
+  power_state          : NORMAL
+  power_consumption    : 8 W
+  internal_state       : NORMAL
+  internal_temp        : {temp} C"""
+
+    # ─── show vlan ────────────────────────────
+    def _show_vlan(self, state):
+        lines = ["VLAN Name                             Status    Ports",
+                 "---- -------------------------------- --------- -------------------------------"]
+        for vid, v in state.vlans.items():
+            ports = ", ".join(v["ports"][:4]) if v["ports"] else ""
+            lines.append(f"{str(vid):<5}{v['name']:<33}{v['status']:<10}{ports}")
+        return "\n".join(lines)
+
+    # ─── show spanning-tree ───────────────────
+    def _show_spanning_tree(self, state):
+        stp = state.stp
+        return f"""VLAN0010
+  Spanning tree enabled protocol {stp['mode']}
+  Root ID    Priority    {state.vlans.get(10,{}).get('name','')and 32768}
+             Address     {stp['root']}
+             This bridge is the root
+             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
+
+  Bridge ID  Priority    32768 (priority 32768 sys-id-ext 10)
+             Address     00:0e:0e:f1:42:00
+             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
+             Aging Time  300 sec
+
+Interface           Role Sts Cost      Prio.Nbr Type
+------------------- ---- --- --------- -------- --------------------------------
+Gi1/0/1             Desgn FWD 4         128.1    P2p
+Gi1/0/2             Desgn FWD 4         128.2    P2p
+Gi1/0/24            Root  FWD 4         128.24   P2p"""
+
+    # ─── show cdp ─────────────────────────────
+    def _show_cdp(self, state):
+        lines = ["Capability Codes: R - Router, T - Trans Bridge, B - Source Route Bridge",
+                 "                  S - Switch, H - Host, I - IGMP, r - Repeater",
+                 "",
+                 "Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID"]
+        for n in state.cdp_neighbors:
+            lines.append(f"{n['device']:<17}{n['local_if']:<18}{n['hold']:<11}{n['cap']:<14}{n['platform']:<10}{n['port']}")
+        lines.append(f"\nTotal cdp entries displayed : {len(state.cdp_neighbors)}")
+        return "\n".join(lines)
+
+    def _show_cdp_detail(self, state):
+        lines = []
+        for n in state.cdp_neighbors:
+            lines += [f"-------------------------",
+                f"Device ID: {n['device']}",
+                f"Entry address(es):",
+                f"  IP address: 192.168.1.{random.randint(2,254)}",
+                f"Platform: Cisco {n['platform']},  Capabilities: {'Switch' if n['cap']=='S' else 'Router'}",
+                f"Interface: {n['local_if']},  Port ID (outgoing port): {n['port']}",
+                f"Holdtime : {n['hold']} sec", ""]
+        return "\n".join(lines)
+
+    # ─── show standby (HSRP) ──────────────────
+    def _show_standby(self, state):
+        h = state.hsrp
+        return f"""{h['iface']} - Group {h['group']}
+  State is {h['state']}
+    2 state changes, last state change 00:01:23
+  Virtual IP address is {h['vip']}
+  Active virtual MAC address is 00:00:0c:07:ac:{h['group']:02x}
+  Hello time 3 sec, hold time 10 sec
+    Next hello sent in 1 secs
+  Preemption {'enabled' if h['preempt'] else 'disabled'}
+  Active router is {'local' if h['state']=='Active' else '192.168.1.2'}
+  Standby router is {'192.168.1.2' if h['state']=='Active' else 'local'}
+  Priority {h['priority']} (configured {h['priority']})"""
+
+    # ─── show ospf ────────────────────────────
+    def _show_ospf(self, state):
+        o = state.ospf
+        return f""" Routing Process "ospf {o['process']}" with ID {o['router_id']}
+ Start time: {state.startup_time.strftime('%H:%M:%S.%f')[:15]}, Time elapsed: {state.uptime_str()}
+ Supports only single TOS(TOS0) routes
+ Supports opaque LSA
+ Supports Link-local Signaling (LLS)
+ Area BACKBONE({o['area']})
+     Number of interfaces in this area is {len(state.interfaces)}
+     Area has no authentication
+     SPF algorithm last executed {random.randint(1,60):02d}:{random.randint(0,59):02d}:{random.randint(0,59):02d} ago
+     Number of LSA {random.randint(5,20)}"""
+
+    def _show_ospf_neighbor(self, state):
+        lines = ["Neighbor ID     Pri   State           Dead Time   Address         Interface"]
+        for n in state.ospf["neighbors"]:
+            lines.append(f"{n['id']:<16}{1:<6}{('FULL/  -'):<16}{n['dead']:<12}{'192.168.1.'+n['id'].split('.')[-1]:<16}{n['iface']}")
+        return "\n".join(lines)
+
+    def _show_ospf_database(self, state):
+        o = state.ospf
+        return f"""            OSPF Router with ID ({o['router_id']}) (Process ID {o['process']})
+
+\t\tRouter Link States (Area 0)
+
+Link ID         ADV Router      Age         Seq#       Checksum Link count
+{o['router_id']:<16}{o['router_id']:<16}{random.randint(100,900):<12}0x{random.randint(0x80000001,0x8000ffff):08x}  0x{random.randint(0x1000,0xffff):04x}   3
+10.0.0.2        10.0.0.2        {random.randint(100,900):<12}0x{random.randint(0x80000001,0x8000ffff):08x}  0x{random.randint(0x1000,0xffff):04x}   2"""
+
+    # ─── show bgp ─────────────────────────────
+    def _show_bgp_summary(self, state):
+        b = state.bgp
+        lines = [f"BGP router identifier {b['router_id']}, local AS number {b['asn']}",
+                 f"BGP table version is 1, main routing table version 1",
+                 "",
+                 "Neighbor        V    AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd"]
+        for n in b["neighbors"]:
+            lines.append(f"{n['ip']:<16}4{str(n['asn']).rjust(6)}{str(random.randint(50,200)).rjust(8)}{str(random.randint(50,200)).rjust(8)}{str(1).rjust(9)}{str(0).rjust(5)}{str(0).rjust(5)} {n['uptime']:<9} {n['pfx']}")
+        return "\n".join(lines)
+
+    def _show_bgp_table(self, state):
+        b = state.bgp
+        lines = [f"BGP table version is 1, local router ID is {b['router_id']}",
+                 "Status codes: s suppressed, d damped, h history, * valid, > best, i - internal",
+                 "Origin codes: i - IGP, e - EGP, ? - incomplete",
+                 "",
+                 "   Network          Next Hop            Metric LocPrf Weight Path"]
+        lines.append(f"*> 192.168.1.0/24   0.0.0.0                  0         32768 i")
+        lines.append(f"*> 192.168.2.0/24   10.1.0.2                 0    100      0 {b['neighbors'][0]['asn']} i")
+        return "\n".join(lines)
+
+    # ─── show eigrp ───────────────────────────
+    def _show_eigrp_neighbors(self, state):
+        e = state.eigrp
+        lines = [f"EIGRP-IPv4 Neighbors for AS({e['asn']})",
+                 "H   Address         Interface         Hold Uptime   SRTT   RTO  Q  Seq",
+                 "                                      (sec)         (ms)       Cnt Num"]
+        for i, n in enumerate(e["neighbors"]):
+            lines.append(f"{i:<4}{n['ip']:<16}{n['iface']:<18}{n['hold']:<6}{n['uptime']:<10}{n['srtt']:<7}{n['rto']:<5}0  {random.randint(10,50)}")
+        return "\n".join(lines)
+
+    def _show_eigrp_topology(self, state):
+        e = state.eigrp
+        return f"""EIGRP-IPv4 Topology Table for AS({e['asn']})/ID(10.2.0.1)
+Codes: P - Passive, A - Active, U - Update, Q - Query, R - Reply
+
+P 192.168.1.0/24, 1 successors, FD is 28160
+        via Connected, GigabitEthernet0/0/0
+P 192.168.2.0/24, 1 successors, FD is 30720
+        via 10.0.0.2 (30720/28160), GigabitEthernet0/0/0"""
+
+    # ─── show vrrp (Si-R) ─────────────────────
+    def _show_vrrp(self, state):
+        v = state.vrrp
+        return f"""[{v['iface']}]
+  VRID {v['vrid']}
+    State: {v['state']}
+    Priority: {v['priority']}
+    Virtual MAC Address: 00:00:5e:00:01:{v['vrid']:02x}
+    Virtual Router IP Address: {v['vip']}
+    Advertisement Interval: 1 sec
+    Master IP Address: {'192.168.1.1' if v['state']=='Master' else '192.168.1.2'}
+    Preempt: {'ON' if v['priority']>=100 else 'OFF'}"""
+
+    def _show_vrrp_brief(self, state):
+        v = state.vrrp
+        return f"""[{v['iface']}]
+  VRID Status
+    {v['vrid']}  {v['state']}"""
+
+    # ─── show ip rip (Si-R) ───────────────────
+    def _show_rip_route(self, state):
+        lines = ["FP Destination/Mask     Gateway           Metric   Time    Interface"]
+        for r in state.rip_table:
+            lines.append(f"{r['fp']:<3}{r['net']:<23}{r['gw']:<18}{str(r['metric']):<9}{r['time']:<8}{r['iface']}")
+        lines.append(f"The number of entries : {len(state.rip_table)}")
+        return "\n".join(lines)
+
+    def _show_rip_protocol(self, state):
+        return f"""Sending updates every 30 seconds with +/-50%, next due in {random.randint(5,25)} seconds
+Timeout after 180 seconds, garbage collect after 120 seconds
+Redistributing: Connected, Static
+Interface        Send     Recv
+  lan0            2        1 2
+Routing Information Sources:
+  Gateway           Rcv-Bad-Packets Rcv-Bad-Routes Last-Update
+  192.168.1.254                   0              0 00:00:{random.randint(10,59):02d}
+Distance: 120
+The number of entries : {len(state.rip_table)}"""
+
+    # ─── show mac address-table ───────────────
+    def _show_mac_table(self, state):
+        lines = ["          Mac Address Table",
+                 "-------------------------------------------",
+                 "",
+                 "Vlan    Mac Address       Type        Ports",
+                 "----    -----------       --------    -----"]
+        macs = [
+            ("10","00:1a:2b:3c:4d:5e","DYNAMIC","Gi1/0/1"),
+            ("10","00:2b:3c:4d:5e:6f","DYNAMIC","Gi1/0/2"),
+            ("1", "ff:ff:ff:ff:ff:ff","STATIC", "CPU"),
+        ]
+        for m in macs:
+            lines.append(f" {m[0]:<8}{m[1]:<20}{m[2]:<12}{m[3]}")
+        lines.append(f"Total Mac Addresses for this criterion: {len(macs)}")
+        return "\n".join(lines)
+
+    # ─── show vtp ─────────────────────────────
+    def _show_vtp(self, state):
+        return f"""VTP Version capable             : 1 to 3
+VTP version running             : 2
+VTP Domain Name                 : CORP
+VTP Pruning Mode                : Disabled
+VTP Traps Generation            : Disabled
+
+Feature VLAN:
+--------------
+VTP Operating Mode                : Server
+Maximum VLANs supported locally   : 1005
+Number of existing VLANs          : {len(state.vlans)}
+Configuration Revision            : 5"""
+
+    # ─── show running-config ──────────────────
+    def _show_running_config(self, state):
+        if state.device_type == "sir":
+            return f"""hostname {state.hostname}
+!
+password admin set ****
+!
+lan 0 ip address 192.168.1.1/24 1
+lan 0 ip dhcp service server
+lan 0 ip dhcp pool address 192.168.1.100 192.168.1.200
+lan 0 ip dhcp server dns 8.8.8.8 8.8.4.4
+lan 0 ip napt use use
+lan 0 vrrp use on
+lan 0 vrrp group 0 id 10 {state.vrrp['priority']} {state.vrrp['vip']}
+!
+wan 1 use use
+wan 1 bind ether 0
+wan 1 ppp auth send user@isp.ne.jp ****
+wan 1 ppp ipcp ipaddress on
+wan 1 ip route default metric 100
+!
+ip dns service use
+ip dns server 8.8.8.8 8.8.4.4
+ip rip use use
+ip rip network 192.168.1.0/24
+ip rip version 2
+!
+timezone +9
+ntp use use
+ntp server 192.168.1.1"""
+        else:
+            lines = [f"hostname {state.hostname}", "!", "version 17.9", "!"]
+            for vid, v in state.vlans.items():
+                if vid != 1:
+                    lines += [f"vlan {vid}", f" name {v['name']}", "!"]
+            lines += ["interface GigabitEthernet1/0/1",
+                      " switchport mode access", " switchport access vlan 10",
+                      " spanning-tree portfast", " no shutdown", "!",
+                      "interface Vlan10",
+                      " ip address 192.168.10.1 255.255.255.0", " no shutdown", "!",
+                      "ip routing", "!",
+                      "end"]
+            return "\n".join(lines)
+
+    # ─── show logging ─────────────────────────
+    def _show_logging(self, state):
+        now = datetime.now()
+        return f"""{now.strftime('%b %d %H:%M:%S')}: %SYS-5-CONFIG_I: Configured from console
+{now.strftime('%b %d %H:%M:%S')}: %LINK-3-UPDOWN: Interface GigabitEthernet1/0/1, changed state to up
+{now.strftime('%b %d %H:%M:%S')}: %LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet1/0/1, changed state to up
+{now.strftime('%b %d %H:%M:%S')}: %SYS-5-RESTART: System restarted"""
+
+    # ─── 設定コマンド ────────────────────────
+    def _cmd_config(self, cmd, state):
+        c = cmd.lower().strip()
+
+        # hostname / sysname
+        m = re.match(r'^(?:hostname|sysname)\s+(\S+)', cmd, re.I)
+        if m:
+            state.hostname = m.group(1)
+            return ""
+
+        # interface ip address
+        if re.match(r'^ip\s+address\s+[\d.]+\s+[\d.]+', c):
+            m = re.match(r'^ip\s+address\s+([\d.]+)\s+([\d.]+)', c)
+            if m and state.current_if:
+                state.interfaces.setdefault(state.current_if, {})["ip"] = m.group(1)
+                return ""
+
+        # switchport
+        if re.match(r'^switchport\s+mode\s+(access|trunk)', c):
+            return ""
+        if re.match(r'^switchport\s+access\s+vlan\s+\d+', c):
+            m = re.match(r'^switchport\s+access\s+vlan\s+(\d+)', c)
+            if m and state.current_if:
+                state.interfaces.setdefault(state.current_if, {})["vlan"] = m.group(1)
+            return ""
+
+        # no shutdown
+        if c in ("no shutdown", "no shut"):
+            if state.current_if:
+                state.interfaces.setdefault(state.current_if, {})["status"] = "up"
+            return ""
+
+        # shutdown
+        if c == "shutdown":
+            if state.current_if:
+                state.interfaces.setdefault(state.current_if, {})["status"] = "down"
+            return ""
+
+        # vlan name
+        if re.match(r'^name\s+\S+', c) and state.mode == "config-vlan":
+            m = re.match(r'^name\s+(\S+)', cmd, re.I)
+            return ""
+
+        # spanning-tree
+        if re.match(r'^spanning-tree\s+mode\s+', c):
+            m = re.match(r'^spanning-tree\s+mode\s+(\S+)', c)
+            if m:
+                state.stp["mode"] = m.group(1)
+            return ""
+
+        # Si-R 固有
+        if re.match(r'^lan\s+\d+\s+', c):
+            return ""
+        if re.match(r'^wan\s+\d+\s+', c):
+            return ""
+        if re.match(r'^ip\s+rip\s+', c):
+            return ""
+        if re.match(r'^ip\s+dns\s+', c):
+            return ""
+
+        # network
+        if re.match(r'^network\s+', c):
+            return ""
+
+        # neighbor
+        if re.match(r'^neighbor\s+', c):
+            return ""
+
+        # 不明な設定コマンドは静かに受け付け
+        return ""
+
+    # ─── ping ─────────────────────────────────
+    def _cmd_ping(self, cmd, state):
+        m = re.match(r'^ping\s+([\d.]+)', cmd, re.I)
+        if not m:
+            return "% Incomplete command."
+        dest = m.group(1)
+        rtt = [round(random.uniform(0.3, 2.5), 3) for _ in range(5)]
+        lines = [f"PING {dest} ({dest}): 56 data bytes"]
+        for i, r in enumerate(rtt):
+            lines.append(f"64 bytes from {dest}: icmp_seq={i} ttl=64 time={r} ms")
+        lines += ["",
+            f"--- {dest} ping statistics ---",
+            f"5 packets transmitted, 5 packets received, 0% packet loss",
+            f"round-trip min/avg/max = {min(rtt)}/{round(sum(rtt)/len(rtt),3)}/{max(rtt)} ms"]
+        return "\n".join(lines)
+
+    # ─── traceroute ───────────────────────────
+    def _cmd_traceroute(self, cmd, state):
+        m = re.match(r'^traceroute\s+([\d.]+)', cmd, re.I)
+        if not m:
+            return "% Incomplete command."
+        dest = m.group(1)
+        hops = [("192.168.1.254", 1), ("10.0.0.1", 2), (dest, 3)]
+        lines = [f"traceroute to {dest} ({dest}), 30 hops max, 40 byte packets"]
+        for hop, (ip, n) in enumerate(hops, 1):
+            rtts = [round(random.uniform(1, 15), 3) for _ in range(3)]
+            lines.append(f" {hop}  {ip} ({ip})  {rtts[0]} ms  {rtts[1]} ms  {rtts[2]} ms")
+        return "\n".join(lines)
+
+    # ─── APRESIA コマンドエンジン（ApresiaLightGM200マニュアル準拠）─
+    def _apresia_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """APRESIAのCLIコマンドを処理する"""
+
+        # モード遷移
+        if c in ('exit', 'end', 'quit'):
+            if state.mode == 'config-if':
+                state.mode = 'config'
+            elif state.mode in ('config-router', 'config-vlan'):
+                state.mode = 'config'
+            elif state.mode == 'config':
+                state.mode = 'exec'
+            return ''
+        if c in ('configure terminal', 'conf t', 'configure', 'conf', 'config'):
+            state.mode = 'config'
+            return 'Enter configuration commands, one per line.  End with CNTL/Z.'
+        if c == 'enable':
+            return ''
+        if c == 'disable':
+            return ''
+
+        # ── インターフェース移行 ──
+        # "interface port 1/0/1" または "interface vlan 10"
+        m_if = re.match(r'^interface\s+(port\s+[\d/]+|vlan\s+\d+)', c)
+        if m_if:
+            state.mode = 'config-if'
+            itype = m_if.group(1)
+            if 'port' in itype:
+                port = itype.replace('port', '').strip()
+                state.current_if = f'Port{port}'
+            else:
+                vid = itype.replace('vlan', '').strip()
+                state.current_if = f'Vlan{vid}'
+            return ''
+
+        # ── show コマンド群 ──
+        if re.match(r'^show\s+version', c):
+            return self._apresia_show_version(state)
+        if re.match(r'^show\s+unit', c):
+            return self._apresia_show_unit(state)
+        if re.match(r'^show\s+environment', c):
+            return self._apresia_show_environment(state)
+        if re.match(r'^show\s+cpu\s+utilization', c):
+            return (f'CPU Utilization Statistics\n'
+                    f'  5 sec: {random.randint(2,15)}%   '
+                    f'1 min: {random.randint(3,12)}%   '
+                    f'5 min: {random.randint(3,10)}%')
+        if re.match(r'^show\s+(running-config|startup-config)', c):
+            return self._apresia_show_running(state)
+        if re.match(r'^show\s+port\s+\S+', c):
+            m = re.match(r'^show\s+port\s+(\S+)', c)
+            return self._apresia_show_port(m.group(1), state)
+        if re.match(r'^show\s+port$', c):
+            return self._apresia_show_port('all', state)
+        if re.match(r'^show\s+vlan\s+detail', c):
+            return self._apresia_show_vlan_detail(state)
+        if re.match(r'^show\s+vlan\s+interface', c):
+            return self._apresia_show_vlan_interface(state)
+        if re.match(r'^show\s+vlan', c):
+            return self._apresia_show_vlan(state)
+        if re.match(r'^show\s+ipif', c):
+            return self._apresia_show_ipif(state)
+        if re.match(r'^show\s+arp', c):
+            return self._apresia_show_arp(state)
+        if re.match(r'^show\s+mac\s+address-table', c) or re.match(r'^show\s+fdb', c):
+            return self._apresia_show_fdb(state)
+        if re.match(r'^show\s+spanning-tree', c) or re.match(r'^show\s+stp', c):
+            return self._apresia_show_stp(state)
+        if re.match(r'^show\s+loopdetect', c):
+            return self._apresia_show_loopdetect(state)
+        if re.match(r'^show\s+lldp\s+neighbors', c):
+            return self._apresia_show_lldp(state)
+        if re.match(r'^show\s+interfaces?\s+status', c):
+            return self._apresia_show_port('all', state)
+        if re.match(r'^show\s+(interfaces?|port\s+description)', c):
+            return self._apresia_show_port('all', state)
+        if re.match(r'^show\s+history', c):
+            return 'show version\nshow unit\nshow port\nshow vlan'
+        if re.match(r'^show\s+boot', c):
+            return ('Current firmware image  : image1 (active)\n'
+                    'Next boot firmware image: image1\n'
+                    'Configuration file      : primary-config')
+
+        # ── ping / traceroute ──
+        if c.startswith('ping '):
+            return self._cmd_ping(cmd, state)
+        if c.startswith('traceroute '):
+            return self._cmd_traceroute(cmd, state)
+
+        # ── 設定コマンド（config mode）──
+        if state.mode == 'config':
+            # hostname
+            m_hn = re.match(r'^hostname\s+(\S+)', c)
+            if m_hn:
+                state.hostname = m_hn.group(1)
+                return ''
+            # VLAN作成: "vlan <id>"
+            m_vl = re.match(r'^vlan\s+(\d+)', c)
+            if m_vl:
+                state.mode = 'config-vlan'
+                return ''
+            # loopdetect
+            if re.match(r'^(enable|disable)\s+loopdetect', c):
+                return ''
+            # OSPF
+            if re.match(r'^router\s+ospf', c):
+                state.mode = 'config-router'
+                state._routing_mode = 'ospf'
+                return ''
+            # RIP
+            if re.match(r'^router\s+rip', c):
+                state.mode = 'config-router'
+                state._routing_mode = 'rip'
+                return ''
+            # 管理IP: "config ipif System 192.168.1.1/24"
+            m_ip = re.match(r'^config\s+ipif\s+\w+\s+([\d.]+)/(\d+)', c)
+            if m_ip:
+                ip, prefix = m_ip.group(1), int(m_ip.group(2))
+                if 'Vlan10' in state.interfaces:
+                    state.interfaces['Vlan10']['ip'] = ip
+                    state.interfaces['Vlan10']['prefix'] = prefix
+                return ''
+            return ''
+
+        if state.mode == 'config-if' and state.current_if:
+            iface = state.current_if
+            if re.match(r'^switchport\s+mode\s+access', c):
+                if iface in state.interfaces:
+                    state.interfaces[iface]['vlan_mode'] = 'access'
+                return ''
+            if re.match(r'^switchport\s+mode\s+trunk', c):
+                if iface in state.interfaces:
+                    state.interfaces[iface]['vlan'] = 'trunk'
+                return ''
+            m_vlan = re.match(r'^switchport\s+access\s+vlan\s+(\d+)', c)
+            if m_vlan:
+                if iface in state.interfaces:
+                    state.interfaces[iface]['vlan'] = m_vlan.group(1)
+                return ''
+            m_desc = re.match(r'^description\s+(.+)', cmd)
+            if m_desc:
+                if iface in state.interfaces:
+                    state.interfaces[iface]['desc'] = m_desc.group(1)
+                return ''
+            if re.match(r'^(no\s+)?shutdown', c):
+                if iface in state.interfaces:
+                    state.interfaces[iface]['status'] = (
+                        'notconnect' if c.startswith('no') else 'connected')
+                return ''
+            return ''
+
+        # ── write（設定保存）──
+        if c in ('write', 'write memory', 'save'):
+            return 'Building configuration...\n[OK]'
+        if c in ('reboot',):
+            return 'Are you sure you want to reboot the device? (y/n): y\nRebooting...'
+
+        # ── 不明コマンド ──
+        return f"% Unknown command."
+
+    def _apresia_show_version(self, state: DeviceState) -> str:
+        now = datetime.now()
+        up = state.uptime_str()
+        return (
+            f'{state.hostname}\n'
+            f' ApresiaLightGM200シリーズ  Version 2.03\n'
+            f' Copyright (C) 2024 APRESIA Systems, Ltd.\n'
+            f'\n'
+            f' APLGM200-24GT\n'
+            f' Serial Number   : APLGM200001\n'
+            f' Firmware Version: 2.03\n'
+            f' Boot Version    : 1.02\n'
+            f' Hardware Version: Rev.A\n'
+            f' MAC Address     : 00:1a:2b:3c:4d:00\n'
+            f' System Up Time  : {up}\n'
+            f' Current Time    : {now.strftime("%Y/%m/%d %H:%M:%S")}\n'
+        )
+
+    def _apresia_show_unit(self, state: DeviceState) -> str:
+        return (
+            f' Unit  : 1\n'
+            f' Model : APLGM200-24GT\n'
+            f' Status: OK\n'
+            f' Ports : 24 x 1000BASE-T + 4 x SFP\n'
+            f' MAC   : 00:1a:2b:3c:4d:00\n'
+        )
+
+    def _apresia_show_environment(self, state: DeviceState) -> str:
+        return (
+            f' Fan Status   : OK (Fan1: Running, Fan2: Running)\n'
+            f' Temperature  : 42°C (Threshold: 70°C)\n'
+            f' Power Status : OK (AC Power)\n'
+            f' Voltage      : Normal\n'
+        )
+
+    def _apresia_show_port(self, portspec: str, state: DeviceState) -> str:
+        lines = [
+            f' Port       Status     Vlan  Duplex  Speed   Desc',
+            f' ---------- ---------- ----- ------- ------- ----------------',
+        ]
+        for name, iface in state.interfaces.items():
+            if not name.startswith('Port'):
+                continue
+            # portspecでフィルタ
+            if portspec != 'all' and portspec not in name.lower():
+                continue
+            short = name  # Port1/0/1
+            status = iface.get('status', 'notconnect')
+            vlan = iface.get('vlan', '1')
+            duplex = 'Full' if iface.get('duplex') == 'full' else 'Auto'
+            speed = iface.get('speed', 'auto')
+            speed_str = f'{speed}M' if speed.isdigit() else 'Auto'
+            desc = iface.get('desc', '')[:16]
+            lines.append(
+                f' {short:<11}{status:<11}{vlan:<6}{duplex:<8}{speed_str:<8}{desc}'
+            )
+        return '\n'.join(lines)
+
+    def _apresia_show_vlan(self, state: DeviceState) -> str:
+        lines = [
+            ' VLAN  Name                Status    Ports',
+            ' ----- ------------------- --------- ---------------------------',
+        ]
+        for vid, vinfo in state.vlans.items():
+            name = vinfo.get('name', f'VLAN{vid}')[:19]
+            ports = ' '.join(vinfo.get('ports', []))[:27]
+            lines.append(f' {vid:<6}{name:<20}{"active":<10}{ports}')
+        return '\n'.join(lines)
+
+    def _apresia_show_vlan_detail(self, state: DeviceState) -> str:
+        lines = []
+        for vid, vinfo in state.vlans.items():
+            lines.append(f' VLAN ID : {vid}')
+            lines.append(f'  Name   : {vinfo.get("name", f"VLAN{vid}")}')
+            lines.append(f'  Status : {vinfo.get("status","active")}')
+            lines.append(f'  Ports  : {", ".join(vinfo.get("ports",[]))}')
+            lines.append('')
+        return '\n'.join(lines)
+
+    def _apresia_show_vlan_interface(self, state: DeviceState) -> str:
+        lines = [
+            ' Interface   Mode     PVID  Allowed VLAN',
+            ' ----------- -------- ----- ---------------------------',
+        ]
+        for name, iface in state.interfaces.items():
+            if not name.startswith('Port'):
+                continue
+            vlan = iface.get('vlan', '1')
+            mode = 'trunk' if vlan == 'trunk' else 'access'
+            pvid = '1' if vlan == 'trunk' else vlan
+            allowed = iface.get('allowed_vlan', '1-4094') if vlan == 'trunk' else pvid
+            lines.append(f' {name:<13}{mode:<9}{pvid:<6}{allowed}')
+        return '\n'.join(lines)
+
+    def _apresia_show_ipif(self, state: DeviceState) -> str:
+        lines = [' IP Interface Table',
+                 ' Interface  IP Address       Prefix  Status',
+                 ' ---------- ---------------- ------- -------']
+        for name, iface in state.interfaces.items():
+            if name.startswith('Vlan') and iface.get('ip'):
+                lines.append(
+                    f' {name:<12}{iface["ip"]:<17}/{iface["prefix"]:<8}'
+                    f'{"up" if iface.get("status")=="up" else "down"}'
+                )
+        if len(lines) == 3:
+            lines.append(' (管理IPが設定されていません。config ipif System X.X.X.X/Y で設定してください)')
+        return '\n'.join(lines)
+
+    def _apresia_show_arp(self, state: DeviceState) -> str:
+        lines = [' ARP Table',
+                 ' IP Address       MAC Address        Type     Interface',
+                 ' ---------------- ------------------ -------- ---------']
+        for e in state.arp_table:
+            lines.append(
+                f' {e["ip"]:<17}{e["mac"]:<19}{"Dynamic":<9}{e["iface"]}'
+            )
+        return '\n'.join(lines)
+
+    def _apresia_show_fdb(self, state: DeviceState) -> str:
+        lines = [' FDB (Forwarding Database)',
+                 ' VLAN  MAC Address          Type     Port',
+                 ' ----- -------------------- -------- -----------']
+        macs = [
+            ('10', '00:1a:2b:3c:4d:5e', 'Dynamic', 'Port1/0/1'),
+            ('10', '00:2b:3c:4d:5e:6f', 'Dynamic', 'Port1/0/2'),
+            ('1',  'ff:ff:ff:ff:ff:ff', 'Static',  'CPU'),
+        ]
+        for v, m, t, p in macs:
+            lines.append(f' {v:<6}{m:<21}{t:<9}{p}')
+        return '\n'.join(lines)
+
+    def _apresia_show_stp(self, state: DeviceState) -> str:
+        return (
+            f' Spanning Tree: Enabled (RSTP)\n'
+            f'\n'
+            f' Bridge ID     : Priority 32768  Address 00:1a:2b:3c:4d:00\n'
+            f' Root Bridge   : Priority 8192   Address 00:0e:0e:f1:00:01\n'
+            f' Root Port     : Port1/0/24   Cost: 4   Hello: 2  MaxAge: 20  FwdDly: 15\n'
+            f'\n'
+            f' Port        Role       State      Cost   Prio  Type\n'
+            f' ----------- ---------- ---------- ------ ----- ----------\n'
+            f' Port1/0/1   Designated Forwarding 20000  128   P2P\n'
+            f' Port1/0/2   Designated Forwarding 20000  128   P2P\n'
+            f' Port1/0/24  Root       Forwarding 20000  128   P2P\n'
+        )
+
+    def _apresia_show_loopdetect(self, state: DeviceState) -> str:
+        lines = [' Loopback Detection Status: Enabled',
+                 '',
+                 ' Port        Status     Action',
+                 ' ----------- ---------- -------']
+        for name, iface in state.interfaces.items():
+            if name.startswith('Port') and iface.get('status') == 'connected':
+                lines.append(f' {name:<13}{"Normal":<11}Block')
+        return '\n'.join(lines)
+
+    def _apresia_show_lldp(self, state: DeviceState) -> str:
+        return (
+            f' LLDP Neighbor Information\n'
+            f'\n'
+            f' Port        Chassis ID         System Name    Port Descr\n'
+            f' ----------- ------------------ -------------- --------------------\n'
+            f' Port1/0/24  00:0e:0e:f1:00:01  Dist-SW        GigabitEthernet1/0/1\n'
+        )
+
+    def _apresia_show_running(self, state: DeviceState) -> str:
+        lines = [
+            f'!',
+            f'! ApresiaLightGM200シリーズ  Version 2.03',
+            f'!',
+            f'hostname {state.hostname}',
+            f'!',
+        ]
+        # 管理IP
+        for name, iface in state.interfaces.items():
+            if name.startswith('Vlan') and iface.get('ip'):
+                lines.append(f'config ipif System {iface["ip"]}/{iface["prefix"]}')
+        lines.append('!')
+        # ポート設定
+        for name, iface in state.interfaces.items():
+            if not name.startswith('Port'):
+                continue
+            vlan = iface.get('vlan', '1')
+            desc = iface.get('desc', '')
+            lines.append(f'interface {name.lower()}')
+            if desc:
+                lines.append(f' description {desc}')
+            if vlan == 'trunk':
+                lines.append(f' switchport mode trunk')
+                if iface.get('allowed_vlan'):
+                    lines.append(f' switchport trunk allowed vlan {iface["allowed_vlan"]}')
+            else:
+                lines.append(f' switchport mode access')
+                lines.append(f' switchport access vlan {vlan}')
+            lines.append(f'!')
+        # VLAN
+        for vid in state.vlans:
+            if vid != 1:
+                lines.append(f'vlan {vid}')
+                lines.append(f' name {state.vlans[vid].get("name", f"VLAN{vid}")}')
+                lines.append(f'!')
+        lines.append('end')
+        return '\n'.join(lines)
+
+    # ─── save / commit ────────────────────────
+    def _cmd_save(self, state):
+        if state.device_type == "sir":
+            return "設定を保存しました。"
+        return "Building configuration...\n[OK]"
+
+    # ─── Stack（3.1章）────────────────────────
+    def _show_switch(self, state):
+        """show switch — スタック状態表示"""
+        lines = [
+            "Switch/Stack Mac Address : 0057.d2d4.4d00 - Local Mac Address",
+            "Mac persistency wait time: Indefinite",
+            "",
+            "                                             H/W   Current",
+            "Switch#   Role    Mac Address     Priority Version  State",
+            "------------------------------------------------------------",
+            "*1       Active   0057.d2d4.4d00     15      V01    Ready",
+            " 2       Standby  0057.d2d4.4d01      14     V01    Ready",
+        ]
+        return "\n".join(lines)
+
+    def _show_switch_detail(self, state):
+        """show switch detail"""
+        lines = [
+            "Switch/Stack Mac Address : 0057.d2d4.4d00",
+            "",
+            "                                             H/W   Current",
+            "Switch#   Role    Mac Address     Priority Version  State",
+            "------------------------------------------------------------",
+            "*1       Active   0057.d2d4.4d00     15      V01    Ready",
+            " 2       Standby  0057.d2d4.4d01      14     V01    Ready",
+            "",
+            "         Stack Port Status             Neighbors",
+            "Switch#  Port 1     Port 2           Port 1   Port 2",
+            "  1      OK         OK                2        2",
+            " 2       OK         OK                1        1",
+        ]
+        return "\n".join(lines)
+
+    # ─── IOS Management（3.2章）──────────────
+    def _show_ntp_status(self, state):
+        return ("Clock is synchronized, stratum 3, reference is 192.168.1.1\n"
+                "nominal freq is 250.0000 Hz, actual freq is 250.0001 Hz, precision is 2**10\n"
+                "ntp uptime is 3600 (1/100 of seconds), resolution is 4004\n"
+                "reference time is E3A4B2C1.D5E6F7A8 (10:30:00.835 UTC Mon Jun 13 2026)\n"
+                "clock offset is 0.5000 msec, root delay is 1.00 msec\n"
+                "root dispersion is 5.00 msec, peer dispersion is 1.75 msec\n"
+                "loopfilter state is 'CTRL' (Normal Controlled Loop), drift is 0.000000001 s/s")
+
+    def _show_ntp_associations(self, state):
+        lines = [
+            "  address         ref clock       st   when   poll reach  delay  offset   disp",
+            "*~192.168.1.1    .GPS.           1   58     64  377     1.0    0.50    1.75",
+            " ~192.168.2.1    192.168.1.1     2   12    128  377     2.0    0.80    2.50",
+            "* sys.peer, # selected, + candidate, - outlyer, x falseticker, ~ configured",
+        ]
+        return "\n".join(lines)
+
+    def _show_logging(self, state):
+        return ("Syslog logging: enabled (0 messages dropped, 0 messages rate-limited,\n"
+                "                0 flushes, 0 overruns, xml disabled, filtering disabled)\n\n"
+                "No Active Message Discriminator.\n\n"
+                "No Inactive Message Discriminator.\n\n"
+                "    Console logging: level debugging, 42 messages logged, xml disabled,\n"
+                "                     filtering disabled\n"
+                "    Monitor logging: level debugging, 0 messages logged, xml disabled,\n"
+                "                     filtering disabled\n"
+                "    Buffer logging:  level debugging, 42 messages logged, xml disabled,\n"
+                "                    filtering disabled\n"
+                "    Logging Exception size (8192 bytes)\n"
+                "    Count and timestamp logging messages: disabled\n"
+                "    Persistent logging: disabled\n\n"
+                "Log Buffer (8192 bytes):\n"
+                f"*Jun 13 10:30:00.001: %LINK-3-UPDOWN: GigabitEthernet1/0/1, changed state to up\n"
+                f"*Jun 13 10:30:01.002: %LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet1/0/1, changed state to up")
+
+    def _show_snmp(self, state):
+        return ("Chassis: " + state.hostname + "\n"
+                "Contact: admin@example.com\n"
+                "Location: Server Room Floor1\n"
+                "SNMP agent enabled\n"
+                "Community: public (read-only)\n"
+                "Community: private (read-write)\n"
+                "SNMP v2c: enabled")
+
+    # ─── Security（3.5章）────────────────────
+    def _show_port_security(self, state):
+        """show port-security"""
+        lines = [
+            "Secure Port  MaxSecureAddr  CurrentAddr  SecurityViolation  Security Action",
+            "               (Count)       (Count)          (Count)",
+            "---------------------------------------------------------------------------",
+        ]
+        for name, iface in state.interfaces.items():
+            if name.startswith("GigabitEthernet") and iface.get("status") == "connected":
+                short = name.replace("GigabitEthernet","Gi")
+                lines.append(f"{short:<13}{'1':<15}{'1':<13}{'0':<19}Restrict")
+        lines.append("---------------------------------------------------------------------------")
+        lines.append(f"Total Addresses in System (excluding one mac per port)     : 0")
+        lines.append(f"Max Addresses limit in System (excluding one mac per port) : 4096")
+        return "\n".join(lines)
+
+    def _show_port_security_interface(self, ifname, state):
+        """show port-security interface Gi1/0/1"""
+        return (f"Port Security              : Enabled\n"
+                f"Port Status                : Secure-up\n"
+                f"Violation Mode             : Restrict\n"
+                f"Aging Time                 : 0 mins\n"
+                f"Aging Type                 : Absolute\n"
+                f"SecureStatic Address Aging : Disabled\n"
+                f"Maximum MAC Addresses      : 1\n"
+                f"Total MAC Addresses        : 1\n"
+                f"Configured MAC Addresses   : 0\n"
+                f"Sticky MAC Addresses       : 0\n"
+                f"Last Source Address:Vlan   : 00:1a:2b:3c:4d:5e:10\n"
+                f"Security Violation Count   : 0")
+
+    def _show_dhcp_snooping(self, state):
+        """show ip dhcp snooping"""
+        lines = [
+            "Switch DHCP snooping is enabled",
+            "Switch DHCP gleaning is disabled",
+            "DHCP snooping is configured on following VLANs:",
+            "10",
+            "DHCP snooping is operational on following VLANs:",
+            "10",
+            "DHCP snooping is configured on the following L3 Interfaces:",
+            "",
+            "Insertion of option 82 is enabled",
+            "   circuit-id default format: vlan-mod-port",
+            "   remote-id: 0057.d2d4.4d00 (MAC)",
+            "Option 82 on untrusted port is not allowed",
+            "Verification of hwaddr field is enabled",
+            "Verification of giaddr field is enabled",
+            "DHCP snooping trust/rate is configured on the following Interfaces:",
+            "",
+            "Interface          Trusted    Allow option    Rate limit (pps)",
+            "-----------  -------  ------------    ----------------",
+            "Gi1/0/24      yes        yes             unlimited",
+        ]
+        return "\n".join(lines)
+
+    def _show_dai(self, state):
+        """show ip arp inspection — Dynamic ARP Inspection"""
+        lines = [
+            " Vlan        Configuration    Operation   ACL Match          Static ACL",
+            " ----        -------------    ---------   ---------          ----------",
+            "   10        Enabled          Active      Implicit Deny      No",
+            "",
+            " Vlan        ACL Logging      DHCP Logging      Probe Logging",
+            " ----        -----------      ------------      -------------",
+            "   10        Deny             Deny              Off",
+            "",
+            " Vlan      Forwarded        Dropped     DHCP Drops      ACL Drops",
+            " ----      ---------        -------     ----------      ---------",
+            "   10              0              0              0              0",
+        ]
+        return "\n".join(lines)
+
+    def _validate_command(self, cmd: str, c: str, state) -> str:
+        """
+        コマンドを検証してエラーメッセージを返す。
+        問題なければNoneを返す。
+
+        検証項目:
+        1. Ambiguous: 前方一致が複数（"s" → show/spanning-tree/standby...）
+        2. Incomplete: 必須パラメータが不足
+        3. Mode: 現在のモードでは実行不可
+        4. Range: 数値が許容範囲外
+        5. 存在しないコマンド（後続のprocess()ロジックに任せるためNone）
+        """
+        dt = state.device_type
+        mode = state.mode
+        tokens = c.split()
+        if not tokens:
+            return None
+        first = tokens[0]
+
+        # ── Ambiguous チェック（先頭トークンが複数候補にマッチ） ──
+        if dt in ('catalyst', 'cisco', 'srs', 'nexus'):
+            # execモードでの先頭コマンド候補
+            exec_cmds = ['show','ping','traceroute','clear','debug','undebug',
+                         'configure','enable','disable','write','copy','reload',
+                         'logout','exit','end','interface','router','vlan',
+                         'spanning-tree','ip','no','do','clock','feature',
+                         'vpc','snmp-server','logging','ntp','banner','service',
+                         'hostname','crypto','aaa','username','line','access-list',
+                         'standby','vrrp','channel-group']
+            if mode == 'exec':
+                candidates = [k for k in exec_cmds if k.startswith(first) and k != first]
+                # 展開されていない（略称のまま残った）場合はambiguous
+                if len(candidates) >= 2 and first not in exec_cmds:
+                    return self._ambiguous_error(cmd, state, candidates)
+
+        # ── Incomplete チェック（必須パラメータなし） ──
+        incomplete_rules = {
+            # (先頭コマンド, モード): 必要な最低トークン数
+            ('interface', 'config'): 2,      # interface GigabitEthernet...
+            ('interface', 'exec'):   2,
+            ('ip address', 'config-if'): 4,  # ip address x.x.x.x mask
+            ('ip route', 'config'): 4,       # ip route net mask gw
+            ('vlan', 'config'): 2,           # vlan 10
+            ('neighbor', 'config-router'): 3, # neighbor x.x.x.x remote-as N
+            ('network', 'config-router'): 3,  # network x.x.x.x x.x.x.x area N (OSPF)
+            ('username', 'config'): 3,        # username xxx privilege N
+        }
+        # 先頭2トークンのコンテキストチェック
+        ctx = ' '.join(tokens[:2]) if len(tokens) >= 2 else tokens[0]
+        for (req_cmd, req_mode), min_toks in incomplete_rules.items():
+            if (c.startswith(req_cmd) and
+                    (req_mode == mode or req_mode == '*') and
+                    len(tokens) < min_toks):
+                return self._incomplete_error(cmd, state)
+
+        # ── Mode チェック（execモードでconfig専用コマンドを打った場合） ──
+        config_only_cmds = [
+            'hostname','interface','router ospf','router rip','router bgp',
+            'spanning-tree mode','vlan','ip route','snmp-server','logging host',
+            'ntp server','banner','service','username','line','access-list',
+            'crypto','aaa','standby','vrrp','channel-group','switchport',
+            'shutdown','no shutdown','ip address','channel-group',
+            'spanning-tree portfast','spanning-tree bpduguard',
+            'spanning-tree guard','vpc domain','feature',
+        ]
+        if mode == 'exec' and dt in ('catalyst', 'cisco', 'srs', 'nexus'):
+            for cc in config_only_cmds:
+                if c.startswith(cc) and cc not in ['ip', 'no']:
+                    # exitやendは除外
+                    if c not in ('exit','end','quit'):
+                        return self._mode_error(cmd, state, 'config')
+
+        # ── Range チェック（数値範囲）──
+        if dt in ('catalyst', 'cisco', 'srs', 'nexus'):
+            # vlan <id>: 1-4094
+            import re
+            m_vlan = re.match(r'^vlan\s+(\d+)', c)
+            if m_vlan:
+                vid = int(m_vlan.group(1))
+                if not (1 <= vid <= 4094):
+                    return self._range_error(cmd, state, 'VLAN ID', 1, 4094, vid)
+
+            # spanning-tree vlan <id> priority <value>: 0-61440, 4096の倍数のみ
+            m_stp_pri = re.match(r'^spanning-tree\s+vlan\s+\d+\s+priority\s+(\d+)', c)
+            if m_stp_pri:
+                pri = int(m_stp_pri.group(1))
+                if not (0 <= pri <= 61440) or pri % 4096 != 0:
+                    return self._range_error(
+                        cmd, state,
+                        'STP priority', '0', '61440 (must be multiple of 4096)', pri
+                    )
+
+            # spanning-tree vlan <id> root primary|secondary
+            m_stp_root = re.match(r'^spanning-tree\s+vlan\s+(\d+)\s+root\s+(primary|secondary)', c)
+            # OK
+
+            # ip ospf priority <0-255>
+            m_ospf_pri = re.match(r'^ip\s+ospf\s+priority\s+(\d+)', c)
+            if m_ospf_pri:
+                pri = int(m_ospf_pri.group(1))
+                if not (0 <= pri <= 255):
+                    return self._range_error(cmd, state, 'OSPF priority', 0, 255, pri)
+
+            # router bgp <AS>: 1-65535
+            m_bgp_as = re.match(r'^router\s+bgp\s+(\d+)', c)
+            if m_bgp_as:
+                asn = int(m_bgp_as.group(1))
+                if not (1 <= asn <= 4294967295):
+                    return self._range_error(cmd, state, 'AS number', 1, 4294967295, asn)
+
+            # channel-group <1-48> mode active|passive|on
+            m_ch = re.match(r'^channel-group\s+(\d+)', c)
+            if m_ch:
+                ch_id = int(m_ch.group(1))
+                if not (1 <= ch_id <= 48):
+                    return self._range_error(cmd, state, 'channel-group', 1, 48, ch_id)
+
+            # vrrp <1-255>
+            m_vrrp = re.match(r'^vrrp\s+(\d+)', c)
+            if m_vrrp:
+                gid = int(m_vrrp.group(1))
+                if not (1 <= gid <= 255):
+                    return self._range_error(cmd, state, 'VRRP group', 1, 255, gid)
+
+            # standby <0-255>
+            m_hsrp = re.match(r'^standby\s+(\d+)', c)
+            if m_hsrp:
+                gid = int(m_hsrp.group(1))
+                if not (0 <= gid <= 255):
+                    return self._range_error(cmd, state, 'HSRP group', 0, 255, gid)
+
+        return None  # エラーなし
+
+    def _validate_command_sir(self, cmd: str, c: str, state) -> str:
+        """Si-R固有のバリデーション"""
+        tokens = c.split()
+        if not tokens:
+            return None
+        # ip rip network にはアドレスが必要
+        import re
+        if re.match(r'^ip\s+rip\s+network$', c):
+            return self._incomplete_error(cmd, state)
+        return None
+
+    
+    def _unknown(self, cmd: str, state) -> str:
+        """不明コマンドの汎用フォールバック → _cmd_error へ委譲"""
+        return self._cmd_error(cmd, state, reason='invalid')
+
+    def _cmd_error(self, cmd: str, state, reason: str = 'invalid',
+                   position: int = None, value: str = None) -> str:
+        """
+        ベンダー別CLIエラーメッセージを生成する。
+
+        reason:
+          'invalid'    → コマンド不明 / タイプミス
+          'ambiguous'  → 前方一致が複数
+          'incomplete' → パラメータ不足
+          'mode'       → 現在のモードでは使用不可
+          'range'      → 値が範囲外
+          'exists'     → 既に存在する
+          'notfound'   → 対象が見つからない
+          'permission' → 権限不足
+        """
+        dt = state.device_type
+
+        # ── Cisco IOS / Catalyst / SR-S ──────────────────
+        if dt in ('catalyst', 'cisco', 'srs'):
+            if reason == 'invalid':
+                # タイプミスの場合: どこでエラーになったかを ^ で示す
+                pos = position if position is not None else len(cmd)
+                spaces = ' ' * (2 + pos)
+                return (
+                    f'% Invalid input detected at \'^\' marker.\n'
+                    f'  {cmd}\n'
+                    f'{spaces}^'
+                )
+            elif reason == 'ambiguous':
+                tok = cmd.strip().split()[0] if cmd.strip() else cmd
+                return f'% Ambiguous command: "{tok}"'
+            elif reason == 'incomplete':
+                return '% Incomplete command.'
+            elif reason == 'mode':
+                return (
+                    f'% Invalid input detected at \'^\' marker.\n'
+                    f'  {cmd}\n'
+                    f'  ^'
+                    f'\n% (Command not available in current mode)'
+                )
+            elif reason == 'range':
+                return f'% Value out of range. {value or ""}'
+            elif reason == 'exists':
+                return f'% {value or "Object already exists."}'
+            elif reason == 'notfound':
+                return f'% {value or "Object not found."}'
+            elif reason == 'permission':
+                return '% Authorization failed.'
+            else:
+                return (
+                    f'% Invalid input detected at \'^\' marker.\n'
+                    f'  {cmd}\n'
+                    f'  ^'
+                )
+
+        # ── NX-OS ────────────────────────────────────────
+        elif dt == 'nexus':
+            if reason == 'invalid':
+                pos = position if position is not None else len(cmd)
+                spaces = ' ' * (2 + pos)
+                return (
+                    f'% Invalid command at \'^\' marker.\n'
+                    f'  {cmd}\n'
+                    f'{spaces}^'
+                )
+            elif reason == 'ambiguous':
+                tok = cmd.strip().split()[0] if cmd.strip() else cmd
+                return f'% Ambiguous command: "{tok}"'
+            elif reason == 'incomplete':
+                return '% Incomplete command at \'^\' marker.'
+            elif reason == 'mode':
+                return (
+                    f'% Invalid command at \'^\' marker.\n'
+                    f'  {cmd}\n'
+                    f'  ^\n'
+                    f'% Command not available in current mode'
+                )
+            elif reason == 'range':
+                return f'% Invalid value: {value or "out of range"}'
+            elif reason == 'permission':
+                return '% Permission denied.'
+            else:
+                return (
+                    f'% Invalid command at \'^\' marker.\n'
+                    f'  {cmd}\n'
+                    f'  ^'
+                )
+
+        # ── Si-R ─────────────────────────────────────────
+        elif dt == 'sir':
+            if reason == 'invalid':
+                return '% Unknown command.'
+            elif reason == 'ambiguous':
+                return '% Ambiguous command.'
+            elif reason == 'incomplete':
+                return '% Incomplete command.'
+            elif reason == 'mode':
+                return '% Command not available in this mode.'
+            elif reason == 'range':
+                return f'% Invalid value. {value or ""}'
+            elif reason == 'notfound':
+                return f'% Not found. {value or ""}'
+            else:
+                return '% Unknown command.'
+
+        # ── SR-S ─────────────────────────────────────────
+        elif dt == 'srs':
+            if reason == 'invalid':
+                return f'% Unknown command: {cmd.split()[0] if cmd.strip() else cmd}'
+            elif reason == 'incomplete':
+                return '% Incomplete command.'
+            elif reason == 'range':
+                return f'% Value out of range. {value or ""}'
+            else:
+                return f'% Unknown command: {cmd.split()[0] if cmd.strip() else cmd}'
+
+        # ── APRESIA ──────────────────────────────────────
+        elif dt == 'apresia':
+            if reason == 'invalid':
+                return f'% Error: Unknown command - {cmd.split()[0] if cmd.strip() else cmd}'
+            elif reason == 'ambiguous':
+                return '% Error: Ambiguous command.'
+            elif reason == 'incomplete':
+                return '% Error: Incomplete command.'
+            elif reason == 'mode':
+                return '% Error: Command not available in current mode.'
+            elif reason == 'range':
+                return f'% Error: Value out of range. {value or ""}'
+            else:
+                return f'% Error: Unknown command.'
+
+        # フォールバック
+        return f'% Unknown command.'
+
+    def _ambiguous_error(self, cmd: str, state, candidates: list) -> str:
+        """候補が複数ある曖昧なコマンドエラー（実機表示準拠）"""
+        dt = state.device_type
+        tok = cmd.strip().split()[0] if cmd.strip() else cmd
+        if dt in ('catalyst', 'cisco', 'srs', 'nexus'):
+            lines = [f'% Ambiguous command: "{tok}"']
+            for c in candidates[:6]:
+                lines.append(f'  {c}')
+            return '\n'.join(lines)
+        elif dt == 'sir':
+            return '% Ambiguous command.'
+        elif dt == 'apresia':
+            return '% Error: Ambiguous command.'
+        return '% Ambiguous command.'
+
+    def _incomplete_error(self, cmd: str, state) -> str:
+        """パラメータ不足エラー"""
+        return self._cmd_error(cmd, state, reason='incomplete')
+
+    def _range_error(self, cmd: str, state, field: str, min_v, max_v, got=None) -> str:
+        """値範囲エラー"""
+        detail = f'{field}: allowed {min_v}-{max_v}'
+        if got is not None:
+            detail += f', got {got}'
+        return self._cmd_error(cmd, state, reason='range', value=detail)
+
+    def _mode_error(self, cmd: str, state, required_mode: str = '') -> str:
+        """モードエラー（configモードで実行が必要など）"""
+        dt = state.device_type
+        if dt in ('catalyst', 'cisco', 'srs', 'nexus'):
+            hint = f' Use in {required_mode} mode.' if required_mode else ''
+            return (
+                f'% Invalid input detected at \'^\' marker.\n'
+                f'  {cmd}\n'
+                f'  ^'
+            )
+        return self._cmd_error(cmd, state, reason='mode')
+
+
+# ══════════════════════════════════════════
+# CLI補完・ヘルプエンジン（機種別）
+# ══════════════════════════════════════════
+class CliCompletion:
+    """
+    実機準拠の CLI 補完・ヘルプ
+
+    Cisco IOS/NX-OS:
+      SW# show ?         → showのサブコマンド一覧
+      SW# show ip ?      → show ipのサブコマンド一覧
+      SW# sh<Tab>        → show に補完
+      SW(config)# rout?  → router に補完
+
+    Si-R:
+      Router# ip rip ?   → ip ripのサブコマンド一覧
+      Router# ?          → 全コマンド一覧
+
+    APRESIA:
+      AP# config ?       → configのサブコマンド一覧
+    """
+
+    # ── Cisco IOS/Catalyst コマンド定義 ──────────────────
+    IOS_EXEC = {
+        'show': {
+            '_desc': 'Show running system information',
+            'version':          'System hardware and software status',
+            'running-config':   'Current operating configuration',
+            'startup-config':   'Contents of startup configuration',
+            'ip': {
+                '_desc': 'IP information',
+                'route':        'IP routing table',
+                'interface':    'IP interface status and configuration',
+                'ospf': {
+                    '_desc': 'OSPF information',
+                    'neighbor':   'Neighbor list',
+                    'database':   'OSPF database summary',
+                    'interface':  'Interface information',
+                    'route':      'OSPF local routing table',
+                    'border-routers': 'ABR and ASBR information',
+                },
+                'rip': {
+                    '_desc': 'RIP routing protocol information',
+                    'neighbor': 'RIP neighbor list',
+                    'route':    'RIP routing table',
+                    'status':   'RIP protocol status',
+                },
+                'bgp': {
+                    '_desc': 'BGP information',
+                    'summary':  'Summary of BGP neighbor status',
+                    'neighbor': 'Detailed information on TCP and BGP connections',
+                    'table':    'BGP table',
+                },
+                'arp':          'IP ARP table',
+                'access-lists': 'List IP access lists',
+                'prefix-list':  'List prefix lists',
+            },
+            'interfaces':       'Interface status and configuration',
+            'vlan':             'VTP VLAN status',
+            'spanning-tree':    'Spanning tree topology',
+            'etherchannel': {
+                '_desc':        'EtherChannel information',
+                'summary':      'One-line summary per channel-group',
+                'detail':       'Detailed information of channel-groups',
+                'port-channel': 'Port-channel information',
+                'port':         'EtherChannel port information',
+            },
+            'vrrp': {
+                '_desc': 'VRRP information',
+                'brief': 'Brief status of VRRP groups',
+                'all':   'All VRRP groups',
+            },
+            'standby': {
+                '_desc': 'HSRP information',
+                'brief': 'Brief status of Hot standby groups',
+                'all':   'All standby group information',
+            },
+            'vpc': {
+                '_desc':              'vPC information (NX-OS)',
+                'brief':              'vPC brief status',
+                'peer-keepalive':     'vPC peer-keepalive status',
+                'role':               'vPC role information',
+                'consistency-parameters': 'vPC consistency check',
+            },
+            'mac': {
+                '_desc': 'MAC address',
+                'address-table': 'MAC address table',
+            },
+            'arp':              'ARP table',
+            'cdp':              'CDP information',
+            'lldp':             'LLDP information',
+            'clock':            'Display the system clock',
+            'logging':          'Show the contents of logging buffers',
+            'processes':        'Active process statistics',
+            'ntp':              'NTP associations',
+        },
+        'ping':         'Send echo messages',
+        'traceroute':   'Trace route to destination',
+        'telnet':       'Open a telnet connection',
+        'ssh':          'Open a secure shell client connection',
+        'clear': {
+            '_desc': 'Reset functions',
+            'ip': {
+                '_desc': 'IP functions',
+                'route':        'Delete route table entries',
+                'ospf':         'OSPF clear commands',
+                'bgp':          'Clear BGP connections',
+                'arp':          'Delete ARP table entries',
+            },
+            'arp':              'Delete entries from the ARP table',
+            'mac':              'MAC address table information',
+            'spanning-tree':    'Clear spanning-tree counters',
+            'counters':         'Clear counters on one or all interfaces',
+        },
+        'debug': {
+            '_desc': 'Debugging functions (see also \'undebug\')',
+            'ip': {
+                '_desc': 'IP information',
+                'ospf':     'OSPF information',
+                'rip':      'RIP protocol transactions',
+                'bgp':      'BGP information',
+                'routing':  'Routing table events',
+            },
+            'spanning-tree': 'Spanning tree information',
+        },
+        'undebug':      'Disable debugging functions',
+        'configure': {
+            '_desc':    'Enter configuration mode',
+            'terminal': 'Enter configuration mode (interactive)',
+        },
+        'enable':       'Turn on privileged commands',
+        'disable':      'Turn off privileged commands',
+        'write': {
+            '_desc':    'Write running configuration to memory or network',
+            'memory':   'Write to NV memory',
+            'terminal': 'Write to terminal',
+            'erase':    'Erase startup configuration',
+        },
+        'copy':         'Copy from one file to another',
+        'reload':       'Halt and perform a cold restart',
+        'logout':       'Exit from the EXEC',
+        'exit':         'Exit from the EXEC',
+        'end':          'Return to privileged EXEC mode',
+    }
+
+    IOS_CONFIG = {
+        'hostname':     'Set system\'s network name',
+        'interface': {
+            '_desc': 'Select an interface to configure',
+            'GigabitEthernet': 'GigabitEthernet IEEE 802.3z',
+            'Port-channel':    'Ethernet Channel of interfaces',
+            'Vlan':            'Catalyst Vlans',
+            'Loopback':        'Loopback interface',
+            'Tunnel':          'Tunnel interface',
+        },
+        'router': {
+            '_desc': 'Enable a routing process',
+            'ospf':   'Open Shortest Path First (OSPF)',
+            'rip':    'Routing Information Protocol (RIP)',
+            'bgp':    'Border Gateway Protocol (BGP)',
+            'eigrp':  'Enhanced Interior Gateway Routing Protocol (EIGRP)',
+        },
+        'ip': {
+            '_desc': 'Global IP configuration subcommands',
+            'route':              'Establish static routes',
+            'routing':            'Enable IP routing',
+            'access-list':        'Named access-list',
+            'prefix-list':        'Build a prefix list',
+            'ospf':               'OSPF configuration',
+            'rip':                'RIP configuration',
+            'name-server':        'Specify address of name server to use',
+            'default-gateway':    'Specify default gateway (if not routing IP)',
+            'ssh':                'Configure ssh options',
+            'http':               'HTTP server configuration',
+        },
+        'vlan':                   'Add, delete, or modify values associated with a VLAN',
+        'spanning-tree': {
+            '_desc': 'Spanning Tree Subsystem',
+            'mode':             'Spanning tree operating mode',
+            'vlan':             'VLAN Switch Spanning Tree',
+            'portfast':         'Spanning tree portfast options',
+            'guard':            'Change an interface\'s spanning tree guard mode',
+        },
+        'access-list':            'Add an access list entry',
+        'line': {
+            '_desc': 'Configure a terminal line',
+            'con':  'Primary terminal line',
+            'vty':  'Virtual terminal',
+            'aux':  'Auxiliary line',
+        },
+        'username':               'Establish User Name Authentication',
+        'enable':                 'Modify enable password parameters',
+        'service':                'Set a microcode service',
+        'logging': {
+            '_desc': 'Modify message logging facilities',
+            'host':         'Set syslog server IP',
+            'trap':         'Logging trap (severity)',
+            'buffered':     'Set buffered logging parameters',
+            'console':      'Set console logging parameters',
+        },
+        'snmp-server': {
+            '_desc': 'Modify SNMP parameters',
+            'community':    'Enable SNMP; set community string and access privs',
+            'host':         'Specify hosts to receive SNMP notifications',
+            'location':     'Text for mib object sysLocation',
+            'contact':      'Text for mib object sysContact',
+        },
+        'ntp': {
+            '_desc': 'Configure NTP',
+            'server':       'Configure NTP server',
+            'authenticate': 'Authenticate time sources',
+        },
+        'banner':                 'Define a login banner',
+        'crypto':                 'Encryption module',
+        'aaa':                    'Authentication, Authorization and Accounting',
+        'no':                     'Negate a command or set its defaults',
+        'do':                     'To run exec commands in config mode',
+        'exit':                   'Exit from configure mode',
+        'end':                    'Exit to privileged EXEC mode',
+    }
+
+    IOS_CONFIG_IF = {
+        'ip': {
+            '_desc': 'Interface Internet Protocol config commands',
+            'address':          'Set the IP address of an interface',
+            'ospf': {
+                '_desc': 'OSPF interface commands',
+                'priority':     'Router priority',
+                'cost':         'Interface cost',
+                'hello-interval': 'Time between HELLO packets',
+                'dead-interval':  'Interval after which a neighbor is dead',
+                'network':      'Network type',
+                'passive':      'Suppress routing updates on an interface',
+            },
+            'rip':              'Router Information Protocol',
+            'access-group':     'Specify access control for packets',
+        },
+        'switchport': {
+            '_desc': 'Set switching mode characteristics of the Layer2 interface',
+            'mode': {
+                '_desc': 'Set trunking mode of the interface',
+                'access':   'Set trunking mode to ACCESS unconditionally',
+                'trunk':    'Set trunking mode to TRUNK unconditionally',
+            },
+            'access': {
+                '_desc': 'Set access mode characteristics of the interface',
+                'vlan':     'Set VLAN when interface is in access mode',
+            },
+            'trunk': {
+                '_desc': 'Set trunk characteristics when interface is in trunking mode',
+                'allowed': {
+                    '_desc': 'Set allowed VLANs when interface is in trunking mode',
+                    'vlan':     'Set allowed VLANs',
+                },
+                'native': {
+                    '_desc': 'Set trunking native characteristics',
+                    'vlan': 'Set native VLAN when interface is in trunking mode',
+                },
+                'encapsulation': 'Set encapsulation type for an interface',
+            },
+        },
+        'channel-group': {
+            '_desc': 'Etherchannel/port bundling function',
+            '<1-48>': 'Channel group number',
+        },
+        'spanning-tree': {
+            '_desc': 'Spanning Tree Subsystem',
+            'portfast':     'Spanning tree portfast options',
+            'bpduguard':    'Don\'t accept BPDUs on this interface',
+            'guard': {
+                '_desc': 'Change an interface\'s spanning tree guard mode',
+                'root': 'Enable root guard on this interface',
+            },
+            'cost':         'Change an interface\'s spanning tree port path cost',
+            'priority':     'Change an interface\'s spanning tree port priority',
+        },
+        'vrrp': {
+            '_desc': 'VRRP interface configuration',
+            '<1-255>': 'Group number',
+        },
+        'standby': {
+            '_desc': 'HSRP interface configuration',
+            '<0-255>': 'Group number',
+        },
+        'description':    'Interface specific description',
+        'shutdown':       'Shutdown the selected interface',
+        'no':             'Negate a command or set its defaults',
+        'duplex':         'Configure duplex operation',
+        'speed':          'Configure speed operation',
+        'mtu':            'Set the interface Maximum Transmission Unit (MTU)',
+        'exit':           'Exit from interface configuration mode',
+        'end':            'Return to privileged EXEC mode',
+    }
+
+    # ── NX-OS 追加コマンド ──────────────────────────
+    NXOS_EXTRA_EXEC = {
+        'show': {
+            'vpc':          'Virtual Port Channel information',
+            'feature':      'Show feature status',
+            'module':       'Show module information',
+            'topology':     'Show topology information',
+            'port-channel': 'Port-channel information',
+        },
+        'feature':  'Enable/disable features',
+    }
+
+    NXOS_EXTRA_CONFIG = {
+        'feature': {
+            '_desc': 'Enable a feature',
+            'vpc':      'Enable Virtual Port Channel (vPC)',
+            'lacp':     'Enable Link Aggregation Control Protocol',
+            'ospf':     'Enable OSPF routing protocol',
+            'bgp':      'Enable BGP routing protocol',
+            'bfd':      'Enable Bidirectional Forwarding Detection',
+            'lldp':     'Enable LLDP',
+            'dhcp':     'Enable DHCP snooping',
+        },
+        'vpc': {
+            '_desc': 'Configure vPC',
+            'domain':    'Configure vPC domain',
+            'peer-link': 'Configure vPC peer-link (in interface mode)',
+            '<1-4096>':  'Configure a vPC',
+        },
+    }
+
+    NXOS_CONFIG_VPC = {
+        'role':             'Configure vPC role priority',
+        'peer-keepalive':   'Configure vPC peer-keepalive link',
+        'peer-gateway':     'Enable vPC peer-gateway',
+        'peer-switch':      'Enable vPC peer-switch',
+        'auto-recovery':    'Enable vPC auto-recovery',
+        'system-priority':  'Configure vPC system priority',
+        'system-mac':       'Configure vPC system MAC address',
+        'ip':               'IP configuration for vPC keepalive',
+        'delay':            'Configure delay for restoring vPCs',
+        'exit':             'Exit from vpc-domain configuration mode',
+    }
+
+    # ── Si-R コマンド定義 ─────────────────────────────
+    SIR_EXEC = {
+        'show': {
+            '_desc': 'Show current system status',
+            'ip': {
+                '_desc': 'IP configuration',
+                'route':        'Routing table',
+                'rip': {
+                    '_desc': 'RIP status',
+                    'route':    'RIP routing table',
+                    'neighbor': 'RIP neighbor list',
+                    'status':   'RIP protocol status',
+                },
+                'ospf': {
+                    '_desc': 'OSPF status',
+                    'neighbor':   'OSPF neighbor list',
+                    'database':   'OSPF database',
+                    'interface':  'OSPF interface status',
+                    'route':      'OSPF routing table',
+                },
+                'bgp': {
+                    '_desc': 'BGP status',
+                    'summary':  'BGP session summary',
+                    'neighbor': 'BGP neighbor detail',
+                },
+            },
+            'vrrp':     'VRRP status',
+            'version':  'Show version',
+        },
+        'ip': {
+            '_desc': 'IP configuration commands',
+            'rip': {
+                '_desc': 'RIP configuration',
+                'use':      'Enable RIP (ip rip use use)',
+                'network':  'Specify RIP network (ip rip network <net>/<prefix>)',
+                'neighbor': 'Specify RIP neighbor',
+                'version':  'RIP version',
+            },
+            'ospf': {
+                '_desc': 'OSPF interface commands',
+                'priority': 'OSPF priority',
+                'cost':     'OSPF cost',
+            },
+            'route':        'Add static route (ip route <dest>/<prefix> <gw>)',
+        },
+        'ping':         'Send echo request',
+        'traceroute':   'Trace route',
+        'configure': {
+            '_desc':    'Enter configuration mode',
+            'terminal': 'Enter configuration mode (interactive)',
+        },
+        'conf':         'Enter configuration mode (short)',
+        'exit':         'Exit',
+        'save':         'Save configuration',
+    }
+
+    SIR_CONFIG = {
+        'hostname':     'Set system hostname',
+        'lan': {
+            '_desc': 'LAN interface configuration',
+            '<0-3>': 'LAN port number',
+        },
+        'wan': {
+            '_desc': 'WAN interface configuration',
+            '<0-3>': 'WAN port number',
+        },
+        'ip': {
+            '_desc': 'IP configuration',
+            'route':            'Set static route',
+            'rip': {
+                '_desc': 'RIP configuration',
+                'use':          'Enable RIP (ip rip use use)',
+                'network':      'Set RIP network',
+                'neighbor':     'Set RIP neighbor',
+                'version':      'Set RIP version',
+            },
+            'ospf': {
+                '_desc': 'OSPF configuration',
+                'priority': 'Set OSPF priority',
+                'cost':     'Set OSPF cost',
+            },
+        },
+        'ospf': {
+            '_desc': 'OSPF global configuration',
+            'use':          'Enable OSPF',
+            'router-id':    'Set OSPF router ID',
+        },
+        'router': {
+            '_desc': 'Routing protocol configuration',
+            'ospf': 'Configure OSPF',
+            'bgp':  'Configure BGP',
+            'rip':  'Configure RIP',
+        },
+        'vrrp': {
+            '_desc': 'VRRP configuration',
+            'use': 'Enable VRRP',
+        },
+        'syslog':       'Syslog configuration',
+        'consoleinfo':  'Console configuration',
+        'telnetinfo':   'Telnet server configuration',
+        'exit':         'Exit configuration mode',
+        'save':         'Save configuration',
+    }
+
+    # ── APRESIA コマンド定義 ──────────────────────────
+    APRESIA_EXEC = {
+        'show': {
+            '_desc': 'Show system status',
+            'ipif':         'Show IP interface',
+            'iproute':      'Show IP routing table',
+            'vlan':         'Show VLAN information',
+            'fdb':          'Show forwarding database',
+            'stp':          'Show spanning tree status',
+            'ports':        'Show port status',
+            'switch':       'Show switch information',
+            'lacp':         'Show LACP status',
+            'management':   'Show management information',
+        },
+        'ping':             'Send ping',
+        'tracert':          'Trace route',
+        'config':           'Enter configuration mode',
+        'configure':        'Enter configuration mode',
+        'save':             'Save configuration',
+        'logout':           'Logout',
+    }
+
+    # APRESIA config <subcommand> ヘルプ（exec mode で config ? と打った場合）
+    APRESIA_CONFIG_SUBCMDS = {
+        'ipif': {
+            '_desc': 'Configure IP interface',
+            'System': 'Configure system IP address (config ipif System <ip>/<prefix>)',
+        },
+        'iproute':      'Configure static IP route',
+        'vlan':         'Configure VLAN settings',
+        'stp': {
+            '_desc': 'Configure spanning tree',
+            'ports':    'STP port configuration',
+        },
+        'lacp':         'Configure LACP',
+        'ports': {
+            '_desc': 'Configure port settings',
+            '<port>':   'Port number (e.g. 1/0/1)',
+        },
+        'snmp':         'Configure SNMP parameters',
+        'syslog':       'Configure syslog parameters',
+        'management':   'Configure management IP address',
+    }
+
+    APRESIA_CONFIG = {
+        'config': {
+            '_desc': 'System configuration',
+            'ipif':         'Configure IP interface',
+            'iproute':      'Configure static route',
+            'vlan':         'Configure VLAN',
+            'stp':          'Configure spanning tree',
+            'lacp':         'Configure LACP',
+            'ports':        'Configure port settings',
+            'snmp':         'Configure SNMP',
+            'syslog':       'Configure syslog',
+            'management':   'Configure management IP',
+        },
+        'create': {
+            '_desc': 'Create a configuration item',
+            'vlan':         'Create VLAN',
+            'iproute':      'Create static route',
+            'account':      'Create user account',
+        },
+        'delete': {
+            '_desc': 'Delete a configuration item',
+            'vlan':         'Delete VLAN',
+            'iproute':      'Delete static route',
+        },
+        'enable':           'Enable a feature',
+        'disable':          'Disable a feature',
+        'exit':             'Exit configuration mode',
+        'save':             'Save configuration',
+    }
+
+    def get_help(self, cmd: str, state: DeviceState) -> str:
+        """? を押したときのヘルプ表示（実機Cisco準拠）"""
+        device_type = state.device_type
+        mode = state.mode
+        tree = self._get_tree(device_type, mode)
+        if not tree:
+            return ''
+        # ?を除去してトークン分割
+        query = cmd.rstrip('?').strip()
+        tokens = query.split() if query else []
+        # サブツリーを辿る（前方一致）
+        node = tree
+        for tok in tokens:
+            matched = self._find_match(node, tok)
+            if matched:
+                if isinstance(node[matched], dict):
+                    node = node[matched]
+                else:
+                    return f'  {matched:<22}  {node[matched]}'
+            else:
+                break
+        return self._format_help(node, device_type, tokens)
+
+    def complete(self, partial: str, state: DeviceState) -> str:
+        """Tab補完: 一意に決まる場合のみ補完"""
+        device_type = state.device_type
+        mode = state.mode
+        tree = self._get_tree(device_type, mode)
+        if not tree:
+            return partial
+        tokens = partial.strip().split()
+        if not tokens:
+            return partial
+        completing = tokens[-1].lower()
+        prefix_tokens = tokens[:-1]
+        # 前のトークンでサブツリーを辿る
+        node = tree
+        resolved = []
+        for tok in prefix_tokens:
+            matched = self._find_match(node, tok)
+            if matched:
+                resolved.append(matched)
+                if isinstance(node[matched], dict):
+                    node = node[matched]
+                else:
+                    return partial
+            else:
+                resolved.append(tok)
+        # 候補を探す
+        candidates = [k for k in node if not k.startswith('_') and k.lower().startswith(completing)]
+        if len(candidates) == 1:
+            return ' '.join(resolved + [candidates[0]]) + ' '
+        return partial
+
+    def _find_match(self, node: dict, tok: str) -> str:
+        tok_lower = tok.lower()
+        for key in node:
+            if key.startswith('_'):
+                continue
+            if key.lower() == tok_lower or key.lower().startswith(tok_lower):
+                return key
+        return ''
+
+    def _format_help(self, node: dict, device_type: str, context: list) -> str:
+        """ヘルプ一覧を実機形式でフォーマット"""
+        if not isinstance(node, dict):
+            return ''
+        lines = []
+        for key, val in sorted(node.items()):
+            if key.startswith('_'):
+                continue
+            if isinstance(val, dict):
+                desc = val.get('_desc', key)
+            else:
+                desc = val if isinstance(val, str) else key
+            lines.append(f'  {key:<22}  {desc}')
+        if not lines:
+            return '% No completions available'
+        return '\n'.join(lines)
+
+    def _get_tree(self, device_type: str, mode: str) -> dict:
+        """機種・モード別のコマンドツリーを返す"""
+        if device_type in ('catalyst', 'cisco', 'srs', 'nexus'):
+            if mode == 'exec':
+                base = dict(self.IOS_EXEC)
+                if device_type == 'nexus':
+                    for k, v in self.NXOS_EXTRA_EXEC.items():
+                        if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+                            base[k] = {**base[k], **v}
+                        else:
+                            base[k] = v
+                return base
+            elif mode == 'config':
+                base = dict(self.IOS_CONFIG)
+                if device_type == 'nexus':
+                    base.update(self.NXOS_EXTRA_CONFIG)
+                return base
+            elif mode == 'config-if':
+                return dict(self.IOS_CONFIG_IF)
+            elif mode == 'config-vpc-domain':
+                return dict(self.NXOS_CONFIG_VPC)
+            elif mode in ('config-router', 'config-vlan'):
+                return {
+                    'network':          'Specify a network to announce via routing protocol',
+                    'neighbor':         'Specify a neighbor router',
+                    'passive-interface':'Suppress routing updates on an interface',
+                    'redistribute':     'Redistribute information from another routing protocol',
+                    'default-information': 'Control distribution of default information',
+                    'area':             'OSPF area parameters',
+                    'version':          'Set routing protocol version',
+                    'no':               'Negate a command or set its defaults',
+                    'exit':             'Exit from routing protocol configuration mode',
+                }
+        elif device_type == 'sir':
+            if mode == 'exec':
+                return dict(self.SIR_EXEC)
+            else:
+                return dict(self.SIR_CONFIG)
+        elif device_type == 'apresia':
+            if mode == 'exec':
+                tree = dict(self.APRESIA_EXEC)
+                # config ? のサブコマンドも exec から辿れるように
+                tree['config'] = dict(self.APRESIA_CONFIG_SUBCMDS)
+                return tree
+            else:
+                return dict(self.APRESIA_CONFIG)
+        return {}
+
+
+cli_completion = CliCompletion()

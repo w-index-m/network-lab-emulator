@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>OSPF ラボ実習</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI','メイリオ',sans-serif; background:#0d1117; color:#c9d1d9; }
+  header { background:#161b22; border-bottom:2px solid #58a6ff; padding:16px 24px; display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:20px; color:#58a6ff; }
+  .badge { background:#58a6ff22; color:#58a6ff; border:1px solid #58a6ff; border-radius:4px; padding:2px 8px; font-size:12px; }
+  .layout { display:grid; grid-template-columns:1fr 1fr; height:calc(100vh - 56px); }
+  .panel { padding:20px; overflow-y:auto; }
+  .panel-left { border-right:1px solid #30363d; }
+  h2 { font-size:13px; color:#58a6ff; text-transform:uppercase; letter-spacing:1px; margin-bottom:12px; }
+  .topology { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:20px; margin-bottom:16px; }
+  .topo-diagram { display:flex; align-items:center; justify-content:center; gap:0; padding:12px 0; }
+  .device { text-align:center; }
+  .device-box { background:#21262d; border:2px solid #30363d; border-radius:8px; padding:10px 14px; min-width:120px; }
+  .device-box.sw1 { border-color:#58a6ff; }
+  .device-box.sw2 { border-color:#3fb950; }
+  .device-name { font-size:13px; font-weight:bold; color:#e6edf3; }
+  .device-type { font-size:10px; color:#8b949e; margin-top:2px; }
+  .device-ip { font-size:11px; color:#58a6ff; margin-top:4px; font-family:monospace; }
+  .device-ip.green { color:#3fb950; }
+  .device-ip.yellow { color:#d29922; }
+  .link { display:flex; align-items:center; flex-direction:column; padding:0 8px; }
+  .link-line { width:80px; height:2px; background:#30363d; }
+  .link-label { font-size:10px; color:#8b949e; margin-top:4px; font-family:monospace; }
+  .role-badge { font-size:10px; padding:1px 6px; border-radius:3px; margin-top:4px; }
+  .dr { background:#1f6feb; color:white; }
+  .bdr { background:#1a4731; color:#3fb950; }
+  .task-card { background:#161b22; border:1px solid #30363d; border-radius:8px; margin-bottom:10px; overflow:hidden; }
+  .task-header { padding:10px 14px; display:flex; align-items:center; gap:8px; cursor:pointer; }
+  .task-num { background:#1f6feb; color:white; border-radius:50%; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:bold; flex-shrink:0; }
+  .task-title { font-size:13px; color:#e6edf3; flex:1; }
+  .task-status { font-size:11px; padding:2px 8px; border-radius:10px; }
+  .task-status.todo { background:#21262d; color:#8b949e; border:1px solid #30363d; }
+  .task-status.done { background:#1a4731; color:#3fb950; border:1px solid #2ea043; }
+  .task-body { padding:12px 14px; border-top:1px solid #21262d; display:none; }
+  .task-body.open { display:block; }
+  .task-body p { font-size:12px; color:#8b949e; margin-bottom:10px; line-height:1.6; }
+  .cmd-block { background:#0d1117; border:1px solid #30363d; border-radius:6px; padding:10px 12px; margin:8px 0; font-family:'Consolas',monospace; font-size:12px; }
+  .prompt { color:#58a6ff; }
+  .cmd { color:#e6edf3; }
+  .comment { color:#8b949e; }
+  .expected { background:#0d1f38; border-left:3px solid #58a6ff; padding:8px 12px; margin-top:8px; font-size:11px; font-family:monospace; color:#79c0ff; border-radius:0 4px 4px 0; white-space:pre; }
+  .hint { background:#1c2128; border-left:3px solid #f0883e; padding:8px 12px; margin-top:8px; font-size:11px; color:#f0883e; border-radius:0 4px 4px 0; }
+  .important { background:#1c1108; border-left:3px solid #d29922; padding:8px 12px; margin-top:8px; font-size:11px; color:#d29922; border-radius:0 4px 4px 0; }
+  .check-btn { background:#1f6feb; color:white; border:none; border-radius:6px; padding:6px 14px; font-size:12px; cursor:pointer; margin-top:10px; }
+  .check-btn:hover { background:#388bfd; }
+  .verify-box { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:14px; margin-bottom:12px; }
+  .verify-cmd { display:flex; align-items:center; gap:8px; margin:6px 0; }
+  .verify-cmd code { font-size:12px; font-family:monospace; color:#79c0ff; background:#0d1117; padding:3px 8px; border-radius:4px; flex:1; }
+  .verify-cmd span { font-size:11px; color:#8b949e; }
+  .copy-btn { background:#21262d; color:#8b949e; border:1px solid #30363d; border-radius:4px; padding:2px 8px; font-size:11px; cursor:pointer; }
+  .copy-btn:hover { color:#e6edf3; }
+  .point-list { list-style:none; }
+  .point-list li { padding:6px 0; font-size:12px; color:#8b949e; border-bottom:1px solid #21262d; display:flex; gap:8px; }
+  .point-list li::before { content:"▸"; color:#58a6ff; flex-shrink:0; }
+  .progress-bar { background:#21262d; border-radius:4px; height:6px; margin:8px 0; overflow:hidden; }
+  .progress-fill { background:#58a6ff; height:100%; border-radius:4px; transition:width 0.3s; }
+  .progress-text { font-size:11px; color:#8b949e; margin-bottom:12px; }
+  table { width:100%; font-size:11px; border-collapse:collapse; margin-top:8px; }
+  th { padding:6px 10px; text-align:left; color:#8b949e; background:#21262d; }
+  td { padding:6px 10px; border-bottom:1px solid #21262d; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔵 OSPF ラボ実習</h1>
+  <span class="badge">Open Shortest Path First</span>
+  <span class="badge" style="margin-left:auto; color:#3fb950; border-color:#3fb950; background:#1a473122;">Catalyst ↔ Catalyst</span>
+</header>
+<div class="layout">
+<div class="panel panel-left">
+  <h2>📋 実習課題</h2>
+  <div class="progress-bar"><div class="progress-fill" id="pf" style="width:0%"></div></div>
+  <div class="progress-text" id="pt">0 / 7 完了</div>
+
+  <!-- Task 1 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(1)">
+      <div class="task-num">1</div>
+      <div class="task-title">SW1 に OSPF を設定する（priority=200 / DR候補）</div>
+      <div class="task-status todo" id="s1">未完了</div>
+    </div>
+    <div class="task-body" id="b1">
+      <p>SW1 を OSPF の DR（代表ルーター）候補にします。<br>priority を 200 に設定することで最優先の DR 候補になります。</p>
+      <div class="cmd-block">
+        <div class="comment"># OSPFプロセス起動</div>
+        <div><span class="prompt">SW1# </span><span class="cmd">router ospf 1</span></div>
+        <div><span class="prompt">SW1(config-router)# </span><span class="cmd">network 192.168.10.0 0.0.0.255 area 0</span></div>
+        <div><span class="prompt">SW1(config-router)# </span><span class="cmd">network 10.0.0.0 0.0.0.3 area 0</span></div>
+        <div><span class="prompt">SW1(config-router)# </span><span class="cmd">exit</span></div>
+        <div class="comment"># OSPFプライオリティ設定（DR候補最優先）</div>
+        <div><span class="prompt">SW1# </span><span class="cmd">ip ospf priority 200</span></div>
+      </div>
+      <div class="important">⚠ priority はインターフェースモードではなくグローバルで設定します</div>
+      <button class="check-btn" onclick="done(1)">✅ 設定完了</button>
+    </div>
+  </div>
+
+  <!-- Task 2 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(2)">
+      <div class="task-num">2</div>
+      <div class="task-title">SW2 に OSPF を設定する（priority=100 / BDR候補）</div>
+      <div class="task-status todo" id="s2">未完了</div>
+    </div>
+    <div class="task-body" id="b2">
+      <p>SW2 を BDR（バックアップ代表ルーター）候補にします。</p>
+      <div class="cmd-block">
+        <div><span class="prompt">SW2# </span><span class="cmd">router ospf 1</span></div>
+        <div><span class="prompt">SW2(config-router)# </span><span class="cmd">network 192.168.20.0 0.0.0.255 area 0</span></div>
+        <div><span class="prompt">SW2(config-router)# </span><span class="cmd">network 10.0.0.0 0.0.0.3 area 0</span></div>
+        <div><span class="prompt">SW2(config-router)# </span><span class="cmd">exit</span></div>
+        <div><span class="prompt">SW2# </span><span class="cmd">ip ospf priority 100</span></div>
+      </div>
+      <button class="check-btn" onclick="done(2)">✅ 設定完了</button>
+    </div>
+  </div>
+
+  <!-- Task 3 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(3)">
+      <div class="task-num">3</div>
+      <div class="task-title">OSPF ネイバーが Full になったことを確認する</div>
+      <div class="task-status todo" id="s3">未完了</div>
+    </div>
+    <div class="task-body" id="b3">
+      <p>両スイッチでネイバー状態を確認します。<br>State が <strong>Full/DR</strong> または <strong>Full/BDR</strong> になれば成功です。</p>
+      <div class="cmd-block">
+        <div><span class="prompt">SW1# </span><span class="cmd">show ip ospf neighbor</span></div>
+        <div><span class="prompt">SW2# </span><span class="cmd">show ip ospf neighbor</span></div>
+      </div>
+      <div class="expected">Neighbor ID     Pri  State       Dead Time  Address       Interface
+10.0.x.x        100  Full/BDR    00:00:35   10.0.0.2    Gi0/0/0</div>
+      <div class="hint">💡 Full/DR = 相手がDR、Full/BDR = 相手がBDR、Full/DROTHER = 相手がその他</div>
+      <button class="check-btn" onclick="done(3)">✅ 確認完了</button>
+    </div>
+  </div>
+
+  <!-- Task 4 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(4)">
+      <div class="task-num">4</div>
+      <div class="task-title">DR/BDR 選出結果を確認する</div>
+      <div class="task-status todo" id="s4">未完了</div>
+    </div>
+    <div class="task-body" id="b4">
+      <p>OSPFインタフェースの詳細でDR/BDRの役割を確認します。</p>
+      <div class="cmd-block">
+        <div><span class="prompt">SW1# </span><span class="cmd">show ip ospf interface</span></div>
+      </div>
+      <div class="expected">State DR, Priority 200
+Designated Router (ID) xxx.xxx.xxx.xxx</div>
+      <div class="hint">💡 SW1(priority=200)がDR、SW2(priority=100)がBDRに選出されます</div>
+      <button class="check-btn" onclick="done(4)">✅ 確認完了</button>
+    </div>
+  </div>
+
+  <!-- Task 5 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(5)">
+      <div class="task-num">5</div>
+      <div class="task-title">LSDB（リンクステートデータベース）を確認する</div>
+      <div class="task-status todo" id="s5">未完了</div>
+    </div>
+    <div class="task-body" id="b5">
+      <p>OSPFが保持するネットワーク全体のトポロジー情報を確認します。<br>Router LSA (Type-1) が両ルーター分登録されていれば成功です。</p>
+      <div class="cmd-block">
+        <div><span class="prompt">SW1# </span><span class="cmd">show ip ospf database</span></div>
+      </div>
+      <div class="expected">Router Link States (Area 0.0.0.0)
+Link ID       ADV Router    Age  Seq#
+xxx.xxx.xxx   xxx.xxx.xxx   10   0x80000001</div>
+      <button class="check-btn" onclick="done(5)">✅ 確認完了</button>
+    </div>
+  </div>
+
+  <!-- Task 6 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(6)">
+      <div class="task-num">6</div>
+      <div class="task-title">コスト設定と show run 確認</div>
+      <div class="task-status todo" id="s6">未完了</div>
+    </div>
+    <div class="task-body" id="b6">
+      <p>OSPFのコストを手動設定して show run に反映されることを確認します。</p>
+      <div class="cmd-block">
+        <div class="comment"># コストを手動設定（デフォルト=10）</div>
+        <div><span class="prompt">SW1# </span><span class="cmd">ip ospf cost 5</span></div>
+        <div class="comment"># 設定確認</div>
+        <div><span class="prompt">SW1# </span><span class="cmd">show run</span></div>
+      </div>
+      <div class="expected">router ospf 1
+ network 192.168.10.0 0.0.0.255 area 0.0.0.0
+ network 10.0.0.0 0.0.0.3 area 0.0.0.0</div>
+      <button class="check-btn" onclick="done(6)">✅ 確認完了</button>
+    </div>
+  </div>
+
+  <!-- Task 7 -->
+  <div class="task-card">
+    <div class="task-header" onclick="toggle(7)">
+      <div class="task-num">7</div>
+      <div class="task-title">ping で疎通確認する</div>
+      <div class="task-status todo" id="s7">未完了</div>
+    </div>
+    <div class="task-body" id="b7">
+      <p>OSPFで経路を学習した後、ping で疎通を確認します。</p>
+      <div class="cmd-block">
+        <div><span class="prompt">SW1# </span><span class="cmd">ping 192.168.20.1</span></div>
+      </div>
+      <div class="expected">!!!!!
+Success rate is 100 percent (5/5)</div>
+      <button class="check-btn" onclick="done(7)">✅ 疎通確認完了</button>
+    </div>
+  </div>
+</div>
+
+<!-- 右パネル -->
+<div class="panel">
+  <h2>🖧 ネットワーク構成</h2>
+  <div class="topology">
+    <div class="topo-diagram">
+      <div class="device">
+        <div class="device-box sw1">
+          <div class="device-name">SW1</div>
+          <div class="device-type">Catalyst 9300</div>
+          <div class="device-ip">Vlan10: 192.168.10.1/24</div>
+          <div class="device-ip">Gi0: 10.0.0.1/30</div>
+        </div>
+        <div class="role-badge dr">DR (priority=200)</div>
+      </div>
+      <div class="link">
+        <div class="link-line"></div>
+        <div class="link-label">10.0.0.0/30<br>Area 0</div>
+      </div>
+      <div class="device">
+        <div class="device-box sw2">
+          <div class="device-name">SW2</div>
+          <div class="device-type">Catalyst 9300</div>
+          <div class="device-ip green">Vlan20: 192.168.20.1/24</div>
+          <div class="device-ip green">Gi0: 10.0.0.2/30</div>
+        </div>
+        <div class="role-badge bdr">BDR (priority=100)</div>
+      </div>
+    </div>
+    <div style="text-align:center;font-size:11px;color:#8b949e;margin-top:8px;">
+      ← PC-A: 192.168.10.0/24 &nbsp;&nbsp;&nbsp;&nbsp; PC-B: 192.168.20.0/24 →
+    </div>
+  </div>
+
+  <h2>🔍 確認コマンド</h2>
+  <div class="verify-box">
+    <div class="verify-cmd"><code>show ip ospf neighbor</code><span>ネイバー一覧・DR/BDR役割</span><button class="copy-btn" onclick="copy('show ip ospf neighbor')">コピー</button></div>
+    <div class="verify-cmd"><code>show ip ospf interface</code><span>コスト・Priority・DR状態</span><button class="copy-btn" onclick="copy('show ip ospf interface')">コピー</button></div>
+    <div class="verify-cmd"><code>show ip ospf database</code><span>LSDB内容</span><button class="copy-btn" onclick="copy('show ip ospf database')">コピー</button></div>
+    <div class="verify-cmd"><code>show ip ospf route</code><span>OSPF学習経路</span><button class="copy-btn" onclick="copy('show ip ospf route')">コピー</button></div>
+    <div class="verify-cmd"><code>show run</code><span>実行中コンフィグ</span><button class="copy-btn" onclick="copy('show run')">コピー</button></div>
+    <div class="verify-cmd"><code>ping 192.168.20.1</code><span>疎通確認</span><button class="copy-btn" onclick="copy('ping 192.168.20.1')">コピー</button></div>
+  </div>
+
+  <h2>📚 学習ポイント</h2>
+  <ul class="point-list">
+    <li>OSPFはリンクステート型 — ネットワーク全体のトポロジーを把握</li>
+    <li>DR/BDR選出: priority大 → Router ID大 の順</li>
+    <li>priority=0 はDR/BDR選出から除外（DROther固定）</li>
+    <li>ネイバー状態: Down → Init → 2Way → ExStart → Exchange → Loading → Full</li>
+    <li>コスト = 参照帯域幅(100M) ÷ インタフェース帯域幅</li>
+    <li>AD値 = 110（RIPの120より小さく優先）</li>
+    <li>wildcard mask = サブネットマスクのビット反転（0.0.0.255 = /24）</li>
+  </ul>
+
+  <h2 style="margin-top:16px">⚡ DR/BDR 選出ルール</h2>
+  <table>
+    <tr><th>優先度</th><th>条件</th><th>結果</th></tr>
+    <tr><td>1位</td><td>priority 最大</td><td>DR に選出</td></tr>
+    <tr style="background:#161b22"><td>2位</td><td>priority が同じ → Router ID 最大</td><td>DR に選出</td></tr>
+    <tr><td>除外</td><td>priority = 0</td><td>DR/BDR 非対象</td></tr>
+    <tr style="background:#161b22"><td>注意</td><td>一度選出されたDRは変わらない</td><td>非プリエンプティブ</td></tr>
+  </table>
+</div>
+</div>
+<script>
+function toggle(n){ document.getElementById('b'+n).classList.toggle('open'); }
+const done_set=new Set();
+const TOTAL=7;
+function done(n){
+  done_set.add(n);
+  document.getElementById('s'+n).textContent='完了 ✅';
+  document.getElementById('s'+n).className='task-status done';
+  const pct=Math.round(done_set.size/TOTAL*100);
+  document.getElementById('pf').style.width=pct+'%';
+  document.getElementById('pt').textContent=done_set.size+' / '+TOTAL+' 完了';
+}
+function copy(cmd){ navigator.clipboard.writeText(cmd); }
+toggle(1);
+</script>
+</body>
+</html>
