@@ -41,6 +41,8 @@ OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 USE_OLLAMA   = False   # 起動時に自動検出
 
+SAVED_CONFIG_PATH = Path(__file__).parent / "saved_config.json"
+
 rule_engine = RuleEngine()
 
 # セッション管理（デバイスIDごとに状態を保持）
@@ -54,6 +56,8 @@ DEFAULT_DEVICES = {
     "catalyst": {"type": "catalyst", "hostname": "Dist-SW",  "color": "#1e90ff"},
     "cisco":    {"type": "cisco",    "hostname": "GW-Router","color": "#e05a00"},
     "apresia":  {"type": "apresia",  "hostname": "sw1",      "color": "#c00040"},
+    "pc-1":     {"type": "pc",       "hostname": "PC-1",     "color": "#888888", "ip": "192.168.1.10", "gateway": "192.168.1.1"},
+    "pc-2":     {"type": "pc",       "hostname": "PC-2",     "color": "#555555", "ip": "192.168.1.11", "gateway": "192.168.1.1"},
 }
 
 # ══════════════════════════════════════════
@@ -93,6 +97,99 @@ async def query_ollama(prompt: str, system: str) -> str:
 # ══════════════════════════════════════════
 # アプリ起動
 # ══════════════════════════════════════════
+def _save_config():
+    """現在のデバイス設定・リンクをJSONに保存"""
+    data = {"devices": {}, "links": []}
+    for dev_id, state in device_sessions.items():
+        dev_data = {
+            "type": state.device_type,
+            "hostname": state.hostname,
+            "interfaces": {},
+        }
+        for ifname, info in state.interfaces.items():
+            dev_data["interfaces"][ifname] = {
+                "ip":     info.get("ip", ""),
+                "prefix": info.get("prefix", 24),
+                "status": info.get("status", "up"),
+            }
+        if state.device_type == "pc":
+            dev_data["gateway"] = getattr(state, "gateway", "")
+            dev_data["routes"]  = getattr(state, "routes", [])
+        data["devices"][dev_id] = dev_data
+    # vnetリンク
+    for a, neighbors in vnet.links.items():
+        for b in neighbors:
+            if {"a": a, "b": b} not in data["links"] and {"a": b, "b": a} not in data["links"]:
+                data["links"].append({"a": a, "b": b})
+    try:
+        with open(SAVED_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"[Config] 設定を保存しました: {SAVED_CONFIG_PATH}")
+    except Exception as e:
+        print(f"[Config] 保存エラー: {e}")
+
+
+def _load_config():
+    """保存済みの設定をロード。存在しなければデフォルトで初期化"""
+    if not SAVED_CONFIG_PATH.exists():
+        # デフォルト初期化
+        for dev_id, dev in DEFAULT_DEVICES.items():
+            state = DeviceState(dev["type"], dev["hostname"])
+            # PCはデフォルトIP/GWを適用
+            if dev.get("type") == "pc" and dev.get("ip"):
+                state.interfaces["eth0"]["ip"] = dev["ip"]
+                if dev.get("gateway"):
+                    state.gateway = dev["gateway"]
+                    state.routes[0]["gw"] = dev["gateway"]
+            device_sessions[dev_id] = state
+            ifaces = {name: {'ip': info['ip'], 'prefix': info.get('prefix', 24)}
+                      for name, info in state.interfaces.items() if info.get('ip')}
+            icmp_engine.register_device(dev_id, state.hostname, ifaces)
+        return
+
+    try:
+        with open(SAVED_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[Config] ロードエラー: {e} — デフォルトで初期化")
+        for dev_id, dev in DEFAULT_DEVICES.items():
+            state = DeviceState(dev["type"], dev["hostname"])
+            device_sessions[dev_id] = state
+        return
+
+    for dev_id, dev_data in data.get("devices", {}).items():
+        state = DeviceState(dev_data["type"], dev_data["hostname"])
+        # インタフェースIPを復元
+        for ifname, iinfo in dev_data.get("interfaces", {}).items():
+            if ifname in state.interfaces:
+                state.interfaces[ifname].update({
+                    "ip":     iinfo.get("ip", ""),
+                    "prefix": iinfo.get("prefix", 24),
+                    "status": iinfo.get("status", "up"),
+                })
+            else:
+                state.interfaces[ifname] = iinfo
+        # PCのゲートウェイ・ルートを復元
+        if dev_data["type"] == "pc":
+            if dev_data.get("gateway"):
+                state.gateway = dev_data["gateway"]
+            if dev_data.get("routes"):
+                state.routes = dev_data["routes"]
+        device_sessions[dev_id] = state
+        ifaces = {name: {'ip': info.get('ip',''), 'prefix': info.get('prefix',24)}
+                  for name, info in state.interfaces.items() if info.get('ip')}
+        icmp_engine.register_device(dev_id, state.hostname, ifaces)
+
+    # リンクを復元
+    for link in data.get("links", []):
+        a, b = link.get("a"), link.get("b")
+        if a and b:
+            vnet.add_link(a, b)
+
+    print(f"[Config] 設定をロードしました: {len(data.get('devices',{}))} devices, "
+          f"{len(data.get('links',[]))} links")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global USE_OLLAMA
@@ -106,14 +203,8 @@ async def lifespan(app: FastAPI):
 ║   モード: {mode:<44}║
 ╚══════════════════════════════════════════════════════════╝
 """)
-    # デフォルトセッション初期化
-    for dev_id, dev in DEFAULT_DEVICES.items():
-        state = DeviceState(dev["type"], dev["hostname"])
-        device_sessions[dev_id] = state
-        # ICMPエンジンにIP登録
-        ifaces = {name: {'ip': info['ip'], 'prefix': info.get('prefix', 24)}
-                  for name, info in state.interfaces.items() if info.get('ip')}
-        icmp_engine.register_device(dev_id, state.hostname, ifaces)
+    # 保存済み設定をロード（なければデフォルト初期化）
+    _load_config()
     yield
 
 app = FastAPI(title="ネットワークラボ", lifespan=lifespan)
@@ -259,6 +350,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         hn = state.hostname
         if c == 'save':
             _apresia_log(device_id, apresia_msg.sys_config_saved())
+            _save_config()
         elif re.match(r'^config\s+ports\s+(\S+)\s+state\s+enable', c):
             m_p = re.match(r'^config\s+ports\s+(\S+)', c)
             if m_p:
@@ -291,6 +383,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                 via='console', src='console'))
             _cisco_log(device_id, cisco_msg._fmt('SYS', 5, 'CONFIG_I',
                 'Configuration saved to NVRAM'))
+            _save_config()
         # hostname変更
         elif re.match(r'^hostname\s+(\S+)', c):
             m_hn = re.match(r'^hostname\s+(\S+)', c)
@@ -353,6 +446,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         # saveコマンド
         elif c == 'save':
             _sir_log(device_id, 'SYSTEM', 'configuration saved by admin')
+            _save_config()
         # hostnameコマンド
         elif c.startswith('hostname ') or c.startswith('sysname '):
             _sir_log(device_id, 'SYSTEM', f'hostname changed to {orig.split(None,1)[1] if " " in orig else ""}')
@@ -2213,12 +2307,41 @@ def _format_ospf_route_sir(device_id: str) -> str:
 
 @app.post("/api/device")
 async def add_device(body: dict):
-    """装置を追加"""
+    """装置を追加。PCの場合は ip / prefix / gateway を指定可能"""
     dev_id   = body.get("id")
     dev_type = body.get("type", "cisco")
     hostname = body.get("hostname", dev_id)
     if dev_id and dev_id not in device_sessions:
-        device_sessions[dev_id] = DeviceState(dev_type, hostname)
+        state = DeviceState(dev_type, hostname)
+        # PCの場合、オプションパラメータでIP/GWを上書き
+        if dev_type == "pc":
+            ip      = body.get("ip")
+            prefix  = body.get("prefix", 24)
+            gateway = body.get("gateway")
+            if ip:
+                state.interfaces["eth0"]["ip"]     = ip
+                state.interfaces["eth0"]["prefix"] = int(prefix)
+                # ルーティングテーブルのdirectルートも更新
+                net_int = 0
+                try:
+                    o = [int(x) for x in ip.split('.')]
+                    ip_int = (o[0]<<24)|(o[1]<<16)|(o[2]<<8)|o[3]
+                    mask   = (0xffffffff << (32 - int(prefix))) & 0xffffffff
+                    net_int = ip_int & mask
+                except Exception:
+                    pass
+                net_str = (f'{(net_int>>24)&0xff}.{(net_int>>16)&0xff}.'
+                           f'{(net_int>>8)&0xff}.{net_int&0xff}/{prefix}')
+                state.routes = [r for r in state.routes if r['dest'] not in (
+                    state.routes[1]['dest'], '192.168.1.0/24')]
+                state.routes = [
+                    {"dest": "0.0.0.0/0", "gw": gateway or state.gateway, "iface": "eth0", "metric": 0},
+                    {"dest": net_str,      "gw": "0.0.0.0",               "iface": "eth0", "metric": 100},
+                    {"dest": "127.0.0.0/8","gw": "0.0.0.0",              "iface": "lo",   "metric": 0},
+                ]
+            if gateway:
+                state.gateway = gateway
+        device_sessions[dev_id] = state
     if dev_id:
         _register_stub(dev_id)
         _register_icmp(dev_id)
@@ -2226,7 +2349,7 @@ async def add_device(body: dict):
 
 
 def _register_icmp(device_id: str):
-    """ICMPエンジンに装置のIP情報を登録"""
+    """ICMPエンジンに装置のIP情報を登録。PCはrib_engineにも経路登録"""
     state = device_sessions.get(device_id)
     if not state:
         return
@@ -2236,6 +2359,41 @@ def _register_icmp(device_id: str):
             interfaces[ifname] = {'ip': info['ip'],
                                   'prefix': info.get('prefix', 24)}
     icmp_engine.register_device(device_id, state.hostname, interfaces)
+    # PC: デフォルトゲートウェイと直結ネットワークをrib_engineに登録
+    if state.device_type == 'pc':
+        gw = getattr(state, 'gateway', '')
+        if gw:
+            rib_engine.add_static_route(device_id, state.hostname,
+                                        '0.0.0.0', 0, gw, 1)
+        for ifname, info in state.interfaces.items():
+            ip = info.get('ip', '')
+            prefix = info.get('prefix', 24)
+            if ip and ip != '127.0.0.1':
+                # 直結ネットワークをrib_engineに登録
+                try:
+                    octets = [int(x) for x in ip.split('.')]
+                    ip_int = (octets[0]<<24)|(octets[1]<<16)|(octets[2]<<8)|octets[3]
+                    mask = (0xffffffff << (32 - prefix)) & 0xffffffff
+                    net_int = ip_int & mask
+                    net = (f'{(net_int>>24)&0xff}.{(net_int>>16)&0xff}.'
+                           f'{(net_int>>8)&0xff}.{net_int&0xff}')
+                    rib_engine.add_static_route(device_id, state.hostname,
+                                                net, prefix, '0.0.0.0', 0)
+                except Exception:
+                    pass
+
+@app.post("/api/save")
+async def api_save():
+    """全デバイス設定をファイルに保存"""
+    _save_config()
+    return {"ok": True, "path": str(SAVED_CONFIG_PATH)}
+
+@app.post("/api/load")
+async def api_load():
+    """保存済み設定をロード（サーバー再起動不要）"""
+    device_sessions.clear()
+    _load_config()
+    return {"ok": True, "devices": list(device_sessions.keys())}
 
 @app.delete("/api/device/{dev_id}")
 async def remove_device(dev_id: str):

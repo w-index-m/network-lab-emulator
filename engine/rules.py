@@ -13,11 +13,39 @@ from datetime import datetime, timedelta
 # ══════════════════════════════════════════
 class DeviceState:
     def __init__(self, device_type: str, hostname: str):
-        self.device_type = device_type  # sir / srs / catalyst / cisco / apresia / nexus
+        self.device_type = device_type  # sir / srs / catalyst / cisco / apresia / nexus / pc
         self.hostname = hostname
         self.mode = "exec"              # exec / config / config-if / config-router / config-vlan / config-vpc-domain
         self.current_if = None
         self.startup_time = datetime.now() - timedelta(hours=random.randint(1,72))
+
+        # PC (Linux汎用エンドポイント)
+        if device_type == "pc":
+            self.interfaces = {
+                "eth0": {
+                    "ip": "192.168.1.10", "prefix": 24,
+                    "status": "up", "mac": "aa:bb:cc:dd:ee:01",
+                    "speed": "1000", "duplex": "full",
+                },
+                "lo": {
+                    "ip": "127.0.0.1", "prefix": 8,
+                    "status": "up", "mac": "00:00:00:00:00:00",
+                },
+            }
+            self.gateway = "192.168.1.1"
+            self.routes = [
+                {"dest": "0.0.0.0/0",       "gw": "192.168.1.1", "iface": "eth0", "metric": 0},
+                {"dest": "192.168.1.0/24",   "gw": "0.0.0.0",    "iface": "eth0", "metric": 100},
+                {"dest": "127.0.0.0/8",      "gw": "0.0.0.0",    "iface": "lo",   "metric": 0},
+            ]
+            self.arp_table = []
+            self.syslog_servers = []
+            self.snmp_hosts = []
+            self.snmp_community = []
+            self.snmp_location = ""
+            self.snmp_contact = ""
+            self.logging_level = "informational"
+            return
 
         # NX-OS (Nexus 9000)
         if device_type == "nexus":
@@ -463,6 +491,10 @@ class RuleEngine:
         error = self._validate_command(cmd, c, state)
         if error:
             return error
+
+        # PCはLinuxコマンド体系 → 専用ハンドラへ
+        if state.device_type == 'pc':
+            return self._pc_process(cmd, c, state)
 
         # APRESIAはOSコマンド体系が独自 → 専用ハンドラへ
         if state.device_type == 'apresia':
@@ -1472,6 +1504,208 @@ ntp server 192.168.1.1"""
             rtts = [round(random.uniform(1, 15), 3) for _ in range(3)]
             lines.append(f" {hop}  {ip} ({ip})  {rtts[0]} ms  {rtts[1]} ms  {rtts[2]} ms")
         return "\n".join(lines)
+
+    # ─── PC コマンドエンジン（Linux汎用エンドポイント）─────────
+    def _pc_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """PCのLinuxライクなコマンドを処理する"""
+
+        # ping / traceroute はapp.pyのhandle_icmpで処理されるが、
+        # ここでは到達前にフォールスルーしないよう念のためNoneを示す
+        # （実際は呼ばれない）
+
+        # hostname
+        if c == 'hostname':
+            return state.hostname
+
+        # uname
+        if c.startswith('uname'):
+            if '-a' in c:
+                return f'Linux {state.hostname} 5.15.0 #1 SMP x86_64 GNU/Linux'
+            return 'Linux'
+
+        # whoami / id
+        if c in ('whoami', 'id'):
+            return 'root' if c == 'whoami' else 'uid=0(root) gid=0(root) groups=0(root)'
+
+        # ifconfig
+        m_ifconfig = re.match(r'^ifconfig(?:\s+(\S+))?', c)
+        if m_ifconfig:
+            target = m_ifconfig.group(1)
+            return self._pc_ifconfig(state, target)
+
+        # ip addr / ip address
+        if re.match(r'^ip\s+addr(?:ess)?(?:\s+show)?', c) or c == 'ip a':
+            return self._pc_ip_addr(state)
+
+        # ip route / route / netstat -r
+        if re.match(r'^ip\s+route(?:\s+show)?', c) or c == 'ip r':
+            return self._pc_ip_route(state)
+        if re.match(r'^(?:route|netstat\s+-r)', c):
+            return self._pc_route_table(state)
+
+        # ip link
+        if re.match(r'^ip\s+link(?:\s+show)?', c) or c == 'ip l':
+            return self._pc_ip_link(state)
+
+        # arp -n
+        if re.match(r'^arp', c):
+            eth0 = state.interfaces.get('eth0', {})
+            gw = state.gateway
+            lines = ['Address                  HWtype  HWaddress           Flags Mask            Iface']
+            lines.append(f'{gw:<25}ether   aa:bb:cc:00:11:22   C                     eth0')
+            return '\n'.join(lines)
+
+        # cat /etc/hosts
+        if 'cat' in c and '/etc/hosts' in c:
+            return f'127.0.0.1   localhost\n127.0.1.1   {state.hostname}'
+
+        # cat /etc/resolv.conf
+        if 'cat' in c and 'resolv.conf' in c:
+            return 'nameserver 8.8.8.8\nnameserver 1.1.1.1'
+
+        # ss -tuln / netstat -tuln
+        if re.match(r'^(?:ss|netstat)\s+-', c):
+            return ('Netid  State   Recv-Q  Send-Q  Local Address:Port  Peer Address:Port\n'
+                    'tcp    LISTEN  0       128     0.0.0.0:22          0.0.0.0:*')
+
+        # ps aux / ps
+        if re.match(r'^ps', c):
+            return (f'  PID TTY          TIME CMD\n'
+                    f'    1 ?        00:00:01 init\n'
+                    f'  100 ?        00:00:00 sshd\n'
+                    f'  200 pts/0    00:00:00 bash\n'
+                    f'  201 pts/0    00:00:00 ps')
+
+        # uptime
+        if c == 'uptime':
+            delta = datetime.now() - state.startup_time
+            h = int(delta.total_seconds() // 3600)
+            return f' {datetime.now().strftime("%H:%M:%S")} up {h}:00,  1 user,  load average: 0.00, 0.00, 0.00'
+
+        # date
+        if c == 'date':
+            return datetime.now().strftime('%a %b %d %H:%M:%S JST %Y')
+
+        # clear
+        if c in ('clear', 'cls'):
+            return '\x0c'
+
+        # help / ?
+        if c in ('help', '?', 'man'):
+            return (
+                'Available commands:\n'
+                '  ifconfig / ip addr      -- ネットワークインタフェース表示\n'
+                '  ip route / route        -- ルーティングテーブル表示\n'
+                '  ip link                 -- リンク状態表示\n'
+                '  ping <IP>               -- 到達性確認\n'
+                '  traceroute <IP>         -- 経路トレース\n'
+                '  arp -n                  -- ARPテーブル表示\n'
+                '  hostname                -- ホスト名表示\n'
+                '  uname -a                -- OS情報表示\n'
+                '  uptime                  -- 稼働時間表示\n'
+                '  ps                      -- プロセス一覧\n'
+                '  ss -tuln                -- ソケット一覧\n'
+            )
+
+        # 不明コマンド
+        prog = cmd.split()[0] if cmd.split() else cmd
+        return f'-bash: {prog}: command not found'
+
+    def _pc_ifconfig(self, state: DeviceState, target: str = None) -> str:
+        lines = []
+        for ifname, info in state.interfaces.items():
+            if target and ifname != target:
+                continue
+            ip = info.get('ip', '')
+            prefix = info.get('prefix', 24)
+            mac = info.get('mac', '00:00:00:00:00:00')
+            status = info.get('status', 'up')
+            flags = 'UP,BROADCAST,RUNNING,MULTICAST' if status == 'up' else 'DOWN'
+            if ifname == 'lo':
+                flags = 'UP,LOOPBACK,RUNNING'
+            # サブネットマスク計算
+            mask_int = (0xffffffff << (32 - prefix)) & 0xffffffff
+            mask = f'{(mask_int>>24)&0xff}.{(mask_int>>16)&0xff}.{(mask_int>>8)&0xff}.{mask_int&0xff}'
+            lines.append(f'{ifname}: flags={flags}  mtu 1500')
+            if ip:
+                lines.append(f'        inet {ip}  netmask {mask}  broadcast {self._broadcast(ip, prefix)}')
+            lines.append(f'        ether {mac}  txqueuelen 1000  (Ethernet)')
+            lines.append(f'        RX packets 1234  bytes 567890 (567.8 KB)')
+            lines.append(f'        TX packets 456   bytes 123456 (123.4 KB)')
+            lines.append('')
+        return '\n'.join(lines).rstrip()
+
+    def _pc_ip_addr(self, state: DeviceState) -> str:
+        lines = []
+        idx = 1
+        for ifname, info in state.interfaces.items():
+            ip = info.get('ip', '')
+            prefix = info.get('prefix', 24)
+            mac = info.get('mac', '00:00:00:00:00:00')
+            status = info.get('status', 'up')
+            state_str = 'UP' if status == 'up' else 'DOWN'
+            flags = 'LOOPBACK,UP,LOWER_UP' if ifname == 'lo' else f'BROADCAST,MULTICAST,{state_str},LOWER_UP'
+            lines.append(f'{idx}: {ifname}: <{flags}> mtu 1500 qdisc pfifo_fast state {state_str}')
+            lines.append(f'    link/ether {mac} brd ff:ff:ff:ff:ff:ff')
+            if ip:
+                bcast = self._broadcast(ip, prefix)
+                lines.append(f'    inet {ip}/{prefix} brd {bcast} scope global {ifname}')
+                lines.append(f'       valid_lft forever preferred_lft forever')
+            idx += 1
+        return '\n'.join(lines)
+
+    def _pc_ip_route(self, state: DeviceState) -> str:
+        lines = []
+        for r in state.routes:
+            dest = r['dest']
+            gw = r['gw']
+            iface = r['iface']
+            metric = r.get('metric', 0)
+            if dest == '0.0.0.0/0':
+                lines.append(f'default via {gw} dev {iface} proto static metric {metric}')
+            elif gw == '0.0.0.0':
+                lines.append(f'{dest} dev {iface} proto kernel scope link src {state.interfaces.get(iface,{}).get("ip","?")} metric {metric}')
+            else:
+                lines.append(f'{dest} via {gw} dev {iface} metric {metric}')
+        return '\n'.join(lines)
+
+    def _pc_route_table(self, state: DeviceState) -> str:
+        lines = ['Kernel IP routing table',
+                 'Destination     Gateway         Genmask         Flags Metric Ref    Use Iface']
+        for r in state.routes:
+            dest_net = r['dest'].split('/')[0]
+            prefix = int(r['dest'].split('/')[1]) if '/' in r['dest'] else 0
+            mask_int = (0xffffffff << (32 - prefix)) & 0xffffffff if prefix else 0
+            mask = f'{(mask_int>>24)&0xff}.{(mask_int>>16)&0xff}.{(mask_int>>8)&0xff}.{mask_int&0xff}'
+            gw = r['gw'] if r['gw'] != '0.0.0.0' else '0.0.0.0'
+            flag = 'UG' if r['gw'] != '0.0.0.0' else 'U'
+            dest_disp = '0.0.0.0' if r['dest'] == '0.0.0.0/0' else dest_net
+            lines.append(f'{dest_disp:<16}{gw:<16}{mask:<16}{flag}     {r.get("metric",0):<7}0      0 {r["iface"]}')
+        return '\n'.join(lines)
+
+    def _pc_ip_link(self, state: DeviceState) -> str:
+        lines = []
+        idx = 1
+        for ifname, info in state.interfaces.items():
+            mac = info.get('mac', '00:00:00:00:00:00')
+            status = info.get('status', 'up')
+            state_str = 'UP' if status == 'up' else 'DOWN'
+            flags = 'LOOPBACK,UP,LOWER_UP' if ifname == 'lo' else f'BROADCAST,MULTICAST,{state_str},LOWER_UP'
+            lines.append(f'{idx}: {ifname}: <{flags}> mtu 1500 qdisc pfifo_fast state {state_str} mode DEFAULT group default')
+            lines.append(f'    link/ether {mac} brd ff:ff:ff:ff:ff:ff')
+            idx += 1
+        return '\n'.join(lines)
+
+    @staticmethod
+    def _broadcast(ip: str, prefix: int) -> str:
+        try:
+            octets = [int(x) for x in ip.split('.')]
+            ip_int = (octets[0]<<24)|(octets[1]<<16)|(octets[2]<<8)|octets[3]
+            mask = (0xffffffff << (32 - prefix)) & 0xffffffff
+            bcast_int = (ip_int & mask) | (~mask & 0xffffffff)
+            return f'{(bcast_int>>24)&0xff}.{(bcast_int>>16)&0xff}.{(bcast_int>>8)&0xff}.{bcast_int&0xff}'
+        except Exception:
+            return '255.255.255.255'
 
     # ─── APRESIA コマンドエンジン（ApresiaLightGM200マニュアル準拠）─
     def _apresia_process(self, cmd: str, c: str, state: DeviceState) -> str:
