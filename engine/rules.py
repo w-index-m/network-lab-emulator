@@ -3220,7 +3220,7 @@ Key Version         : A
             p_lo  = int(m_range.group(3))
             p_hi  = int(m_range.group(4))
             lines = []
-            for port in range(p_lo, min(p_hi + 1, p_lo + 20)):
+            for port in range(p_lo, p_hi + 1):
                 rtt = round(random.uniform(0.3, 5.0), 2)
                 lines.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
             return "\n".join(lines) if lines else f"nc: connect to {host} port {p_lo} failed"
