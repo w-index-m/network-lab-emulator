@@ -69,6 +69,12 @@ def _parse_cisco(config_text: str, state, rule_engine) -> dict:
 
     lines = config_text.splitlines()
 
+    # デフォルトのインターフェースIPをクリア（インポート前の残留を防ぐ）
+    for ifname in list(state.interfaces.keys()):
+        state.interfaces[ifname]['ip'] = ''
+        state.interfaces[ifname]['prefix'] = 0
+        state.interfaces[ifname]['status'] = 'down'
+
     # まず enable + configure terminal でコンフィグモードへ
     rule_engine.process('enable', state)
     rule_engine.process('configure terminal', state)
