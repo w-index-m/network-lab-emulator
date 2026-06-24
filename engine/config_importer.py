@@ -17,6 +17,37 @@ _ASCII_PRINTABLE_RE = re.compile(r'^[\x20-\x7e\t]*$')
 # IPアドレスとして有効なパターン
 _IP_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
 
+# IPアドレスパターンを行から抽出するための正規表現
+_IP_PATTERN_RE = re.compile(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b')
+
+
+def _is_valid_ip(ip: str) -> bool:
+    """IPv4アドレスの妥当性チェック（各オクテット0-255、4オクテット必須）"""
+    try:
+        parts = ip.split('.')
+        return len(parts) == 4 and all(0 <= int(p) <= 255 for p in parts)
+    except (ValueError, AttributeError):
+        return False
+
+
+def _has_invalid_ip(line: str) -> tuple:
+    """
+    行にIPアドレスパターンがあればバリデーション。
+    不正なIPがあれば (True, 説明文字列) を返す。
+    正常なら (False, '') を返す。
+    パスワード・キーワードが含まれる行（isakmp key など）は検査をスキップ。
+    """
+    # パスワード行はIPチェック対象外（キーにドット区切り数字が含まれることがある）
+    stripped = line.strip()
+    if re.match(r'^\s*(password|secret|key|enable\s+secret|username\s+\S+\s+(?:password|secret))', stripped, re.IGNORECASE):
+        return False, ''
+
+    found = _IP_PATTERN_RE.findall(line)
+    for ip in found:
+        if not _is_valid_ip(ip):
+            return True, f"invalid IP address '{ip}'"
+    return False, ''
+
 
 def _sanitize_line(line: str) -> str | None:
     """
@@ -143,6 +174,13 @@ def _parse_cisco(config_text: str, state, rule_engine) -> dict:
         if _has_masked_secret(stripped):
             errors.append(f"SKIP masked secret: {stripped[:60]}")
             logger.debug("skipped masked line: %s", stripped)
+            continue
+
+        # IPアドレスバリデーション：不正なIPを含む行はスキップ
+        has_bad_ip, bad_ip_desc = _has_invalid_ip(stripped)
+        if has_bad_ip:
+            errors.append(f"SKIP {bad_ip_desc}: {stripped[:60]}")
+            logger.debug("skipped line with invalid IP: %s", stripped)
             continue
 
         is_indented = raw and raw[0] in (' ', '\t')
