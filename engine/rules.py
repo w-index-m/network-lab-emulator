@@ -8,6 +8,10 @@ import time
 import random
 from datetime import datetime, timedelta
 
+def _prefix_to_mask(prefix: int) -> str:
+    bits = (0xffffffff >> (32 - prefix)) << (32 - prefix)
+    return '.'.join(str((bits >> (8 * i)) & 0xff) for i in reversed(range(4)))
+
 # ══════════════════════════════════════════
 # デバイス状態（セッション単位で保持）
 # ══════════════════════════════════════════
@@ -821,6 +825,10 @@ class RuleEngine:
         # ── Cisco IOS: show crypto ──
         if state.device_type in ('cisco', 'catalyst') and re.match(r'^show\s+crypto', c):
             return self._ios_show_crypto(cmd, c, state)
+
+        # ── show tunnel-header / トンネルヘッダー付加エミュレーション ──
+        if re.match(r'^show\s+tunnel[-\s]?header', c):
+            return self._show_tunnel_header(cmd, state)
 
         # ── show processes cpu ──
         if re.match(r'^show\s+(processes\s+cpu|cpu)', c):
@@ -1774,6 +1782,65 @@ Configuration Revision            : 5"""
                 "ntp server 192.168.1.1",
             ]
             return "\n".join(lines)
+        elif state.device_type in ("cisco", "catalyst"):
+            lines = [f"hostname {state.hostname}", "!", "version 17.9", "!"]
+            # インタフェース
+            for ifname, ifdata in state.interfaces.items():
+                ip = ifdata.get('ip', '')
+                prefix = ifdata.get('prefix', 0)
+                status = ifdata.get('status', 'down')
+                if not ip and status == 'down':
+                    continue
+                mask = _prefix_to_mask(prefix) if prefix else '255.255.255.0'
+                lines.append(f"interface {ifname}")
+                if ip:
+                    lines.append(f" ip address {ip} {mask}")
+                if status == 'up':
+                    lines.append(" no shutdown")
+                else:
+                    lines.append(" shutdown")
+                lines.append("!")
+            lines.append("ip routing")
+            lines.append("!")
+            # IPsec/IKE crypto
+            crypto = getattr(state, 'ipsec_crypto', {})
+            if crypto:
+                for num, pol in sorted(crypto.get('isakmp_policies', {}).items()):
+                    lines.append(f"crypto isakmp policy {num}")
+                    lines.append(f" authentication {pol.get('authentication','pre-share')}")
+                    enc = pol.get('encryption', 'aes 256')
+                    lines.append(f" encryption {enc}")
+                    lines.append(f" hash {pol.get('hash','sha256')}")
+                    lines.append(f" group {pol.get('group',14)}")
+                    lines.append(f" lifetime {pol.get('lifetime',86400)}")
+                    lines.append("!")
+                for peer, key in crypto.get('isakmp_keys', {}).items():
+                    lines.append(f"crypto isakmp key **** address {peer}")
+                lines.append("!")
+                for ts_name, ts in crypto.get('transform_sets', {}).items():
+                    transforms = ' '.join(ts.get('transforms', []))
+                    lines.append(f"crypto ipsec transform-set {ts_name} {transforms}")
+                    lines.append(" mode tunnel")
+                lines.append("!")
+                for mapname, seqs in crypto.get('crypto_maps', {}).items():
+                    for seq, entry in sorted(seqs.items()):
+                        if entry.get('acl'):
+                            lines.append(f"crypto map {mapname} {seq} ipsec-isakmp")
+                            lines.append(f" match address {entry['acl']}")
+                            if entry.get('peer'):
+                                lines.append(f" set peer {entry['peer']}")
+                            if entry.get('transform_set'):
+                                lines.append(f" set transform-set {entry['transform_set']}")
+                            lines.append("!")
+                cm_if = crypto.get('crypto_map_interface', {})
+                if cm_if:
+                    lines.append(f"crypto map {cm_if['name']} interface {cm_if['interface']}")
+                ike_if = crypto.get('isakmp_enabled', '')
+                if ike_if:
+                    lines.append(f"crypto isakmp enable {ike_if}")
+                lines.append("!")
+            lines.append("end")
+            return "\n".join(lines)
         else:
             lines = [f"hostname {state.hostname}", "!", "version 17.9", "!"]
             for vid, v in state.vlans.items():
@@ -2079,6 +2146,120 @@ Configuration Revision            : 5"""
             f"--- {dest} ping statistics ---",
             f"5 packets transmitted, 5 packets received, 0% packet loss",
             f"round-trip min/avg/max = {min(rtt)}/{round(sum(rtt)/len(rtt),3)}/{max(rtt)} ms"]
+        return "\n".join(lines)
+
+    # ─── トンネルヘッダー付加エミュレーション ──────────────────
+    def _show_tunnel_header(self, cmd, state):
+        """
+        IPsec トンネルモードのパケットヘッダー付加をシミュレート表示。
+        'show tunnel-header <src-ip> <dst-ip>' コマンドに対応。
+        Si-R / Cisco IOS 共通。
+        """
+        m = re.match(r'^show\s+tunnel[-\s]?header\s+([\d.]+)\s+([\d.]+)', cmd, re.I)
+        if not m:
+            return ("Usage: show tunnel-header <src-ip> <dst-ip>\n"
+                    "  Example: show tunnel-header 192.168.1.10 10.10.0.20")
+
+        orig_src = m.group(1)
+        orig_dst = m.group(2)
+
+        # アクティブなトンネルを探す
+        tunnel_local  = None
+        tunnel_remote = None
+        spi_out       = None
+        enc_alg       = "AES-256"
+        protocol      = "ESP"
+
+        if state.device_type in ('sir', 'srs'):
+            for tid, t in getattr(state, 'ipsec_tunnels', {}).items():
+                if t.get('status') == 'established':
+                    tunnel_local  = t.get('local_ip',  '203.0.113.1')
+                    tunnel_remote = t.get('remote_ip', '203.0.113.2')
+                    spi_out       = t.get('spi_out',   '0x00000001')
+                    enc_alg = t.get('encryption', 'aes256').upper().replace('AES256', 'AES-256')
+                    break
+        elif state.device_type in ('cisco', 'catalyst'):
+            crypto = getattr(state, 'ipsec_crypto', {})
+            peers  = getattr(state, 'ipsec_peers',  {})
+            for peer_ip, p in peers.items():
+                if p.get('status') == 'established':
+                    tunnel_remote = peer_ip
+                    spi_out = p.get('spi_out', '0x00000001')
+                    # WAN IP を探す
+                    for _, ifd in state.interfaces.items():
+                        if ifd.get('ip') and ifd['ip'] != '127.0.0.1':
+                            tunnel_local = ifd['ip']
+                            break
+                    # transform-set から暗号アルゴリズム取得
+                    ts_map = crypto.get('transform_sets', {})
+                    ts = next(iter(ts_map.values()), {}) if ts_map else {}
+                    tfs = ts.get('transforms', [])
+                    if 'esp-aes-256' in tfs or 'esp-aes256' in tfs:
+                        enc_alg = 'AES-256'
+                    elif 'esp-3des' in tfs:
+                        enc_alg = '3DES'
+                    else:
+                        enc_alg = 'AES-128'
+                    break
+
+        if not tunnel_local or not tunnel_remote:
+            return ("% No established IPsec tunnel found.\n"
+                    "  Run 'show ipsec sa' or 'show crypto ipsec sa' to check tunnel status.")
+
+        orig_size   = 60   # ICMP echo (IP 20 + ICMP 8 + data 32)
+        esp_hdr     = 8    # SPI(4) + Seq(4)
+        esp_trl     = 22   # Pad + PadLen + NextHdr + ICV(16 for AES-256)
+        tunnel_hdr  = 20   # outer IP header
+        total_size  = orig_size + esp_hdr + esp_trl + tunnel_hdr
+
+        lines = [
+            "",
+            "IPsec Tunnel Mode - Packet Header Encapsulation",
+            "=" * 56,
+            "",
+            "Original (Inner) Packet:",
+            f"  +---------------------------+---------------------------+",
+            f"  | IP Header (20 bytes)      | Payload                   |",
+            f"  | Src: {orig_src:<18} |                           |",
+            f"  | Dst: {orig_dst:<18} | ICMP / TCP / UDP          |",
+            f"  | Proto: ICMP               | ({orig_size - 20} bytes)                 |",
+            f"  +---------------------------+---------------------------+",
+            f"  Total: {orig_size} bytes",
+            "",
+            "After IPsec ESP Encapsulation (Tunnel Mode):",
+            f"  +---------------+-------+---------------------------+-------+",
+            f"  | Outer IP Hdr  | ESP   | Encrypted Payload         | ESP   |",
+            f"  | (20 bytes)    | Header| (Inner IP + Data)         | Trail |",
+            f"  | Src: {tunnel_local:<9} | ({esp_hdr}B)  | Alg: {enc_alg:<20} | ({esp_trl}B) |",
+            f"  | Dst: {tunnel_remote:<9} | SPI:  | Original {orig_size} bytes         |       |",
+            f"  | Proto: ESP    | {spi_out} |                           |       |",
+            f"  +---------------+-------+---------------------------+-------+",
+            f"  Total: {total_size} bytes  (overhead: +{total_size - orig_size} bytes)",
+            "",
+            "Header Details:",
+            f"  [Outer IP Header]",
+            f"    Version  : 4",
+            f"    IHL      : 20 bytes",
+            f"    Protocol : 50 (ESP)",
+            f"    Src      : {tunnel_local}",
+            f"    Dst      : {tunnel_remote}",
+            "",
+            f"  [ESP Header]",
+            f"    SPI      : {spi_out}",
+            f"    Seq No   : 0x00000001",
+            "",
+            f"  [Encrypted Payload]",
+            f"    Algorithm: {enc_alg} (CBC)",
+            f"    Content  : [Original IP Header + {protocol} Data] (encrypted)",
+            "",
+            f"  [ESP Trailer]",
+            f"    Padding  : variable",
+            f"    Next Hdr : 4 (IPv4)",
+            f"    ICV      : 16 bytes (HMAC-SHA256)",
+            "",
+            f"Tunnel: {tunnel_local} --> {tunnel_remote}",
+            f"Status: ACTIVE  SPI(out)={spi_out}  Encr={enc_alg}",
+        ]
         return "\n".join(lines)
 
     # ─── traceroute ───────────────────────────
