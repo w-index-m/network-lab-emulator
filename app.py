@@ -357,6 +357,12 @@ async def cli_command(body: dict):
     # ルールベースで処理
     output = rule_engine.process(command, state)
 
+    # IPアドレス・ルート変更があればicmp_engineに再登録
+    c_low = command.lower().strip()
+    if re.search(r'ip\s+address|ip\s+route|remote\s+\d+\s+ip\s+route|'
+                 r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address', c_low):
+        _register_icmp(device_id)
+
     # ルールで空応答かつOllamaあり → Ollamaで補完
     if USE_OLLAMA and output == "" and command.strip():
         system = build_system_prompt(state)
@@ -2434,7 +2440,7 @@ async def add_device(body: dict):
 
 
 def _register_icmp(device_id: str):
-    """ICMPエンジンに装置のIP情報を登録。PCはrib_engineにも経路登録"""
+    """ICMPエンジンに装置のIP情報を登録。全デバイスで直結ネット・静的ルートをrib_engineに登録"""
     state = device_sessions.get(device_id)
     if not state:
         return
@@ -2444,28 +2450,43 @@ def _register_icmp(device_id: str):
             interfaces[ifname] = {'ip': info['ip'],
                                   'prefix': info.get('prefix', 24)}
     icmp_engine.register_device(device_id, state.hostname, interfaces)
-    # PC: デフォルトゲートウェイと直結ネットワークをrib_engineに登録
+
+    def _net_addr(ip, prefix):
+        try:
+            octets = [int(x) for x in ip.split('.')]
+            ip_int = (octets[0]<<24)|(octets[1]<<16)|(octets[2]<<8)|octets[3]
+            mask_bits = (0xffffffff << (32 - prefix)) & 0xffffffff
+            net_int = ip_int & mask_bits
+            return (f'{(net_int>>24)&0xff}.{(net_int>>16)&0xff}.'
+                    f'{(net_int>>8)&0xff}.{net_int&0xff}')
+        except Exception:
+            return None
+
+    # 全デバイス: インタフェース直結ネットワークをrib_engineに登録
+    for ifname, info in state.interfaces.items():
+        ip = info.get('ip', '')
+        prefix = info.get('prefix', 24)
+        if ip and ip != '127.0.0.1':
+            net = _net_addr(ip, prefix)
+            if net:
+                rib_engine.add_static_route(device_id, state.hostname,
+                                            net, prefix, '0.0.0.0', 0)
+
+    # PC: デフォルトゲートウェイをrib_engineに登録
     if state.device_type == 'pc':
         gw = getattr(state, 'gateway', '')
         if gw:
             rib_engine.add_static_route(device_id, state.hostname,
                                         '0.0.0.0', 0, gw, 1)
-        for ifname, info in state.interfaces.items():
-            ip = info.get('ip', '')
-            prefix = info.get('prefix', 24)
-            if ip and ip != '127.0.0.1':
-                # 直結ネットワークをrib_engineに登録
-                try:
-                    octets = [int(x) for x in ip.split('.')]
-                    ip_int = (octets[0]<<24)|(octets[1]<<16)|(octets[2]<<8)|octets[3]
-                    mask = (0xffffffff << (32 - prefix)) & 0xffffffff
-                    net_int = ip_int & mask
-                    net = (f'{(net_int>>24)&0xff}.{(net_int>>16)&0xff}.'
-                           f'{(net_int>>8)&0xff}.{net_int&0xff}')
-                    rib_engine.add_static_route(device_id, state.hostname,
-                                                net, prefix, '0.0.0.0', 0)
-                except Exception:
-                    pass
+
+    # ルーター系: 静的ルート（remote N ip route / ip route）をrib_engineに登録
+    for route in getattr(state, 'static_routes', []):
+        dest   = route.get('dest', '')
+        prefix = route.get('prefix', 0)
+        gw     = route.get('gw', '0.0.0.0')
+        if dest:
+            rib_engine.add_static_route(device_id, state.hostname,
+                                        dest, prefix, gw, 1)
 
 @app.post("/api/save")
 async def api_save():

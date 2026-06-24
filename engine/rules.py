@@ -228,11 +228,13 @@ class DeviceState:
             self.ipsec_proposals = {}
             self.ipsec_enabled   = False
             self.ike_enabled     = False
+            self.static_routes   = []  # [{"dest","prefix","gw"}]
 
         # Cisco IOS IPsec 状態（ASA は上で初期化済み）
         if device_type in ("cisco", "catalyst"):
             self.ipsec_crypto = {}   # isakmp_policies / transform_sets / crypto_maps / isakmp_keys / isakmp_enabled
             self.ipsec_peers  = {}   # {peer_ip: {status, phase1, phase2, spi_in, spi_out, ...}}
+            self.static_routes = []  # [{"dest","prefix","gw"}]
 
     def uptime_str(self):
         delta = datetime.now() - self.startup_time
@@ -2030,9 +2032,27 @@ Configuration Revision            : 5"""
             return ""
 
         # remote 1 ip route <dst>/<prefix> <gw> metric <n>
-        m_remote_route = re.match(r'^remote\s+(\d+)\s+ip\s+route\s+([\d.]+)/(\d+)', c)
+        m_remote_route = re.match(r'^remote\s+\d+\s+ip\s+route\s+([\d.]+)/(\d+)(?:\s+([\d.]+))?', c)
         if m_remote_route and state.device_type in ('sir', 'srs'):
-            return ""  # ルーティング設定は受け入れ
+            dest   = m_remote_route.group(1)
+            prefix = int(m_remote_route.group(2))
+            gw     = m_remote_route.group(3) or '0.0.0.0'
+            entry  = {'dest': dest, 'prefix': prefix, 'gw': gw}
+            if entry not in state.static_routes:
+                state.static_routes.append(entry)
+            return ""
+
+        # ip route <dst> <mask> <gw>  (Si-R / Cisco IOS 共通)
+        m_ip_route = re.match(r'^ip\s+route\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)', c)
+        if m_ip_route and state.device_type in ('sir', 'srs', 'cisco', 'catalyst'):
+            dest = m_ip_route.group(1)
+            mask = m_ip_route.group(2)
+            gw   = m_ip_route.group(3)
+            prefix = sum(bin(int(o)).count('1') for o in mask.split('.'))
+            entry = {'dest': dest, 'prefix': prefix, 'gw': gw}
+            if entry not in getattr(state, 'static_routes', []):
+                state.static_routes.append(entry)
+            return ""
 
         # ipsec use on (グローバル有効化)
         if re.match(r'^ipsec\s+use\s+on', c) and state.device_type in ('sir', 'srs'):
