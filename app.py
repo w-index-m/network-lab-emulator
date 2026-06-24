@@ -113,9 +113,16 @@ def _save_config():
                 "prefix": info.get("prefix", 24),
                 "status": info.get("status", "up"),
             }
+        # ルートテーブルを保存（全デバイス共通）
+        routes = getattr(state, "routes", [])
+        if routes:
+            dev_data["routes"] = routes
         if state.device_type == "pc":
             dev_data["gateway"] = getattr(state, "gateway", "")
-            dev_data["routes"]  = getattr(state, "routes", [])
+        # VLANを保存
+        vlans = getattr(state, "vlans", {})
+        if vlans:
+            dev_data["vlans"] = vlans
         data["devices"][dev_id] = dev_data
     # vnetリンク
     for a, neighbors in vnet.links.items():
@@ -128,6 +135,14 @@ def _save_config():
         print(f"[Config] 設定を保存しました: {SAVED_CONFIG_PATH}")
     except Exception as e:
         print(f"[Config] 保存エラー: {e}")
+
+
+async def _auto_save_loop():
+    """60秒ごとに設定を自動保存"""
+    while True:
+        await asyncio.sleep(60)
+        _save_config()
+        print("[Config] 自動保存完了")
 
 
 def _load_config():
@@ -170,12 +185,16 @@ def _load_config():
                 })
             else:
                 state.interfaces[ifname] = iinfo
-        # PCのゲートウェイ・ルートを復元
+        # ルートを復元（全デバイス共通）
+        if dev_data.get("routes"):
+            state.routes = dev_data["routes"]
+        # PCのゲートウェイを復元
         if dev_data["type"] == "pc":
             if dev_data.get("gateway"):
                 state.gateway = dev_data["gateway"]
-            if dev_data.get("routes"):
-                state.routes = dev_data["routes"]
+        # VLANを復元
+        if dev_data.get("vlans") and hasattr(state, "vlans"):
+            state.vlans = dev_data["vlans"]
         device_sessions[dev_id] = state
         ifaces = {name: {'ip': info.get('ip',''), 'prefix': info.get('prefix',24)}
                   for name, info in state.interfaces.items() if info.get('ip')}
@@ -206,7 +225,16 @@ async def lifespan(app: FastAPI):
 """)
     # 保存済み設定をロード（なければデフォルト初期化）
     _load_config()
+    # 定期自動保存タスク（60秒ごと）
+    auto_save_task = asyncio.create_task(_auto_save_loop())
     yield
+    auto_save_task.cancel()
+    try:
+        await auto_save_task
+    except asyncio.CancelledError:
+        pass
+    # シャットダウン時にも保存
+    _save_config()
 
 app = FastAPI(title="ネットワークラボ", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -2422,6 +2450,7 @@ async def add_link(body: dict):
     b = body.get("b")
     if a and b:
         vnet.add_link(a, b)
+        _save_config()
     return {"ok": True, "neighbors": {a: list(vnet.get_neighbors(a)),
                                        b: list(vnet.get_neighbors(b))}}
 
@@ -2432,6 +2461,7 @@ async def remove_link(body: dict):
     b = body.get("b")
     if a and b:
         vnet.remove_link(a, b)
+        _save_config()
     return {"ok": True}
 
 @app.post("/api/route/nexthop")
@@ -2466,6 +2496,7 @@ async def sync_links(body: dict):
     for dev_id in device_sessions:
         if dev_id not in vnet.ws_send_callbacks:
             _register_stub(dev_id)
+    _save_config()
     return {"ok": True, "count": len(links)}
 
 
