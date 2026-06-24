@@ -597,7 +597,7 @@ class RuleEngine:
             return self._cmd_show(cmd, state)
 
         # 設定コマンド
-        if state.mode in ("config", "config-if", "config-router", "config-vlan"):
+        if state.mode in ("config", "config-if", "config-router", "config-vlan", "config-crypto"):
             return self._cmd_config(cmd, state)
 
         # 運用コマンド
@@ -629,8 +629,12 @@ class RuleEngine:
     def _cmd_exit(self, cmd, state):
         if state.mode == "config-if":
             state.mode = "config"
-        elif state.mode in ("config-router", "config-vlan", "config-vpc-domain"):
+        elif state.mode in ("config-router", "config-vlan", "config-vpc-domain", "config-crypto"):
             state.mode = "config"
+            # Clear crypto sub-context pointers
+            for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq'):
+                if hasattr(state, attr):
+                    delattr(state, attr)
         elif state.mode == "config":
             state.mode = "exec"
         return ""
@@ -2074,6 +2078,7 @@ Configuration Revision            : 5"""
                     'encryption': 'aes-256', 'hash': 'sha256',
                     'authentication': 'pre-share', 'group': 14, 'lifetime': 86400,
                 }
+                state.mode = 'config-crypto'
                 return ''
 
             if hasattr(state, '_ike_policy_num'):
@@ -2099,7 +2104,43 @@ Configuration Revision            : 5"""
                 }
                 return ''
 
-            # crypto map <name> <seq> match address <acl>
+            # crypto map <name> <seq> ipsec-isakmp  (enter crypto map sub-context)
+            m_cmap_enter = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+ipsec-isakmp', c)
+            if m_cmap_enter:
+                mapname, seq = m_cmap_enter.group(1), int(m_cmap_enter.group(2))
+                state._cmap_name = mapname
+                state._cmap_seq = seq
+                state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {}).setdefault(seq, {})
+                state.mode = 'config-crypto'
+                return ''
+
+            # crypto map <name> <seq> match address <acl>  (sub-context or inline)
+            # Sub-context commands for crypto map (match address / set peer / set transform-set)
+            _in_cmap = hasattr(state, '_cmap_name') and hasattr(state, '_cmap_seq')
+            m_sub_match = re.match(r'^match\s+address\s+(\S+)', c)
+            if m_sub_match and _in_cmap:
+                acl = m_sub_match.group(1)
+                (state.ipsec_crypto.setdefault('crypto_maps', {})
+                 .setdefault(state._cmap_name, {})
+                 .setdefault(state._cmap_seq, {})['acl']) = acl
+                return ''
+            m_sub_peer = re.match(r'^set\s+peer\s+([\d.]+)', c)
+            if m_sub_peer and _in_cmap:
+                peer = m_sub_peer.group(1)
+                (state.ipsec_crypto.setdefault('crypto_maps', {})
+                 .setdefault(state._cmap_name, {})
+                 .setdefault(state._cmap_seq, {})['peer']) = peer
+                state.ipsec_peers.setdefault(peer, {})['remote_ip'] = peer
+                return ''
+            m_sub_ts = re.match(r'^set\s+transform-set\s+(\S+)', c)
+            if m_sub_ts and _in_cmap:
+                ts = m_sub_ts.group(1)
+                (state.ipsec_crypto.setdefault('crypto_maps', {})
+                 .setdefault(state._cmap_name, {})
+                 .setdefault(state._cmap_seq, {})['transform_set']) = ts
+                return ''
+
+            # crypto map <name> <seq> match address <acl>  (inline form)
             m_cmap_match = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+match\s+address\s+(\S+)', c)
             if m_cmap_match:
                 mapname, seq, acl = m_cmap_match.group(1), int(m_cmap_match.group(2)), m_cmap_match.group(3)
@@ -3219,12 +3260,43 @@ Key Version         : A
         m = re.match(r'^trace(?:route|path)\s+([\d.]+)', c)
         if not m:
             return "Usage: traceroute <destination>"
-        dest  = m.group(1)
-        gw    = state.gateway
+        dest = m.group(1)
         lines = [f"traceroute to {dest} ({dest}), 30 hops max, 60 byte packets"]
-        hops  = [(1, gw, round(random.uniform(0.5, 2.0), 3)),
-                 (2, "203.0.113.254", round(random.uniform(5, 15), 3)),
-                 (3, dest, round(random.uniform(8, 25), 3))]
+        # Use topology-aware icmp_engine when available
+        try:
+            from engine.protocols import icmp_engine as _icmp_engine
+            my_ip = self._pc_my_ip(state)
+            # Find device_id by matching this PC's IP
+            src_id = None
+            for dev_id, info in _icmp_engine.device_ips.items():
+                if my_ip in info.get('ips', {}):
+                    src_id = dev_id
+                    break
+            if src_id:
+                result = _icmp_engine.trace_path(src_id, dest)
+                hop_num = 1
+                hops_to_show = result['hops']
+                # Skip first hop if it's the source device itself
+                if hops_to_show and hops_to_show[0].get('device') == src_id:
+                    hops_to_show = hops_to_show[1:]
+                for hop in hops_to_show:
+                    if hop.get('timeout'):
+                        lines.append(f" {hop_num}  * * *  (no route)")
+                    else:
+                        rtts = [round(hop_num * random.uniform(0.5, 2.0) + random.uniform(0, 3), 3) for _ in range(3)]
+                        host = hop.get('hostname', hop.get('ip', '?'))
+                        ip = hop.get('ip', '?')
+                        lines.append(f" {hop_num}  {host} ({ip})  {rtts[0]} ms  {rtts[1]} ms  {rtts[2]} ms")
+                    hop_num += 1
+                if not result['reachable'] and not any(h.get('timeout') for h in hops_to_show):
+                    lines.append(f" {hop_num}  * * *  (destination unreachable)")
+                return "\n".join(lines)
+        except Exception:
+            pass
+        # Fallback: default gateway + dest
+        gw = state.gateway
+        hops = [(1, gw, round(random.uniform(0.5, 2.0), 3)),
+                (2, dest, round(random.uniform(8, 25), 3))]
         for n, ip, rtt in hops:
             r2, r3 = round(rtt + random.uniform(0, 1), 3), round(rtt + random.uniform(0, 1), 3)
             lines.append(f" {n}  {ip}  {rtt} ms  {r2} ms  {r3} ms")
