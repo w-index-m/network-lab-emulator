@@ -308,6 +308,85 @@ def _parse_sir(config_text: str, state, rule_engine) -> dict:
 # ──────────────────────────────────────────
 
 _MAX_CONFIG_BYTES = 512 * 1024  # 512KB上限
+_MAX_LINES = 10_000             # 行数上限
+
+
+def validate_config_text(config_text: str) -> dict:
+    """
+    コンフィグテキストの事前チェック。インポート前に呼び出して問題を検出する。
+
+    チェック項目:
+      1. 存在確認（空でないか）
+      2. 2バイト文字（日本語等）が含まれていないか
+      3. 行数が異常に多くないか（1万行超）
+      4. 不要なスペースのみの行が多くないか
+
+    Returns:
+        {
+          "ok": bool,           # 全チェック通過でTrue
+          "line_count": int,
+          "issues": [           # 問題点リスト（ok=Falseの場合に詳細）
+            {"level": "error"|"warn", "code": str, "message": str}
+          ]
+        }
+    """
+    issues = []
+
+    # 1. 存在確認
+    if not config_text or not config_text.strip():
+        return {
+            "ok": False,
+            "line_count": 0,
+            "issues": [{"level": "error", "code": "EMPTY",
+                        "message": "コンフィグが空です"}],
+        }
+
+    lines = config_text.splitlines()
+    line_count = len(lines)
+
+    # 2. 行数チェック（1万行超はエラー）
+    if line_count > _MAX_LINES:
+        issues.append({
+            "level": "error",
+            "code": "TOO_MANY_LINES",
+            "message": f"行数が多すぎます: {line_count} 行（上限 {_MAX_LINES} 行）",
+        })
+
+    # 3. 2バイト文字チェック（最初の5件を報告）
+    multibyte_lines = []
+    for lineno, line in enumerate(lines, 1):
+        try:
+            line.encode('ascii')
+        except UnicodeEncodeError:
+            # どの文字が非ASCIIか特定
+            bad_chars = [c for c in line if ord(c) > 0x7e]
+            sample = ''.join(dict.fromkeys(bad_chars))[:10]
+            multibyte_lines.append((lineno, sample))
+            if len(multibyte_lines) >= 5:
+                break
+    if multibyte_lines:
+        detail = ', '.join(f"行{ln}「{ch}」" for ln, ch in multibyte_lines)
+        issues.append({
+            "level": "error",
+            "code": "MULTIBYTE_CHARS",
+            "message": f"2バイト文字が含まれています: {detail}",
+            "lines": [ln for ln, _ in multibyte_lines],
+        })
+
+    # 4. 空白のみの行が全体の30%超なら警告（不要スペース・改行が多い）
+    blank_or_space_lines = sum(1 for l in lines if not l.strip())
+    if line_count > 0:
+        blank_ratio = blank_or_space_lines / line_count
+        if blank_ratio > 0.30:
+            issues.append({
+                "level": "warn",
+                "code": "EXCESSIVE_BLANK_LINES",
+                "message": (f"空白行が多すぎます: {blank_or_space_lines}/{line_count} 行"
+                            f"（{blank_ratio:.0%}）— 不要なスペース・改行が混入している可能性があります"),
+            })
+
+    ok = not any(i["level"] == "error" for i in issues)
+    return {"ok": ok, "line_count": line_count, "issues": issues}
 
 
 def import_running_config(dev_type: str, config_text: str, rule_engine, state) -> dict:
@@ -329,6 +408,13 @@ def import_running_config(dev_type: str, config_text: str, rule_engine, state) -
     if len(config_text.encode('utf-8', errors='replace')) > _MAX_CONFIG_BYTES:
         return {"ok": False, "commands_applied": 0,
                 "errors": [f"config too large (max {_MAX_CONFIG_BYTES // 1024}KB)"]}
+
+    # 事前バリデーション（存在確認・2バイト文字・行数）
+    pre = validate_config_text(config_text)
+    if not pre["ok"]:
+        msgs = [i["message"] for i in pre["issues"] if i["level"] == "error"]
+        return {"ok": False, "commands_applied": 0, "errors": msgs,
+                "validation": pre}
 
     if dev_type in ('sir', 'srs'):
         return _parse_sir(config_text, state, rule_engine)

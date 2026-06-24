@@ -34,7 +34,7 @@ from engine.protocols import (
 )
 from engine.syslog_sender import syslog_dispatcher, snmp_dispatcher, ntp_client
 from engine.ike_engine import negotiate_ipsec
-from engine.config_importer import import_running_config
+from engine.config_importer import import_running_config, validate_config_text
 
 # ══════════════════════════════════════════
 # 設定
@@ -2508,6 +2508,23 @@ async def remove_device(dev_id: str):
     if dev_id in device_sessions:
         del device_sessions[dev_id]
     return {"ok": True}
+
+@app.post("/api/config/validate")
+async def api_validate_config(body: dict):
+    """
+    コンフィグテキストの事前チェック（インポート前の検証）。
+    body: {"config": "<running-config text>"}
+
+    チェック項目:
+      - 存在確認（空でないか）
+      - 2バイト文字（日本語等）が含まれていないか
+      - 行数が1万行を超えていないか
+      - 空白行が30%超で不要スペースが多くないか
+    """
+    config_text = body.get("config", "")
+    result = validate_config_text(config_text)
+    return result
+
 
 @app.post("/api/device/{dev_id}/import")
 async def import_device_config(dev_id: str, body: dict):
