@@ -219,9 +219,11 @@ class DeviceState:
 
         # Si-R IPsec VPN 状態（Si-R/Si-R brin 系）
         if device_type in ("sir", "srs"):
-            self.ipsec_tunnels = {}   # {tunnel_num: {"peer","local_ip","remote_ip","preshared","status","phase1","phase2"}}
-            self.ike_policies  = {}   # {policy_num: {"encryption","hash","dh","lifetime"}}
-            self.ipsec_proposals = {} # {prop_name: {"esp","hash","pfs","lifetime"}}
+            self.ipsec_tunnels   = {}
+            self.ike_policies    = {}
+            self.ipsec_proposals = {}
+            self.ipsec_enabled   = False
+            self.ike_enabled     = False
 
     def uptime_str(self):
         delta = datetime.now() - self.startup_time
@@ -1480,34 +1482,81 @@ Configuration Revision            : 5"""
 
     # ─── show running-config ──────────────────
     def _show_running_config(self, state):
-        if state.device_type == "sir":
-            return f"""hostname {state.hostname}
-!
-password admin set ****
-!
-lan 0 ip address 192.168.1.1/24 1
-lan 0 ip dhcp service server
-lan 0 ip dhcp pool address 192.168.1.100 192.168.1.200
-lan 0 ip dhcp server dns 8.8.8.8 8.8.4.4
-lan 0 ip napt use use
-lan 0 vrrp use on
-lan 0 vrrp group 0 id 10 {state.vrrp['priority']} {state.vrrp['vip']}
-!
-wan 1 use use
-wan 1 bind ether 0
-wan 1 ppp auth send user@isp.ne.jp ****
-wan 1 ppp ipcp ipaddress on
-wan 1 ip route default metric 100
-!
-ip dns service use
-ip dns server 8.8.8.8 8.8.4.4
-ip rip use use
-ip rip network 192.168.1.0/24
-ip rip version 2
-!
-timezone +9
-ntp use use
-ntp server 192.168.1.1"""
+        if state.device_type in ("sir", "srs"):
+            lines = [
+                f"hostname {state.hostname}",
+                "!",
+                "password admin set ****",
+                "!",
+                "lan 0 ip address 192.168.1.1/24 1",
+                "lan 0 ip dhcp service server",
+                "lan 0 ip dhcp pool address 192.168.1.100 192.168.1.200",
+                "lan 0 ip dhcp server dns 8.8.8.8 8.8.4.4",
+                "lan 0 ip napt use use",
+                "lan 0 vrrp use on",
+                f"lan 0 vrrp group 0 id 10 {state.vrrp['priority']} {state.vrrp['vip']}",
+                "!",
+                "wan 1 use use",
+                "wan 1 bind ether 0",
+                "wan 1 ppp auth send user@isp.ne.jp ****",
+                "wan 1 ppp ipcp ipaddress on",
+                "wan 1 ip route default metric 100",
+                "!",
+                "ip dns service use",
+                "ip dns server 8.8.8.8 8.8.4.4",
+                "ip rip use use",
+                "ip rip network 192.168.1.0/24",
+                "ip rip version 2",
+                "!",
+            ]
+            # IPsec/IKE設定を動的に出力
+            tunnels = getattr(state, 'ipsec_tunnels', {})
+            ipsec_enabled = getattr(state, 'ipsec_enabled', False)
+            ike_enabled   = getattr(state, 'ike_enabled', False)
+            if tunnels:
+                for tid, t in sorted(tunnels.items()):
+                    rn, ap = tid if isinstance(tid, tuple) else (tid, 0)
+                    prefix = f"remote {rn} ap {ap}"
+                    if t.get('name'):
+                        lines.append(f"{prefix} name {t['name']}")
+                    if t.get('datalink'):
+                        lines.append(f"{prefix} datalink type {t['datalink']}")
+                    if t.get('ipsec_type'):
+                        lines.append(f"{prefix} ipsec type {t['ipsec_type']}")
+                    if t.get('local_ip'):
+                        lines.append(f"{prefix} tunnel local {t['local_ip']}")
+                    if t.get('remote_ip'):
+                        lines.append(f"{prefix} tunnel remote {t['remote_ip']}")
+                    if t.get('protocol'):
+                        lines.append(f"{prefix} ipsec protocol {t['protocol']}")
+                    enc = t.get('encryption', '')
+                    hsh = t.get('hash', '')
+                    if enc:
+                        lines.append(f"{prefix} ipsec encrypt {enc}{' ' + hsh if hsh else ''}")
+                    if t.get('pfs'):
+                        lines.append(f"{prefix} ipsec pfs use {t['pfs']}")
+                    if t.get('ike_mode'):
+                        lines.append(f"{prefix} ipsec ike mode {t['ike_mode']}")
+                    if t.get('dh_group'):
+                        lines.append(f"{prefix} ipsec ike dh {t['dh_group']}")
+                    if t.get('ike_lifetime'):
+                        lines.append(f"{prefix} ipsec ike lifetime {t['ike_lifetime']}")
+                    if t.get('sa_lifetime'):
+                        lines.append(f"{prefix} ipsec sa lifetime {t['sa_lifetime']}")
+                    if t.get('preshared'):
+                        lines.append(f"{prefix} ipsec ike preshared-key ****")
+                    lines.append("!")
+                if ipsec_enabled:
+                    lines.append("ipsec use on")
+                if ike_enabled:
+                    lines.append("ike use on")
+                lines.append("!")
+            lines += [
+                "timezone +9",
+                "ntp use use",
+                "ntp server 192.168.1.1",
+            ]
+            return "\n".join(lines)
         else:
             lines = [f"hostname {state.hostname}", "!", "version 17.9", "!"]
             for vid, v in state.vlans.items():
@@ -1598,11 +1647,12 @@ ntp server 192.168.1.1"""
             return ""
 
         # ── Si-R IPsec VPN コマンド ──
-        # remote 1 ap 0 name <name>
+        # remote 1 ap 0 name <name>  (名前は元のケースを保持)
         m_remote_name = re.match(r'^remote\s+(\d+)\s+ap\s+(\d+)\s+name\s+(\S+)', c)
         if m_remote_name and state.device_type in ('sir', 'srs'):
             tid = int(m_remote_name.group(1))
-            state.ipsec_tunnels.setdefault(tid, {})['name'] = m_remote_name.group(3)
+            m_orig = re.match(r'^remote\s+\d+\s+ap\s+\d+\s+name\s+(\S+)', cmd, re.I)
+            state.ipsec_tunnels.setdefault(tid, {})['name'] = m_orig.group(1) if m_orig else m_remote_name.group(3)
             return ""
 
         # remote 1 ap 0 datalink type ipsec
@@ -1702,10 +1752,12 @@ ntp server 192.168.1.1"""
 
         # ipsec use on (グローバル有効化)
         if re.match(r'^ipsec\s+use\s+on', c) and state.device_type in ('sir', 'srs'):
+            state.ipsec_enabled = True
             return ""
 
         # ike use on
         if re.match(r'^ike\s+use\s+on', c) and state.device_type in ('sir', 'srs'):
+            state.ike_enabled = True
             return ""
 
         # network

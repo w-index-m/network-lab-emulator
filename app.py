@@ -123,6 +123,13 @@ def _save_config():
         vlans = getattr(state, "vlans", {})
         if vlans:
             dev_data["vlans"] = vlans
+        # Si-R IPsec設定を保存
+        if state.device_type in ("sir", "srs"):
+            tunnels = getattr(state, "ipsec_tunnels", {})
+            if tunnels:
+                dev_data["ipsec_tunnels"]  = tunnels
+                dev_data["ipsec_enabled"]  = getattr(state, "ipsec_enabled", False)
+                dev_data["ike_enabled"]    = getattr(state, "ike_enabled", False)
         data["devices"][dev_id] = dev_data
     # vnetリンク
     for a, neighbors in vnet.links.items():
@@ -195,6 +202,11 @@ def _load_config():
         # VLANを復元
         if dev_data.get("vlans") and hasattr(state, "vlans"):
             state.vlans = dev_data["vlans"]
+        # Si-R IPsec設定を復元
+        if dev_data["type"] in ("sir", "srs") and dev_data.get("ipsec_tunnels"):
+            state.ipsec_tunnels = dev_data["ipsec_tunnels"]
+            state.ipsec_enabled = dev_data.get("ipsec_enabled", False)
+            state.ike_enabled   = dev_data.get("ike_enabled", False)
         device_sessions[dev_id] = state
         ifaces = {name: {'ip': info.get('ip',''), 'prefix': info.get('prefix',24)}
                   for name, info in state.interfaces.items() if info.get('ip')}
