@@ -225,6 +225,11 @@ class DeviceState:
             self.ipsec_enabled   = False
             self.ike_enabled     = False
 
+        # Cisco IOS IPsec 状態（ASA は上で初期化済み）
+        if device_type in ("cisco", "catalyst"):
+            self.ipsec_crypto = {}   # isakmp_policies / transform_sets / crypto_maps / isakmp_keys / isakmp_enabled
+            self.ipsec_peers  = {}   # {peer_ip: {status, phase1, phase2, spi_in, spi_out, ...}}
+
     def uptime_str(self):
         delta = datetime.now() - self.startup_time
         h = int(delta.total_seconds() // 3600)
@@ -812,6 +817,10 @@ class RuleEngine:
         # ── show logging ──
         if re.match(r'^show\s+logging', c):
             return self._show_logging(state)
+
+        # ── Cisco IOS: show crypto ──
+        if state.device_type in ('cisco', 'catalyst') and re.match(r'^show\s+crypto', c):
+            return self._ios_show_crypto(cmd, c, state)
 
         # ── show processes cpu ──
         if re.match(r'^show\s+(processes\s+cpu|cpu)', c):
@@ -1447,14 +1456,18 @@ Configuration Revision            : 5"""
             remote = t.get('remote_ip', '?.?.?.?')
             local  = t.get('local_ip',  '?.?.?.?')
             proto  = t.get('protocol', 'esp').upper()
+            phase2 = t.get('phase2', 'LARVAL')
             status = t.get('status', 'wait')
-            if status == 'established':
-                spi_in  = f'0x{abs(hash(remote+str(tid)))%0xffffffff:08x}'
-                spi_out = f'0x{abs(hash(local +str(tid)))%0xffffffff:08x}'
+            if status == 'established' and phase2 == 'MATURE':
+                spi_in  = t.get('spi_in',  f'0x{abs(hash(remote+str(tid)))%0xffffffff:08x}')
+                spi_out = t.get('spi_out', f'0x{abs(hash(local +str(tid)))%0xffffffff:08x}')
                 state_str = 'MATURE'
+            elif phase2 == 'DYING':
+                spi_in = spi_out = '-'
+                state_str = 'DYING'
             else:
                 spi_in = spi_out = '-'
-                state_str = 'LARVAL/wait'
+                state_str = 'LARVAL'
             lines.append(f'  {remote:<13}{local:<13}{proto:<10}{spi_in:<11}{spi_out:<11}{state_str}')
         return '\n'.join(lines)
 
@@ -1489,6 +1502,107 @@ Configuration Revision            : 5"""
             mode   = t.get('ike_mode', 'main')
             lines.append(f'  {remote:<17}{ph1:<9}{"yes":<11}{dh:<5}{lt_rem:<15}{mode}')
         return '\n'.join(lines)
+
+    # ─── Cisco IOS show crypto ────────────────
+    def _ios_show_crypto(self, cmd: str, c: str, state: DeviceState) -> str:
+        crypto = getattr(state, 'ipsec_crypto', {})
+        peers  = getattr(state, 'ipsec_peers',  {})
+
+        # show crypto isakmp sa
+        if re.match(r'^show\s+crypto\s+isakmp\s+sa', c):
+            estab = {ip: p for ip, p in peers.items() if p.get('phase1') == 'MATURE'}
+            if not estab:
+                return 'IPv4 Crypto ISAKMP SA\ndst             src             state          conn-id status\n(none)'
+            lines = ['IPv4 Crypto ISAKMP SA',
+                     'dst             src             state          conn-id status']
+            local_ip = next((i.get('ip','') for i in state.interfaces.values()
+                             if i.get('ip') and i.get('ip') != '127.0.0.1'), '-')
+            for peer_ip, p in estab.items():
+                lines.append(f'{peer_ip:<16}{local_ip:<16}QM_IDLE        {random.randint(1000,9999)} ACTIVE')
+            return '\n'.join(lines)
+
+        # show crypto ipsec sa
+        if re.match(r'^show\s+crypto\s+ipsec\s+sa', c):
+            estab = {ip: p for ip, p in peers.items() if p.get('phase2') == 'MATURE'}
+            if not estab:
+                return 'There are no ipsec sas.'
+            lines = []
+            local_ip = next((i.get('ip','') for i in state.interfaces.values()
+                             if i.get('ip') and i.get('ip') != '127.0.0.1'), '-')
+            for peer_ip, p in estab.items():
+                spi_in  = p.get('spi_in',  f'0x{random.randint(0,0xffffffff):08x}')
+                spi_out = p.get('spi_out', f'0x{random.randint(0,0xffffffff):08x}')
+                sa_rem  = p.get('sa_lifetime_remaining', 28800)
+                lines += [
+                    f'interface: GigabitEthernet0/0/0',
+                    f'    Crypto map tag: CMAP, local addr {local_ip}',
+                    f'',
+                    f'   local  ident (addr/mask/prot/port): (0.0.0.0/0.0.0.0/0/0)',
+                    f'   remote ident (addr/mask/prot/port): (0.0.0.0/0.0.0.0/0/0)',
+                    f'   current_peer {peer_ip} port 500',
+                    f'    PERMIT, flags={{origin_is_acl,}}',
+                    f'   #pkts encaps: {random.randint(100,9999)}, #pkts encrypt: {random.randint(100,9999)}, #pkts digest: {random.randint(100,9999)}',
+                    f'   #pkts decaps: {random.randint(100,9999)}, #pkts decrypt: {random.randint(100,9999)}, #pkts verify: {random.randint(100,9999)}',
+                    f'   #send errors 0, #recv errors 0',
+                    f'',
+                    f'     local crypto endpt.: {local_ip}, remote crypto endpt.: {peer_ip}',
+                    f'     path mtu 1500, ip mtu 1500',
+                    f'',
+                    f'    inbound esp sas:',
+                    f'     spi: {spi_in}()',
+                    f'      transform: esp-aes-256 esp-sha-hmac ,',
+                    f'      in use settings ={{Tunnel, }}',
+                    f'      sa timing: remaining key lifetime (k/sec): (4608000/{sa_rem})',
+                    f'      Status: ACTIVE(ACTIVE)',
+                    f'',
+                    f'    outbound esp sas:',
+                    f'     spi: {spi_out}()',
+                    f'      transform: esp-aes-256 esp-sha-hmac ,',
+                    f'      in use settings ={{Tunnel, }}',
+                    f'      sa timing: remaining key lifetime (k/sec): (4608000/{sa_rem})',
+                    f'      Status: ACTIVE(ACTIVE)',
+                    f'',
+                ]
+            return '\n'.join(lines)
+
+        # show crypto isakmp policy
+        if re.match(r'^show\s+crypto\s+isakmp\s+policy', c):
+            pols = crypto.get('isakmp_policies', {})
+            if not pols:
+                return 'Default IKE policy\n  authentication pre-share\n  encryption aes-256\n  hash sha256\n  Diffie-Hellman group 14\n  lifetime 86400 seconds'
+            lines = []
+            for num, pol in sorted(pols.items()):
+                lines += [
+                    f'IKE policy {num}:',
+                    f'  authentication {pol.get("authentication","pre-share")}',
+                    f'  encryption {pol.get("encryption","aes-256")}',
+                    f'  hash {pol.get("hash","sha256")}',
+                    f'  Diffie-Hellman group {pol.get("group",14)}',
+                    f'  lifetime {pol.get("lifetime",86400)} seconds, No volume limit',
+                    '',
+                ]
+            return '\n'.join(lines)
+
+        # show crypto map
+        if re.match(r'^show\s+crypto\s+map', c):
+            cmaps = crypto.get('crypto_maps', {})
+            if not cmaps:
+                return '% Crypto map not configured.'
+            lines = []
+            for mapname, seqs in cmaps.items():
+                for seq, entry in sorted(seqs.items()):
+                    lines += [
+                        f'Crypto Map "{mapname}" {seq} ipsec-isakmp',
+                        f'  Peer = {entry.get("peer","-")}',
+                        f'  Extended IP access list {entry.get("acl","-")}',
+                        f'  Security association lifetime: 4608000 kilobytes/28800 seconds',
+                        f'  Transform sets={{ {entry.get("transform_set","-")} }}',
+                        f'  Interfaces using crypto map {mapname}:',
+                        '',
+                    ]
+            return '\n'.join(lines)
+
+        return '% Incomplete crypto show command.'
 
     def _sir_show_ipsec_policy(self, state: DeviceState) -> str:
         tunnels = getattr(state, 'ipsec_tunnels', {})
@@ -1863,6 +1977,83 @@ Configuration Revision            : 5"""
             state.ike_enabled = True
             return ""
 
+        # ── Cisco IOS IPsec/IKE コマンド (cisco / catalyst) ──
+        if state.device_type in ('cisco', 'catalyst'):
+            # crypto isakmp policy <n>
+            m_isakmp = re.match(r'^crypto\s+isakmp\s+policy\s+(\d+)', c)
+            if m_isakmp:
+                state._ike_policy_num = int(m_isakmp.group(1))
+                state.ipsec_crypto.setdefault('isakmp_policies', {})[state._ike_policy_num] = {
+                    'encryption': 'aes-256', 'hash': 'sha256',
+                    'authentication': 'pre-share', 'group': 14, 'lifetime': 86400,
+                }
+                return ''
+
+            if hasattr(state, '_ike_policy_num'):
+                num = state._ike_policy_num
+                pol = state.ipsec_crypto.get('isakmp_policies', {}).get(num, {})
+                m_enc2 = re.match(r'^encryption\s+(.+)', c)
+                if m_enc2: pol['encryption'] = m_enc2.group(1).strip(); return ''
+                m_hash2 = re.match(r'^hash\s+(\S+)', c)
+                if m_hash2: pol['hash'] = m_hash2.group(1); return ''
+                m_auth2 = re.match(r'^authentication\s+(\S+)', c)
+                if m_auth2: pol['authentication'] = m_auth2.group(1); return ''
+                m_grp2 = re.match(r'^group\s+(\d+)', c)
+                if m_grp2: pol['group'] = int(m_grp2.group(1)); return ''
+                m_lt2 = re.match(r'^lifetime\s+(\d+)', c)
+                if m_lt2: pol['lifetime'] = int(m_lt2.group(1)); return ''
+
+            # crypto ipsec transform-set <name> <transforms>
+            m_ts = re.match(r'^crypto\s+ipsec\s+transform-set\s+(\S+)\s+(.+)', c)
+            if m_ts:
+                ts_name = m_ts.group(1)
+                state.ipsec_crypto.setdefault('transform_sets', {})[ts_name] = {
+                    'transforms': m_ts.group(2).split()
+                }
+                return ''
+
+            # crypto map <name> <seq> match address <acl>
+            m_cmap_match = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+match\s+address\s+(\S+)', c)
+            if m_cmap_match:
+                mapname, seq, acl = m_cmap_match.group(1), int(m_cmap_match.group(2)), m_cmap_match.group(3)
+                state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {})[seq] = {'acl': acl}
+                return ''
+
+            # crypto map <name> <seq> set peer <ip>
+            m_cmap_peer = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+set\s+peer\s+([\d.]+)', c)
+            if m_cmap_peer:
+                mapname, seq, peer = m_cmap_peer.group(1), int(m_cmap_peer.group(2)), m_cmap_peer.group(3)
+                state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {}).setdefault(seq, {})['peer'] = peer
+                state.ipsec_peers.setdefault(peer, {})['remote_ip'] = peer
+                return ''
+
+            # crypto map <name> <seq> set transform-set <ts>
+            m_cmap_ts = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+set\s+transform-set\s+(\S+)', c)
+            if m_cmap_ts:
+                mapname, seq, ts = m_cmap_ts.group(1), int(m_cmap_ts.group(2)), m_cmap_ts.group(3)
+                state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {}).setdefault(seq, {})['transform_set'] = ts
+                return ''
+
+            # crypto map <name> interface <if>
+            m_cmap_if = re.match(r'^crypto\s+map\s+(\S+)\s+interface\s+(\S+)', c)
+            if m_cmap_if:
+                state.ipsec_crypto['crypto_map_interface'] = {
+                    'name': m_cmap_if.group(1), 'interface': m_cmap_if.group(2)}
+                return ''
+
+            # crypto isakmp enable <if>
+            m_ike_enable = re.match(r'^crypto\s+isakmp\s+enable\s+(\S+)', c)
+            if m_ike_enable:
+                state.ipsec_crypto['isakmp_enabled'] = m_ike_enable.group(1)
+                return ''
+
+            # crypto isakmp key <key> address <peer>  (already handled above but fallback)
+            m_ios_psk2 = re.match(r'^crypto\s+isakmp\s+key\s+(\S+)\s+address\s+([\d.]+)', c)
+            if m_ios_psk2:
+                key, peer = m_ios_psk2.group(1), m_ios_psk2.group(2)
+                state.ipsec_crypto.setdefault('isakmp_keys', {})[peer] = key
+                return ''
+
         # network
         if re.match(r'^network\s+', c):
             return ""
@@ -2127,7 +2318,15 @@ Configuration Revision            : 5"""
                 'policy': m_sp.group(1), 'scope': m_sp.group(2)})
             return ''
 
-        # ── IPsec / IKE設定（ASA） ──
+        # ── IPsec / IKE設定（Cisco IOS / ASA 共通） ──
+        # crypto isakmp key <key> address <peer>  (IOS)
+        m_ios_psk = re.match(r'^crypto\s+isakmp\s+key\s+(\S+)\s+address\s+([\d.]+)', c)
+        if m_ios_psk and state.device_type in ('cisco', 'catalyst', 'srs'):
+            key  = m_ios_psk.group(1)
+            peer = m_ios_psk.group(2)
+            state.ipsec_crypto.setdefault('isakmp_keys', {})[peer] = key
+            return ''
+
         # crypto isakmp policy 10
         m_isakmp = re.match(r'^crypto\s+isakmp\s+policy\s+(\d+)', c)
         if m_isakmp and state.mode == 'config':
@@ -2141,8 +2340,8 @@ Configuration Revision            : 5"""
         if hasattr(state, '_ike_policy_num') and state.mode == 'config':
             num = state._ike_policy_num
             pol = state.ipsec_crypto.get('isakmp_policies', {}).get(num, {})
-            m_enc = re.match(r'^encryption\s+(\S+)', c)
-            if m_enc: pol['encryption'] = m_enc.group(1); return ''
+            m_enc = re.match(r'^encryption\s+(.+)', c)
+            if m_enc: pol['encryption'] = m_enc.group(1).strip(); return ''
             m_hash = re.match(r'^hash\s+(\S+)', c)
             if m_hash: pol['hash'] = m_hash.group(1); return ''
             m_auth = re.match(r'^authentication\s+(\S+)', c)

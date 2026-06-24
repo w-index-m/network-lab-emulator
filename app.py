@@ -33,6 +33,7 @@ from engine.protocols import (
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
 from engine.syslog_sender import syslog_dispatcher, snmp_dispatcher, ntp_client
+from engine.ike_engine import negotiate_ipsec
 
 # ══════════════════════════════════════════
 # 設定
@@ -98,6 +99,34 @@ async def query_ollama(prompt: str, system: str) -> str:
 # ══════════════════════════════════════════
 # アプリ起動
 # ══════════════════════════════════════════
+def _trigger_ike_negotiation(device_id: str):
+    """IKE ネゴシエーションを実行してログをバッファに積む"""
+    results = negotiate_ipsec(device_sessions, device_id)
+    buf = proto_log_buffer.setdefault(device_id, [])
+    for tid_str, result in results.items():
+        for log_line in result.logs:
+            buf.append({'type': 'sir_log', 'message': log_line,
+                        'hostname': device_sessions[device_id].hostname,
+                        'facility': 'IPSEC' if 'IPsec' in log_line else 'IKE',
+                        'level': 'INFO' if result.success else 'ERROR'})
+        # 対向デバイスにも結果ログを積む
+        state = device_sessions.get(device_id)
+        if state:
+            for _, t in getattr(state, 'ipsec_tunnels', {}).items():
+                peer_ip = t.get('remote_ip', '')
+                for pid, ps in device_sessions.items():
+                    if pid == device_id:
+                        continue
+                    for _, pt in getattr(ps, 'ipsec_tunnels', {}).items():
+                        if pt.get('local_ip') == peer_ip:
+                            pbuf = proto_log_buffer.setdefault(pid, [])
+                            for log_line in result.logs:
+                                pbuf.append({'type': 'sir_log', 'message': log_line,
+                                             'hostname': ps.hostname,
+                                             'facility': 'IPSEC' if 'IPsec' in log_line else 'IKE',
+                                             'level': 'INFO' if result.success else 'ERROR'})
+
+
 def _save_config():
     """現在のデバイス設定・リンクをJSONに保存"""
     data = {"devices": {}, "links": []}
@@ -408,10 +437,18 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             m_v = re.match(r'^delete\s+vlan\s+(\d+)', c)
             if m_v:
                 _apresia_log(device_id, apresia_msg.vlan_deleted(int(m_v.group(1))))
-    # ── ASA: write memory ──
+    # ── ASA: write memory / IKE negotiate ──
     if state.device_type == 'asa':
         if c in ('write memory', 'write', 'wr', 'copy running-config startup-config'):
             _save_config()
+        elif re.match(r'^crypto\s+isakmp\s+enable', c):
+            _trigger_ike_negotiation(device_id)
+    # ── Cisco IOS: IKE negotiate ──
+    if state.device_type in ('cisco', 'catalyst'):
+        if (re.match(r'^crypto\s+isakmp\s+enable', c) or
+                re.match(r'^crypto\s+isakmp\s+key', c) or
+                re.match(r'^crypto\s+map\s+\S+\s+interface', c)):
+            _trigger_ike_negotiation(device_id)
     if state.device_type in ('catalyst', 'cisco', 'srs', 'nexus'):
         prev_mode = state.mode
         if c in ('configure terminal', 'conf t', 'conf terminal',
@@ -512,6 +549,9 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         # VRRP設定
         elif 'vrrp' in c and 'group' in c:
             _sir_log(device_id, 'VRRP', 'VRRP initialized')
+        # IPsec/IKE ネゴシエーション
+        elif c in ('ike use on', 'ipsec use on') or re.match(r'^remote\s+\d+\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key', c):
+            _trigger_ike_negotiation(device_id)
 
     # ── prefix-list ──
     # Cisco: "ip prefix-list NAME seq 5 permit 10.0.0.0/8 ge 24 le 30"
