@@ -34,6 +34,7 @@ from engine.protocols import (
 )
 from engine.syslog_sender import syslog_dispatcher, snmp_dispatcher, ntp_client
 from engine.ike_engine import negotiate_ipsec
+from engine.config_importer import import_running_config
 
 # ══════════════════════════════════════════
 # 設定
@@ -2507,6 +2508,42 @@ async def remove_device(dev_id: str):
     if dev_id in device_sessions:
         del device_sessions[dev_id]
     return {"ok": True}
+
+@app.post("/api/device/{dev_id}/import")
+async def import_device_config(dev_id: str, body: dict):
+    """
+    running-configテキストを受け取りデバイス状態に反映する。
+    body: {"config": "<running-config text>", "type": "cisco", "reset": true}
+      - type: デバイスタイプ上書き（省略時は既存デバイスのタイプを使用）
+      - reset: true にすると状態をリセットしてからインポート
+    """
+    config_text = body.get("config", "")
+    if not config_text:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "config is required"})
+
+    # 既存セッションを取得、なければ作成
+    if dev_id not in device_sessions:
+        dev = DEFAULT_DEVICES.get(dev_id, {"type": body.get("type", "cisco"), "hostname": dev_id})
+        device_sessions[dev_id] = DeviceState(dev["type"], dev["hostname"])
+
+    state = device_sessions[dev_id]
+
+    # デバイスタイプの決定（bodyで上書き可能）
+    dev_type = body.get("type") or state.device_type
+
+    # reset=true の場合、同タイプ・同ホスト名で状態をリセット
+    if body.get("reset"):
+        state = DeviceState(dev_type, state.hostname)
+        device_sessions[dev_id] = state
+
+    # running-config をインポート
+    result = import_running_config(dev_type, config_text, rule_engine, state)
+
+    # ICMPエンジンに再登録
+    _register_icmp(dev_id)
+
+    return {**result, "dev_id": dev_id, "device_type": dev_type, "hostname": state.hostname}
+
 
 @app.patch("/api/device/{dev_id}/hostname")
 async def update_hostname(dev_id: str, body: dict):
