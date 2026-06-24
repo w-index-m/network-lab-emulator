@@ -611,3 +611,125 @@ interface: GigabitEthernet0/0/0
         transform: esp-aes-256 esp-sha256-hmac
         Status: ACTIVE
 ```
+
+---
+
+## PC 間 TCP 通信テスト手順
+
+### 前提構成（Si-R ↔ Si-R 例）
+
+```
+PC-Tokyo (192.168.1.10) --- [SiR-Tokyo] ==IPsec== [SiR-Osaka] --- PC-Osaka (192.168.2.10)
+```
+
+### PC の IP アドレス設定確認
+
+```
+ip addr show
+ifconfig
+```
+
+### Step 1: ゲートウェイへの疎通確認
+
+```
+ping 192.168.1.1          # PC-Tokyo → SiR-Tokyo LAN ポート
+```
+
+### Step 2: 対向 LAN への ICMP テスト
+
+```
+ping 192.168.2.10         # PC-Tokyo → PC-Osaka (IPsec トンネル経由)
+ping -c 3 192.168.2.10    # 3パケットのみ
+```
+
+### Step 3: TCP ポート接続テスト（nc / netcat）
+
+```
+# PC-Tokyo から PC-Osaka の SSH ポートを確認
+nc -zv 192.168.2.10 22
+
+# HTTP ポートを確認
+nc -zv 192.168.2.10 80
+
+# 複数ポートをまとめて確認 (22〜25番)
+nc -zv 192.168.2.10 22-25
+```
+
+期待出力:
+```
+Connection to 192.168.2.10 22 port [tcp/*] succeeded!
+  Local:  192.168.1.10:45992
+  Remote: 192.168.2.10:22
+  RTT:    3.21 ms
+  State:  ESTABLISHED
+```
+
+### Step 4: HTTP 通信テスト（curl / wget）
+
+```
+# curl でHTTP GET
+curl http://192.168.2.10/
+
+# 詳細表示 (HTTPヘッダ含む)
+curl -v http://192.168.2.10/
+
+# wget でファイル取得
+wget http://192.168.2.10/
+```
+
+### Step 5: SSH 接続テスト
+
+```
+ssh root@192.168.2.10
+ssh admin@192.168.2.10
+```
+
+### Step 6: Telnet 接続テスト（ポート疎通確認）
+
+```
+telnet 192.168.2.10 80    # HTTP ポート確認
+telnet 192.168.2.10 443   # HTTPS ポート確認
+```
+
+### Step 7: traceroute でトンネル経路確認
+
+```
+traceroute 192.168.2.10
+```
+
+期待出力（IPsec トンネル経由の経路）:
+```
+traceroute to 192.168.2.10 (192.168.2.10), 30 hops max
+ 1  192.168.1.1    1.5 ms   -- SiR-Tokyo LAN
+ 2  203.0.113.254  8.3 ms   -- インターネット
+ 3  192.168.2.10  12.1 ms   -- PC-Osaka（到達）
+```
+
+### Step 8: ルーター側でトンネルヘッダーを確認
+
+SiR-Tokyo (Si-R) の CLI で実行:
+```
+show tunnel-header 192.168.1.10 192.168.2.10
+```
+
+IOS-Tokyo (Cisco IOS) の CLI で実行:
+```
+show tunnel-header 10.1.0.10 10.2.0.20
+```
+
+---
+
+## PC ↔ PC TCP 通信テスト コマンド一覧
+
+| コマンド | 用途 |
+|----------|------|
+| `ping <IP>` | ICMP 到達性確認 |
+| `ping -c 3 <IP>` | 3回のみ ping |
+| `nc -zv <IP> <PORT>` | TCP ポート接続確認 |
+| `nc -zv <IP> <P1>-<P2>` | TCP ポートレンジ確認 |
+| `telnet <IP> <PORT>` | TCP Telnet 接続テスト |
+| `curl http://<IP>/` | HTTP GET |
+| `curl -v http://<IP>/` | HTTP GET 詳細表示 |
+| `wget http://<IP>/` | HTTP ファイル取得 |
+| `ssh user@<IP>` | SSH 接続テスト |
+| `traceroute <IP>` | ホップ毎の経路確認 |

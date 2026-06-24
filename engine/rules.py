@@ -3035,6 +3035,34 @@ Key Version         : A
         # ここでは到達前にフォールスルーしないよう念のためNoneを示す
         # （実際は呼ばれない）
 
+        # ping
+        if re.match(r'^ping\s+', c):
+            return self._pc_ping(cmd, c, state)
+
+        # traceroute / tracepath
+        if re.match(r'^traceroute\s+|^tracepath\s+', c):
+            return self._pc_traceroute(cmd, c, state)
+
+        # nc / netcat  (TCP接続テスト)
+        if re.match(r'^nc\s+|^netcat\s+', c):
+            return self._pc_nc(cmd, c, state)
+
+        # telnet (TCP ポート確認)
+        if re.match(r'^telnet\s+', c):
+            return self._pc_telnet(cmd, c, state)
+
+        # curl
+        if re.match(r'^curl\s+', c):
+            return self._pc_curl(cmd, c, state)
+
+        # wget
+        if re.match(r'^wget\s+', c):
+            return self._pc_wget(cmd, c, state)
+
+        # ssh
+        if re.match(r'^ssh\s+', c):
+            return self._pc_ssh(cmd, c, state)
+
         # hostname
         if c == 'hostname':
             return state.hostname
@@ -3119,8 +3147,15 @@ Key Version         : A
                 '  ifconfig / ip addr      -- ネットワークインタフェース表示\n'
                 '  ip route / route        -- ルーティングテーブル表示\n'
                 '  ip link                 -- リンク状態表示\n'
-                '  ping <IP>               -- 到達性確認\n'
+                '  ping <IP>               -- 到達性確認 (ICMPエコー)\n'
                 '  traceroute <IP>         -- 経路トレース\n'
+                '  nc -zv <IP> <PORT>      -- TCP ポート接続テスト\n'
+                '  nc -zv <IP> <PORT1>-<PORT2>  -- TCP ポートレンジスキャン\n'
+                '  telnet <IP> <PORT>      -- TCP Telnet 接続テスト\n'
+                '  curl http://<IP>/       -- HTTP GET リクエスト\n'
+                '  curl -v http://<IP>/    -- HTTP GET 詳細表示\n'
+                '  wget http://<IP>/       -- HTTP ファイル取得\n'
+                '  ssh user@<IP>           -- SSH 接続テスト\n'
                 '  arp -n                  -- ARPテーブル表示\n'
                 '  hostname                -- ホスト名表示\n'
                 '  uname -a                -- OS情報表示\n'
@@ -3132,6 +3167,175 @@ Key Version         : A
         # 不明コマンド
         prog = cmd.split()[0] if cmd.split() else cmd
         return f'-bash: {prog}: command not found'
+
+    # ── PC 通信テスト系コマンド ──────────────────────────────────
+
+    def _pc_my_ip(self, state) -> str:
+        """PC の eth0 IP を返す"""
+        return state.interfaces.get('eth0', {}).get('ip', '192.168.1.10')
+
+    def _pc_ping(self, cmd, c, state) -> str:
+        m = re.match(r'^ping\s+(?:-c\s*(\d+)\s+)?([\d.]+)', c)
+        if not m:
+            return "Usage: ping [-c count] <destination>"
+        count = int(m.group(1)) if m.group(1) else 5
+        dest  = m.group(2)
+        my_ip = self._pc_my_ip(state)
+        rtt_base = round(random.uniform(0.5, 3.0), 3)
+        lines = [f"PING {dest} ({dest}) 56(84) bytes of data."]
+        for i in range(count):
+            rtt = round(rtt_base + random.uniform(-0.2, 0.5), 3)
+            lines.append(f"64 bytes from {dest}: icmp_seq={i+1} ttl=64 time={rtt} ms")
+        rtts = [rtt_base + random.uniform(-0.2, 0.5) for _ in range(count)]
+        lines += [
+            "",
+            f"--- {dest} ping statistics ---",
+            f"{count} packets transmitted, {count} received, 0% packet loss, time {count*1000}ms",
+            f"rtt min/avg/max/mdev = {min(rtts):.3f}/{sum(rtts)/len(rtts):.3f}/{max(rtts):.3f}/0.100 ms",
+        ]
+        return "\n".join(lines)
+
+    def _pc_traceroute(self, cmd, c, state) -> str:
+        m = re.match(r'^trace(?:route|path)\s+([\d.]+)', c)
+        if not m:
+            return "Usage: traceroute <destination>"
+        dest  = m.group(1)
+        gw    = state.gateway
+        lines = [f"traceroute to {dest} ({dest}), 30 hops max, 60 byte packets"]
+        hops  = [(1, gw, round(random.uniform(0.5, 2.0), 3)),
+                 (2, "203.0.113.254", round(random.uniform(5, 15), 3)),
+                 (3, dest, round(random.uniform(8, 25), 3))]
+        for n, ip, rtt in hops:
+            r2, r3 = round(rtt + random.uniform(0, 1), 3), round(rtt + random.uniform(0, 1), 3)
+            lines.append(f" {n}  {ip}  {rtt} ms  {r2} ms  {r3} ms")
+        return "\n".join(lines)
+
+    def _pc_nc(self, cmd, c, state) -> str:
+        """nc -zv <host> <port> または nc -zv <host> <port1>-<port2>"""
+        m_range = re.match(r'^nc\s+.*?(-z)?.*?([\d.]+)\s+(\d+)-(\d+)', c)
+        m_single = re.match(r'^nc\s+.*?([\d.]+)\s+(\d+)', c)
+        my_ip = self._pc_my_ip(state)
+        if m_range:
+            host  = m_range.group(2)
+            p_lo  = int(m_range.group(3))
+            p_hi  = int(m_range.group(4))
+            lines = []
+            for port in range(p_lo, min(p_hi + 1, p_lo + 20)):
+                rtt = round(random.uniform(0.3, 5.0), 2)
+                lines.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
+            return "\n".join(lines) if lines else f"nc: connect to {host} port {p_lo} failed"
+        elif m_single:
+            host = m_single.group(1)
+            port = int(m_single.group(2))
+            rtt  = round(random.uniform(0.3, 5.0), 2)
+            lines = [
+                f"Connection to {host} {port} port [tcp/*] succeeded!",
+                f"  Local:  {my_ip}:{random.randint(40000,60000)}",
+                f"  Remote: {host}:{port}",
+                f"  RTT:    {rtt} ms",
+                f"  State:  ESTABLISHED",
+            ]
+            return "\n".join(lines)
+        return "Usage: nc -zv <host> <port>"
+
+    def _pc_telnet(self, cmd, c, state) -> str:
+        m = re.match(r'^telnet\s+([\d.]+)(?:\s+(\d+))?', c)
+        if not m:
+            return "Usage: telnet <host> [port]"
+        host = m.group(1)
+        port = int(m.group(2)) if m.group(2) else 23
+        my_ip = self._pc_my_ip(state)
+        rtt = round(random.uniform(0.5, 8.0), 2)
+        if port == 23:
+            return (f"Trying {host}...\n"
+                    f"Connected to {host}.\n"
+                    f"Escape character is '^]'.\n"
+                    f"\n"
+                    f"login: ")
+        else:
+            return (f"Trying {host}...\n"
+                    f"Connected to {host} port {port}.\n"
+                    f"Escape character is '^]'.\n"
+                    f"  TCP connection established in {rtt} ms\n"
+                    f"  Local:  {my_ip}:{random.randint(40000,60000)}\n"
+                    f"  Remote: {host}:{port}")
+
+    def _pc_curl(self, cmd, c, state) -> str:
+        verbose = '-v' in c or '--verbose' in c
+        m = re.match(r'^curl\s+(?:-\S+\s+)*(?:http://|https://)?([\d.]+\S*)', c)
+        if not m:
+            return "curl: try 'curl http://<IP>/'"
+        url_part = m.group(1)
+        host = url_part.split('/')[0]
+        path = '/' + '/'.join(url_part.split('/')[1:]) if '/' in url_part else '/'
+        my_ip = self._pc_my_ip(state)
+        rtt = round(random.uniform(1.0, 15.0), 3)
+        if verbose:
+            lines = [
+                f"*   Trying {host}:80...",
+                f"* Connected to {host} ({host}) port 80 (#0)",
+                f"> GET {path} HTTP/1.1",
+                f"> Host: {host}",
+                f"> User-Agent: curl/7.88.1",
+                f"> Accept: */*",
+                f">",
+                f"< HTTP/1.1 200 OK",
+                f"< Content-Type: text/html",
+                f"< Content-Length: 612",
+                f"< Connection: keep-alive",
+                f"<",
+                f"<!DOCTYPE html>",
+                f"<html><head><title>Network Lab Test Page</title></head>",
+                f"<body><h1>TCP Connection OK</h1>",
+                f"<p>Server: {host} | Client: {my_ip} | RTT: {rtt}ms</p>",
+                f"</body></html>",
+                f"* Connection #0 to host {host} left intact",
+            ]
+        else:
+            lines = [
+                f"<!DOCTYPE html>",
+                f"<html><head><title>Network Lab Test Page</title></head>",
+                f"<body><h1>TCP Connection OK</h1>",
+                f"<p>Server: {host} | Client: {my_ip} | RTT: {rtt}ms</p>",
+                f"</body></html>",
+            ]
+        return "\n".join(lines)
+
+    def _pc_wget(self, cmd, c, state) -> str:
+        m = re.match(r'^wget\s+(?:-\S+\s+)*(?:http://|https://)?([\d.]+\S*)', c)
+        if not m:
+            return "wget: missing URL"
+        url_part = m.group(1)
+        host = url_part.split('/')[0]
+        rtt = round(random.uniform(1.0, 15.0), 3)
+        size = random.randint(200, 800)
+        lines = [
+            f"--{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  http://{url_part}",
+            f"Resolving {host}... {host}",
+            f"Connecting to {host}|{host}|:80... connected.",
+            f"HTTP request sent, awaiting response... 200 OK",
+            f"Length: {size} [text/html]",
+            f"Saving to: 'index.html'",
+            f"",
+            f"index.html        100%[==========>]  {size}  --.-KB/s    in {rtt}s",
+            f"",
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ({size/rtt:.0f} B/s) - 'index.html' saved [{size}/{size}]",
+        ]
+        return "\n".join(lines)
+
+    def _pc_ssh(self, cmd, c, state) -> str:
+        m = re.match(r'^ssh\s+(?:-\S+\s+)*(?:(\S+)@)?([\d.]+)', c)
+        if not m:
+            return "Usage: ssh [user@]<host>"
+        user = m.group(1) or 'root'
+        host = m.group(2)
+        return (f"The authenticity of host '{host} ({host})' can't be established.\n"
+                f"ED25519 key fingerprint is SHA256:abc123xyz/networklab.\n"
+                f"Are you sure you want to continue connecting (yes/no/[fingerprint])? yes\n"
+                f"Warning: Permanently added '{host}' (ED25519) to the list of known hosts.\n"
+                f"{user}@{host}'s password: \n"
+                f"Last login: {datetime.now().strftime('%a %b %d %H:%M:%S %Y')} from {self._pc_my_ip(state)}\n"
+                f"[{user}@{host} ~]$ ")
 
     def _pc_ifconfig(self, state: DeviceState, target: str = None) -> str:
         lines = []
