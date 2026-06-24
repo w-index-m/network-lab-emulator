@@ -12,6 +12,34 @@ def _prefix_to_mask(prefix: int) -> str:
     bits = (0xffffffff >> (32 - prefix)) << (32 - prefix)
     return '.'.join(str((bits >> (8 * i)) & 0xff) for i in reversed(range(4)))
 
+def _valid_ip(ip: str) -> bool:
+    """IPv4アドレスの妥当性チェック（各オクテット0-255、4オクテット必須）"""
+    try:
+        parts = ip.split('.')
+        return len(parts) == 4 and all(0 <= int(p) <= 255 for p in parts)
+    except (ValueError, AttributeError):
+        return False
+
+def _valid_mask(mask: str) -> bool:
+    """サブネットマスクの妥当性チェック（連続した1ビット）"""
+    if not _valid_ip(mask):
+        return False
+    try:
+        val = sum(int(o) << (24 - 8*i) for i, o in enumerate(mask.split('.')))
+        # 連続ビットマスクであることを確認
+        inv = val ^ 0xffffffff
+        return (inv & (inv + 1)) == 0
+    except Exception:
+        return False
+
+def _valid_prefix(prefix: int) -> bool:
+    """プレフィックス長の妥当性チェック（0-32）"""
+    return 0 <= prefix <= 32
+
+def _valid_asn(asn: int) -> bool:
+    """BGP AS番号の妥当性チェック（1-4294967295、0は無効）"""
+    return 1 <= asn <= 4294967295
+
 # ══════════════════════════════════════════
 # デバイス状態（セッション単位で保持）
 # ══════════════════════════════════════════
@@ -1882,8 +1910,17 @@ Configuration Revision            : 5"""
         # interface ip address
         if re.match(r'^ip\s+address\s+[\d.]+\s+[\d.]+', c):
             m = re.match(r'^ip\s+address\s+([\d.]+)\s+([\d.]+)', c)
-            if m and state.current_if:
-                state.interfaces.setdefault(state.current_if, {})["ip"] = m.group(1)
+            if m:
+                ip_val = m.group(1)
+                mask_val = m.group(2)
+                if not _valid_ip(ip_val):
+                    return f"% Invalid input: IP address '{ip_val}' is not valid"
+                if not _valid_mask(mask_val):
+                    return f"% Invalid input: subnet mask '{mask_val}' is not valid"
+                if state.current_if:
+                    state.interfaces.setdefault(state.current_if, {})["ip"] = ip_val
+                    prefix = sum(bin(int(o)).count('1') for o in mask_val.split('.'))
+                    state.interfaces[state.current_if]["prefix"] = prefix
                 return ""
 
         # switchport
@@ -1924,12 +1961,27 @@ Configuration Revision            : 5"""
             # lan X ip address で IPを反映
             m_lan_ip = re.match(r'^lan\s+(\d+)\s+ip\s+address\s+([\d.]+)/(\d+)', c)
             if m_lan_ip and state.device_type in ('sir', 'srs'):
+                ip_val = m_lan_ip.group(2)
+                prefix_val = int(m_lan_ip.group(3))
+                if not _valid_ip(ip_val):
+                    return f"% Invalid input: IP address '{ip_val}' is not valid"
+                if not _valid_prefix(prefix_val):
+                    return f"% Invalid input: prefix length '{prefix_val}' must be 0-32"
                 iface = f'lan{m_lan_ip.group(1)}'
                 state.interfaces.setdefault(iface, {})
-                state.interfaces[iface]['ip'] = m_lan_ip.group(2)
-                state.interfaces[iface]['prefix'] = int(m_lan_ip.group(3))
+                state.interfaces[iface]['ip'] = ip_val
+                state.interfaces[iface]['prefix'] = prefix_val
             return ""
         if re.match(r'^wan\s+\d+\s+', c):
+            # wan X ip address で IPを反映
+            m_wan_ip = re.match(r'^wan\s+(\d+)\s+ip\s+address\s+([\d.]+)/(\d+)', c)
+            if m_wan_ip and state.device_type in ('sir', 'srs'):
+                ip_val = m_wan_ip.group(2)
+                prefix_val = int(m_wan_ip.group(3))
+                if not _valid_ip(ip_val):
+                    return f"% Invalid input: IP address '{ip_val}' is not valid"
+                if not _valid_prefix(prefix_val):
+                    return f"% Invalid input: prefix length '{prefix_val}' must be 0-32"
             return ""
         if re.match(r'^ip\s+rip\s+', c):
             return ""
@@ -1963,7 +2015,10 @@ Configuration Revision            : 5"""
         m_tunnel_local = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+tunnel\s+local\s+([\d.]+)', c)
         if m_tunnel_local and state.device_type in ('sir', 'srs'):
             tid = int(m_tunnel_local.group(1))
-            state.ipsec_tunnels.setdefault(tid, {})['local_ip'] = m_tunnel_local.group(2)
+            local_ip = m_tunnel_local.group(2)
+            if not _valid_ip(local_ip):
+                return f"% Invalid input: IP address '{local_ip}' is not valid"
+            state.ipsec_tunnels.setdefault(tid, {})['local_ip'] = local_ip
             state.ipsec_tunnels[tid].setdefault('status', 'wait')
             return ""
 
@@ -1971,7 +2026,10 @@ Configuration Revision            : 5"""
         m_tunnel_remote = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+tunnel\s+remote\s+([\d.]+)', c)
         if m_tunnel_remote and state.device_type in ('sir', 'srs'):
             tid = int(m_tunnel_remote.group(1))
-            state.ipsec_tunnels.setdefault(tid, {})['remote_ip'] = m_tunnel_remote.group(2)
+            remote_ip = m_tunnel_remote.group(2)
+            if not _valid_ip(remote_ip):
+                return f"% Invalid input: IP address '{remote_ip}' is not valid"
+            state.ipsec_tunnels.setdefault(tid, {})['remote_ip'] = remote_ip
             return ""
 
         # remote 1 ap 0 ipsec ike preshared-key <key>
@@ -2041,6 +2099,12 @@ Configuration Revision            : 5"""
             dest   = m_remote_route.group(1)
             prefix = int(m_remote_route.group(2))
             gw     = m_remote_route.group(3) or '0.0.0.0'
+            if not _valid_ip(dest):
+                return f"% Invalid input: IP address '{dest}' is not valid"
+            if not _valid_prefix(prefix):
+                return f"% Invalid input: prefix length '{prefix}' must be 0-32"
+            if gw != '0.0.0.0' and not _valid_ip(gw):
+                return f"% Invalid input: IP address '{gw}' is not valid"
             entry  = {'dest': dest, 'prefix': prefix, 'gw': gw}
             if entry not in state.static_routes:
                 state.static_routes.append(entry)
@@ -2052,6 +2116,12 @@ Configuration Revision            : 5"""
             dest = m_ip_route.group(1)
             mask = m_ip_route.group(2)
             gw   = m_ip_route.group(3)
+            if not _valid_ip(dest):
+                return f"% Invalid input: IP address '{dest}' is not valid"
+            if not _valid_mask(mask):
+                return f"% Invalid input: subnet mask '{mask}' is not valid"
+            if not _valid_ip(gw):
+                return f"% Invalid input: IP address '{gw}' is not valid"
             prefix = sum(bin(int(o)).count('1') for o in mask.split('.'))
             entry = {'dest': dest, 'prefix': prefix, 'gw': gw}
             if entry not in getattr(state, 'static_routes', []):
@@ -2127,6 +2197,8 @@ Configuration Revision            : 5"""
             m_sub_peer = re.match(r'^set\s+peer\s+([\d.]+)', c)
             if m_sub_peer and _in_cmap:
                 peer = m_sub_peer.group(1)
+                if not _valid_ip(peer):
+                    return f"% Invalid input: IP address '{peer}' is not valid"
                 (state.ipsec_crypto.setdefault('crypto_maps', {})
                  .setdefault(state._cmap_name, {})
                  .setdefault(state._cmap_seq, {})['peer']) = peer
@@ -2151,6 +2223,8 @@ Configuration Revision            : 5"""
             m_cmap_peer = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+set\s+peer\s+([\d.]+)', c)
             if m_cmap_peer:
                 mapname, seq, peer = m_cmap_peer.group(1), int(m_cmap_peer.group(2)), m_cmap_peer.group(3)
+                if not _valid_ip(peer):
+                    return f"% Invalid input: IP address '{peer}' is not valid"
                 state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {}).setdefault(seq, {})['peer'] = peer
                 state.ipsec_peers.setdefault(peer, {})['remote_ip'] = peer
                 return ''
@@ -2179,6 +2253,8 @@ Configuration Revision            : 5"""
             m_ios_psk2 = re.match(r'^crypto\s+isakmp\s+key\s+(\S+)\s+address\s+([\d.]+)', c)
             if m_ios_psk2:
                 key, peer = m_ios_psk2.group(1), m_ios_psk2.group(2)
+                if not _valid_ip(peer):
+                    return f"% Invalid input: IP address '{peer}' is not valid"
                 state.ipsec_crypto.setdefault('isakmp_keys', {})[peer] = key
                 return ''
 
@@ -2186,7 +2262,17 @@ Configuration Revision            : 5"""
         if re.match(r'^network\s+', c):
             return ""
 
-        # neighbor
+        # neighbor <IP> remote-as <ASN>
+        m_neighbor = re.match(r'^neighbor\s+([\d.]+)\s+remote-as\s+(\d+)', c)
+        if m_neighbor:
+            nbr_ip = m_neighbor.group(1)
+            nbr_asn = int(m_neighbor.group(2))
+            if not _valid_ip(nbr_ip):
+                return f"% Invalid input: IP address '{nbr_ip}' is not valid"
+            if not _valid_asn(nbr_asn):
+                return f"% Invalid input: AS number {nbr_asn} must be 1-4294967295"
+            return ""
+        # neighbor (other sub-commands)
         if re.match(r'^neighbor\s+', c):
             return ""
 
