@@ -58,6 +58,7 @@ DEFAULT_DEVICES = {
     "apresia":  {"type": "apresia",  "hostname": "sw1",      "color": "#c00040"},
     "pc-1":     {"type": "pc",       "hostname": "PC-1",     "color": "#888888", "ip": "192.168.1.10", "gateway": "192.168.1.1"},
     "pc-2":     {"type": "pc",       "hostname": "PC-2",     "color": "#555555", "ip": "192.168.1.11", "gateway": "192.168.1.1"},
+    "asa":      {"type": "asa",      "hostname": "ASA-FW",   "color": "#cc4400"},
 }
 
 # ══════════════════════════════════════════
@@ -367,6 +368,10 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             m_v = re.match(r'^delete\s+vlan\s+(\d+)', c)
             if m_v:
                 _apresia_log(device_id, apresia_msg.vlan_deleted(int(m_v.group(1))))
+    # ── ASA: write memory ──
+    if state.device_type == 'asa':
+        if c in ('write memory', 'write', 'wr', 'copy running-config startup-config'):
+            _save_config()
     if state.device_type in ('catalyst', 'cisco', 'srs', 'nexus'):
         prev_mode = state.mode
         if c in ('configure terminal', 'conf t', 'conf terminal',
