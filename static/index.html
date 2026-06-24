@@ -210,6 +210,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     </div>
     <div id="launcher-foot">
       <span id="launcher-count">0台選択中</span>
+      <button id="btn-clear-state" onclick="clearLabState();this.textContent='✅ リセット完了';setTimeout(()=>this.textContent='🗑 前回セッションをリセット',1500)" style="background:transparent;border:1px solid #3a2a00;color:#806040;font-size:10px;padding:3px 10px;cursor:pointer;font-family:'Courier New',monospace;border-radius:3px">🗑 前回セッションをリセット</button>
       <button id="btn-launch" onclick="launchLab()">▶ ラボ起動</button>
     </div>
   </div>
@@ -679,6 +680,93 @@ function launchLab() {
     focusTerm(selected[0][0]);
     checkStatus();
   }, 100);
+
+  // ラボ状態をlocalStorageに保存
+  saveLabState();
+}
+
+// ════════════════════════════════════════════
+// ラボ状態の保存・復元（ブラウザリロード対応）
+// ════════════════════════════════════════════
+const LAB_STATE_KEY = 'nlabState_v1';
+
+function saveLabState() {
+  try {
+    const state = {
+      labActive: true,
+      devices: JSON.parse(JSON.stringify(DEVICES)),
+      links: JSON.parse(JSON.stringify(LINKS)),
+      nodePos: JSON.parse(JSON.stringify(NODE_POS)),
+      savedAt: Date.now(),
+    };
+    localStorage.setItem(LAB_STATE_KEY, JSON.stringify(state));
+  } catch(e) { /* localStorage が使えない場合は無視 */ }
+}
+
+function clearLabState() {
+  localStorage.removeItem(LAB_STATE_KEY);
+}
+
+function restoreLabState() {
+  let state;
+  try {
+    const raw = localStorage.getItem(LAB_STATE_KEY);
+    if (!raw) return false;
+    state = JSON.parse(raw);
+  } catch(e) { return false; }
+  if (!state || !state.labActive || !state.devices) return false;
+
+  // DEVICES・LINKS・NODE_POSを復元
+  Object.keys(DEVICES).forEach(k => delete DEVICES[k]);
+  Object.keys(NODE_POS).forEach(k => delete NODE_POS[k]);
+  LINKS.length = 0;
+  Object.assign(DEVICES, state.devices);
+  Object.assign(NODE_POS, state.nodePos || {});
+  (state.links || []).forEach(l => LINKS.push(l));
+
+  // TERMSを初期化
+  Object.keys(DEVICES).forEach(id => {
+    if (!TERMS[id]) TERMS[id] = {busy:false, typed:'', cur:0, history:[], histIdx:-1};
+  });
+
+  // グリッド列数を設定
+  const count = Object.keys(DEVICES).length;
+  const cols = count <= 1 ? 1 : count <= 2 ? 2 : count <= 4 ? 2 : 3;
+  document.getElementById('terminal-grid').style.gridTemplateColumns = `repeat(${cols},1fr)`;
+
+  // バックエンドにデバイス登録 & リンク同期
+  Promise.all(Object.entries(DEVICES).map(([id, d]) =>
+    fetch('/api/device', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id, type: d.type, hostname: d.hostname})})
+  )).then(() => {
+    fetch('/api/links/sync', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({links: LINKS.map(l => ({a:l.a, b:l.b}))})});
+  });
+
+  // ターミナルDOM構築
+  initTerminals();
+
+  // ランチャーを隠す
+  document.getElementById('launcher').style.display = 'none';
+
+  renderTopoDisplay();
+  renderLinkList();
+  updateStatusBar();
+  updateVrrpBadges();
+  updateFlowDevSel();
+
+  // 復元メッセージ
+  setTimeout(() => {
+    const firstId = Object.keys(DEVICES)[0];
+    if (firstId) {
+      print(firstId, '  [セッション復元] 前回の設定を読み込みました', 'col-d');
+      renderInput(firstId);
+      focusTerm(firstId);
+    }
+    checkStatus();
+  }, 200);
+
+  return true;
 }
 
 function calcPositions(count) {
@@ -1311,7 +1399,12 @@ function onMM(e){
 
   if(CVS.linkMode){CVS.linkMouse={wx,wy};drawCanvas();}
 }
-function onMU(){CVS.dragging=null;CVS.panning=false;CVS.panStart=null;CVS.cvs.style.cursor=CVS.linkMode?'crosshair':'default';renderLinkList();renderTopoDisplay();}
+function onMU(){
+  const wasDragging = !!CVS.dragging;
+  CVS.dragging=null;CVS.panning=false;CVS.panStart=null;CVS.cvs.style.cursor=CVS.linkMode?'crosshair':'default';
+  renderLinkList();renderTopoDisplay();
+  if (wasDragging) saveLabState();
+}
 function onMW(e){
   e.preventDefault();
   const r=CVS.cvs.getBoundingClientRect(),sx=e.clientX-r.left,sy=e.clientY-r.top;
@@ -1360,6 +1453,7 @@ function commitLink(aId,bId){
   print(bId,'');print(bId,`%LINK-3-UPDOWN: Interface ${pb}, changed state to up`,'col-g');
   renderLinkList();renderTopoDisplay();drawCanvas();
   syncLinksToBackend();
+  saveLabState();
 }
 function syncLinksToBackend(){
   // vnetにリンクを同期（プロトコルパケットが流れる）
@@ -1386,6 +1480,7 @@ function addDevice(tplKey){
   fetch('/api/device',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({id:newId,type:tpl.type,hostname:tpl.prefix+devCounter})});
   renderLinkList();renderTopoDisplay();drawCanvas();updateFlowDevSel();
+  saveLabState();
 }
 function deleteSelectedNode(){
   const id=CVS.selected;if(!id)return;
@@ -1399,6 +1494,7 @@ function deleteSelectedNode(){
   CVS.selected=null;document.getElementById('btn-del-sel').style.display='none';
   document.getElementById('node-detail-box').style.display='none';
   renderLinkList();renderTopoDisplay();drawCanvas();updateFlowDevSel();
+  saveLabState();
 }
 function showNodeDetail(id){
   const d=DEVICES[id];
@@ -1407,7 +1503,7 @@ function showNodeDetail(id){
     <div style="display:flex;gap:8px;margin-bottom:6px">
       <div style="flex:1"><div style="font-size:9px;color:var(--text2)">ホスト名</div>
         <input style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 5px;font-size:11px;font-family:'Courier New',monospace;outline:none"
-          value="${d.hostname}" onchange="DEVICES['${id}'].hostname=this.value;renderInput('${id}');renderTopoDisplay();drawCanvas();fetch('/api/device/${id}/hostname',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({hostname:this.value})})">
+          value="${d.hostname}" onchange="DEVICES['${id}'].hostname=this.value;renderInput('${id}');renderTopoDisplay();drawCanvas();saveLabState();fetch('/api/device/${id}/hostname',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({hostname:this.value})})">
       </div>
     </div>
     <div style="display:flex;gap:6px">
@@ -1532,6 +1628,7 @@ function deleteLink(lid){
   print(lnk.b,'');print(lnk.b,`%LINK-3-UPDOWN: Interface ${lnk.pb}, changed state to down`,'col-r');
   LINKS=LINKS.filter(l=>l.id!==lid);renderLinkList();renderTopoDisplay();drawCanvas();
   syncLinksToBackend();
+  saveLabState();
 }
 function renderLinkList(){
   const el=document.getElementById('link-list');if(!el)return;
@@ -1776,6 +1873,11 @@ function copyLastOutput(id) {
     if (btn) { const orig = btn.textContent; btn.textContent='✅コピー済'; setTimeout(()=>btn.textContent=orig, 1500); }
   });
 }
+
+// ページ読み込み時に復元を試みる
+document.addEventListener('DOMContentLoaded', function() {
+  restoreLabState();
+});
 
 </script>
 </body>
