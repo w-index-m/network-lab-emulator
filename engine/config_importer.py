@@ -273,6 +273,13 @@ def _parse_sir(config_text: str, state, rule_engine) -> dict:
             errors.append(f"SKIP masked secret: {stripped[:60]}")
             continue
 
+        # IPアドレスバリデーション：不正なIPを含む行はスキップ
+        has_bad_ip, bad_ip_desc = _has_invalid_ip(stripped)
+        if has_bad_ip:
+            errors.append(f"SKIP {bad_ip_desc}: {stripped[:60]}")
+            logger.debug("skipped line with invalid IP: %s", stripped)
+            continue
+
         # hostname → バリデーションして直接セット
         m_hn = re.match(r'^hostname\s+(\S+)', stripped, re.IGNORECASE)
         if m_hn:
