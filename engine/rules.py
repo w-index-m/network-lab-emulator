@@ -789,10 +789,20 @@ class RuleEngine:
             return self._sir_show_ipsec_sa(state)
         if re.match(r'^show\s+ipsec\s+tunnel', c) and state.device_type in ('sir', 'srs'):
             return self._sir_show_ipsec_tunnel(state)
-        if re.match(r'^show\s+ike\s+sa', c) and state.device_type in ('sir', 'srs'):
-            return self._sir_show_ike_sa(state)
+        if re.match(r'^show\s+ipsec\s+polic', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ipsec_policy(state)
+        if re.match(r'^show\s+ipsec\s+stat', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ipsec_statistics(state)
         if re.match(r'^show\s+ipsec', c) and state.device_type in ('sir', 'srs'):
             return self._sir_show_ipsec_sa(state)
+        if re.match(r'^show\s+ike\s+sa', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ike_sa(state)
+        if re.match(r'^show\s+ike\s+polic', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ike_policy(state)
+        if re.match(r'^show\s+ike\s+stat', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ike_statistics(state)
+        if re.match(r'^show\s+ike', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ike_sa(state)
 
         # ── show running-config / candidate-config ──
         if re.match(r'^show\s+(run(ning-config)?|candidate-config|start(up-config)?|conf?(ig)?)\b', c) \
@@ -1478,6 +1488,99 @@ Configuration Revision            : 5"""
             lt_rem = str(t.get('ike_lifetime', 86400) - random.randint(0, 3600))
             mode   = t.get('ike_mode', 'main')
             lines.append(f'  {remote:<17}{ph1:<9}{"yes":<11}{dh:<5}{lt_rem:<15}{mode}')
+        return '\n'.join(lines)
+
+    def _sir_show_ipsec_policy(self, state: DeviceState) -> str:
+        tunnels = getattr(state, 'ipsec_tunnels', {})
+        if not tunnels:
+            return '  No IPsec policy configured.'
+        lines = [
+            '  No.  Direction  Local-IP        Remote-IP       Protocol  Encrypt    Hash    PFS',
+            '  ---  ---------  --------------  --------------  --------  ---------  ------  ---',
+        ]
+        for tid, t in sorted(tunnels.items()):
+            local  = t.get('local_ip',  '-')
+            remote = t.get('remote_ip', '-')
+            proto  = t.get('protocol', 'esp').upper()
+            enc    = t.get('encryption', 'aes256')
+            hsh    = t.get('hash', 'sha256')
+            pfs    = t.get('pfs', 'off')
+            lines.append(
+                f'  {tid:<5}{"both":<11}{local:<16}{remote:<16}{proto:<10}{enc:<11}{hsh:<8}{pfs}'
+            )
+        return '\n'.join(lines)
+
+    def _sir_show_ipsec_statistics(self, state: DeviceState) -> str:
+        tunnels = getattr(state, 'ipsec_tunnels', {})
+        if not tunnels:
+            return '  No IPsec SA established.'
+        lines = [
+            '  IPsec Statistics',
+            '  ----------------',
+        ]
+        for tid, t in sorted(tunnels.items()):
+            remote = t.get('remote_ip', '-')
+            name   = t.get('name', f'tunnel{tid}')
+            if t.get('status') == 'established':
+                pkts_in  = random.randint(1000, 99999)
+                pkts_out = random.randint(1000, 99999)
+                bytes_in  = pkts_in  * random.randint(500, 1400)
+                bytes_out = pkts_out * random.randint(500, 1400)
+                lines += [
+                    f'',
+                    f'  Remote {remote}  ({name})',
+                    f'    Inbound  ESP:  {pkts_in} packets  {bytes_in} bytes  0 errors',
+                    f'    Outbound ESP:  {pkts_out} packets  {bytes_out} bytes  0 errors',
+                    f'    Replay check:  0 failures',
+                    f'    SA rekeys:     {random.randint(0, 5)}',
+                ]
+            else:
+                lines += [f'', f'  Remote {remote}  ({name})', f'    SA not yet established.']
+        return '\n'.join(lines)
+
+    def _sir_show_ike_policy(self, state: DeviceState) -> str:
+        tunnels = getattr(state, 'ipsec_tunnels', {})
+        if not tunnels:
+            return '  No IKE policy configured.'
+        lines = [
+            '  No.  Peer             Mode        DH   Encrypt    Hash    Auth         Lifetime',
+            '  ---  ---------------  ----------  ---  ---------  ------  -----------  --------',
+        ]
+        for tid, t in sorted(tunnels.items()):
+            remote   = t.get('remote_ip', '-')
+            mode     = t.get('ike_mode', 'main')
+            dh       = str(t.get('dh_group', 14))
+            enc      = t.get('encryption', 'aes256')
+            hsh      = t.get('hash', 'sha256')
+            lifetime = str(t.get('ike_lifetime', 86400))
+            lines.append(
+                f'  {tid:<5}{remote:<17}{mode:<12}{dh:<5}{enc:<11}{hsh:<8}{"preshared":<13}{lifetime}'
+            )
+        return '\n'.join(lines)
+
+    def _sir_show_ike_statistics(self, state: DeviceState) -> str:
+        tunnels = getattr(state, 'ipsec_tunnels', {})
+        if not tunnels:
+            return '  No IKE SA established.'
+        lines = [
+            '  IKE Statistics',
+            '  --------------',
+        ]
+        for tid, t in sorted(tunnels.items()):
+            remote = t.get('remote_ip', '-')
+            name   = t.get('name', f'tunnel{tid}')
+            if t.get('status') == 'established':
+                lines += [
+                    f'',
+                    f'  Peer {remote}  ({name})',
+                    f'    Phase1 negotiations:  {random.randint(1,5)} success  0 failure',
+                    f'    Phase2 negotiations:  {random.randint(1,5)} success  0 failure',
+                    f'    DPD probes sent:      {random.randint(0,20)}',
+                    f'    DPD probes received:  {random.randint(0,20)}',
+                    f'    Rekeys:               {random.randint(0,3)}',
+                ]
+            else:
+                lines += [f'', f'  Peer {remote}  ({name})', f'    SA not yet established.']
         return '\n'.join(lines)
 
     # ─── show running-config ──────────────────
