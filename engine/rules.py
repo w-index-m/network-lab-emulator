@@ -3219,11 +3219,40 @@ Key Version         : A
             host  = m_range.group(2)
             p_lo  = int(m_range.group(3))
             p_hi  = int(m_range.group(4))
-            lines = []
-            for port in range(p_lo, p_hi + 1):
-                rtt = round(random.uniform(0.3, 5.0), 2)
-                lines.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
-            return "\n".join(lines) if lines else f"nc: connect to {host} port {p_lo} failed"
+            total = p_hi - p_lo + 1
+            # 100ポート以下は全件表示、超える場合は先頭10件+サマリー+末尾10件
+            if total <= 100:
+                lines = []
+                for port in range(p_lo, p_hi + 1):
+                    rtt = round(random.uniform(0.3, 5.0), 2)
+                    lines.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
+                return "\n".join(lines) if lines else f"nc: connect to {host} port {p_lo} failed"
+            else:
+                head = []
+                for port in range(p_lo, p_lo + 10):
+                    rtt = round(random.uniform(0.3, 5.0), 2)
+                    head.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
+                tail = []
+                for port in range(p_hi - 9, p_hi + 1):
+                    rtt = round(random.uniform(0.3, 5.0), 2)
+                    tail.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
+                avg_rtt = round(random.uniform(1.5, 3.5), 2)
+                summary = [
+                    f"",
+                    f"  ... (ports {p_lo + 10} - {p_hi - 10} tested, all succeeded) ...",
+                    f"",
+                ]
+                all_lines = head + summary + tail + [
+                    f"",
+                    f"--- nc scan summary ---",
+                    f"Host   : {host}",
+                    f"Range  : {p_lo} - {p_hi}",
+                    f"Total  : {total} ports scanned",
+                    f"Open   : {total} ports",
+                    f"Closed : 0 ports",
+                    f"Avg RTT: {avg_rtt} ms",
+                ]
+                return "\n".join(all_lines)
         elif m_single:
             host = m_single.group(1)
             port = int(m_single.group(2))
