@@ -4365,7 +4365,7 @@ Key Version         : A
                 f'  Chassis ID   : {chassis}',
                 f'  Port ID      : {port_id}',
                 f'  System Name  : {sysname}',
-                f'  System Descr : Fujitsu Network Communications',
+                f'  System Descr : APRESIA Networks',
                 f'  Port Descr   : {port_id}',
                 f'  Capability   : {cap}',
                 f'  TTL          : {n.get("ttl", 120)}',
@@ -4385,7 +4385,7 @@ Key Version         : A
             f'\n'
             f'  Chassis ID   : 00:0e:0e:f1:00:02\n'
             f'  System Name  : {state.hostname}\n'
-            f'  System Descr : Fujitsu APRESIA Series\n'
+            f'  System Descr : APRESIA Networks ApresiaLight Series\n'
             f'  Capability   : Bridge\n'
             f'  Management   : {mgmt_ip or "not configured"}\n'
         )
