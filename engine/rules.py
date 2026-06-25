@@ -199,6 +199,11 @@ class DeviceState:
                                       "desc": "#### To Router ####", "type": "10/100/1000BaseTX",
                                       "native_vlan": "1", "allowed_vlan": "1,10,200"},
             "Vlan10": {"ip": "192.168.10.1", "prefix": 24, "status": "up", "desc": ""},
+            **{f"Port-channel{i}": {
+                "ip": "", "prefix": 0, "status": "notconnect",
+                "vlan": "1", "speed": "auto", "duplex": "full",
+                "desc": f"Port-channel{i}",
+            } for i in range(1, 5)},
         }) if device_type in ("catalyst", "srs") else {
             "GigabitEthernet0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
@@ -263,6 +268,11 @@ class DeviceState:
             self.ipsec_crypto = {}   # isakmp_policies / transform_sets / crypto_maps / isakmp_keys / isakmp_enabled
             self.ipsec_peers  = {}   # {peer_ip: {status, phase1, phase2, spi_in, spi_out, ...}}
             self.static_routes = []  # [{"dest","prefix","gw"}]
+
+        # EtherChannel / LACP state (catalyst, srs, nexus)
+        if device_type in ("catalyst", "srs", "nexus"):
+            # {group_id: {"mode": "active"|"passive"|"on", "members": ["Gi1/0/1", ...]}}
+            self.channel_groups = {}
 
     def uptime_str(self):
         delta = datetime.now() - self.startup_time
@@ -756,6 +766,28 @@ class RuleEngine:
         # ── show arp ──
         if re.match(r'^show\s+(ip\s+)?arp', c):
             return self._show_arp(state)
+
+        # ── show etherchannel (Catalyst/SR-S) ──
+        if re.match(r'^show\s+etherchannel\s+summary', c):
+            return self._show_etherchannel_summary(state)
+        if re.match(r'^show\s+etherchannel\s+detail', c):
+            return self._show_etherchannel_detail(state)
+        if re.match(r'^show\s+etherchannel', c):
+            return self._show_etherchannel_summary(state)
+
+        # ── show lacp (Catalyst/SR-S/Nexus) ──
+        if re.match(r'^show\s+lacp\s+neighbor', c):
+            return self._show_lacp_neighbor(state)
+        if re.match(r'^show\s+lacp\s+internal', c):
+            return self._show_lacp_internal(state)
+        if re.match(r'^show\s+lacp', c):
+            return self._show_lacp_neighbor(state)
+
+        # ── show port-channel summary (Nexus) ──
+        if re.match(r'^show\s+port-channel\s+summary', c):
+            return self._show_port_channel_summary(state)
+        if re.match(r'^show\s+port-channel', c):
+            return self._show_port_channel_summary(state)
 
         # ── show vlan ──
         if re.match(r'^show\s+vlan', c):
@@ -1273,6 +1305,157 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
   power_consumption    : 8 W
   internal_state       : NORMAL
   internal_temp        : {temp} C"""
+
+    # ─── show etherchannel summary ────────────────────────────
+    def _show_etherchannel_summary(self, state):
+        cgs = getattr(state, 'channel_groups', {})
+        lines = [
+            "Flags:  D - down        P - bundled in port-channel",
+            "        I - stand-alone s - suspended",
+            "        H - Hot-standby (LACP only)",
+            "        R - Layer3      S - Layer2",
+            "        U - in use      N - not in use, no aggregation",
+            "        f - failed to allocate aggregator",
+            "",
+            "        M - not in use, minimum links not met",
+            "        u - unsuitable for bundling",
+            "        w - waiting to be aggregated",
+            "        d - default port",
+            "",
+            "Number of channel-groups in use: {}".format(len(cgs)),
+            "Number of aggregators:           {}".format(len(cgs)),
+            "",
+            "Group  Port-channel  Protocol    Ports",
+            "------+-------------+-----------+-----------------------------------------------",
+        ]
+        if not cgs:
+            lines.append("(none)")
+        for grp_id in sorted(cgs):
+            grp = cgs[grp_id]
+            mode = grp.get('mode', 'on')
+            proto = "LACP" if mode in ('active', 'passive') else "PAgP"
+            po_name = f"Po{grp_id}"
+            po_status = "SU" if grp.get('members') else "SD"
+            member_strs = []
+            for m in grp.get('members', []):
+                short = m.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te").replace("Ethernet", "Et")
+                flag = "P" if mode in ('active', 'passive', 'on') else "I"
+                member_strs.append(f"{short}({flag})")
+            lines.append(f"{grp_id:<7}{po_name:<14}({po_status}) {proto:<12}" + " ".join(member_strs))
+        return "\n".join(lines)
+
+    def _show_etherchannel_detail(self, state):
+        cgs = getattr(state, 'channel_groups', {})
+        if not cgs:
+            return "No EtherChannels configured."
+        lines = []
+        for grp_id in sorted(cgs):
+            grp = cgs[grp_id]
+            mode = grp.get('mode', 'on')
+            proto = "LACP" if mode in ('active', 'passive') else "PAgP"
+            po_name = f"Port-channel{grp_id}"
+            lines.append(f"Group: {grp_id}")
+            lines.append(f"----------")
+            lines.append(f"  Group state = L2")
+            lines.append(f"  Ports: {len(grp.get('members',[]))}   Maxports = 8")
+            lines.append(f"  Port-channels: 1  Max Port-channels = 16")
+            lines.append(f"  Protocol:   {proto}")
+            lines.append(f"  Minimum Links: 0")
+            lines.append("")
+            lines.append(f"              Ports in the group:")
+            lines.append(f"              -------------------")
+            lines.append(f"  Port: {po_name}")
+            lines.append(f"  Port state    = Port-channel Ag-Inuse")
+            lines.append(f"  Protocol      =   {proto}")
+            lines.append(f"  Port index    =   0  Load: 0x00  Protocol:   {proto}")
+            lines.append("")
+            lines.append(f"  Age of the Port-channel   = 0d:00h:05m:21s")
+            lines.append(f"  Logical slot/port   = 2/1  Number of ports = {len(grp.get('members',[]))}")
+            lines.append(f"  HotStandBy port = null")
+            lines.append(f"  Port state          = Port-channel Ag-Inuse")
+            for mem in grp.get('members', []):
+                short = mem.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te")
+                lines.append(f"  Ports: {mem} ")
+                lines.append(f"     Port state    = Up Mstr Assoc In-Bndl")
+                lines.append(f"     Channel group = {grp_id}    Mode = {'Active' if mode == 'active' else 'Passive' if mode == 'passive' else 'On'}  Gcchange = -")
+                lines.append(f"     Port-channel  = Po{grp_id}    GC  =   -  Pseudo port-channel = Po{grp_id}")
+                lines.append(f"     Port index    = 0   Load = 0x00  Protocol =  {'LACP' if mode in ('active','passive') else 'PAgP'}")
+                lines.append("")
+        return "\n".join(lines)
+
+    # ─── show lacp neighbor ────────────────────────────
+    def _show_lacp_neighbor(self, state):
+        cgs = getattr(state, 'channel_groups', {})
+        if not cgs:
+            return "No LACP port channels established."
+        lines = []
+        for grp_id in sorted(cgs):
+            grp = cgs[grp_id]
+            if grp.get('mode') not in ('active', 'passive'):
+                continue
+            lines.append(f"Channel group {grp_id} neighbors")
+            lines.append("")
+            lines.append(f"                        LACP port                        Admin  Oper   Port    Port")
+            lines.append(f"Port      Flags   State  Priority  Oper Key  Admin Key  Role   Oper   Number  State")
+            for mem in grp.get('members', []):
+                short = mem.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te").replace("Ethernet1/", "Eth1/")
+                lines.append(f"{short:<10}FA      bndl   32768     0x{grp_id:<4}  0x{grp_id:<5} Active Active 0x{grp_id+1:<4}  0x3D")
+            lines.append("")
+        if not lines:
+            return "No active/passive LACP channel groups configured."
+        return "\n".join(lines)
+
+    def _show_lacp_internal(self, state):
+        cgs = getattr(state, 'channel_groups', {})
+        if not cgs:
+            return "No LACP port channels established."
+        lines = []
+        for grp_id in sorted(cgs):
+            grp = cgs[grp_id]
+            if grp.get('mode') not in ('active', 'passive'):
+                continue
+            lines.append(f"Channel group {grp_id}")
+            lines.append(f"                          LACP port     Admin    Oper    Port     Port")
+            lines.append(f"Port       Flags   State  Priority      Key      Key     Number   State")
+            for mem in grp.get('members', []):
+                short = mem.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te")
+                lines.append(f"{short:<11}SA      bndl   32768         0x{grp_id:<4} 0x{grp_id:<4} 0x{grp_id+1:<4} 0x3D")
+            lines.append("")
+        if not lines:
+            return "No active/passive LACP channel groups configured."
+        return "\n".join(lines)
+
+    # ─── show port-channel summary (NX-OS) ────────────────────────────
+    def _show_port_channel_summary(self, state):
+        cgs = getattr(state, 'channel_groups', {})
+        lines = [
+            "Flags:  D - Down        P - Up in port-channel (members)",
+            "        I - Individual  H - Hot-standby (LACP only)",
+            "        s - Suspended   r - Module-removed",
+            "        b - BFD Session Wait",
+            "        S - Switched    R - Routed",
+            "        U - Up (port-channel)",
+            "        p - Up in delay-lacp mode (member)",
+            "        M - Not in use. Min-links not met",
+            "--------------------------------------------------------------------------------",
+            "Group  Port-         Type   Protocol  Member Ports",
+            "       channel",
+            "--------------------------------------------------------------------------------",
+        ]
+        if not cgs:
+            lines.append("(none)")
+        for grp_id in sorted(cgs):
+            grp = cgs[grp_id]
+            mode = grp.get('mode', 'on')
+            proto = "LACP" if mode in ('active', 'passive') else "NONE"
+            members = grp.get('members', [])
+            po_flag = "SU" if members else "SD"
+            member_strs = []
+            for m in members:
+                short = m.replace("Ethernet1/", "Eth1/").replace("GigabitEthernet", "Gi")
+                member_strs.append(f"{short}(P)")
+            lines.append(f"{grp_id:<7}Po{grp_id:<13}Eth    {proto:<10}" + " ".join(member_strs))
+        return "\n".join(lines)
 
     # ─── show vlan ────────────────────────────
     def _show_vlan(self, state):
@@ -4274,11 +4457,36 @@ Key Version         : A
                     return self._range_error(cmd, state, 'AS number', 1, 4294967295, asn)
 
             # channel-group <1-48> mode active|passive|on
-            m_ch = re.match(r'^channel-group\s+(\d+)', c)
+            m_ch = re.match(r'^channel-group\s+(\d+)(?:\s+mode\s+(\S+))?', c)
             if m_ch:
                 ch_id = int(m_ch.group(1))
                 if not (1 <= ch_id <= 48):
                     return self._range_error(cmd, state, 'channel-group', 1, 48, ch_id)
+                mode = m_ch.group(2) or 'on'
+                if mode not in ('active', 'passive', 'on'):
+                    return self._cmd_error(cmd, state, reason='invalid')
+                # Save to channel_groups and track membership
+                if not hasattr(state, 'channel_groups'):
+                    state.channel_groups = {}
+                if ch_id not in state.channel_groups:
+                    state.channel_groups[ch_id] = {'mode': mode, 'members': []}
+                else:
+                    state.channel_groups[ch_id]['mode'] = mode
+                # Determine current interface name
+                cur_if = getattr(state, 'current_if', None)
+                if cur_if and cur_if not in state.channel_groups[ch_id]['members']:
+                    state.channel_groups[ch_id]['members'].append(cur_if)
+                # Update port-channel interface status
+                po_name = f"Port-channel{ch_id}"
+                if po_name not in state.interfaces:
+                    state.interfaces[po_name] = {
+                        "ip": "", "prefix": 0, "status": "connected",
+                        "vlan": "trunk", "speed": "1000", "duplex": "full",
+                        "desc": f"Port-channel{ch_id}",
+                    }
+                else:
+                    state.interfaces[po_name]['status'] = 'connected'
+                return ''
 
             # vrrp <1-255>
             m_vrrp = re.match(r'^vrrp\s+(\d+)', c)
