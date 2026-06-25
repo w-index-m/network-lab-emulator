@@ -113,19 +113,39 @@ def _trigger_ike_negotiation(device_id: str):
         # 対向デバイスにも結果ログを積む
         state = device_sessions.get(device_id)
         if state:
+            # Si-R: ipsec_tunnels から peer_ip を収集
+            peer_ips = set()
             for _, t in getattr(state, 'ipsec_tunnels', {}).items():
-                peer_ip = t.get('remote_ip', '')
+                rip = t.get('remote_ip', '')
+                if rip:
+                    peer_ips.add(rip)
+            # Cisco/Catalyst: ipsec_crypto の crypto_maps から peer を収集
+            for cmap in getattr(state, 'ipsec_crypto', {}).get('crypto_maps', {}).values():
+                for seq_data in cmap.values():
+                    if isinstance(seq_data, dict) and seq_data.get('peer'):
+                        peer_ips.add(seq_data['peer'])
+            for peer_ip in peer_ips:
                 for pid, ps in device_sessions.items():
                     if pid == device_id:
                         continue
-                    for _, pt in getattr(ps, 'ipsec_tunnels', {}).items():
-                        if pt.get('local_ip') == peer_ip:
-                            pbuf = proto_log_buffer.setdefault(pid, [])
-                            for log_line in result.logs:
-                                pbuf.append({'type': 'sir_log', 'message': log_line,
-                                             'hostname': ps.hostname,
-                                             'facility': 'IPSEC' if 'IPsec' in log_line else 'IKE',
-                                             'level': 'INFO' if result.success else 'ERROR'})
+                    # Si-R peer match
+                    peer_match = any(
+                        pt.get('local_ip') == peer_ip
+                        for _, pt in getattr(ps, 'ipsec_tunnels', {}).items()
+                    )
+                    # Cisco peer match
+                    if not peer_match:
+                        for iinfo in ps.interfaces.values():
+                            if iinfo.get('ip') == peer_ip:
+                                peer_match = True
+                                break
+                    if peer_match:
+                        pbuf = proto_log_buffer.setdefault(pid, [])
+                        for log_line in result.logs:
+                            pbuf.append({'type': 'sir_log', 'message': log_line,
+                                         'hostname': ps.hostname,
+                                         'facility': 'IPSEC' if 'IPsec' in log_line else 'IKE',
+                                         'level': 'INFO' if result.success else 'ERROR'})
 
 
 def _save_config():
@@ -160,6 +180,11 @@ def _save_config():
                 dev_data["ipsec_tunnels"]  = tunnels
                 dev_data["ipsec_enabled"]  = getattr(state, "ipsec_enabled", False)
                 dev_data["ike_enabled"]    = getattr(state, "ike_enabled", False)
+        # Cisco/Catalyst IPsec設定を保存
+        if state.device_type in ("cisco", "catalyst"):
+            crypto = getattr(state, "ipsec_crypto", {})
+            if crypto:
+                dev_data["ipsec_crypto"] = crypto
         data["devices"][dev_id] = dev_data
     # vnetリンク
     for a, neighbors in vnet.links.items():
@@ -193,7 +218,8 @@ def _load_config():
                 state.interfaces["eth0"]["ip"] = dev["ip"]
                 if dev.get("gateway"):
                     state.gateway = dev["gateway"]
-                    state.routes[0]["gw"] = dev["gateway"]
+                    if state.routes:
+                        state.routes[0]["gw"] = dev["gateway"]
             device_sessions[dev_id] = state
             ifaces = {name: {'ip': info['ip'], 'prefix': info.get('prefix', 24)}
                       for name, info in state.interfaces.items() if info.get('ip')}
@@ -237,6 +263,9 @@ def _load_config():
             state.ipsec_tunnels = dev_data["ipsec_tunnels"]
             state.ipsec_enabled = dev_data.get("ipsec_enabled", False)
             state.ike_enabled   = dev_data.get("ike_enabled", False)
+        # Cisco/Catalyst IPsec設定を復元
+        if dev_data["type"] in ("cisco", "catalyst") and dev_data.get("ipsec_crypto"):
+            state.ipsec_crypto = dev_data["ipsec_crypto"]
         device_sessions[dev_id] = state
         ifaces = {name: {'ip': info.get('ip',''), 'prefix': info.get('prefix',24)}
                   for name, info in state.interfaces.items() if info.get('ip')}
