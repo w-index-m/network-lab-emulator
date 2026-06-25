@@ -365,8 +365,9 @@ async def cli_command(body: dict):
 
     # IPアドレス・ルート変更があればicmp_engineに再登録
     c_low = command.lower().strip()
-    if re.search(r'ip\s+address|ip\s+route|remote\s+\d+\s+ip\s+route|'
-                 r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address', c_low):
+    if re.search(r'ip\s+addr(?:ess)?|ip\s+route|remote\s+\d+\s+ip\s+route|'
+                 r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address|'
+                 r'no\s+shutdown|no\s+shut|crypto\s+map', c_low):
         _register_icmp(device_id)
 
     # ルールで空応答かつOllamaあり → Ollamaで補完
@@ -1699,6 +1700,38 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     if re.match(r'^show\s+snmp', c):
         return _format_show_snmp(state)
 
+    # ── show ip protocols (Cisco/Catalyst) ──
+    if re.match(r'^show\s+ip\s+protocols', c) and state.device_type in ('cisco', 'catalyst'):
+        lines = []
+        rn = rip_engine.nodes.get(device_id)
+        if rn and rn.get('enabled'):
+            lines.append('Routing Protocol is "rip"')
+            lines.append('  Sending updates every 30 seconds, next due in 15 seconds')
+            lines.append(f'  Version {rn.get("version", 2)}, receive version {rn.get("version", 2)}')
+            lines.append('  Routing for Networks:')
+            for net in rn.get('networks', []):
+                lines.append(f'    {net.split("/")[0]}')
+            lines.append('  Distance: (default is 120)')
+        on = ospf_engine.nodes.get(device_id)
+        if on and on.get('enabled'):
+            pid = on.get('process_id', 1)
+            lines.append(f'Routing Protocol is "ospf {pid}"')
+            lines.append('  Outgoing update filter list for all interfaces is not set')
+            lines.append('  Incoming update filter list for all interfaces is not set')
+            lines.append(f'  Router ID {on.get("router_id", "0.0.0.0")}')
+            lines.append('  Number of areas in this router is 1. 1 normal 0 stub 0 nssa')
+            lines.append('  Distance: (default is 110)')
+        bn = bgp_engine.nodes.get(device_id)
+        if bn and bn.get('enabled'):
+            asn = bn.get('local_as', '?')
+            lines.append(f'Routing Protocol is "bgp {asn}"')
+            lines.append('  Outgoing update filter list for all interfaces is not set')
+            lines.append('  Incoming update filter list for all interfaces is not set')
+            lines.append('  Distance: external 20 internal 200 local 200')
+        if not lines:
+            lines.append('No routing protocol is configured')
+        return '\n'.join(lines)
+
     # ── VLAN 表示 ──
     if re.match(r'^show\s+vlan\s+brief', c):
         return vlan_engine.format_show_vlan(device_id, brief=True)
@@ -2353,6 +2386,7 @@ def handle_nc(device_id: str, command: str, state: DeviceState):
 
 
 
+def _format_ping(dest: str, result: dict, device_type: str) -> str:
     """ping結果を実機風フォーマットで整形"""
     if result['reachable']:
         rtts = result['rtts']

@@ -872,6 +872,10 @@ class RuleEngine:
         if re.match(r'^show\s+ip\s+ospf$', c):
             return self._show_ospf(state)
 
+        # ── show ip protocols (Cisco) ──
+        if re.match(r'^show\s+ip\s+protocols', c):
+            return self._show_ip_protocols(state)
+
         # ── show bgp ──
         if re.match(r'^show\s+(ip\s+)?bgp\s+summary', c):
             return self._show_bgp_summary(state)
@@ -1740,6 +1744,39 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
   Standby router is {'192.168.1.2' if h['state']=='Active' else 'local'}
   Priority {h['priority']} (configured {h['priority']})"""
 
+    # ─── show ip protocols (Cisco) ────────────────────────────
+    def _show_ip_protocols(self, state):
+        lines = []
+        # RIP
+        rip_ver = getattr(state, 'rip_version', None)
+        rip_nets = getattr(state, 'rip_networks', [])
+        if rip_ver or rip_nets:
+            lines.append("Routing Protocol is \"rip\"")
+            lines.append(f"  Sending updates every 30 seconds, next due in 15 seconds")
+            lines.append(f"  Version {rip_ver or 2}, receive version {rip_ver or 2}")
+            lines.append(f"  Routing for Networks:")
+            for n in rip_nets:
+                lines.append(f"    {n}")
+        # OSPF
+        ospf = getattr(state, 'ospf', {})
+        if ospf.get('process') and ospf.get('networks'):
+            pid = ospf.get('process', 1)
+            lines.append(f"Routing Protocol is \"ospf {pid}\"")
+            lines.append(f"  Outgoing update filter list for all interfaces is not set")
+            lines.append(f"  Incoming update filter list for all interfaces is not set")
+            lines.append(f"  Router ID {ospf.get('router_id', '0.0.0.0')}")
+            lines.append(f"  Number of areas in this router is 1. 1 normal 0 stub 0 nssa")
+        # BGP
+        bgp = getattr(state, 'bgp', {})
+        if bgp.get('asn') and bgp.get('neighbors'):
+            asn = bgp.get('asn', '?')
+            lines.append(f"Routing Protocol is \"bgp {asn}\"")
+            lines.append(f"  Outgoing update filter list for all interfaces is not set")
+            lines.append(f"  Incoming update filter list for all interfaces is not set")
+        if not lines:
+            lines.append("No routing protocol is configured")
+        return "\n".join(lines)
+
     # ─── show ospf ────────────────────────────
     def _show_ospf(self, state):
         o = state.ospf
@@ -2345,11 +2382,12 @@ Configuration Revision            : 5"""
         # crypto map <name>  (インターフェースモードで適用)
         m_cmap_if = re.match(r'^crypto\s+map\s+(\S+)$', c)
         if m_cmap_if and state.current_if:
-            map_name = m_cmap_if.group(1)
+            # Preserve original case of map name
+            m_orig2 = re.match(r'^crypto\s+map\s+(\S+)$', cmd.strip(), re.I)
+            map_name = m_orig2.group(1) if m_orig2 else m_cmap_if.group(1)
             state.interfaces.setdefault(state.current_if, {})['crypto_map'] = map_name
-            # ipsec_cryptoにも記録
-            state.ipsec_crypto.setdefault('crypto_map_interface', {
-                'name': map_name, 'interface': state.current_if})
+            state.ipsec_crypto['crypto_map_interface'] = {
+                'name': map_name, 'interface': state.current_if}
             return ""
 
         # no shutdown
@@ -2642,7 +2680,10 @@ Configuration Revision            : 5"""
             # crypto map <name> <seq> ipsec-isakmp  (enter crypto map sub-context)
             m_cmap_enter = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+ipsec-isakmp', c)
             if m_cmap_enter:
-                mapname, seq = m_cmap_enter.group(1), int(m_cmap_enter.group(2))
+                # Preserve original case of map name
+                m_orig = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+ipsec-isakmp', cmd.strip(), re.I)
+                mapname = m_orig.group(1) if m_orig else m_cmap_enter.group(1)
+                seq = int(m_cmap_enter.group(2))
                 state._cmap_name = mapname
                 state._cmap_seq = seq
                 state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {}).setdefault(seq, {})
@@ -3695,12 +3736,45 @@ Key Version         : A
             target = m_ifconfig.group(1)
             return self._pc_ifconfig(state, target)
 
-        # ip addr / ip address
-        if re.match(r'^ip\s+addr(?:ess)?(?:\s+show)?', c) or c == 'ip a':
+        # ip addr add X.X.X.X/prefix dev ethX  ← MUST be before generic show handler
+        m_addr_add = re.match(r'^ip\s+addr(?:ess)?\s+add\s+([\d.]+)/(\d+)(?:\s+dev\s+(\S+))?', c)
+        if m_addr_add:
+            ip_val = m_addr_add.group(1)
+            prefix  = int(m_addr_add.group(2))
+            ifname  = m_addr_add.group(3) or 'eth0'
+            state.interfaces.setdefault(ifname, {'status': 'up'})['ip'] = ip_val
+            state.interfaces[ifname]['prefix'] = prefix
+            state.interfaces[ifname]['status'] = 'up'
+            return ''
+
+        # ip addr / ip address (show) — exact match so "ip addr add" above handles adds
+        if re.match(r'^ip\s+addr(?:ess)?(?:\s+show)?$', c) or c == 'ip a':
             return self._pc_ip_addr(state)
 
-        # ip route / route / netstat -r
-        if re.match(r'^ip\s+route(?:\s+show)?', c) or c == 'ip r':
+        # ip route add default via X.X.X.X  ← MUSTbe before generic "ip route" handler
+        m_route_def = re.match(r'^ip\s+route\s+add\s+default\s+via\s+([\d.]+)', c)
+        if m_route_def:
+            state.gateway = m_route_def.group(1)
+            return ''
+
+        # ip route add X.X.X.X/prefix via X.X.X.X
+        m_route_add = re.match(r'^ip\s+route\s+add\s+([\d.]+)/(\d+)\s+via\s+([\d.]+)', c)
+        if m_route_add:
+            dest   = m_route_add.group(1)
+            prefix = int(m_route_add.group(2))
+            gw     = m_route_add.group(3)
+            if not hasattr(state, 'static_routes'):
+                state.static_routes = []
+            state.static_routes.append({'dest': dest, 'prefix': prefix, 'gw': gw})
+            return ''
+
+        # ip route del / ip route delete
+        m_route_del = re.match(r'^ip\s+route\s+(?:del|delete)\s+', c)
+        if m_route_del:
+            return ''
+
+        # ip route show / ip route / ip r
+        if re.match(r'^ip\s+route(?:\s+show)?$', c) or c == 'ip r':
             return self._pc_ip_route(state)
         if re.match(r'^(?:route|netstat\s+-r)', c):
             return self._pc_route_table(state)
