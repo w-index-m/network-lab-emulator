@@ -2570,6 +2570,97 @@ async def update_hostname(dev_id: str, body: dict):
     return {"ok": True}
 
 # ── リンク管理（vnetに反映）──
+
+# デバイスタイプ別MACプレフィックス（CDP/LLDPのChassis ID用）
+_MAC_BASE = {
+    'sir':      '00:0e:0e:f1:41:',
+    'srs':      '00:0e:0e:f1:42:',
+    'catalyst': '00:0e:0e:f1:43:',
+    'cisco':    '00:0e:0e:f1:44:',
+    'nexus':    '00:0e:0e:f1:45:',
+    'apresia':  '00:0e:0e:f1:46:',
+    'pc':       '00:0e:0e:f1:47:',
+}
+
+def _device_mac(dev_id: str, dev_type: str) -> str:
+    prefix = _MAC_BASE.get(dev_type, '00:0e:0e:f1:ff:')
+    suffix = format(abs(hash(dev_id)) % 256, '02x')
+    return prefix + suffix
+
+def _first_if(state) -> str:
+    """デバイスの最初の物理インターフェース名を返す"""
+    for name in state.interfaces:
+        if not name.lower().startswith(('vlan', 'lo', 'mgmt', 'port-channel')):
+            return name
+    return list(state.interfaces.keys())[0] if state.interfaces else ''
+
+def _cap_code(dev_type: str) -> str:
+    return 'R' if dev_type in ('sir', 'srs', 'cisco') else 'S'
+
+def _update_neighbors(a_id: str, b_id: str, add: bool):
+    """リンク追加/削除時にCDP・LLDPネイバーテーブルを更新する"""
+    a_state = device_sessions.get(a_id)
+    b_state = device_sessions.get(b_id)
+    if not a_state or not b_state:
+        return
+
+    pairs = [(a_state, a_id, b_state, b_id), (b_state, b_id, a_state, a_id)]
+    for local_st, local_id, peer_st, peer_id in pairs:
+        local_if = _first_if(local_st)
+        peer_if  = _first_if(peer_st)
+        mac      = _device_mac(peer_id, peer_st.device_type)
+        cap      = _cap_code(peer_st.device_type)
+
+        # ── CDP (Cisco同士のみ) ──
+        if local_st.device_type in ('catalyst', 'cisco', 'srs') and \
+           peer_st.device_type  in ('catalyst', 'cisco', 'srs'):
+            neighbors = getattr(local_st, 'cdp_neighbors', [])
+            # 既存エントリ削除（device名で識別）
+            neighbors = [n for n in neighbors if n.get('device') != peer_st.hostname]
+            if add:
+                neighbors.append({
+                    'device':    peer_st.hostname,
+                    'local_if':  local_if,
+                    'hold':      150,
+                    'cap':       cap,
+                    'platform':  peer_st.device_type.upper(),
+                    'port':      peer_if,
+                })
+            local_st.cdp_neighbors = neighbors
+
+        # ── LLDP (全機器) ──
+        lldp = getattr(local_st, 'lldp_neighbors', [])
+        lldp = [n for n in lldp
+                if n.get('system_name') != peer_st.hostname
+                and n.get('device') != peer_st.hostname]
+        if add:
+            lldp.append({
+                'local_if':    local_if,
+                'port':        local_if,
+                'chassis_id':  mac,
+                'system_name': peer_st.hostname,
+                'port_id':     peer_if,
+                'ttl':         120,
+                'cap':         cap,
+                'platform':    peer_st.device_type.upper(),
+            })
+        local_st.lldp_neighbors = lldp
+
+def _rebuild_all_neighbors():
+    """sync_links後に全デバイスのCDP/LLDPテーブルをvnetから再構築"""
+    # まず全デバイスのネイバーテーブルをクリア（動的エントリのみ）
+    for dev_id, state in device_sessions.items():
+        state.cdp_neighbors  = []
+        state.lldp_neighbors = []
+    # vnetのリンクをもとに再構築
+    seen = set()
+    for a_id, peers in vnet.links.items():
+        for b_id in peers:
+            key = tuple(sorted([a_id, b_id]))
+            if key not in seen:
+                seen.add(key)
+                _update_neighbors(a_id, b_id, add=True)
+
 @app.post("/api/link")
 async def add_link(body: dict):
     """装置間リンクを作成（プロトコルパケットが流れるようになる）"""
@@ -2577,6 +2668,7 @@ async def add_link(body: dict):
     b = body.get("b")
     if a and b:
         vnet.add_link(a, b)
+        _update_neighbors(a, b, add=True)
         _save_config()
     return {"ok": True, "neighbors": {a: list(vnet.get_neighbors(a)),
                                        b: list(vnet.get_neighbors(b))}}
@@ -2588,6 +2680,7 @@ async def remove_link(body: dict):
     b = body.get("b")
     if a and b:
         vnet.remove_link(a, b)
+        _update_neighbors(a, b, add=False)
         _save_config()
     return {"ok": True}
 
@@ -2623,6 +2716,7 @@ async def sync_links(body: dict):
     for dev_id in device_sessions:
         if dev_id not in vnet.ws_send_callbacks:
             _register_stub(dev_id)
+    _rebuild_all_neighbors()
     _save_config()
     return {"ok": True, "count": len(links)}
 
