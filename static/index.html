@@ -543,11 +543,13 @@ const DEV_TEMPLATES = {
 
 // ランチャー用の装置リスト（選択状態を管理）
 const LAUNCHER_DEVICES = {
-  'sir-a':    {checked:true,  name:'Router-A', model:'Si-R G120',     color:'#00c840', type:'sir'},
-  'sir-b':    {checked:false, name:'Router-B', model:'Si-R G120',     color:'#00a040', type:'sir'},
-  'srs':      {checked:false, name:'Core-SW',  model:'SR-S324TR1',    color:'#00a0ff', type:'srs'},
-  'catalyst': {checked:false, name:'Dist-SW',  model:'Catalyst 9300', color:'#1e90ff', type:'catalyst'},
-  'cisco':    {checked:false, name:'GW-Router',model:'Cisco ISR4321', color:'#e05a00', type:'cisco'},
+  'sir-a':    {checked:true,  name:'Router-A', model:'Si-R G120',            color:'#00c840', type:'sir'},
+  'sir-b':    {checked:false, name:'Router-B', model:'Si-R G120',            color:'#00a040', type:'sir'},
+  'srs':      {checked:false, name:'Core-SW',  model:'SR-S324TR1',           color:'#00a0ff', type:'srs'},
+  'catalyst': {checked:false, name:'Dist-SW',  model:'Catalyst 9300',        color:'#1e90ff', type:'catalyst'},
+  'cisco':    {checked:false, name:'GW-Router',model:'Cisco ISR4321',        color:'#e05a00', type:'cisco'},
+  'nexus':    {checked:false, name:'Nexus-SW', model:'Nexus 9300',           color:'#ff6a00', type:'nexus'},
+  'apresia':  {checked:false, name:'AP-SW',    model:'APRESIA ApresiaLight', color:'#00d4aa', type:'apresia'},
 };
 let launcherDevCounter = 10;
 
@@ -555,7 +557,7 @@ function renderLauncherList() {
   const el = document.getElementById('dev-sel-list');
   if (!el) return;
   el.innerHTML = Object.entries(LAUNCHER_DEVICES).map(([id, d]) => {
-    const isDefault = ['sir-a','sir-b','srs','catalyst','cisco'].includes(id);
+    const isDefault = ['sir-a','sir-b','srs','catalyst','cisco','nexus','apresia'].includes(id);
     const checked = d.checked ? 'checked' : '';
     const active  = d.checked ? 'active' : '';
     const del     = isDefault ? '' :
