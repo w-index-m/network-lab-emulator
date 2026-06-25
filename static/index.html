@@ -934,6 +934,7 @@ async function initLauncher() {
     badge.textContent = '● ルールベース ℹ';
     badge.className = 'badge-rules';
   }
+  applyScreenLayout();
 }
 
 // ════════════════════════════════════════════
@@ -1919,7 +1920,78 @@ function copyLastOutput(id) {
 }
 
 // ページ読み込み時に復元を試みる
+// ── スクリーンサイズに基づくUI動的スケーリング ──
+function applyScreenLayout() {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const r  = document.documentElement;
+
+  if (vw <= 480) {
+    // 小型スマホ (〜480px)
+    const scale = vw / 480;
+    r.style.setProperty('--ui-font',      Math.round(11 * scale) + 'px');
+    r.style.setProperty('--ui-font-sm',   Math.round(9  * scale) + 'px');
+    r.style.setProperty('--ui-font-term', Math.round(12 * scale) + 'px');
+    r.style.setProperty('--ui-pad',       Math.round(6  * scale) + 'px');
+    r.style.setProperty('--ui-launcher-w', '100vw');
+    r.style.setProperty('--ui-launcher-radius', '0px');
+    r.style.setProperty('--ui-row-h',     Math.round(44 * scale) + 'px');
+    r.style.setProperty('--ui-chk',       Math.round(20 * scale) + 'px');
+  } else if (vw <= 768) {
+    // 大型スマホ・タブレット縦 (481〜768px)
+    const scale = vw / 768;
+    r.style.setProperty('--ui-font',      Math.round(12 * scale + 6) + 'px');
+    r.style.setProperty('--ui-font-sm',   Math.round(10 * scale + 4) + 'px');
+    r.style.setProperty('--ui-font-term', Math.round(13 * scale + 5) + 'px');
+    r.style.setProperty('--ui-pad',       Math.round(8  * scale + 3) + 'px');
+    r.style.setProperty('--ui-launcher-w', Math.min(vw * 0.96, 520) + 'px');
+    r.style.setProperty('--ui-launcher-radius', '4px');
+    r.style.setProperty('--ui-row-h',     '40px');
+    r.style.setProperty('--ui-chk',       '18px');
+  } else {
+    // PC (769px〜)
+    r.style.setProperty('--ui-font',      '11px');
+    r.style.setProperty('--ui-font-sm',   '10px');
+    r.style.setProperty('--ui-font-term', '12px');
+    r.style.setProperty('--ui-pad',       '6px');
+    r.style.setProperty('--ui-launcher-w', '520px');
+    r.style.setProperty('--ui-launcher-radius', '6px');
+    r.style.setProperty('--ui-row-h',     'auto');
+    r.style.setProperty('--ui-chk',       '16px');
+  }
+
+  // ランチャーボックス幅を動的に適用
+  const lb = document.getElementById('launcher-box');
+  if (lb) {
+    lb.style.width          = r.style.getPropertyValue('--ui-launcher-w');
+    lb.style.maxWidth       = vw <= 480 ? '100vw' : '96vw';
+    lb.style.borderRadius   = r.style.getPropertyValue('--ui-launcher-radius');
+  }
+
+  // ターミナルフォントサイズを全ウィンドウに適用
+  const termFont = r.style.getPropertyValue('--ui-font-term');
+  document.querySelectorAll('.tw-buf, .tw-inp').forEach(function(el) {
+    el.style.fontSize = termFont;
+  });
+
+  // デバイス行の高さ
+  const rowH = r.style.getPropertyValue('--ui-row-h');
+  document.querySelectorAll('.dev-sel-row').forEach(function(el) {
+    el.style.minHeight = rowH;
+  });
+
+  // チェックボックスサイズ
+  const chk = r.style.getPropertyValue('--ui-chk');
+  document.querySelectorAll('.dev-sel-row input[type=checkbox]').forEach(function(el) {
+    el.style.width  = chk;
+    el.style.height = chk;
+  });
+}
+
+window.addEventListener('resize', applyScreenLayout);
+
 document.addEventListener('DOMContentLoaded', function() {
+  applyScreenLayout();
   restoreLabState();
 });
 
