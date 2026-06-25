@@ -161,6 +161,10 @@ class DeviceState:
                 {"port": "Ethernet1/1", "chassis_id": "00:0e:0e:f1:00:01", "system_name": "Catalyst-SW",
                  "port_id": "GigabitEthernet1/0/1", "ttl": 120, "cap": "B"},
             ]
+            self.ospf = {"process": 1, "router_id": "", "area": "0.0.0.0",
+                         "neighbors": []}
+            self.bgp  = {"asn": 0, "router_id": "", "neighbors": []}
+            self.static_routes = []
             return
 
         # 設定値
@@ -700,6 +704,28 @@ class RuleEngine:
 
     def _cmd_router_mode(self, cmd, state):
         state.mode = "config-router"
+        c = cmd.strip().lower()
+        # router bgp <ASN> → bgp.asn に保存
+        m_bgp = re.match(r'^router\s+bgp\s+(\d+)', c)
+        if m_bgp:
+            asn = int(m_bgp.group(1))
+            if not hasattr(state, 'bgp') or not isinstance(state.bgp, dict):
+                state.bgp = {"asn": asn, "router_id": "", "neighbors": []}
+            else:
+                state.bgp["asn"] = asn
+            state._current_router = 'bgp'
+        # router ospf <process> → ospf.process に保存
+        m_ospf = re.match(r'^router\s+ospf\s+(\d+)', c)
+        if m_ospf:
+            pid = int(m_ospf.group(1))
+            if not hasattr(state, 'ospf') or not isinstance(state.ospf, dict):
+                state.ospf = {"process": pid, "router_id": "", "area": "0.0.0.0", "neighbors": []}
+            else:
+                state.ospf["process"] = pid
+            state._current_router = 'ospf'
+        # router rip
+        if re.match(r'^router\s+rip', c):
+            state._current_router = 'rip'
         return ""
 
     def _cmd_vlan_mode(self, cmd, state):
@@ -2459,6 +2485,51 @@ Configuration Revision            : 5"""
             entry  = {'dest': dest, 'prefix': prefix, 'gw': gw}
             if entry not in state.static_routes:
                 state.static_routes.append(entry)
+            return ""
+
+        # ip route default gateway <gw>  (Si-R)
+        m_sir_default = re.match(r'^ip\s+route\s+default\s+gateway\s+([\d.]+)', c)
+        if m_sir_default and state.device_type in ('sir', 'srs'):
+            gw = m_sir_default.group(1)
+            if not _valid_ip(gw):
+                return f"% Invalid input: IP address '{gw}' is not valid"
+            entry = {'dest': '0.0.0.0', 'prefix': 0, 'gw': gw}
+            if entry not in getattr(state, 'static_routes', []):
+                state.static_routes.append(entry)
+            return ""
+
+        # ip route <dst>/<prefix> gateway <gw>  (Si-R CIDR形式)
+        m_sir_cidr = re.match(r'^ip\s+route\s+([\d.]+)/(\d+)\s+gateway\s+([\d.]+)', c)
+        if m_sir_cidr and state.device_type in ('sir', 'srs'):
+            dest   = m_sir_cidr.group(1)
+            prefix = int(m_sir_cidr.group(2))
+            gw     = m_sir_cidr.group(3)
+            if not _valid_ip(dest):
+                return f"% Invalid input: IP address '{dest}' is not valid"
+            if not _valid_prefix(prefix):
+                return f"% Invalid input: prefix length '{prefix}' must be 0-32"
+            if not _valid_ip(gw):
+                return f"% Invalid input: IP address '{gw}' is not valid"
+            entry = {'dest': dest, 'prefix': prefix, 'gw': gw}
+            if entry not in getattr(state, 'static_routes', []):
+                state.static_routes.append(entry)
+            return ""
+
+        # ip route <dst>/<prefix> <gw>  (Nexus CIDR形式)
+        m_nex_route = re.match(r'^ip\s+route\s+([\d.]+)/(\d+)\s+([\d.]+)', c)
+        if m_nex_route and state.device_type == 'nexus':
+            dest   = m_nex_route.group(1)
+            prefix = int(m_nex_route.group(2))
+            gw     = m_nex_route.group(3)
+            if not _valid_ip(dest):
+                return f"% Invalid input: IP address '{dest}' is not valid"
+            if not _valid_prefix(prefix):
+                return f"% Invalid input: prefix length '{prefix}' must be 0-32"
+            if not _valid_ip(gw):
+                return f"% Invalid input: IP address '{gw}' is not valid"
+            entry = {'code': 'S', 'dest': f"{dest}/{prefix}", 'gw': gw, 'dist': 1, 'iface': ''}
+            if not any(r.get('dest') == entry['dest'] for r in state.routes):
+                state.routes.append(entry)
             return ""
 
         # ip route <dst> <mask> <gw>  (Si-R / Cisco IOS 共通)
@@ -4615,7 +4686,7 @@ Key Version         : A
             ('ip route', 'config'): 4,       # ip route net mask gw
             ('vlan', 'config'): 2,           # vlan 10
             ('neighbor', 'config-router'): 3, # neighbor x.x.x.x remote-as N
-            ('network', 'config-router'): 3,  # network x.x.x.x x.x.x.x area N (OSPF)
+            # network の必要トークン数はルーティングプロトコルによって異なるため別途チェック
             ('username', 'config'): 3,        # username xxx privilege N
         }
         # 先頭2トークンのコンテキストチェック
