@@ -2,6 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>ネットワークラボ エミュレーター</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -141,6 +142,49 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 .flow-hdr{background:#1a3a6a;padding:7px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #2a5a8a}
 #flow-text{width:100%;height:200px;background:#050e18;border:1px solid #1a3a5a;color:#00c800;font-family:'Courier New',monospace;font-size:12px;padding:8px;outline:none;resize:vertical;line-height:1.5;display:block}
 #flow-log{height:60px;overflow-y:auto;background:#050e18;border:1px solid #1a3a5a;padding:4px 8px;font-size:10px;scrollbar-width:thin;margin-top:6px;color:#406060}
+
+/* ── モバイル対応 ── */
+@media (max-width: 600px) {
+  /* ランチャー: 全画面表示 */
+  #launcher{padding:0}
+  #launcher-box{width:100vw;max-width:100vw;border-radius:0;border-left:none;border-right:none;min-height:100vh}
+  #launcher-hdr{padding:10px 12px}
+  .lh-title{font-size:14px}
+  .dev-sel-row{padding:8px 10px;min-height:44px}
+  .dev-sel-row label{font-size:13px}
+  .dev-sel-row input[type=checkbox]{width:20px;height:20px}
+  #launcher-add{padding:8px 10px;gap:6px;flex-wrap:wrap}
+  .add-btn{font-size:12px;padding:5px 10px}
+  #launcher-links{padding:8px 10px}
+  #launcher-launch{padding:14px}
+  #launcher-launch button{font-size:15px;padding:12px;border-radius:6px}
+
+  /* メニューバー: スクロール可能に */
+  #menubar{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+  #menubar::-webkit-scrollbar{display:none}
+
+  /* タイトルバー: コンパクト化 */
+  #titlebar .title{font-size:11px}
+  #mode-badge{font-size:9px;padding:1px 6px}
+
+  /* ターミナルウィンドウ: フォントサイズ調整 */
+  .tw-buf{font-size:13px;line-height:1.5}
+  .tw-hdr{font-size:11px}
+  .tw-inp{font-size:13px}
+
+  /* トポロジー左パネル: 横幅縮小 */
+  .topo-left{width:100%;flex-shrink:0}
+
+  /* コンフィグ左パネル */
+  .cfg-left{width:100%}
+
+  /* フローボックス: 全幅 */
+  #flow-box{width:98vw;max-width:98vw}
+  #flow-text{font-size:13px}
+
+  /* タブ操作しやすくする */
+  .tab-btn{padding:5px 10px;font-size:11px}
+}
 </style>
 </head>
 <body>
