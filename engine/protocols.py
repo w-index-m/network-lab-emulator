@@ -2651,6 +2651,30 @@ class IcmpEngine:
     """
     def __init__(self):
         self.device_ips: Dict[str, dict] = {}
+        # IPsecトンネル: {device_id: [{'local': ip, 'peer': ip}]}
+        self.ipsec_tunnels: Dict[str, list] = {}
+
+    def register_ipsec(self, device_id: str, local_ip: str, peer_ip: str):
+        """IPsecトンネル情報を登録（crypto map適用済みインターフェース）"""
+        self.ipsec_tunnels.setdefault(device_id, [])
+        entry = {'local': local_ip, 'peer': peer_ip}
+        if entry not in self.ipsec_tunnels[device_id]:
+            self.ipsec_tunnels[device_id].append(entry)
+
+    def clear_ipsec(self, device_id: str):
+        self.ipsec_tunnels.pop(device_id, None)
+
+    def _has_ipsec_to(self, device_id: str, next_device_id: str) -> bool:
+        """device_id から next_device_id へのIPsecトンネルが存在するか"""
+        tunnels = self.ipsec_tunnels.get(device_id, [])
+        if not tunnels:
+            return False
+        # next_device_idのIPリストを取得
+        peer_ips = set(self.device_ips.get(next_device_id, {}).get('ips', {}).keys())
+        for t in tunnels:
+            if t['peer'] in peer_ips:
+                return True
+        return False
 
     def register_device(self, device_id: str, hostname: str, interfaces: dict):
         ips = {}
@@ -2706,46 +2730,49 @@ class IcmpEngine:
             visited.add(current)
             cur_info = self.device_ips.get(current, {})
 
-            # 宛先と同じ直接接続ネットワークにいるか
+            # 宛先と同一直結ネットワーク → 到達（最後のホップは宛先自身なので追加しない）
             for dev_ip, prefix in cur_info.get('ips', {}).items():
                 if self._ip_in_network(dest_ip, dev_ip, prefix):
-                    hops.append({'device': current,
-                                 'hostname': cur_info.get('hostname', current),
-                                 'ip': dev_ip})
                     return {'reachable': True, 'hops': hops,
                             'reason': 'connected', 'dest_device': dest_device}
 
-            # 宛先装置に直接リンクで繋がっているか
-            if dest_device and dest_device in vnet.get_neighbors(current):
-                hops.append({'device': current,
-                             'hostname': cur_info.get('hostname', current),
-                             'ip': next(iter(cur_info.get('ips', {})), '?')})
-                dest_info = self.device_ips.get(dest_device, {})
-                hops.append({'device': dest_device,
-                             'hostname': dest_info.get('hostname', dest_device),
-                             'ip': dest_ip})
-                return {'reachable': True, 'hops': hops,
-                        'reason': 'reached', 'dest_device': dest_device}
-
-            # ルーティングテーブルで次ホップ決定
-            next_hop_device = self._resolve_next_hop(current, dest_ip)
+            # 次ホップデバイスとIPを解決
+            next_hop_device, next_hop_ip = self._resolve_next_hop_detail(current, dest_ip)
             if not next_hop_device:
-                hops.append({'device': current,
-                             'hostname': cur_info.get('hostname', current),
-                             'ip': next(iter(cur_info.get('ips', {})), '?'),
-                             'timeout': True})
-                return {'reachable': False, 'hops': hops,
-                        'reason': 'no route to host'}
+                # 経路なし: 現在デバイスがタイムアウト
+                cur_ip = next(iter(cur_info.get('ips', {})), '?')
+                hops.append({'device': current, 'hostname': cur_info.get('hostname', current),
+                             'ip': cur_ip, 'timeout': True})
+                return {'reachable': False, 'hops': hops, 'reason': 'no route to host'}
 
-            hops.append({'device': current,
-                         'hostname': cur_info.get('hostname', current),
-                         'ip': next(iter(cur_info.get('ips', {})), '?')})
+            next_info = self.device_ips.get(next_hop_device, {})
+            has_ipsec = self._has_ipsec_to(current, next_hop_device)
+
+            if has_ipsec:
+                # IPsecトンネル: next_hopのLAN側IP（dest方向）を表示、WAN区間は透過
+                tunnel_exit_ip = self._local_ip_toward(next_hop_device, dest_ip) or \
+                                 next(iter(next_info.get('ips', {})), '?')
+                hops.append({'device': next_hop_device,
+                             'hostname': next_info.get('hostname', next_hop_device),
+                             'ip': tunnel_exit_ip,
+                             'ipsec': True})
+            else:
+                # 通常ルーティング: next_hop_ip（受信側インターフェースIP）を表示
+                hops.append({'device': next_hop_device,
+                             'hostname': next_info.get('hostname', next_hop_device),
+                             'ip': next_hop_ip})
+
             current = next_hop_device
             ttl -= 1
 
         return {'reachable': False, 'hops': hops, 'reason': 'TTL exceeded'}
 
     def _resolve_next_hop(self, device_id: str, dest_ip: str) -> Optional[str]:
+        dev, _ = self._resolve_next_hop_detail(device_id, dest_ip)
+        return dev
+
+    def _resolve_next_hop_detail(self, device_id: str, dest_ip: str):
+        """(next_device_id, next_hop_ip) を返す"""
         best_routes = rib_engine.get_best_routes(device_id)
         matched = None
         matched_prefix = -1
@@ -2760,20 +2787,30 @@ class IcmpEngine:
                     matched = r
                     break
         if not matched:
-            return None
+            return None, None
         next_hop_ip = matched['next_hop']
         if next_hop_ip in ('0.0.0.0', ''):
-            return self._find_device_owning_ip(dest_ip) or \
-                   self._find_device_in_network(dest_ip)
+            dev = self._find_device_owning_ip(dest_ip) or \
+                  self._find_device_in_network(dest_ip)
+            return dev, dest_ip
         nh_device = self._find_device_owning_ip(next_hop_ip)
         if nh_device:
-            return nh_device
+            return nh_device, next_hop_ip
         for peer in vnet.get_neighbors(device_id):
             peer_info = self.device_ips.get(peer, {})
             if next_hop_ip in peer_info.get('ips', {}):
-                return peer
+                return peer, next_hop_ip
         neighbors = vnet.get_neighbors(device_id)
-        return next(iter(neighbors), None) if neighbors else None
+        dev = next(iter(neighbors), None) if neighbors else None
+        return dev, next_hop_ip
+
+    def _local_ip_toward(self, device_id: str, next_hop_ip: str) -> Optional[str]:
+        """next_hop_ipと同一セグメントの自分のIPを返す"""
+        info = self.device_ips.get(device_id, {})
+        for my_ip, prefix in info.get('ips', {}).items():
+            if self._ip_in_network(next_hop_ip, my_ip, prefix):
+                return my_ip
+        return None
 
     def ping(self, src_id: str, dest_ip: str, count: int = 5) -> dict:
         result = self.trace_path(src_id, dest_ip)

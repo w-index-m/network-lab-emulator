@@ -2342,6 +2342,16 @@ Configuration Revision            : 5"""
                 state.interfaces.setdefault(state.current_if, {})["vlan"] = m.group(1)
             return ""
 
+        # crypto map <name>  (インターフェースモードで適用)
+        m_cmap_if = re.match(r'^crypto\s+map\s+(\S+)$', c)
+        if m_cmap_if and state.current_if:
+            map_name = m_cmap_if.group(1)
+            state.interfaces.setdefault(state.current_if, {})['crypto_map'] = map_name
+            # ipsec_cryptoにも記録
+            state.ipsec_crypto.setdefault('crypto_map_interface', {
+                'name': map_name, 'interface': state.current_if})
+            return ""
+
         # no shutdown
         if c in ("no shutdown", "no shut"):
             if state.current_if:

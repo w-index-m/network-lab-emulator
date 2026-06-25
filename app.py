@@ -2574,6 +2574,32 @@ def _register_icmp(device_id: str):
             rib_engine.add_static_route(device_id, state.hostname,
                                         dest, prefix, gw, 1)
 
+    # IPsecトンネル: ipsec_crypto の crypto_maps / crypto_map_interface からpeer登録
+    icmp_engine.clear_ipsec(device_id)
+    ipsec_crypto = getattr(state, 'ipsec_crypto', {})
+    if ipsec_crypto:
+        crypto_maps   = ipsec_crypto.get('crypto_maps', {})
+        cmap_if       = ipsec_crypto.get('crypto_map_interface', {})
+        applied_name  = cmap_if.get('name', '')
+        applied_if    = cmap_if.get('interface', '')
+        # WAN側インターフェースのIPを取得
+        local_ip = ''
+        for ifname, info in state.interfaces.items():
+            if applied_if and applied_if.lower() in ifname.lower():
+                local_ip = info.get('ip', '')
+                break
+        if not local_ip and applied_if == '':
+            # interface に直接 crypto map が書かれているパターン
+            for ifname, info in state.interfaces.items():
+                if info.get('crypto_map') == applied_name:
+                    local_ip = info.get('ip', '')
+                    break
+        if local_ip and applied_name and applied_name in crypto_maps:
+            for seq, seq_data in crypto_maps[applied_name].items():
+                peer = seq_data.get('peer', '') if isinstance(seq_data, dict) else ''
+                if peer:
+                    icmp_engine.register_ipsec(device_id, local_ip, peer)
+
 @app.post("/api/save")
 async def api_save():
     """全デバイス設定をファイルに保存"""
