@@ -698,8 +698,19 @@ class RuleEngine:
     def _cmd_interface(self, cmd, state):
         m = re.match(r'^interface\s+(\S+)', cmd, re.I)
         if m:
-            state.current_if = m.group(1)
+            ifname = m.group(1)
+            state.current_if = ifname
             state.mode = "config-if"
+            # Loopbackは存在しなければ作成し、常にup状態
+            if ifname.lower().startswith('loopback'):
+                if ifname not in state.interfaces:
+                    state.interfaces[ifname] = {
+                        'ip': '', 'prefix': 0, 'status': 'up',
+                        'speed': '', 'duplex': '', 'desc': '',
+                        'type': 'Loopback',
+                    }
+                else:
+                    state.interfaces[ifname]['status'] = 'up'
         return ""
 
     def _cmd_router_mode(self, cmd, state):
@@ -1227,16 +1238,26 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         dup_str = "Full-duplex" if duplex in ("full","a-full") else ("Half-duplex" if duplex=="half" else "Auto-duplex")
         spd_str = f"{speed}Mb/s" if speed not in ("auto","a-1000","a-100") else "1000Mb/s"
         typ = iface.get("type","10/100/1000BaseTX")
+        is_loopback = name.lower().startswith("loopback")
         L = []
-        L.append(f"{name} is {'up' if up else 'down'}, line protocol is {'up' if up else 'down'} ({'connected' if up else 'notconnect'})")
-        L.append(f"  Hardware is Gigabit Ethernet, address is {mac} (bia {mac})")
-        if desc:
-            L.append(f"  Description: {desc}")
-        L.append("  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,")
-        L.append("     reliability 255/255, txload 1/255, rxload 1/255")
-        L.append("  Encapsulation ARPA, loopback not set")
-        L.append("  Keepalive set (10 sec)")
-        L.append(f"  {dup_str}, {spd_str}, media type is {typ}")
+        if is_loopback:
+            L.append(f"{name} is up, line protocol is up")
+            L.append(f"  Hardware is Loopback")
+            if desc:
+                L.append(f"  Description: {desc}")
+            L.append("  MTU 1514 bytes, BW 8000000 Kbit/sec, DLY 5000 usec,")
+            L.append("     reliability 255/255, txload 1/255, rxload 1/255")
+            L.append("  Encapsulation Loopback, loopback set")
+        else:
+            L.append(f"{name} is {'up' if up else 'down'}, line protocol is {'up' if up else 'down'} ({'connected' if up else 'notconnect'})")
+            L.append(f"  Hardware is Gigabit Ethernet, address is {mac} (bia {mac})")
+            if desc:
+                L.append(f"  Description: {desc}")
+            L.append("  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,")
+            L.append("     reliability 255/255, txload 1/255, rxload 1/255")
+            L.append("  Encapsulation ARPA, loopback not set")
+            L.append("  Keepalive set (10 sec)")
+            L.append(f"  {dup_str}, {spd_str}, media type is {typ}")
         L.append("  input flow-control is off, output flow-control is unsupported")
         L.append("  ARP type: ARPA, ARP Timeout 04:00:00")
         L.append("  Last input 00:00:01, output 00:00:01, output hang never")
@@ -2282,6 +2303,18 @@ Configuration Revision            : 5"""
         m = re.match(r'^(?:hostname|sysname)\s+(\S+)', cmd, re.I)
         if m:
             state.hostname = m.group(1)
+            return ""
+
+        # interface ip address (CIDR notation: ip address X.X.X.X/prefix)
+        m_cidr = re.match(r'^ip\s+address\s+([\d.]+)/(\d+)', c)
+        if m_cidr:
+            ip_val = m_cidr.group(1)
+            prefix = int(m_cidr.group(2))
+            if not _valid_ip(ip_val):
+                return f"% Invalid input: IP address '{ip_val}' is not valid"
+            if state.current_if:
+                state.interfaces.setdefault(state.current_if, {})["ip"] = ip_val
+                state.interfaces[state.current_if]["prefix"] = prefix
             return ""
 
         # interface ip address
@@ -4682,7 +4715,7 @@ Key Version         : A
             # (先頭コマンド, モード): 必要な最低トークン数
             ('interface', 'config'): 2,      # interface GigabitEthernet...
             ('interface', 'exec'):   2,
-            ('ip address', 'config-if'): 4,  # ip address x.x.x.x mask
+            # ('ip address', 'config-if'): 4 — handled below with CIDR check
             ('ip route', 'config'): 4,       # ip route net mask gw
             ('vlan', 'config'): 2,           # vlan 10
             ('neighbor', 'config-router'): 3, # neighbor x.x.x.x remote-as N
@@ -4695,6 +4728,12 @@ Key Version         : A
             if (c.startswith(req_cmd) and
                     (req_mode == mode or req_mode == '*') and
                     len(tokens) < min_toks):
+                return self._incomplete_error(cmd, state)
+
+        # ip address: needs either "ip address X.X.X.X mask" (4 tokens) or "ip address X.X.X.X/prefix" (3 tokens w/ slash)
+        if c.startswith('ip address') and mode == 'config-if':
+            import re as _re
+            if not _re.match(r'^ip\s+address\s+([\d.]+)/(\d+)', c) and len(tokens) < 4:
                 return self._incomplete_error(cmd, state)
 
         # ── Mode チェック（execモードでconfig専用コマンドを打った場合） ──
