@@ -157,6 +157,10 @@ class DeviceState:
             self.snmp_hosts = []
             self.snmp_location = ''
             self.banner = ''
+            self.lldp_neighbors = [
+                {"port": "Ethernet1/1", "chassis_id": "00:0e:0e:f1:00:01", "system_name": "Catalyst-SW",
+                 "port_id": "GigabitEthernet1/0/1", "ttl": 120, "cap": "B"},
+            ]
             return
 
         # 設定値
@@ -239,8 +243,10 @@ class DeviceState:
             {"device":"GW-Router","local_if":"Gi1/0/1", "hold":120,"cap":"R","platform":"ISR4321",   "port":"Gi0/0/0"},
         ]
         self.lldp_neighbors = [
-            {"device":"Core-SW",  "local_if":"Gi1/0/24","hold":120,"cap":"B","platform":"SR-S324TR1","port":"ether 10"},
-            {"device":"GW-Router","local_if":"Gi1/0/1", "hold":120,"cap":"R","platform":"ISR4321",   "port":"Gi0/0/0"},
+            {"local_if": "Gi1/0/24", "chassis_id": "00:0e:0e:f1:00:01",
+             "system_name": "Core-SW",   "port_id": "ether 10",     "ttl": 120, "cap": "B", "platform": "SR-S324TR1"},
+            {"local_if": "Gi1/0/1",  "chassis_id": "00:1a:2b:3c:4d:5e",
+             "system_name": "GW-Router", "port_id": "Gi0/0/0",      "ttl": 120, "cap": "R", "platform": "ISR4321"},
         ]
         self.hsrp = {"group":1,"vip":"192.168.1.254","priority":110,"state":"Active","preempt":True,"iface":"GigabitEthernet1/0/1"}
         self.ospf = {"process":1,"router_id":"10.0.0.1","area":"0.0.0.0",
@@ -266,6 +272,11 @@ class DeviceState:
             self.ipsec_enabled   = False
             self.ike_enabled     = False
             self.static_routes   = []  # [{"dest","prefix","gw"}]
+            self.lldp_neighbors  = [
+                {"local_if": "ether1", "chassis_id": "00:0e:0e:f1:00:03",
+                 "system_name": "Catalyst-SW", "port_id": "GigabitEthernet1/0/24",
+                 "ttl": 120, "cap": "B", "platform": "Catalyst 3850"},
+            ] if device_type == "srs" else []
 
         # Cisco IOS IPsec 状態（ASA は上で初期化済み）
         if device_type in ("cisco", "catalyst"):
@@ -277,6 +288,18 @@ class DeviceState:
         if device_type in ("catalyst", "srs", "nexus"):
             # {group_id: {"mode": "active"|"passive"|"on", "members": ["Gi1/0/1", ...]}}
             self.channel_groups = {}
+
+        # LLDP neighbor table (APRESIA)
+        if device_type == "apresia":
+            self.lldp_neighbors = [
+                {"port": "Port1/0/24", "chassis_id": "00:0e:0e:f1:00:01",
+                 "system_name": "Dist-SW", "port_id": "GigabitEthernet1/0/1",
+                 "ttl": 120, "cap": "B"},
+            ]
+
+        # LLDP neighbor table (Si-R)
+        if device_type == "sir":
+            self.lldp_neighbors = []
 
     def uptime_str(self):
         delta = datetime.now() - self.startup_time
@@ -812,6 +835,8 @@ class RuleEngine:
             return self._show_lldp_detail(state)
         if re.match(r'^show\s+lldp\s+neighbors', c):
             return self._show_lldp(state)
+        if re.match(r'^show\s+lldp\s+local', c):
+            return self._show_lldp_local(state)
         if re.match(r'^show\s+lldp', c):
             return self._show_lldp(state)
 
@@ -1437,6 +1462,41 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             return "No active/passive LACP channel groups configured."
         return "\n".join(lines)
 
+    # ─── show lldp local ──────────────────
+    def _show_lldp_local(self, state):
+        dt = state.device_type
+        mgmt_ip = ''
+        for name, iface in state.interfaces.items():
+            if iface.get('ip') and not name.startswith('lo'):
+                mgmt_ip = iface['ip']
+                break
+
+        if dt in ('srs', 'sir'):
+            return (
+                f' Local Device Information:\n'
+                f'  System Name  : {state.hostname}\n'
+                f'  Chassis ID   : 00:0e:0e:f1:41:dc\n'
+                f'  System Descr : Fujitsu Network SR-S Series\n'
+                f'  Capability   : Router\n'
+                f'  Management   : {mgmt_ip or "not configured"}\n'
+            )
+        # Cisco / Catalyst / Nexus
+        platform = {'catalyst': 'Cisco Catalyst', 'cisco': 'Cisco IOS', 'nexus': 'Cisco NX-OS'}.get(dt, 'Cisco')
+        return (
+            f"Local Interface: (all)\n\n"
+            f"Chassis id: 00:0e:0e:f1:00:10\n"
+            f"Port id: {list(state.interfaces.keys())[0] if state.interfaces else 'Gi0/1'}\n"
+            f"Port Description - not advertised\n"
+            f"System Name: {state.hostname}\n\n"
+            f"System Description:\n"
+            f"{platform}\n\n"
+            f"Time remaining: 30 seconds\n"
+            f"System Capabilities: B, R\n"
+            f"Enabled Capabilities: B\n\n"
+            f"Management Addresses:\n"
+            f"    IP: {mgmt_ip or 'not configured'}\n"
+        )
+
     # ─── show port-channel summary (NX-OS) ────────────────────────────
     def _show_port_channel_summary(self, state):
         cgs = getattr(state, 'channel_groups', {})
@@ -1525,6 +1585,27 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
     # ─── show lldp neighbors ──────────────────
     def _show_lldp(self, state):
         neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
+        dt = state.device_type
+
+        # SR-S / Si-R: 富士通フォーマット
+        if dt in ('srs', 'sir'):
+            lines = [
+                ' Neighbor Information:',
+                '  Port      Chassis-ID          Port-ID               System-Name       TTL',
+                '  --------- ------------------- --------------------- ----------------- -----',
+            ]
+            for n in neighbors:
+                local_if = n.get('local_if', n.get('port', ''))
+                chassis = n.get('chassis_id', '00:0e:0e:f1:00:01')
+                port_id = n.get('port_id', n.get('port', ''))
+                sysname = n.get('system_name', n.get('device', ''))
+                ttl = n.get('ttl', n.get('hold', 120))
+                lines.append(f'  {local_if:<10}{chassis:<20}{port_id:<22}{sysname:<18}{ttl}')
+            if not neighbors:
+                lines.append('  (no neighbors)')
+            return '\n'.join(lines)
+
+        # Cisco / Catalyst / Nexus: Ciscoフォーマット
         lines = [
             "Capability codes:",
             "    (R) Router, (B) Bridge, (T) Telephone, (C) DOCSIS Cable Device",
@@ -1533,38 +1614,77 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
             "Device ID            Local Intf      Hold-time  Capability   Port ID",
         ]
         for n in neighbors:
-            cap_map = {'R': 'R', 'S': 'B', 'H': 'T'}
-            cap = cap_map.get(n.get('cap', 'S'), 'B')
-            port = n.get('port', 'Gi0/1')
-            lines.append(f"{n['device']:<21}{n['local_if']:<16}{n['hold']:<11}{cap:<13}{port}")
+            cap_map = {'R': 'R', 'B': 'B', 'S': 'B', 'H': 'T'}
+            cap = cap_map.get(n.get('cap', 'B'), 'B')
+            local_if = n.get('local_if', n.get('port', ''))
+            port_id = n.get('port_id', n.get('port', ''))
+            sysname = n.get('system_name', n.get('device', ''))
+            hold = n.get('hold', n.get('ttl', 120))
+            lines.append(f"{sysname:<21}{local_if:<16}{hold:<11}{cap:<13}{port_id}")
         lines.append(f"\nTotal entries displayed: {len(neighbors)}")
         return "\n".join(lines)
 
     def _show_lldp_detail(self, state):
         neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
+        dt = state.device_type
+
+        # SR-S / Si-R: 富士通詳細フォーマット
+        if dt in ('srs', 'sir'):
+            if not neighbors:
+                return ' Neighbor Information:\n\n  (no neighbors)'
+            lines = [' Neighbor Information:', '']
+            for n in neighbors:
+                local_if = n.get('local_if', n.get('port', ''))
+                chassis = n.get('chassis_id', '00:0e:0e:f1:00:01')
+                port_id = n.get('port_id', n.get('port', ''))
+                sysname = n.get('system_name', n.get('device', ''))
+                platform = n.get('platform', 'Fujitsu Network')
+                ttl = n.get('ttl', n.get('hold', 120))
+                cap_map = {'B': 'Bridge', 'R': 'Router', 'S': 'Bridge'}
+                cap = cap_map.get(n.get('cap', 'B'), 'Bridge')
+                lines += [
+                    f'  Port             : {local_if}',
+                    f'   Chassis ID      : {chassis}',
+                    f'   Port ID         : {port_id}',
+                    f'   System Name     : {sysname}',
+                    f'   System Descr    : {platform}',
+                    f'   Port Descr      : {port_id}',
+                    f'   System Cap.     : {cap}',
+                    f'   TTL             : {ttl}',
+                    '',
+                ]
+            return '\n'.join(lines)
+
+        # Cisco / Catalyst / Nexus
         if not neighbors:
             return "Total entries displayed: 0"
         lines = []
         for n in neighbors:
-            cap_map = {'R': 'Router', 'S': 'Bridge', 'H': 'Telephone'}
-            cap = cap_map.get(n.get('cap', 'S'), 'Bridge')
+            cap_map = {'R': 'Router', 'B': 'Bridge', 'S': 'Bridge', 'H': 'Telephone'}
+            cap = cap_map.get(n.get('cap', 'B'), 'Bridge')
+            local_if = n.get('local_if', n.get('port', ''))
+            port_id = n.get('port_id', n.get('port', ''))
+            sysname = n.get('system_name', n.get('device', ''))
+            platform = n.get('platform', 'Cisco')
+            hold = n.get('hold', n.get('ttl', 120))
+            chassis = n.get('chassis_id', '00:00:00:00:00:00')
             lines += [
                 "------------------------------------------------",
-                f"Local Intf: {n['local_if']}",
-                f"Chassis id: {':'.join(['00']*6)}",
-                f"Port id: {n.get('port','Gi0/1')}",
-                f"Port Description: {n.get('port','Gi0/1')}",
-                f"System Name: {n['device']}",
+                f"Local Intf: {local_if}",
+                f"Chassis id: {chassis}",
+                f"Port id: {port_id}",
+                f"Port Description: {port_id}",
+                f"System Name: {sysname}",
                 "",
                 f"System Description:",
-                f"Cisco IOS Software, {n.get('platform','Catalyst')}",
+                f"{platform}",
                 "",
-                f"Time remaining: {n['hold']} seconds",
+                f"Time remaining: {hold} seconds",
                 f"System Capabilities: {cap}",
                 f"Enabled Capabilities: {cap}",
                 "",
                 f"Management Addresses:",
-                f"    IP: 192.168.1.{hash(n['device']) % 253 + 2}",
+                f"    IP: 192.168.1.{abs(hash(sysname)) % 253 + 2}",
                 "",
                 f"Auto Negotiation - supported, enabled",
                 f"Physical media capabilities:",
@@ -3958,7 +4078,13 @@ Key Version         : A
             return self._apresia_show_stp(state)
         if re.match(r'^show\s+loopdetect', c):
             return self._apresia_show_loopdetect(state)
+        if re.match(r'^show\s+lldp\s+neighbors\s+detail', c):
+            return self._apresia_show_lldp_detail(state)
         if re.match(r'^show\s+lldp\s+neighbors', c):
+            return self._apresia_show_lldp(state)
+        if re.match(r'^show\s+lldp\s+local', c):
+            return self._apresia_show_lldp_local(state)
+        if re.match(r'^show\s+lldp', c):
             return self._apresia_show_lldp(state)
         if re.match(r'^show\s+interfaces?\s+status', c):
             return self._apresia_show_port('all', state)
@@ -4205,12 +4331,63 @@ Key Version         : A
         return '\n'.join(lines)
 
     def _apresia_show_lldp(self, state: DeviceState) -> str:
+        neighbors = getattr(state, 'lldp_neighbors', [])
+        lines = [
+            ' LLDP Neighbor Information',
+            '',
+            ' Port        Chassis ID         System Name    Port Descr',
+            ' ----------- ------------------ -------------- --------------------',
+        ]
+        for n in neighbors:
+            port = n.get('port', n.get('local_if', ''))
+            chassis = n.get('chassis_id', '00:00:00:00:00:00')
+            sysname = n.get('system_name', n.get('device', ''))
+            port_id = n.get('port_id', n.get('port', ''))
+            lines.append(f' {port:<12}{chassis:<19}{sysname:<15}{port_id}')
+        if not neighbors:
+            lines.append(' (no neighbors)')
+        return '\n'.join(lines)
+
+    def _apresia_show_lldp_detail(self, state: DeviceState) -> str:
+        neighbors = getattr(state, 'lldp_neighbors', [])
+        if not neighbors:
+            return ' LLDP Neighbor Information\n\n (no neighbors)'
+        lines = [' LLDP Neighbor Information', '']
+        for n in neighbors:
+            port = n.get('port', n.get('local_if', ''))
+            chassis = n.get('chassis_id', '00:00:00:00:00:00')
+            sysname = n.get('system_name', n.get('device', ''))
+            port_id = n.get('port_id', n.get('port', ''))
+            cap_map = {'B': 'Bridge', 'R': 'Router', 'T': 'Telephone', 'S': 'Bridge'}
+            cap = cap_map.get(n.get('cap', 'B'), 'Bridge')
+            lines += [
+                f' Port          : {port}',
+                f'  Chassis ID   : {chassis}',
+                f'  Port ID      : {port_id}',
+                f'  System Name  : {sysname}',
+                f'  System Descr : Fujitsu Network Communications',
+                f'  Port Descr   : {port_id}',
+                f'  Capability   : {cap}',
+                f'  TTL          : {n.get("ttl", 120)}',
+                '',
+            ]
+        return '\n'.join(lines)
+
+    def _apresia_show_lldp_local(self, state: DeviceState) -> str:
+        # ローカルデバイス情報（APRESIA自身のLLDP送信情報）
+        mgmt_ip = ''
+        for name, iface in state.interfaces.items():
+            if name.startswith('Vlan') and iface.get('ip'):
+                mgmt_ip = iface['ip']
+                break
         return (
-            f' LLDP Neighbor Information\n'
+            f' LLDP Local Information\n'
             f'\n'
-            f' Port        Chassis ID         System Name    Port Descr\n'
-            f' ----------- ------------------ -------------- --------------------\n'
-            f' Port1/0/24  00:0e:0e:f1:00:01  Dist-SW        GigabitEthernet1/0/1\n'
+            f'  Chassis ID   : 00:0e:0e:f1:00:02\n'
+            f'  System Name  : {state.hostname}\n'
+            f'  System Descr : Fujitsu APRESIA Series\n'
+            f'  Capability   : Bridge\n'
+            f'  Management   : {mgmt_ip or "not configured"}\n'
         )
 
     def _apresia_show_running(self, state: DeviceState) -> str:
@@ -4847,7 +5024,15 @@ class CliCompletion:
             },
             'arp':              'ARP table',
             'cdp':              'CDP information',
-            'lldp':             'LLDP information',
+            'lldp': {
+                '_desc':    'LLDP information',
+                'neighbors': {
+                    '_desc':  'LLDP neighbor entries',
+                    'detail': 'Show detailed information of neighbors',
+                },
+                'local':    'LLDP local device information',
+                'interface':'LLDP interface information',
+            },
             'clock':            'Display the system clock',
             'logging':          'Show the contents of logging buffers',
             'processes':        'Active process statistics',
