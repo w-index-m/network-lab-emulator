@@ -347,6 +347,11 @@ async def cli_command(body: dict):
     if icmp_out is not None:
         return {"output": icmp_out, "mode": state.mode, "hostname": state.hostname}
 
+    # ── PC: nc / netcat（TCP到達性判定 — トポロジー考慮）──
+    nc_out = handle_nc(device_id, command, state)
+    if nc_out is not None:
+        return {"output": nc_out, "mode": state.mode, "hostname": state.hostname}
+
     # ── プロトコル動的show（エンジンが起動していればエンジンの出力を優先）──
     proto_output = await handle_protocol_show(device_id, command, state)
     if proto_output is not None:
@@ -2267,7 +2272,87 @@ def handle_icmp(device_id: str, command: str, state: DeviceState):
     return None
 
 
-def _format_ping(dest: str, result: dict, device_type: str) -> str:
+def handle_nc(device_id: str, command: str, state: DeviceState):
+    """nc / telnet のTCPポート到達性チェック（icmp_engineで経路確認）"""
+    if state.device_type != 'pc':
+        return None
+    c = command.strip()
+    import re as _re
+    import random as _random
+
+    # nc -zv <host> <port1>-<port2>  または  nc <host> <port1>-<port2>
+    m_range  = _re.match(r'^nc\s+(?:-\S+\s+)*([\d.]+)\s+(\d+)-(\d+)', c, _re.I)
+    # nc -zv <host> <port>
+    m_single = _re.match(r'^nc\s+(?:-\S+\s+)*([\d.]+)\s+(\d+)', c, _re.I)
+
+    if not m_range and not m_single:
+        return None  # ncコマンドではない
+
+    host = (m_range or m_single).group(1)
+
+    # icmp_engineで経路チェック
+    _register_icmp(device_id)
+    reach = icmp_engine.ping(device_id, host, count=1)
+    reachable = reach.get('reachable', False)
+
+    my_ip = ''
+    for iface in state.interfaces.values():
+        if iface.get('ip'):
+            my_ip = iface['ip']
+            break
+
+    if m_range:
+        p_lo = int(m_range.group(2))
+        p_hi = int(m_range.group(3))
+        total = p_hi - p_lo + 1
+        if not reachable:
+            lines = [f"nc: connect to {host} port {p_lo} (tcp) failed: No route to host"]
+            if total > 1:
+                lines.append(f"  (ports {p_lo}-{p_hi}: all {total} ports unreachable — no route)")
+            return "\n".join(lines)
+        # 到達可能: 100以下は全件、それ以上はサマリー
+        if total <= 100:
+            lines = []
+            for port in range(p_lo, p_hi + 1):
+                rtt = round(_random.uniform(0.3, 5.0), 2)
+                lines.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
+            return "\n".join(lines)
+        else:
+            head = [f"Connection to {host} {p} port [tcp/*] succeeded!  ({round(_random.uniform(0.3,5.0),2)} ms)"
+                    for p in range(p_lo, p_lo + 10)]
+            tail = [f"Connection to {host} {p} port [tcp/*] succeeded!  ({round(_random.uniform(0.3,5.0),2)} ms)"
+                    for p in range(p_hi - 9, p_hi + 1)]
+            avg_rtt = round(_random.uniform(1.5, 3.5), 2)
+            summary = [
+                "",
+                f"  ... (ports {p_lo + 10} - {p_hi - 10} tested, all succeeded) ...",
+                "",
+            ]
+            return "\n".join(head + summary + tail + [
+                "",
+                "--- nc scan summary ---",
+                f"Host   : {host}",
+                f"Range  : {p_lo} - {p_hi}",
+                f"Total  : {total} ports scanned",
+                f"Open   : {total} ports",
+                f"Closed : 0 ports",
+                f"Avg RTT: {avg_rtt} ms",
+            ])
+    else:
+        port = int(m_single.group(2))
+        if not reachable:
+            return f"nc: connect to {host} port {port} (tcp) failed: No route to host"
+        rtt = round(_random.uniform(0.3, 5.0), 2)
+        return "\n".join([
+            f"Connection to {host} {port} port [tcp/*] succeeded!",
+            f"  Local:  {my_ip}:{_random.randint(40000,60000)}",
+            f"  Remote: {host}:{port}",
+            f"  RTT:    {rtt} ms",
+            f"  State:  ESTABLISHED",
+        ])
+
+
+
     """ping結果を実機風フォーマットで整形"""
     if result['reachable']:
         rtts = result['rtts']
