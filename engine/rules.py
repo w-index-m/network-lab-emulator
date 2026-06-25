@@ -238,6 +238,10 @@ class DeviceState:
             {"device":"Core-SW",  "local_if":"Gi1/0/24","hold":150,"cap":"S","platform":"SR-S324TR1","port":"ether 10"},
             {"device":"GW-Router","local_if":"Gi1/0/1", "hold":120,"cap":"R","platform":"ISR4321",   "port":"Gi0/0/0"},
         ]
+        self.lldp_neighbors = [
+            {"device":"Core-SW",  "local_if":"Gi1/0/24","hold":120,"cap":"B","platform":"SR-S324TR1","port":"ether 10"},
+            {"device":"GW-Router","local_if":"Gi1/0/1", "hold":120,"cap":"R","platform":"ISR4321",   "port":"Gi0/0/0"},
+        ]
         self.hsrp = {"group":1,"vip":"192.168.1.254","priority":110,"state":"Active","preempt":True,"iface":"GigabitEthernet1/0/1"}
         self.ospf = {"process":1,"router_id":"10.0.0.1","area":"0.0.0.0",
             "neighbors":[{"id":"10.0.0.2","state":"FULL","iface":"Gi1/0/24","dead":"00:00:35"}]}
@@ -802,6 +806,14 @@ class RuleEngine:
             return self._show_cdp_detail(state)
         if re.match(r'^show\s+cdp\s+neighbors', c):
             return self._show_cdp(state)
+
+        # ── show lldp ──
+        if re.match(r'^show\s+lldp\s+neighbors\s+detail', c):
+            return self._show_lldp_detail(state)
+        if re.match(r'^show\s+lldp\s+neighbors', c):
+            return self._show_lldp(state)
+        if re.match(r'^show\s+lldp', c):
+            return self._show_lldp(state)
 
         # ── show standby (HSRP) ──
         if re.match(r'^show\s+standby', c):
@@ -1508,6 +1520,59 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
                 f"Platform: Cisco {n['platform']},  Capabilities: {'Switch' if n['cap']=='S' else 'Router'}",
                 f"Interface: {n['local_if']},  Port ID (outgoing port): {n['port']}",
                 f"Holdtime : {n['hold']} sec", ""]
+        return "\n".join(lines)
+
+    # ─── show lldp neighbors ──────────────────
+    def _show_lldp(self, state):
+        neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
+        lines = [
+            "Capability codes:",
+            "    (R) Router, (B) Bridge, (T) Telephone, (C) DOCSIS Cable Device",
+            "    (W) WLAN Access Point, (P) Repeater, (S) Station, (O) Other",
+            "",
+            "Device ID            Local Intf      Hold-time  Capability   Port ID",
+        ]
+        for n in neighbors:
+            cap_map = {'R': 'R', 'S': 'B', 'H': 'T'}
+            cap = cap_map.get(n.get('cap', 'S'), 'B')
+            port = n.get('port', 'Gi0/1')
+            lines.append(f"{n['device']:<21}{n['local_if']:<16}{n['hold']:<11}{cap:<13}{port}")
+        lines.append(f"\nTotal entries displayed: {len(neighbors)}")
+        return "\n".join(lines)
+
+    def _show_lldp_detail(self, state):
+        neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
+        if not neighbors:
+            return "Total entries displayed: 0"
+        lines = []
+        for n in neighbors:
+            cap_map = {'R': 'Router', 'S': 'Bridge', 'H': 'Telephone'}
+            cap = cap_map.get(n.get('cap', 'S'), 'Bridge')
+            lines += [
+                "------------------------------------------------",
+                f"Local Intf: {n['local_if']}",
+                f"Chassis id: {':'.join(['00']*6)}",
+                f"Port id: {n.get('port','Gi0/1')}",
+                f"Port Description: {n.get('port','Gi0/1')}",
+                f"System Name: {n['device']}",
+                "",
+                f"System Description:",
+                f"Cisco IOS Software, {n.get('platform','Catalyst')}",
+                "",
+                f"Time remaining: {n['hold']} seconds",
+                f"System Capabilities: {cap}",
+                f"Enabled Capabilities: {cap}",
+                "",
+                f"Management Addresses:",
+                f"    IP: 192.168.1.{hash(n['device']) % 253 + 2}",
+                "",
+                f"Auto Negotiation - supported, enabled",
+                f"Physical media capabilities:",
+                f"    1000baseT(FD)",
+                f"    100base-TX(FD)",
+                "",
+            ]
+        lines.append(f"Total entries displayed: {len(neighbors)}")
         return "\n".join(lines)
 
     # ─── show standby (HSRP) ──────────────────
