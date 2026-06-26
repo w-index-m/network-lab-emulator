@@ -1144,6 +1144,15 @@ function pollProtocolLog(id, times) {
         d.logs.forEach(function(log) {
           var line = (typeof log === 'string') ? log : (log.message || JSON.stringify(log));
           var cls = 'col-d';
+          // ARP パケットログは専用の色分け
+          if (typeof log === 'object' && log.type === 'arp_log') {
+            var sub = log.subtype || '';
+            if (sub === 'request' || sub === 'request_received') cls = 'col-y';
+            else if (sub === 'reply' || sub === 'reply_received') cls = 'col-g';
+            print(id, line, cls);
+            renderInput(id);
+            return;
+          }
           if (line.indexOf('up') >= 0 || line.indexOf('Up') >= 0 ||
               line.indexOf('FULL') >= 0 || line.indexOf('Established') >= 0 ||
               line.indexOf('学習') >= 0 || line.indexOf('root') >= 0 ||

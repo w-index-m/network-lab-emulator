@@ -2487,8 +2487,8 @@ def handle_icmp(device_id: str, command: str, state: DeviceState):
     if m:
         dest = m.group(1)
         _register_icmp(device_id)
-        # ARP解決を試みる（同一セグメントならARPテーブルに記録）
-        arp_engine.resolve(device_id, dest)
+        # ARP Request/Reply パケット交換を伴う解決（同一セグメントのみ）
+        await arp_engine.resolve_with_packet(device_id, dest)
         result = icmp_engine.ping(device_id, dest, count=5)
         return _format_ping(dest, result, state.device_type)
 
@@ -3244,6 +3244,12 @@ def _register_stub(device_id: str):
 
     async def stub_send(msg: dict):
         mt = msg.get('type', '')
+        if mt == 'arp_log':
+            buf = proto_log_buffer.setdefault(device_id, [])
+            buf.append(msg)
+            if len(buf) > 100:
+                buf.pop(0)
+            return
         if mt in ('rip_log', 'ospf_log', 'bgp_log', 'stp_log',
                   'vrrp_log', 'hsrp_log', 'vpc_log',
                   'rip_table', 'bgp_state', 'stp_topology_change'):

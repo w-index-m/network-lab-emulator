@@ -176,6 +176,16 @@ class VirtualNetwork:
             # BGPはエンジン側で直接相手ノードを操作するのでスキップ
             pass
 
+        # arp_log はフロントエンドへ転送（ARPパケット可視化）
+        if msg_type == 'arp_log':
+            cb = self.ws_send_callbacks.get(device_id)
+            if cb:
+                try:
+                    await cb(msg)
+                except Exception:
+                    pass
+            return
+
         # それ以外（表示用）はフロントエンドへ + syslog送信
         cb = self.ws_send_callbacks.get(device_id)
         if cb:
@@ -3214,39 +3224,93 @@ class ArpEngine:
         return f'00:1b:0d:{(h>>16)&0xff:02x}:{(h>>8)&0xff:02x}:{h&0xff:02x}'
 
     def resolve(self, device_id: str, target_ip: str) -> Optional[str]:
-        """
-        target_ip のMACを解決。
-        同一セグメントに相手がいればARPテーブルに記録してMACを返す。
-        いなければNone（解決失敗）。
-        """
-        # 既にテーブルにあればそれを返す
+        """同期版resolve（キャッシュ参照のみ。ARPパケット交換なし）"""
         if target_ip in self.tables[device_id]:
             entry = self.tables[device_id][target_ip]
-            # タイムアウトチェック
             if time.time() - entry.age < self.arp_timeout:
                 return entry.mac
             else:
                 del self.tables[device_id][target_ip]
+        return None
+
+    async def resolve_with_packet(self, device_id: str, target_ip: str) -> Optional[str]:
+        """
+        ARP Request/Reply パケット交換をシミュレートしながらMACを解決する。
+        キャッシュにあればARPパケットなしで即返す（実機準拠）。
+        """
+        # キャッシュヒット → パケット不要
+        cached = self.resolve(device_id, target_ip)
+        if cached:
+            return cached
 
         # ICMPエンジンの装置IP情報を使って同一セグメント判定
         src_info = icmp_engine.device_ips.get(device_id, {})
-        # 自分のどのインタフェースと同じネットワークか
         for my_ip, prefix in src_info.get('ips', {}).items():
-            if icmp_engine._ip_in_network(target_ip, my_ip, prefix):
-                # 同一セグメント → 相手装置を探す
-                target_dev = icmp_engine._find_device_owning_ip(target_ip)
-                if target_dev:
-                    # 相手のMACを取得（相手のARPエンジン視点のMAC）
-                    mac = self._gen_mac(target_dev, target_ip)
-                else:
-                    # IPは同セグメントだが装置不明 → 仮想ホストとしてMAC生成
-                    mac = self._gen_mac('host', target_ip)
-                # ARPテーブルに記録
-                iface = self._iface_for_ip(device_id, my_ip)
-                self.tables[device_id][target_ip] = ArpEntry(
-                    ip=target_ip, mac=mac, iface=iface, entry_type='dynamic')
-                return mac
-        # 同一セグメントにいない → ARP解決不可（L3で別途ルーティング）
+            if not icmp_engine._ip_in_network(target_ip, my_ip, prefix):
+                continue
+
+            src_mac  = self._gen_mac(device_id, my_ip)
+            iface    = self._iface_for_ip(device_id, my_ip)
+            target_dev = icmp_engine._find_device_owning_ip(target_ip)
+
+            if target_dev:
+                target_mac = self._gen_mac(target_dev, target_ip)
+            else:
+                target_mac = self._gen_mac('host', target_ip)
+
+            # ── ARP Request ブロードキャスト（送信側ログ） ──
+            await vnet.send_to(device_id, {
+                'type': 'arp_log',
+                'subtype': 'request',
+                'message': (f'ARP: sending request for {target_ip} '
+                            f'on {iface} (sender {my_ip}/{src_mac})'),
+                'src_ip': my_ip, 'src_mac': src_mac,
+                'dst_ip': target_ip, 'dst_mac': 'ff:ff:ff:ff:ff:ff',
+                'iface': iface,
+            })
+
+            # ── ARP Request を相手に届ける（ブロードキャスト） ──
+            if target_dev:
+                target_iface = self._iface_for_ip(target_dev, target_ip)
+                await vnet.send_to(target_dev, {
+                    'type': 'arp_log',
+                    'subtype': 'request_received',
+                    'message': (f'ARP: received request from {my_ip} '
+                                f'(src MAC {src_mac}) for {target_ip} on {target_iface}'),
+                    'src_ip': my_ip, 'src_mac': src_mac,
+                    'dst_ip': target_ip, 'dst_mac': 'ff:ff:ff:ff:ff:ff',
+                    'iface': target_iface,
+                })
+                # ── ARP Reply（相手 → 自分） ──
+                await vnet.send_to(target_dev, {
+                    'type': 'arp_log',
+                    'subtype': 'reply',
+                    'message': (f'ARP: sending reply to {my_ip} '
+                                f'(I am {target_ip}/{target_mac}) on {target_iface}'),
+                    'src_ip': target_ip, 'src_mac': target_mac,
+                    'dst_ip': my_ip, 'dst_mac': src_mac,
+                    'iface': target_iface,
+                })
+                # 相手のARPテーブルにも学習させる
+                self.tables[target_dev][my_ip] = ArpEntry(
+                    ip=my_ip, mac=src_mac, iface=target_iface, entry_type='dynamic')
+
+            # ── ARP Reply 受信（自分側ログ） ──
+            await vnet.send_to(device_id, {
+                'type': 'arp_log',
+                'subtype': 'reply_received',
+                'message': (f'ARP: received reply: {target_ip} is at {target_mac}'),
+                'src_ip': target_ip, 'src_mac': target_mac,
+                'dst_ip': my_ip, 'dst_mac': src_mac,
+                'iface': iface,
+            })
+
+            # 自分のARPテーブルに記録
+            self.tables[device_id][target_ip] = ArpEntry(
+                ip=target_ip, mac=target_mac, iface=iface, entry_type='dynamic')
+            return target_mac
+
+        # 同一セグメントにいない → ARP解決不可
         return None
 
     def _iface_for_ip(self, device_id: str, ip: str) -> str:
