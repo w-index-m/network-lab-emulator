@@ -648,6 +648,21 @@ class RuleEngine:
         if c.startswith("show "):
             return self._cmd_show(cmd, state)
 
+        # do コマンド（Cisco/Catalyst: configモード中にEXECコマンドを実行）
+        if c.startswith("do ") and state.device_type in ("cisco", "catalyst"):
+            sub = cmd[3:].strip()
+            sub_c = sub.lower().strip()
+            if sub_c.startswith("show "):
+                return self._cmd_show(sub, state)
+            # do ping / do traceroute なども通す
+            if sub_c.startswith("ping "):
+                return self._cmd_ping(sub, state)
+            if sub_c.startswith("traceroute "):
+                return self._cmd_traceroute(sub, state)
+            if sub_c in ("write memory", "write", "copy running-config startup-config"):
+                return self._cmd_save(state)
+            return f"% Invalid input detected at '^' marker.\n  do {sub}\n      ^"
+
         # 設定コマンド
         if state.mode in ("config", "config-if", "config-router", "config-vlan", "config-crypto"):
             return self._cmd_config(cmd, state)
