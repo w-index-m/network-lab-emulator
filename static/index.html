@@ -1779,6 +1779,13 @@ document.getElementById('flow-run-btn').onclick=async()=>{
   const text=document.getElementById('flow-text').value;
   const lines=text.split('\n').map(l=>l.trimEnd()).filter(l=>l&&!l.startsWith('#'));
   if(!lines.length){addFlowLog('コマンドがありません','#c8c800');return;}
+  // 投入前にバックエンドで異常値チェック（空・2バイト文字・行数・空白率）
+  try{
+    const vr=await fetch('/api/config/validate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({config:lines.join('\n')})}).then(r=>r.json());
+    (vr.issues||[]).forEach(it=>addFlowLog((it.level==='error'?'❌ ':'⚠️ ')+it.message,it.level==='error'?'#ff5050':'#c8c800'));
+    if(!vr.ok){addFlowLog('■ エラーのため中止しました（投入していません）','#ff5050');return;}
+  }catch(e){addFlowLog('⚠️ 検証をスキップ（サーバー応答なし）','#c8c800');}
   const delay=parseInt(document.getElementById('flow-delay').value);
   flowStop=false;flowRunning=true;
   document.getElementById('flow-run-btn').style.display='none';

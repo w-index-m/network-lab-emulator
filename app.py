@@ -2964,16 +2964,24 @@ async def set_nexthop(body: dict):
 async def sync_links(body: dict):
     """フロントエンドの全リンクをvnetに同期"""
     links = body.get("links", [])
+    # 入力ガード: links はリストであること。不正なら 400 を返す（500クラッシュ防止）
+    if not isinstance(links, list):
+        return JSONResponse(status_code=400,
+                            content={"ok": False, "error": "links must be a list"})
     # 既存リンクをクリアして再構築（interface_linksも同時クリア）
     for dev_id in list(vnet.links.keys()):
         vnet.links[dev_id] = set()
     vnet.interface_links.clear()
+    applied = 0
     for l in links:
+        if not isinstance(l, dict):
+            continue  # 不正なエントリはスキップ
         a, b = l.get("a"), l.get("b")
         iface_a = l.get("iface_a") or l.get("pa")
         iface_b = l.get("iface_b") or l.get("pb")
-        if a and b:
+        if a and b and a != b:  # 自己ループも除外
             vnet.add_link(a, b, iface_a, iface_b)
+            applied += 1
     # WebSocket未接続の装置にもスタブコールバックを登録
     # （これがないとプロトコルパケットが転送先で処理されない）
     for dev_id in device_sessions:
@@ -2981,7 +2989,7 @@ async def sync_links(body: dict):
             _register_stub(dev_id)
     _rebuild_all_neighbors()
     _save_config()
-    return {"ok": True, "count": len(links)}
+    return {"ok": True, "count": applied}
 
 
 # CLIコマンドでプロトコルが起動したとき、表示用ログを溜めるバッファ

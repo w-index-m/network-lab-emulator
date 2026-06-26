@@ -695,10 +695,23 @@ class RuleEngine:
         state.mode = "config"
         return "Enter configuration commands, one per line.  End with CNTL/Z."
 
+    def _resolve_ifname(self, ifname, state):
+        """既存インターフェースと大文字小文字を無視して照合し、
+        一致すれば既定の正式名を返す。なければ入力名をそのまま返す
+        （新規インターフェース作成）。これにより `interface LAN0` が
+        既定の `lan0` と別物の幻インターフェースを作るのを防ぐ。"""
+        if ifname in state.interfaces:
+            return ifname
+        low = ifname.lower()
+        for existing in state.interfaces:
+            if existing.lower() == low:
+                return existing
+        return ifname
+
     def _cmd_interface(self, cmd, state):
         m = re.match(r'^interface\s+(\S+)', cmd, re.I)
         if m:
-            ifname = m.group(1)
+            ifname = self._resolve_ifname(m.group(1), state)
             state.current_if = ifname
             state.mode = "config-if"
             # Loopbackは存在しなければ作成し、常にup状態
@@ -3042,7 +3055,7 @@ Configuration Revision            : 5"""
         # ── インタフェース設定 ──
         m_if = re.match(r'^interface\s+(\S+)', c)
         if m_if and state.mode == 'config':
-            state.current_if = m_if.group(1)
+            state.current_if = self._resolve_ifname(m_if.group(1), state)
             state.mode = 'config-if'
             return ''
 
