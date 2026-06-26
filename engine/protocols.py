@@ -46,20 +46,73 @@ def _normalize_area(area: str) -> str:
 # ══════════════════════════════════════════
 class VirtualNetwork:
     """装置間の仮想リンクを管理し、パケットを転送する"""
+
+    # スイッチ系デバイス種別（MAC flapログを出す対象）
+    _SWITCH_TYPES = frozenset({'catalyst', 'srs', 'apresia', 'nexus'})
+
     def __init__(self):
         self.links: Dict[str, set] = defaultdict(set)  # device_id -> {peer_ids}
         self.interface_links: Dict[str, Dict[str, str]] = defaultdict(dict)  # device_id -> {peer_id -> iface_name}
         self.down_interfaces: Dict[str, set] = defaultdict(set)  # device_id -> {shutdown中のiface名}
         self.send_callbacks: Dict[str, Callable] = {}  # device_id -> ws_send関数
         self.ws_send_callbacks: Dict[str, Callable] = {}  # フロントエンド表示用
+        self.device_types: Dict[str, str] = {}  # device_id -> device_type
+
+    # ── MAC flap検知 ────────────────────────────────────────────
+    def _has_path(self, src: str, dst: str) -> list:
+        """BFSで src→dst の経由パスを返す（なければ空リスト）"""
+        from collections import deque
+        q = deque([[src]])
+        visited = {src}
+        while q:
+            path = q.popleft()
+            node = path[-1]
+            if node == dst:
+                return path
+            for nbr in self.links.get(node, set()):
+                if nbr not in visited:
+                    visited.add(nbr)
+                    q.append(path + [nbr])
+        return []
+
+    async def _notify_mac_flap(self, a: str, b: str, iface_a: str, iface_b: str, loop_path: list):
+        """ループ検出時にスイッチ系デバイスへMACフラップログを送信"""
+        # ループを構成する全ノードからスイッチを抽出
+        loop_nodes = set(loop_path) | {a, b}
+        for dev_id in loop_nodes:
+            dtype = self.device_types.get(dev_id, '')
+            if dtype not in self._SWITCH_TYPES:
+                continue
+            # そのスイッチから見た2つのポートを特定
+            nbrs = list(self.links.get(dev_id, set()) & loop_nodes - {dev_id})
+            if len(nbrs) < 2:
+                continue
+            port1 = self.interface_links.get(dev_id, {}).get(nbrs[0], nbrs[0])
+            port2 = self.interface_links.get(dev_id, {}).get(nbrs[1], nbrs[1])
+            # ループの反対側の末端デバイスのMACを生成（代表MAC）
+            far_dev = nbrs[0]
+            h = abs(hash(far_dev)) % (16 ** 8)
+            mac = f'00:1b:0d:{(h >> 16) & 0xff:02x}:{(h >> 8) & 0xff:02x}:{h & 0xff:02x}'
+            log_msg = (f'%SW_MATM-4-MACFLAP_NOTIF: Host {mac} in vlan 1 '
+                       f'is flapping between port {port1} and port {port2}')
+            await self.send_to(dev_id, {'type': 'stp_log', 'message': log_msg})
+            # ループガードログも追加
+            await self.send_to(dev_id, {
+                'type': 'stp_log',
+                'message': f'%SPANTREE-2-LOOPGUARD_BLOCK: Loop guard blocking port {port2} on vlan 1'
+            })
 
     def add_link(self, a: str, b: str, iface_a: str = None, iface_b: str = None):
+        # リンク追加前にループ（既存パス）を検出
+        loop_path = self._has_path(a, b) if b not in self.links.get(a, set()) else []
         self.links[a].add(b)
         self.links[b].add(a)
         if iface_a:
             self.interface_links[a][b] = iface_a
         if iface_b:
             self.interface_links[b][a] = iface_b
+        if loop_path:
+            _spawn(self._notify_mac_flap(a, b, iface_a or a, iface_b or b, loop_path))
 
     def interface_down(self, device_id: str, iface: str):
         """インターフェースをshutdown状態にする（broadcast_to_neighborsがスキップする）"""

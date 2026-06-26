@@ -221,6 +221,7 @@ def _load_config():
                     if state.routes:
                         state.routes[0]["gw"] = dev["gateway"]
             device_sessions[dev_id] = state
+            vnet.device_types[dev_id] = state.device_type
             ifaces = {name: {'ip': info['ip'], 'prefix': info.get('prefix', 24)}
                       for name, info in state.interfaces.items() if info.get('ip')}
             icmp_engine.register_device(dev_id, state.hostname, ifaces)
@@ -234,6 +235,7 @@ def _load_config():
         for dev_id, dev in DEFAULT_DEVICES.items():
             state = DeviceState(dev["type"], dev["hostname"])
             device_sessions[dev_id] = state
+            vnet.device_types[dev_id] = dev["type"]
         return
 
     for dev_id, dev_data in data.get("devices", {}).items():
@@ -274,6 +276,7 @@ def _load_config():
         if dev_data["type"] in ("cisco", "catalyst") and dev_data.get("ipsec_crypto"):
             state.ipsec_crypto = dev_data["ipsec_crypto"]
         device_sessions[dev_id] = state
+        vnet.device_types[dev_id] = state.device_type
         ifaces = {name: {'ip': info.get('ip',''), 'prefix': info.get('prefix',24)}
                   for name, info in state.interfaces.items() if info.get('ip')}
         icmp_engine.register_device(dev_id, state.hostname, ifaces)
@@ -2749,6 +2752,7 @@ async def add_device(body: dict):
                 state.gateway = gateway
         device_sessions[dev_id] = state
     if dev_id:
+        vnet.device_types[dev_id] = device_sessions[dev_id].device_type
         _register_stub(dev_id)
         _register_icmp(dev_id)
     return {"ok": True, "id": dev_id}
