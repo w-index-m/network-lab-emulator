@@ -318,33 +318,89 @@ app = FastAPI(title="ネットワークラボ", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ══════════════════════════════════════════
-# Basic 認証（admin/admin）
+# セッション認証（admin/admin）
 #   NETLAB_AUTH_USER / NETLAB_AUTH_PASS で変更可
 #   NETLAB_AUTH_DISABLE=1 で無効化（自動テスト用）
+#   セッショントークン有効期限: 10分（無操作時）
 # ══════════════════════════════════════════
-import base64 as _base64, secrets as _secrets
+import secrets as _secrets
 from fastapi import Response as _Response
 
 _AUTH_USER = os.environ.get("NETLAB_AUTH_USER", "admin")
 _AUTH_PASS = os.environ.get("NETLAB_AUTH_PASS", "admin")
 _AUTH_DISABLED = os.environ.get("NETLAB_AUTH_DISABLE") == "1"
+_SESSION_TTL = 600  # 10分（秒）
 
+# トークン -> 最終アクセス時刻
+_sessions: Dict[str, float] = {}
+
+def _new_token() -> str:
+    return _secrets.token_hex(32)
+
+def _valid_token(token: str) -> bool:
+    exp = _sessions.get(token)
+    if exp is None:
+        return False
+    if time.time() - exp > _SESSION_TTL:
+        del _sessions[token]
+        return False
+    _sessions[token] = time.time()  # タッチ（延長）
+    return True
+
+# パスホワイトリスト（認証不要）
+_NO_AUTH_PATHS = {"/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
 
 @app.middleware("http")
-async def basic_auth_middleware(request, call_next):
+async def session_auth_middleware(request, call_next):
     if _AUTH_DISABLED or request.method == "OPTIONS":
         return await call_next(request)
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Basic "):
-        try:
-            user, _, pw = _base64.b64decode(auth[6:]).decode("utf-8").partition(":")
-            if (_secrets.compare_digest(user, _AUTH_USER)
-                    and _secrets.compare_digest(pw, _AUTH_PASS)):
-                return await call_next(request)
-        except Exception:
-            pass
-    return _Response(status_code=401, content="認証が必要です",
-                     headers={"WWW-Authenticate": 'Basic realm="NetworkLab"'})
+    path = request.url.path
+    # 静的ファイル・ログインAPIは通過
+    if path in _NO_AUTH_PATHS or path.startswith("/static/"):
+        return await call_next(request)
+    # WebSocket は同一オリジンから呼ばれるのでトークン検証
+    if path.startswith("/ws/"):
+        token = request.query_params.get("token", "")
+        if _AUTH_DISABLED or _valid_token(token):
+            return await call_next(request)
+        return _Response(status_code=403, content="認証が必要です")
+    # 通常APIはヘッダーまたはクエリパラメータでトークン検証
+    token = request.headers.get("X-Session-Token", "") or request.query_params.get("token", "")
+    if _valid_token(token):
+        return await call_next(request)
+    return _Response(status_code=401, content="認証が必要です")
+
+
+@app.post("/api/login")
+async def login(body: dict):
+    user = body.get("username", "")
+    pw   = body.get("password", "")
+    if (_secrets.compare_digest(user, _AUTH_USER)
+            and _secrets.compare_digest(pw, _AUTH_PASS)):
+        token = _new_token()
+        _sessions[token] = time.time()
+        return {"ok": True, "token": token, "ttl": _SESSION_TTL}
+    return JSONResponse(status_code=401, content={"ok": False, "error": "ユーザー名またはパスワードが違います"})
+
+
+@app.post("/api/logout")
+async def logout(body: dict):
+    token = body.get("token", "")
+    _sessions.pop(token, None)
+    return {"ok": True}
+
+
+@app.get("/api/session/refresh")
+async def session_refresh(token: str = ""):
+    if _valid_token(token):
+        remaining = int(_SESSION_TTL - (time.time() - _sessions.get(token, time.time())))
+        return {"ok": True, "remaining": remaining}
+    return JSONResponse(status_code=401, content={"ok": False})
+
+
+@app.get("/api/health")
+async def health():
+    return {"ok": True}
 
 # ══════════════════════════════════════════
 # API エンドポイント

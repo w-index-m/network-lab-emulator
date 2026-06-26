@@ -38,6 +38,22 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 /* メイン */
 #main{flex:1;display:flex;overflow:hidden}
 
+/* ════ ログイン画面 ════ */
+#login-screen{position:fixed;inset:0;z-index:19999;background:#000;display:flex;align-items:center;justify-content:center}
+#login-box{background:#0a0f18;border:1px solid #1a3a5a;border-radius:6px;width:360px;max-width:94vw;overflow:hidden;box-shadow:0 4px 32px rgba(0,80,160,.4)}
+#login-hdr{background:linear-gradient(to bottom,#1a3a6a,#0d2040);padding:10px 16px;border-bottom:1px solid #1a3a5a;font-size:14px;color:#80c8ff;font-weight:bold}
+#login-body{padding:20px;display:flex;flex-direction:column;gap:12px}
+#login-body label{font-size:11px;color:#8ab4e0;margin-bottom:2px;display:block}
+#login-body input{width:100%;background:#060e18;border:1px solid #1a3a5a;color:#c0c0c0;padding:6px 8px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px}
+#login-body input:focus{outline:none;border-color:#3a7abf}
+#login-err{color:#ff5050;font-size:11px;min-height:16px}
+#login-timeout-msg{color:#c8c800;font-size:11px;min-height:16px}
+#btn-login{width:100%;padding:8px;background:#0a3a0a;border:1px solid #00c800;color:#00c800;font-size:13px;font-weight:bold;cursor:pointer;border-radius:4px;font-family:'Courier New',monospace}
+#btn-login:hover{background:#0a5a0a}
+#session-timer{font-size:10px;color:#606060;cursor:default;padding:2px 8px;border-radius:2px}
+#session-timer.warn{color:#c8c800}
+#session-timer.danger{color:#c80000}
+
 /* ════ 起動選択画面 ════ */
 #launcher{position:fixed;inset:0;z-index:9999;background:#000;display:flex;align-items:center;justify-content:center;flex-direction:column}
 #launcher-box{background:#0a0f18;border:1px solid #1a3a5a;border-radius:6px;width:520px;max-width:95vw;overflow:hidden;box-shadow:0 4px 32px rgba(0,80,160,.4)}
@@ -189,6 +205,26 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 </head>
 <body>
 
+<!-- ════ ログイン画面 ════ -->
+<div id="login-screen" style="display:none">
+  <div id="login-box">
+    <div id="login-hdr">🔒 ネットワークラボ — ログイン</div>
+    <div id="login-body">
+      <div id="login-timeout-msg"></div>
+      <div>
+        <label>ユーザー名</label>
+        <input id="login-user" type="text" value="admin" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('login-pass').focus()">
+      </div>
+      <div>
+        <label>パスワード</label>
+        <input id="login-pass" type="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+      </div>
+      <div id="login-err"></div>
+      <button id="btn-login" onclick="doLogin()">ログイン</button>
+    </div>
+  </div>
+</div>
+
 <!-- ════ 起動選択画面 ════ -->
 <div id="launcher">
   <div id="launcher-box">
@@ -264,6 +300,8 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 <div id="titlebar">
   <div class="title">🖥 ネットワークラボ エミュレーター — Si-R × SR-S × Catalyst × Cisco</div>
   <span id="mode-badge" class="badge-rules">● ルールベース</span>
+  <span id="session-timer" title="セッション残り時間">&#x23F2; --:--</span>
+  <button onclick="doLogout()" style="background:#1a0a0a;border:1px solid #5a2a2a;color:#c06060;font-size:10px;padding:1px 7px;cursor:pointer;border-radius:2px;font-family:'Courier New',monospace">ログアウト</button>
   <div style="display:flex;gap:3px;margin-left:8px"><div class="tbtn">_</div><div class="tbtn">□</div><div class="tbtn">×</div></div>
 </div>
 
@@ -2002,9 +2040,164 @@ function applyScreenLayout() {
 
 window.addEventListener('resize', applyScreenLayout);
 
-document.addEventListener('DOMContentLoaded', function() {
+// ════════════════════════════════════════════
+// セッション管理
+// ════════════════════════════════════════════
+const SESSION_KEY = 'netlabToken_v1';
+const SESSION_TTL = 600;      // 10分（サーバーと同値）
+const WARN_AT    = 120;       // 残り2分で警告色
+const DANGER_AT  = 30;        // 残り30秒で赤
+let _sessionToken = null;
+let _sessionStart = 0;        // 最終アクティビティ時刻（ms）
+let _sessionTimerID = null;
+
+function _getToken() { return _sessionToken; }
+
+// fetch ラッパー（全APIリクエストに自動でトークンを付与）
+const _origFetch = window.fetch;
+window.fetch = function(url, opts) {
+  opts = opts || {};
+  if (_sessionToken && typeof url === 'string' && url.startsWith('/api/')) {
+    opts.headers = Object.assign({'X-Session-Token': _sessionToken}, opts.headers || {});
+  }
+  return _origFetch(url, opts).then(function(res) {
+    if (res.status === 401 && url !== '/api/login') {
+      _forceLogout('セッションが無効です。再ログインしてください。');
+    }
+    return res;
+  });
+};
+
+function _touchActivity() {
+  _sessionStart = Date.now();
+}
+
+function _startSessionTimer() {
+  if (_sessionTimerID) clearInterval(_sessionTimerID);
+  _sessionStart = Date.now();
+  _sessionTimerID = setInterval(function() {
+    const elapsed = Math.floor((Date.now() - _sessionStart) / 1000);
+    const remaining = SESSION_TTL - elapsed;
+    const el = document.getElementById('session-timer');
+    if (!el) return;
+    if (remaining <= 0) {
+      clearInterval(_sessionTimerID);
+      _forceLogout('セッションがタイムアウトしました（10分無操作）。');
+      return;
+    }
+    const mm = String(Math.floor(remaining / 60)).padStart(2, '0');
+    const ss = String(remaining % 60).padStart(2, '0');
+    el.textContent = '⏲ ' + mm + ':' + ss;
+    el.className = remaining <= DANGER_AT ? 'danger' : remaining <= WARN_AT ? 'warn' : '';
+  }, 1000);
+}
+
+function _stopSessionTimer() {
+  if (_sessionTimerID) { clearInterval(_sessionTimerID); _sessionTimerID = null; }
+  const el = document.getElementById('session-timer');
+  if (el) { el.textContent = '⏲ --:--'; el.className = ''; }
+}
+
+// マウス・キー操作でアクティビティタイマーをリセット
+['mousemove','keydown','click','touchstart'].forEach(function(ev) {
+  document.addEventListener(ev, function() {
+    if (_sessionToken) _touchActivity();
+  }, {passive: true});
+});
+
+function showLoginScreen(msg, isTimeout) {
+  const ls = document.getElementById('login-screen');
+  ls.style.display = 'flex';
+  document.getElementById('login-err').textContent = '';
+  document.getElementById('login-timeout-msg').textContent = isTimeout ? (msg || '') : '';
+  if (!isTimeout) document.getElementById('login-err').textContent = msg || '';
+  document.getElementById('login-pass').value = '';
+  setTimeout(function() { document.getElementById('login-pass').focus(); }, 100);
+  _stopSessionTimer();
+}
+
+function hideLoginScreen() {
+  document.getElementById('login-screen').style.display = 'none';
+}
+
+async function doLogin() {
+  const user = document.getElementById('login-user').value.trim();
+  const pass = document.getElementById('login-pass').value;
+  document.getElementById('login-err').textContent = '認証中...';
+  try {
+    const res = await _origFetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: user, password: pass})
+    });
+    const data = await res.json();
+    if (data.ok && data.token) {
+      _sessionToken = data.token;
+      localStorage.setItem(SESSION_KEY, data.token);
+      hideLoginScreen();
+      _startSessionTimer();
+      _touchActivity();
+      document.getElementById('login-err').textContent = '';
+    } else {
+      document.getElementById('login-err').textContent = data.error || 'ログイン失敗';
+    }
+  } catch(e) {
+    document.getElementById('login-err').textContent = 'サーバー接続エラー';
+  }
+}
+
+async function doLogout() {
+  if (_sessionToken) {
+    await _origFetch('/api/logout', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token: _sessionToken})
+    }).catch(()=>{});
+  }
+  _sessionToken = null;
+  localStorage.removeItem(SESSION_KEY);
+  showLoginScreen('ログアウトしました。', false);
+}
+
+function _forceLogout(msg) {
+  _sessionToken = null;
+  localStorage.removeItem(SESSION_KEY);
+  showLoginScreen(msg, true);
+}
+
+async function _initSession() {
+  // 保存済みトークンを確認
+  const saved = localStorage.getItem(SESSION_KEY);
+  if (saved) {
+    // サーバー側でまだ有効か確認
+    try {
+      const res = await _origFetch('/api/session/refresh?token=' + saved);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.ok) {
+          _sessionToken = saved;
+          hideLoginScreen();
+          _startSessionTimer();
+          _touchActivity();
+          return true;
+        }
+      }
+    } catch(e) {}
+    // 無効なら削除
+    localStorage.removeItem(SESSION_KEY);
+  }
+  showLoginScreen('', false);
+  return false;
+}
+
+document.addEventListener('DOMContentLoaded', async function() {
   applyScreenLayout();
-  restoreLabState();
+  // ログイン画面を表示してトークン確認
+  document.getElementById('login-screen').style.display = 'flex';
+  const ok = await _initSession();
+  if (ok) {
+    restoreLabState();
+  }
 });
 
 </script>
