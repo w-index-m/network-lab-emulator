@@ -467,7 +467,7 @@ async def cli_command(body: dict):
         return {"output": "\x0c", "mode": state.mode, "hostname": state.hostname}
 
     # ── ICMP: ping / traceroute（実到達性判定）──
-    icmp_out = handle_icmp(device_id, command, state)
+    icmp_out = await handle_icmp(device_id, command, state)
     if icmp_out is not None:
         return {"output": icmp_out, "mode": state.mode, "hostname": state.hostname}
 
@@ -2478,7 +2478,7 @@ def _prefix_to_mask(prefix: int) -> str:
     return f'{(mask>>24)&0xff}.{(mask>>16)&0xff}.{(mask>>8)&0xff}.{mask&0xff}'
 
 
-def handle_icmp(device_id: str, command: str, state: DeviceState):
+async def handle_icmp(device_id: str, command: str, state: DeviceState):
     """ping / traceroute を実到達性判定で処理"""
     c = command.lower().strip()
 
