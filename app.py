@@ -394,9 +394,16 @@ async def cli_command(body: dict):
 
     # IPアドレス・ルート変更があればicmp_engineに再登録
     c_low = command.lower().strip()
+    # no crypto map / shutdown → DPD detecting 状態へ遷移
+    if re.match(r'^no\s+crypto\s+map', c_low) or (
+            c_low in ('shutdown', 'shut') and state.current_if and
+            state.interfaces.get(state.current_if, {}).get('crypto_map')):
+        icmp_engine.clear_ipsec(device_id)
     if re.search(r'ip\s+addr(?:ess)?|ip\s+route|remote\s+\d+\s+ip\s+route|'
                  r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address|'
-                 r'no\s+shutdown|no\s+shut|crypto\s+map', c_low):
+                 r'no\s+shutdown|no\s+shut', c_low) or (
+            re.search(r'crypto\s+map', c_low) and
+            not re.match(r'^no\s+crypto\s+map', c_low)):
         _register_icmp(device_id)
 
     # ルールで空応答かつOllamaあり → Ollamaで補完
@@ -1729,6 +1736,61 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     if re.match(r'^show\s+snmp', c):
         return _format_show_snmp(state)
 
+    # ── show crypto ipsec sa (DPD状態対応) ──
+    if re.match(r'^show\s+crypto\s+ipsec\s+sa', c) and state.device_type in ('cisco', 'catalyst', 'asa'):
+        sa_list = icmp_engine.get_ipsec_sa_status(device_id)
+        if not sa_list:
+            return 'There are no ipsec sas.'
+        import random as _rand
+        lines = []
+        cmap_if = getattr(state, 'ipsec_crypto', {}).get('crypto_map_interface', {})
+        cmap_name = cmap_if.get('name', 'CMAP')
+        applied_if = cmap_if.get('interface', 'GigabitEthernet0/2')
+        for sa in sa_list:
+            local_ip = sa['local']
+            peer_ip  = sa['peer']
+            lbl      = sa['label']
+            state_str = sa['state']
+            lines.append(f'interface: {applied_if}')
+            lines.append(f'    Crypto map tag: {cmap_name}, local addr {local_ip}')
+            lines.append('')
+            lines.append(f'   current_peer {peer_ip} port 500')
+            lines.append(f'   DPD status: {lbl}')
+            if state_str == 'established':
+                spi_in  = f'0x{_rand.randint(0, 0xffffffff):08x}'
+                spi_out = f'0x{_rand.randint(0, 0xffffffff):08x}'
+                lines += [
+                    f'   PERMIT, flags={{origin_is_acl,}}',
+                    f'   #pkts encaps: {_rand.randint(100,9999)}, #pkts encrypt: {_rand.randint(100,9999)}',
+                    f'   #pkts decaps: {_rand.randint(100,9999)}, #pkts decrypt: {_rand.randint(100,9999)}',
+                    f'   #send errors 0, #recv errors 0',
+                    f'',
+                    f'     local crypto endpt.: {local_ip}, remote crypto endpt.: {peer_ip}',
+                    f'     inbound esp sas:',
+                    f'      spi: {spi_in}(decimal: {int(spi_in,16)})',
+                    f'       Status: ACTIVE',
+                    f'     outbound esp sas:',
+                    f'      spi: {spi_out}(decimal: {int(spi_out,16)})',
+                    f'       Status: ACTIVE',
+                ]
+            elif state_str in ('detecting', 'down'):
+                lines += [
+                    f'   PERMIT, flags={{origin_is_acl,}}',
+                    f'   #pkts encaps: 0, #pkts encrypt: 0',
+                    f'   #pkts decaps: 0, #pkts decrypt: 0',
+                    f'   #dpd error timeout: {sa["elapsed"]}',
+                    f'     inbound esp sas: (none)',
+                    f'     outbound esp sas: (none)',
+                ]
+            else:  # negotiating
+                lines += [
+                    f'   (IKE Phase1/Phase2 in progress...)',
+                    f'     inbound esp sas: (pending)',
+                    f'     outbound esp sas: (pending)',
+                ]
+            lines.append('')
+        return '\n'.join(lines)
+
     # ── show ip protocols (Cisco/Catalyst) ──
     if re.match(r'^show\s+ip\s+protocols', c) and state.device_type in ('cisco', 'catalyst'):
         lines = []
@@ -2658,6 +2720,11 @@ def _register_icmp(device_id: str):
                     local_ip = info.get('ip', '')
                     break
         if local_ip and applied_name and applied_name in crypto_maps:
+            # DPDタイマー設定をicmp_engineに反映
+            dpd_cfg = ipsec_crypto.get('dpd', {})
+            if dpd_cfg.get('interval'):
+                icmp_engine.DPD_DETECT_SEC = dpd_cfg['interval'] * dpd_cfg.get('retry', 2)
+                icmp_engine.IKE_NEGO_SEC   = max(2, dpd_cfg['interval'] // 5)
             for seq, seq_data in crypto_maps[applied_name].items():
                 peer = seq_data.get('peer', '') if isinstance(seq_data, dict) else ''
                 if peer:

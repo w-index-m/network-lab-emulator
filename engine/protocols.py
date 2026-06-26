@@ -2649,32 +2649,99 @@ class IcmpEngine:
     送信元から宛先まで実際に経路をたどって到達性を判定。
     各装置のIP・接続ネットワークを把握し、RIBを参照してホップ転送する。
     """
+    # DPD タイマーデフォルト値
+    DPD_DETECT_SEC  = 30   # no crypto map 後、tunnelがDOWNになるまでの秒数
+    IKE_NEGO_SEC    = 3    # crypto map 再適用後、ESTABLISHEDになるまでの秒数
+
     def __init__(self):
+        import time as _time
+        self._time = _time
         self.device_ips: Dict[str, dict] = {}
-        # IPsecトンネル: {device_id: [{'local': ip, 'peer': ip}]}
+        # IPsecトンネル: {device_id: [{'local': ip, 'peer': ip, 'state': str, 'since': float}]}
+        # state: 'established' | 'detecting' | 'down' | 'negotiating'
         self.ipsec_tunnels: Dict[str, list] = {}
 
     def register_ipsec(self, device_id: str, local_ip: str, peer_ip: str):
-        """IPsecトンネル情報を登録（crypto map適用済みインターフェース）"""
-        self.ipsec_tunnels.setdefault(device_id, [])
-        entry = {'local': local_ip, 'peer': peer_ip}
-        if entry not in self.ipsec_tunnels[device_id]:
-            self.ipsec_tunnels[device_id].append(entry)
+        """IPsecトンネルを登録。既存エントリは negotiating 状態で再開"""
+        now = self._time.time()
+        tunnels = self.ipsec_tunnels.setdefault(device_id, [])
+        for t in tunnels:
+            if t['local'] == local_ip and t['peer'] == peer_ip:
+                if t['state'] not in ('established',):
+                    t['state'] = 'negotiating'
+                    t['since'] = now
+                return
+        tunnels.append({'local': local_ip, 'peer': peer_ip,
+                        'state': 'negotiating', 'since': now})
 
     def clear_ipsec(self, device_id: str):
-        self.ipsec_tunnels.pop(device_id, None)
+        """crypto map 削除 / interface shutdown → detecting 状態へ遷移"""
+        now = self._time.time()
+        tunnels = self.ipsec_tunnels.get(device_id, [])
+        for t in tunnels:
+            if t['state'] == 'established':
+                t['state'] = 'detecting'
+                t['since'] = now
+            elif t['state'] == 'negotiating':
+                # ネゴ中に削除 → すぐ down
+                t['state'] = 'down'
+                t['since'] = now
+        # established でも detecting でもない（=設定なし）ならエントリ削除
+        self.ipsec_tunnels[device_id] = [
+            t for t in tunnels if t['state'] in ('detecting', 'down')
+        ]
+        if not self.ipsec_tunnels[device_id]:
+            self.ipsec_tunnels.pop(device_id, None)
+
+    def _advance_dpd(self, t: dict) -> str:
+        """タイマーを進めて現在の state を返す"""
+        now = self._time.time()
+        elapsed = now - t.get('since', now)
+        if t['state'] == 'detecting' and elapsed >= self.DPD_DETECT_SEC:
+            t['state'] = 'down'
+            t['since'] = now
+        elif t['state'] == 'negotiating' and elapsed >= self.IKE_NEGO_SEC:
+            t['state'] = 'established'
+            t['since'] = now
+        return t['state']
 
     def _has_ipsec_to(self, device_id: str, next_device_id: str) -> bool:
-        """device_id から next_device_id へのIPsecトンネルが存在するか"""
+        """device_id から next_device_id へのIPsecトンネルが established か"""
         tunnels = self.ipsec_tunnels.get(device_id, [])
         if not tunnels:
             return False
-        # next_device_idのIPリストを取得
         peer_ips = set(self.device_ips.get(next_device_id, {}).get('ips', {}).keys())
         for t in tunnels:
-            if t['peer'] in peer_ips:
+            state = self._advance_dpd(t)
+            if state == 'established' and t['peer'] in peer_ips:
                 return True
         return False
+
+    def get_ipsec_sa_status(self, device_id: str) -> list:
+        """show crypto ipsec sa 用のステータスリストを返す"""
+        import time as _t
+        now = _t.time()
+        result = []
+        for t in self.ipsec_tunnels.get(device_id, []):
+            state = self._advance_dpd(t)
+            elapsed = int(now - t.get('since', now))
+            if state == 'established':
+                remain = None
+                label = 'ESTABLISHED'
+            elif state == 'detecting':
+                remain = max(0, self.DPD_DETECT_SEC - elapsed)
+                label = f'DPD-DETECTING (DOWN まで {remain}s)'
+            elif state == 'negotiating':
+                remain = max(0, self.IKE_NEGO_SEC - elapsed)
+                label = f'IKE-NEGOTIATING (確立まで {remain}s)'
+            else:
+                remain = None
+                label = 'DOWN'
+            result.append({
+                'local': t['local'], 'peer': t['peer'],
+                'state': state, 'label': label, 'elapsed': elapsed,
+            })
+        return result
 
     def register_device(self, device_id: str, hostname: str, interfaces: dict):
         ips = {}

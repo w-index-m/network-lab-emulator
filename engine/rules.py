@@ -2668,6 +2668,15 @@ Configuration Revision            : 5"""
                 m_lt2 = re.match(r'^lifetime\s+(\d+)', c)
                 if m_lt2: pol['lifetime'] = int(m_lt2.group(1)); return ''
 
+            # crypto isakmp keepalive <interval> [<retry>] [periodic|on-demand]
+            # DPDタイマー設定: state.ipsec_crypto['dpd'] に保存
+            m_dpd = re.match(r'^crypto\s+isakmp\s+keepalive\s+(\d+)(?:\s+(\d+))?', c)
+            if m_dpd:
+                interval = int(m_dpd.group(1))
+                retry    = int(m_dpd.group(2)) if m_dpd.group(2) else 2
+                state.ipsec_crypto['dpd'] = {'interval': interval, 'retry': retry}
+                return ''
+
             # crypto ipsec transform-set <name> <transforms>
             m_ts = re.match(r'^crypto\s+ipsec\s+transform-set\s+(\S+)\s+(.+)', c)
             if m_ts:
