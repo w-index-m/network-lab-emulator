@@ -238,16 +238,23 @@ def _load_config():
 
     for dev_id, dev_data in data.get("devices", {}).items():
         state = DeviceState(dev_data["type"], dev_data["hostname"])
-        # インタフェースIPを復元
+        # インタフェースIPを復元（大小文字違いの幻インターフェースをマージして除去）
+        groups = {}
         for ifname, iinfo in dev_data.get("interfaces", {}).items():
-            if ifname in state.interfaces:
-                state.interfaces[ifname].update({
+            groups.setdefault(ifname.lower(), []).append((ifname, iinfo))
+        for low, entries in groups.items():
+            # 既定インターフェースの正式名（大小無視）に寄せる
+            target = next((n for n in state.interfaces if n.lower() == low), entries[0][0])
+            # 非空IPを持つエントリを優先（同点は保存順の先頭）
+            _, iinfo = max(entries, key=lambda e: 1 if e[1].get("ip") else 0)
+            if target in state.interfaces:
+                state.interfaces[target].update({
                     "ip":     iinfo.get("ip", ""),
                     "prefix": iinfo.get("prefix", 24),
                     "status": iinfo.get("status", "up"),
                 })
             else:
-                state.interfaces[ifname] = iinfo
+                state.interfaces[target] = iinfo
         # ルートを復元（全デバイス共通）
         if dev_data.get("routes"):
             state.routes = dev_data["routes"]
@@ -309,6 +316,35 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="ネットワークラボ", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# ══════════════════════════════════════════
+# Basic 認証（admin/admin）
+#   NETLAB_AUTH_USER / NETLAB_AUTH_PASS で変更可
+#   NETLAB_AUTH_DISABLE=1 で無効化（自動テスト用）
+# ══════════════════════════════════════════
+import base64 as _base64, secrets as _secrets
+from fastapi import Response as _Response
+
+_AUTH_USER = os.environ.get("NETLAB_AUTH_USER", "admin")
+_AUTH_PASS = os.environ.get("NETLAB_AUTH_PASS", "admin")
+_AUTH_DISABLED = os.environ.get("NETLAB_AUTH_DISABLE") == "1"
+
+
+@app.middleware("http")
+async def basic_auth_middleware(request, call_next):
+    if _AUTH_DISABLED or request.method == "OPTIONS":
+        return await call_next(request)
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Basic "):
+        try:
+            user, _, pw = _base64.b64decode(auth[6:]).decode("utf-8").partition(":")
+            if (_secrets.compare_digest(user, _AUTH_USER)
+                    and _secrets.compare_digest(pw, _AUTH_PASS)):
+                return await call_next(request)
+        except Exception:
+            pass
+    return _Response(status_code=401, content="認証が必要です",
+                     headers={"WWW-Authenticate": 'Basic realm="NetworkLab"'})
 
 # ══════════════════════════════════════════
 # API エンドポイント
