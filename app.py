@@ -2964,13 +2964,16 @@ async def set_nexthop(body: dict):
 async def sync_links(body: dict):
     """フロントエンドの全リンクをvnetに同期"""
     links = body.get("links", [])
-    # 既存リンクをクリアして再構築
+    # 既存リンクをクリアして再構築（interface_linksも同時クリア）
     for dev_id in list(vnet.links.keys()):
         vnet.links[dev_id] = set()
+    vnet.interface_links.clear()
     for l in links:
         a, b = l.get("a"), l.get("b")
+        iface_a = l.get("iface_a") or l.get("pa")
+        iface_b = l.get("iface_b") or l.get("pb")
         if a and b:
-            vnet.add_link(a, b)
+            vnet.add_link(a, b, iface_a, iface_b)
     # WebSocket未接続の装置にもスタブコールバックを登録
     # （これがないとプロトコルパケットが転送先で処理されない）
     for dev_id in device_sessions:

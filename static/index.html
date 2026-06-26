@@ -1503,16 +1503,19 @@ function commitLink(aId,bId){
   saveLabState();
 }
 function syncLinksToBackend(){
-  // vnetにリンクを同期（プロトコルパケットが流れる）
+  // vnetにリンクを同期（インターフェース名込みでプロトコルパケットが流れる）
   fetch('/api/links/sync',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({links:LINKS.map(function(l){return {a:l.a,b:l.b};})})});
+    body:JSON.stringify({links:LINKS.map(function(l){return {a:l.a,b:l.b,iface_a:l.pa,iface_b:l.pb};})})});
 }
 function defPort(type,n){
-  if(type==='sir')return`lan${n%3}`;
-  if(type==='srs')return`ether ${n+1}`;
+  if(type==='sir')return`LAN${n%3}`;
+  if(type==='srs')return`GigabitEthernet1/${n+1}`;
+  if(type==='nexus')return`Ethernet1/${n+1}`;
   if(type==='catalyst')return`GigabitEthernet1/0/${n+1}`;
-  if(type==='cisco')return`GigabitEthernet0/0/${n%2}`;
-  return`eth${n}`;
+  if(type==='cisco')return`GigabitEthernet0/${n%3}`;
+  if(type==='asa')return`GigabitEthernet0/${n%3}`;
+  if(type==='apresia')return`ge-${n%24}`;
+  return`GigabitEthernet0/${n}`;
 }
 function addDevice(tplKey){
   const tpl=DEV_TEMPLATES[tplKey];if(!tpl)return;
