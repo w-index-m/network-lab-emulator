@@ -1797,6 +1797,11 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
             lines.append(f"{n['id']:<16}{1:<6}{('FULL/  -'):<16}{n['dead']:<12}{'192.168.1.'+n['id'].split('.')[-1]:<16}{n['iface']}")
         return "\n".join(lines)
 
+    def _show_rip_neighbor(self, state):
+        lines = ['Index   IP Address        Last Update   Bad Pkts   Bad Routes']
+        lines.append('(No RIP neighbors — ルートを受信していません)')
+        return '\n'.join(lines)
+
     def _show_ospf_database(self, state):
         o = state.ospf
         return f"""            OSPF Router with ID ({o['router_id']}) (Process ID {o['process']})
@@ -3005,6 +3010,24 @@ Configuration Revision            : 5"""
 
         if re.match(r'^show\s+crypto\s+ipsec\s+sa', c):
             return self._asa_show_crypto_ipsec_sa(state)
+
+        if re.match(r'^show\s+ospf\s+neighbor', c):
+            if hasattr(state, 'ospf'):
+                return self._show_ospf_neighbor(state)
+            return 'Neighbor ID     Pri   State           Dead Time   Address         Interface\n(No OSPF neighbors)'
+
+        if re.match(r'^show\s+ospf\s+database', c):
+            if hasattr(state, 'ospf'):
+                return self._show_ospf_database(state)
+            return '% No OSPF database entries.'
+
+        if re.match(r'^show\s+ospf$', c):
+            if hasattr(state, 'ospf'):
+                return self._show_ospf(state)
+            return '% OSPF is not configured on this device.'
+
+        if re.match(r'^show\s+(ip\s+)?rip\s+neighbor', c):
+            return self._show_rip_neighbor(state)
 
         if re.match(r'^show\s+service-policy', c):
             return self._asa_show_service_policy(state)

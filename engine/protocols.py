@@ -48,12 +48,31 @@ class VirtualNetwork:
     """装置間の仮想リンクを管理し、パケットを転送する"""
     def __init__(self):
         self.links: Dict[str, set] = defaultdict(set)  # device_id -> {peer_ids}
+        self.interface_links: Dict[str, Dict[str, str]] = defaultdict(dict)  # device_id -> {peer_id -> iface_name}
+        self.down_interfaces: Dict[str, set] = defaultdict(set)  # device_id -> {shutdown中のiface名}
         self.send_callbacks: Dict[str, Callable] = {}  # device_id -> ws_send関数
         self.ws_send_callbacks: Dict[str, Callable] = {}  # フロントエンド表示用
 
-    def add_link(self, a: str, b: str):
+    def add_link(self, a: str, b: str, iface_a: str = None, iface_b: str = None):
         self.links[a].add(b)
         self.links[b].add(a)
+        if iface_a:
+            self.interface_links[a][b] = iface_a
+        if iface_b:
+            self.interface_links[b][a] = iface_b
+
+    def interface_down(self, device_id: str, iface: str):
+        """インターフェースをshutdown状態にする（broadcast_to_neighborsがスキップする）"""
+        self.down_interfaces[device_id].add(iface)
+
+    def interface_up(self, device_id: str, iface: str):
+        """インターフェースをno shutdown状態に戻す"""
+        self.down_interfaces[device_id].discard(iface)
+
+    def get_peers_on_interface(self, device_id: str, iface: str) -> set:
+        """指定インターフェース経由で接続されているpeer device_idのセット"""
+        return {peer for peer, if_name in self.interface_links.get(device_id, {}).items()
+                if if_name == iface}
 
     def remove_link(self, a: str, b: str):
         self.links[a].discard(b)
@@ -215,9 +234,15 @@ class VirtualNetwork:
 
     async def broadcast_to_neighbors(self, src_id: str, msg: dict, exclude: set = None):
         msg_type = msg.get('type', '')
+        down = self.down_interfaces.get(src_id, set())
         for peer_id in list(self.links.get(src_id, set())):
             if exclude and peer_id in exclude:
                 continue
+            # shutdownされているインターフェース経由のピアには送信しない
+            if down:
+                connecting_iface = self.interface_links.get(src_id, {}).get(peer_id)
+                if connecting_iface and connecting_iface in down:
+                    continue
             # L2マルチキャスト系プロトコル（RIP/OSPF/STP/VRRP/LACP）は
             # 同一セグメントのみ届く
             if msg_type in ('rip_update', 'rip_request', 'rip_packet',
@@ -261,6 +286,7 @@ class RipEngine:
                 'timer_task': None,
                 'expire_tasks': {},   # "net/prefix" -> task
                 'redistributed': {},  # net/prefix -> {metric, source}
+                'peers': {},          # peer_id -> {hostname, last_seen, routes}
             }
         return self.nodes[device_id]
 
@@ -313,7 +339,26 @@ class RipEngine:
         for t in n['expire_tasks'].values():
             t.cancel()
         n['enabled'] = False
-        n['table'] = []
+
+    async def interface_down(self, device_id: str, peer_ids: set):
+        """インターフェースダウン時: 対象ピアから学習したルートをポイズンして削除"""
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return
+        removed = [r for r in n['table'] if r.learned_from in peer_ids]
+        n['table'] = [r for r in n['table'] if r.learned_from not in peer_ids]
+        # 自ノードのピアレコードから削除 + 相手ノードからも自分を削除
+        for peer_id in peer_ids:
+            n.get('peers', {}).pop(peer_id, None)
+            peer_n = self.nodes.get(peer_id)
+            if peer_n:
+                peer_n.get('peers', {}).pop(device_id, None)
+        if removed:
+            poison = [{'network': r.network, 'prefix': r.prefix, 'metric': 16}
+                      for r in removed]
+            pkt = {'type': 'rip_packet', 'command': 'response', 'version': 2,
+                   'src_id': device_id, 'src_hostname': n['hostname'], 'entries': poison}
+            await vnet.broadcast_to_neighbors(device_id, pkt)
 
     async def _update_loop(self, device_id: str):
         jitter = random.uniform(1, RIP_JITTER_MAX)
@@ -340,7 +385,13 @@ class RipEngine:
         if not n or not n['enabled']:
             return
 
+        down = vnet.down_interfaces.get(device_id, set())
         for peer_id in vnet.get_neighbors(device_id):
+            # shutdownインターフェース経由のピアには送信しない
+            if down:
+                connecting_iface = vnet.interface_links.get(device_id, {}).get(peer_id)
+                if connecting_iface and connecting_iface in down:
+                    continue
             # セグメントチェック: 共通IPセグメントがなければ届かない
             if not vnet._shares_segment(device_id, peer_id):
                 continue
@@ -388,6 +439,30 @@ class RipEngine:
         if command == 'request':
             await self._send_update(receiver_id)
             return
+
+        # ピアとして記録（ルートの有無に関わらず）
+        if src_id:
+            # ピアの接続IPを検索（icmp_engineの同一セグメントIPを使用）
+            peer_ip = src_id
+            try:
+                recv_nets = vnet._get_device_networks(receiver_id)
+                for ip, prefix in icmp_engine.device_ips.get(src_id, {}).get('ips', {}).items():
+                    mask = (0xffffffff << (32 - prefix)) & 0xffffffff
+                    net_int = vnet._ip_to_int(ip) & mask
+                    for r_net, r_mask, r_prefix in recv_nets:
+                        if r_prefix == prefix and r_net == net_int:
+                            peer_ip = ip
+                            break
+                    if peer_ip != src_id:
+                        break
+            except Exception:
+                pass
+            n.setdefault('peers', {})[src_id] = {
+                'hostname': src_hostname,
+                'ip': peer_ip,
+                'last_seen': time.time(),
+                'routes': len(msg.get('entries', [])),
+            }
 
         # Response処理（ベルマン-フォード）
         changed = False
@@ -549,34 +624,33 @@ class RipEngine:
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
             return '% RIP is not configured on this device.'
-        # ルートを学習した送信元をネイバーとして表示
-        neighbors = {}
+        # peers dict（パケット受信時に記録）を優先。なければ学習ルートから補完
+        peers = dict(n.get('peers', {}))
         for r in n['table']:
-            if r.learned_from and r.learned_from != 'direct':
-                src = r.learned_from
-                if src not in neighbors:
-                    neighbors[src] = {
-                        'hostname': r.learned_from_hostname or src,
-                        'last_update': f'00:00:{random.randint(5,29):02d}',
-                        'routes': 0,
-                        'next_hop': r.next_hop or src,
-                    }
-                neighbors[src]['routes'] += 1
-        if not neighbors:
+            if r.learned_from and r.learned_from != 'direct' and r.learned_from not in peers:
+                peers[r.learned_from] = {
+                    'hostname': r.learned_from_hostname or r.learned_from,
+                    'last_seen': r.timestamp,
+                    'routes': 1,
+                }
+        if not peers:
             return ('Index   IP Address        Last Update   Bad Pkts   Bad Routes\n'
                     '(No RIP neighbors — ルートを受信していません)')
-        lines = [
-            'Index   IP Address        Last Update   Bad Pkts   Bad Routes',
-        ]
-        for i, (nid, info) in enumerate(neighbors.items(), 1):
-            ip = info['next_hop']
-            upd = info['last_update']
-            lines.append(f'{i:<8}{ip:<18}{upd:<14}0          0')
+        lines = ['Index   IP Address        Last Update   Bad Pkts   Bad Routes']
+        for i, (peer_id, info) in enumerate(peers.items(), 1):
+            age_sec = int(time.time() - info.get('last_seen', time.time()))
+            mm, ss = divmod(age_sec, 60)
+            hh, mm = divmod(mm, 60)
+            upd = f'{hh:02d}:{mm:02d}:{ss:02d}'
+            display_ip = info.get('ip', info.get('hostname', peer_id))
+            lines.append(f'{i:<8}{display_ip:<18}{upd:<14}0          0')
         lines.append('')
-        lines.append(f'Routing Information Sources:')
-        for nid, info in neighbors.items():
-            lines.append(f'  {info["next_hop"]:<20}{info["hostname"]:<16}'
-                         f'  {info["routes"]} routes')
+        lines.append('Routing Information Sources:')
+        for peer_id, info in peers.items():
+            hostname = info.get('hostname', peer_id)
+            display_ip = info.get('ip', hostname)
+            routes = info.get('routes', 0)
+            lines.append(f'  {display_ip:<20}{hostname:<16}  {routes} routes')
         return '\n'.join(lines)
 
 
@@ -722,6 +796,27 @@ class OspfEngine:
         n['neighbors'] = {}
         n['dr'] = None
         n['bdr'] = None
+
+    async def interface_down(self, device_id: str, peer_ids: set):
+        """インターフェースダウン時: 対象ピアとのネイバーを即座に削除してルート再計算"""
+        n = self.nodes.get(device_id)
+        if not n:
+            return
+        removed = False
+        for peer_id in list(peer_ids):
+            if peer_id in n['neighbors']:
+                nbr = n['neighbors'].pop(peer_id)
+                if nbr.dead_task:
+                    nbr.dead_task.cancel()
+                await vnet.send_to(device_id, {
+                    'type': 'ospf_log',
+                    'message': (f'%OSPF-5-ADJCHG: Process {n["process_id"]}, '
+                                f'Nbr {nbr.router_id} interface down, '
+                                f'changing state from FULL to DOWN')
+                })
+                removed = True
+        if removed:
+            self._recalc_routes(device_id)
 
     async def _hello_loop(self, device_id: str):
         await asyncio.sleep(random.uniform(0.5, 1.5))

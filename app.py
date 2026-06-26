@@ -399,6 +399,18 @@ async def cli_command(body: dict):
             c_low in ('shutdown', 'shut') and state.current_if and
             state.interfaces.get(state.current_if, {}).get('crypto_map')):
         icmp_engine.clear_ipsec(device_id)
+
+    # shutdown / no shutdown → VirtualNetwork + OSPF/RIP エンジンに通知
+    iface_for_flap = state.current_if or ''
+    if c_low in ('shutdown', 'shut') and iface_for_flap:
+        vnet.interface_down(device_id, iface_for_flap)
+        peer_ids = vnet.get_peers_on_interface(device_id, iface_for_flap)
+        if peer_ids:
+            await ospf_engine.interface_down(device_id, peer_ids)
+            await rip_engine.interface_down(device_id, peer_ids)
+    elif c_low in ('no shutdown', 'no shut') and iface_for_flap:
+        vnet.interface_up(device_id, iface_for_flap)
+
     if re.search(r'ip\s+addr(?:ess)?|ip\s+route|remote\s+\d+\s+ip\s+route|'
                  r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address|'
                  r'no\s+shutdown|no\s+shut', c_low) or (
@@ -2905,14 +2917,21 @@ def _rebuild_all_neighbors():
 @app.post("/api/link")
 async def add_link(body: dict):
     """装置間リンクを作成（プロトコルパケットが流れるようになる）"""
-    a = body.get("a")
-    b = body.get("b")
+    a = body.get("a") or body.get("device_a")
+    b = body.get("b") or body.get("device_b")
+    iface_a = body.get("iface_a") or body.get("interface_a")
+    iface_b = body.get("iface_b") or body.get("interface_b")
     if a and b:
-        vnet.add_link(a, b)
+        vnet.add_link(a, b, iface_a, iface_b)
         _update_neighbors(a, b, add=True)
         _save_config()
     return {"ok": True, "neighbors": {a: list(vnet.get_neighbors(a)),
                                        b: list(vnet.get_neighbors(b))}}
+
+@app.post("/api/topology/link")
+async def topology_link(body: dict):
+    """インターフェース名付きリンク作成（device_a/interface_a/device_b/interface_b形式）"""
+    return await add_link(body)
 
 @app.delete("/api/link")
 async def remove_link(body: dict):
