@@ -2473,6 +2473,10 @@ Configuration Revision            : 5"""
                     return f"% Invalid input: IP address '{ip_val}' is not valid"
                 if not _valid_prefix(prefix_val):
                     return f"% Invalid input: prefix length '{prefix_val}' must be 0-32"
+                iface = f'wan{m_wan_ip.group(1)}'
+                state.interfaces.setdefault(iface, {})
+                state.interfaces[iface]['ip'] = ip_val
+                state.interfaces[iface]['prefix'] = prefix_val
             return ""
         if re.match(r'^ip\s+rip\s+', c):
             return ""

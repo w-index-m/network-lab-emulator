@@ -29,6 +29,7 @@ from engine.rules import RuleEngine, DeviceState
 from engine.protocols import (
     vnet, rip_engine, ospf_engine, bgp_engine, stp_engine, rib_engine,
     icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
+    nat_engine,
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
@@ -512,6 +513,11 @@ async def cli_command(body: dict):
             re.search(r'crypto\s+map', c_low) and
             not re.match(r'^no\s+crypto\s+map', c_low)):
         _register_icmp(device_id)
+
+    # ── NAT / NAPT / proxy-arp 設定（Si-R / Cisco ルーター）──
+    nat_out = _handle_nat_config(device_id, command, state)
+    if nat_out is not None:
+        return {"output": nat_out, "mode": state.mode, "hostname": state.hostname}
 
     # ルールで空応答かつOllamaあり → Ollamaで補完
     if USE_OLLAMA and output == "" and command.strip():
@@ -1837,6 +1843,16 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
         name = pl_show.group(1)
         return filter_engine.format_show_prefix_list(device_id, name)
 
+    # ── NAT 変換テーブル表示 ──
+    # Cisco: show ip nat translations / show ip nat statistics
+    if re.match(r'^show\s+ip\s+nat\s+translation', c):
+        return nat_engine.format_show_translations(device_id)
+    if re.match(r'^show\s+ip\s+nat\s+statistic', c):
+        return nat_engine.format_show_statistics(device_id)
+    # Si-R: show nat-table / show ip napt
+    if re.match(r'^show\s+(nat-table|ip\s+napt)', c) and state.device_type in ('sir', 'srs'):
+        return nat_engine.format_show_translations(device_id)
+
     # ── syslog / SNMP 設定確認（state反映版）──
     if re.match(r'^show\s+logging', c):
         return _format_show_logging(state)
@@ -2478,6 +2494,80 @@ def _prefix_to_mask(prefix: int) -> str:
     return f'{(mask>>24)&0xff}.{(mask>>16)&0xff}.{(mask>>8)&0xff}.{mask&0xff}'
 
 
+def _handle_nat_config(device_id: str, command: str, state: DeviceState):
+    """
+    NAT / NAPT / proxy-arp の設定を解釈（Si-R / Cisco ルーターのみ）。
+    設定コマンドを処理したら "" を、対象外なら None を返す。
+    """
+    if state.device_type not in ('cisco', 'sir', 'srs'):
+        return None
+    c = command.lower().strip()
+
+    # ── Cisco: interface 'ip nat inside|outside' ──
+    m = re.match(r'^ip\s+nat\s+(inside|outside)$', c)
+    if m and state.current_if:
+        nat_engine.set_iface_role(device_id, state.current_if, m.group(1))
+        return ""
+    if re.match(r'^no\s+ip\s+nat\s+(inside|outside)$', c) and state.current_if:
+        role = c.split()[-1]
+        nat_engine.cfg[device_id][role].discard(state.current_if)
+        return ""
+
+    # ── Cisco: 'ip nat inside source list <acl> interface <if> overload' ──
+    m = re.match(r'^ip\s+nat\s+inside\s+source\s+list\s+(\S+)\s+interface\s+(\S+)(\s+overload)?', c)
+    if m:
+        nat_engine.add_pat(device_id, m.group(1), m.group(2), bool(m.group(3)))
+        return ""
+    # ── Cisco: 'ip nat inside source static <inside> <outside>' ──
+    m = re.match(r'^ip\s+nat\s+inside\s+source\s+static\s+([\d.]+)\s+([\d.]+)', c)
+    if m:
+        nat_engine.add_static(device_id, m.group(1), m.group(2))
+        return ""
+
+    # ── Cisco標準ACL（NAT用 source list）: 'access-list <n> permit <net> <wildcard>' ──
+    m = re.match(r'^access-list\s+(\S+)\s+(permit|deny)\s+([\d.]+)\s+([\d.]+)$', c)
+    if m:
+        net = m.group(3)
+        wildcard = m.group(4)
+        # ワイルドカード→プレフィックス長
+        try:
+            inv = [255 - int(o) for o in wildcard.split('.')]
+            prefix = sum(bin(o).count('1') for o in inv)
+        except Exception:
+            prefix = 24
+        nat_engine.add_acl(device_id, m.group(1), m.group(2), net, prefix)
+        # access-list は filter_engine 用にも別途処理されるため None を返さず継続させる
+        # （NATのACLとして登録だけして、応答は既存処理に委ねるため "" は返さない）
+        return None
+    m = re.match(r'^access-list\s+(\S+)\s+(permit|deny)\s+host\s+([\d.]+)$', c)
+    if m:
+        nat_engine.add_acl(device_id, m.group(1), m.group(2), m.group(3), 32)
+        return None
+
+    # ── Cisco: 'ip proxy-arp' / 'no ip proxy-arp' ──
+    if c == 'ip proxy-arp' and state.current_if:
+        nat_engine.set_proxy_arp(device_id, state.current_if, True)
+        return ""
+    if c == 'no ip proxy-arp' and state.current_if:
+        nat_engine.set_proxy_arp(device_id, state.current_if, False)
+        return ""
+
+    # ── Si-R: 'lan N ip napt use use' / 'wan N ip napt use use' ──
+    m = re.match(r'^(lan|wan)\s+(\d+)\s+ip\s+napt\s+', c)
+    if m and state.device_type in ('sir', 'srs'):
+        iface = f'{m.group(1)}{m.group(2)}'
+        nat_engine.enable_napt(device_id, iface)
+        return ""
+    # ── Si-R: 'lan N ip proxyarp use on|off' ──
+    m = re.match(r'^(lan|wan)\s+(\d+)\s+ip\s+proxyarp\s+use\s+(on|off)', c)
+    if m and state.device_type in ('sir', 'srs'):
+        iface = f'{m.group(1)}{m.group(2)}'
+        nat_engine.set_proxy_arp(device_id, iface, m.group(3) == 'on')
+        return ""
+
+    return None
+
+
 def _find_gateway_ip(state: DeviceState) -> str:
     """デバイスのデフォルトゲートウェイIPを取得（device_type非依存）"""
     # PC等が持つ明示的gateway属性
@@ -2513,6 +2603,29 @@ async def _arp_before_send(device_id: str, dest: str, state: DeviceState):
             await arp_engine.resolve_with_packet(device_id, gw)
 
 
+def _apply_nat_on_path(src_id: str, dest_ip: str, ping_result: dict, proto: str = 'icmp'):
+    """
+    ping/通信の経路上にあるNATルーターで送信元IP変換を適用する。
+    変換テーブルにエントリを記録（show ip nat translations で確認可能）。
+    """
+    if not ping_result.get('reachable'):
+        return
+    src_info = icmp_engine.device_ips.get(src_id, {})
+    src_ips = list(src_info.get('ips', {}).keys())
+    if not src_ips:
+        return
+    src_ip = src_ips[0]
+    # 宛先が自分と同一セグメントなら変換不要（NAT対象外）
+    for my_ip, prefix in src_info.get('ips', {}).items():
+        if icmp_engine._ip_in_network(dest_ip, my_ip, prefix):
+            return
+    # 経路上の各ホップ（ルーター）でNAT設定があれば変換を試みる
+    for hop in ping_result.get('hops', []):
+        hop_dev = hop.get('device')
+        if hop_dev and nat_engine.has_nat(hop_dev):
+            nat_engine.translate(hop_dev, src_ip, dest_ip, proto=proto)
+
+
 async def handle_icmp(device_id: str, command: str, state: DeviceState):
     """ping / traceroute を実到達性判定で処理"""
     c = command.lower().strip()
@@ -2525,6 +2638,8 @@ async def handle_icmp(device_id: str, command: str, state: DeviceState):
         # 送出前ARP（同一セグメントは宛先、別セグメントはデフォゲ）
         await _arp_before_send(device_id, dest, state)
         result = icmp_engine.ping(device_id, dest, count=5)
+        # 経路上のNATルーターで送信元アドレス変換を適用
+        _apply_nat_on_path(device_id, dest, result, proto='icmp')
         return _format_ping(dest, result, state.device_type)
 
     # traceroute / tracert

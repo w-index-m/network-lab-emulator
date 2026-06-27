@@ -3060,6 +3060,235 @@ icmp_engine = IcmpEngine()
 
 
 # ══════════════════════════════════════════
+# NAT / NAPT エンジン（Si-R / Cisco ルーター）
+# ══════════════════════════════════════════
+@dataclass
+class NatEntry:
+    proto: str           # icmp | tcp | udp | ---
+    inside_local: str    # 変換前（内部）IP
+    inside_global: str   # 変換後（外部）IP
+    outside_local: str   # 宛先IP
+    outside_global: str  # 宛先IP
+    in_port: int = 0
+    glob_port: int = 0
+    is_static: bool = False
+    age: float = field(default_factory=time.time)
+
+
+class NatEngine:
+    """
+    NAT / NAPT(PAT) を実装。
+    - Cisco: interface 'ip nat inside/outside' + 'ip nat inside source list <acl> interface <if> overload'
+             静的: 'ip nat inside source static <inside> <outside>'
+    - Si-R : 'lan/wan N ip napt use use'（インターフェース単位のNAPT有効化）
+    内部→外部へ越えるトラフィックの送信元IPを外側インターフェースIPに変換する。
+    """
+    def __init__(self):
+        # device_id -> 設定
+        self.cfg: Dict[str, dict] = defaultdict(lambda: {
+            'inside': set(),       # inside指定のインターフェース名
+            'outside': set(),      # outside指定のインターフェース名
+            'pat': [],             # [{'acl','iface','overload'}]
+            'static': [],          # [{'inside','outside'}]
+            'napt_ifaces': set(),  # Si-R: NAPT有効インターフェース
+            'proxy_arp': {},       # iface -> bool（Cisco既定True）
+        })
+        # device_id -> {acl_name -> [(action, net, prefix)]}
+        self.acls: Dict[str, Dict[str, list]] = defaultdict(lambda: defaultdict(list))
+        # device_id -> [NatEntry]
+        self.translations: Dict[str, list] = defaultdict(list)
+        self._port_counter = 1024
+
+    # ── 設定 ──
+    def set_iface_role(self, device_id: str, iface: str, role: str):
+        if role == 'inside':
+            self.cfg[device_id]['inside'].add(iface)
+        elif role == 'outside':
+            self.cfg[device_id]['outside'].add(iface)
+
+    def add_pat(self, device_id: str, acl: str, iface: str, overload: bool = True):
+        self.cfg[device_id]['pat'].append({'acl': acl, 'iface': iface, 'overload': overload})
+
+    def add_static(self, device_id: str, inside: str, outside: str):
+        self.cfg[device_id]['static'].append({'inside': inside, 'outside': outside})
+
+    def enable_napt(self, device_id: str, iface: str):
+        """Si-R: インターフェースにNAPTを有効化（そのifaceをoutside扱い）"""
+        self.cfg[device_id]['napt_ifaces'].add(iface)
+        self.cfg[device_id]['outside'].add(iface)
+
+    def add_acl(self, device_id: str, name: str, action: str, net: str, prefix: int):
+        self.acls[device_id][name].append((action, net, prefix))
+
+    def set_proxy_arp(self, device_id: str, iface: str, enabled: bool):
+        self.cfg[device_id]['proxy_arp'][iface] = enabled
+
+    def proxy_arp_enabled(self, device_id: str, iface: str, device_type: str = 'cisco') -> bool:
+        pa = self.cfg.get(device_id, {}).get('proxy_arp', {})
+        if iface in pa:
+            return pa[iface]
+        # Ciscoルーターは既定で有効、Si-Rは既定無効
+        return device_type in ('cisco',)
+
+    def has_nat(self, device_id: str) -> bool:
+        c = self.cfg.get(device_id)
+        if not c:
+            return False
+        return bool(c['pat'] or c['static'] or c['napt_ifaces'])
+
+    def _acl_permits(self, device_id: str, acl: str, src_ip: str) -> bool:
+        entries = self.acls.get(device_id, {}).get(acl, [])
+        if not entries:
+            return True  # ACL未定義なら全許可（簡易）
+        for action, net, prefix in entries:
+            if icmp_engine._ip_in_network(src_ip, net, prefix):
+                return action == 'permit'
+        return False
+
+    def _outside_iface_ip(self, device_id: str, src_ip: str = '',
+                          dest_ip: str = '') -> Optional[str]:
+        """
+        outside指定インターフェースのIPを返す（inside global用）。
+        送信元と同一セグメントのインターフェース（=内部側）は除外し、
+        可能なら宛先方向のインターフェースを選ぶ。
+        """
+        info = icmp_engine.device_ips.get(device_id, {})
+        ifaces = info.get('interfaces', {})
+        candidates = list(self.cfg[device_id]['outside']) or \
+                     list(self.cfg[device_id]['napt_ifaces'])
+
+        def iface_ip(ifname):
+            ii = ifaces.get(ifname)
+            return ii.get('ip') if ii else None
+
+        # 1) 宛先と同一セグメントのoutsideインターフェース（egress）を優先
+        if dest_ip:
+            for ifname in candidates:
+                ip = iface_ip(ifname)
+                if ip and icmp_engine._ip_in_network(dest_ip, ip,
+                        ifaces.get(ifname, {}).get('prefix', 24)):
+                    return ip
+        # 2) 送信元と同一セグメント（=内部側）でないインターフェースを選ぶ
+        for ifname in candidates:
+            ip = iface_ip(ifname)
+            if not ip:
+                continue
+            if src_ip and icmp_engine._ip_in_network(src_ip, ip,
+                    ifaces.get(ifname, {}).get('prefix', 24)):
+                continue  # 内部側インターフェースはスキップ
+            return ip
+        # 3) フォールバック: 最初に見つかったIP
+        for ifname in candidates:
+            ip = iface_ip(ifname)
+            if ip:
+                return ip
+        return None
+
+    def translate(self, device_id: str, src_ip: str, dest_ip: str,
+                  proto: str = 'icmp') -> Optional[NatEntry]:
+        """
+        内部送信元 src_ip を外側グローバルIPへ変換。
+        変換が起きた場合 NatEntry を返す（show ip nat translations 用に記録）。
+        """
+        if not self.has_nat(device_id):
+            return None
+        cfg = self.cfg[device_id]
+
+        # 静的NAT優先
+        for s in cfg['static']:
+            if s['inside'] == src_ip:
+                entry = self._record(device_id, proto, src_ip, s['outside'],
+                                     dest_ip, is_static=True)
+                return entry
+
+        # 動的PAT/NAPT: ACLにマッチ（CiscoはACL、Si-Rは全内部）
+        permitted = False
+        if cfg['napt_ifaces']:
+            permitted = True  # Si-R NAPTは内部全体
+        else:
+            for p in cfg['pat']:
+                if self._acl_permits(device_id, p['acl'], src_ip):
+                    permitted = True
+                    break
+        if not permitted:
+            return None
+
+        global_ip = self._outside_iface_ip(device_id, src_ip=src_ip, dest_ip=dest_ip)
+        if not global_ip:
+            return None
+        port = self._next_port()
+        entry = self._record(device_id, proto, src_ip, global_ip, dest_ip,
+                             glob_port=port, in_port=port)
+        return entry
+
+    def _next_port(self) -> int:
+        self._port_counter += 1
+        if self._port_counter > 65000:
+            self._port_counter = 1024
+        return self._port_counter
+
+    def _record(self, device_id, proto, inside_local, inside_global,
+                dest_ip, glob_port=0, in_port=0, is_static=False) -> NatEntry:
+        # 既存の同一変換があれば更新
+        for e in self.translations[device_id]:
+            if (e.inside_local == inside_local and e.outside_global == dest_ip
+                    and e.proto == proto):
+                e.age = time.time()
+                return e
+        entry = NatEntry(proto=proto, inside_local=inside_local,
+                         inside_global=inside_global, outside_local=dest_ip,
+                         outside_global=dest_ip, glob_port=glob_port,
+                         in_port=in_port, is_static=is_static)
+        self.translations[device_id].append(entry)
+        if len(self.translations[device_id]) > 200:
+            self.translations[device_id].pop(0)
+        return entry
+
+    def clear(self, device_id: str):
+        self.translations[device_id] = []
+
+    # ── show 出力 ──
+    def format_show_translations(self, device_id: str) -> str:
+        entries = self.translations.get(device_id, [])
+        if not entries:
+            return ('Pro Inside global      Inside local       Outside local      Outside global\n'
+                    '(変換エントリなし — 内部→外部通信が発生していません)')
+        lines = ['Pro Inside global      Inside local       Outside local      Outside global']
+        for e in entries:
+            if e.proto in ('icmp', 'tcp', 'udp') and e.glob_port:
+                ig = f'{e.inside_global}:{e.glob_port}'
+                il = f'{e.inside_local}:{e.in_port}'
+                ol = f'{e.outside_local}:{e.glob_port}'
+                og = f'{e.outside_global}:{e.glob_port}'
+            else:
+                ig, il = e.inside_global, e.inside_local
+                ol, og = e.outside_local or '---', e.outside_global or '---'
+            pro = e.proto if e.glob_port else '---'
+            lines.append(f'{pro:<4}{ig:<19}{il:<19}{ol:<19}{og}')
+        return '\n'.join(lines)
+
+    def format_show_statistics(self, device_id: str) -> str:
+        entries = self.translations.get(device_id, [])
+        cfg = self.cfg.get(device_id, {})
+        active = len(entries)
+        inside = ', '.join(cfg.get('inside', set())) or '-'
+        outside = ', '.join(cfg.get('outside', set())) or '-'
+        return '\n'.join([
+            f'Total active translations: {active} ({sum(1 for e in entries if e.is_static)} static, '
+            f'{sum(1 for e in entries if not e.is_static)} dynamic; '
+            f'{sum(1 for e in entries if e.glob_port)} extended)',
+            'Peak translations: %d' % active,
+            f'Outside interfaces:',
+            f'  {outside}',
+            f'Inside interfaces:',
+            f'  {inside}',
+        ])
+
+
+nat_engine = NatEngine()
+
+
+# ══════════════════════════════════════════
 # 経路フィルタエンジン（prefix-list / distribute-list / route-map / route-manage）
 # ══════════════════════════════════════════
 @dataclass
@@ -3310,7 +3539,66 @@ class ArpEngine:
                 ip=target_ip, mac=target_mac, iface=iface, entry_type='dynamic')
             return target_mac
 
-        # 同一セグメントにいない → ARP解決不可
+        # 同一セグメントにいない → Proxy ARP を試みる
+        proxy_mac = await self._try_proxy_arp(device_id, target_ip, src_info)
+        if proxy_mac:
+            return proxy_mac
+
+        # ARP解決不可
+        return None
+
+    async def _try_proxy_arp(self, device_id: str, target_ip: str, src_info: dict) -> Optional[str]:
+        """
+        Proxy ARP: 要求元と同一セグメントにいるルーターが、
+        別セグメント宛のARP要求に対して自分のMACで代理応答する。
+        ルーターがproxy-arp有効かつ宛先への経路を持つ場合のみ。
+        """
+        # 要求元の各セグメントについて、同居するルーターを探す
+        for my_ip, prefix in src_info.get('ips', {}).items():
+            for cand_id, cand_info in icmp_engine.device_ips.items():
+                if cand_id == device_id:
+                    continue
+                cand_type = vnet.device_types.get(cand_id, '')
+                if cand_type not in ('cisco', 'sir', 'srs', 'catalyst'):
+                    continue
+                # ルーターのインターフェースが要求元と同一セグメントか
+                router_iface_ip = None
+                for r_ip, r_prefix in cand_info.get('ips', {}).items():
+                    if icmp_engine._ip_in_network(my_ip, r_ip, r_prefix):
+                        router_iface_ip = r_ip
+                        break
+                if not router_iface_ip:
+                    continue
+                r_iface = self._iface_for_ip(cand_id, router_iface_ip)
+                if not nat_engine.proxy_arp_enabled(cand_id, r_iface, cand_type):
+                    continue
+                # 宛先への経路を持つか（別セグメントに宛先所有装置がある）
+                target_dev = (icmp_engine._find_device_owning_ip(target_ip) or
+                              icmp_engine._find_device_in_network(target_ip))
+                if not target_dev or target_dev == cand_id:
+                    # ルーター自身が宛先側にいる、または宛先不明でも代理応答（簡易）
+                    pass
+                # ルーターのMACで代理応答
+                src_mac = self._gen_mac(device_id, my_ip)
+                proxy_mac = self._gen_mac(cand_id, router_iface_ip)
+                await vnet.send_to(device_id, {
+                    'type': 'arp_log', 'subtype': 'request',
+                    'message': (f'ARP: sending request for {target_ip} on {r_iface} '
+                                f'(sender {my_ip}/{src_mac})'),
+                })
+                await vnet.send_to(cand_id, {
+                    'type': 'arp_log', 'subtype': 'proxy',
+                    'message': (f'ARP: proxy reply for {target_ip} — '
+                                f'answering with own MAC {proxy_mac} on {r_iface} (proxy ARP)'),
+                })
+                await vnet.send_to(device_id, {
+                    'type': 'arp_log', 'subtype': 'reply_received',
+                    'message': (f'ARP: received reply: {target_ip} is at {proxy_mac} (proxy)'),
+                })
+                self.tables[device_id][target_ip] = ArpEntry(
+                    ip=target_ip, mac=proxy_mac,
+                    iface=self._iface_for_ip(device_id, my_ip), entry_type='dynamic')
+                return proxy_mac
         return None
 
     def _iface_for_ip(self, device_id: str, ip: str) -> str:
