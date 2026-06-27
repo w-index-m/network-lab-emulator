@@ -505,6 +505,28 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
   </div>
 </div>
 
+<!-- 接続インターフェース指定モーダル -->
+<div id="lif-overlay" style="position:fixed;inset:0;z-index:9200;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.7)">
+  <div style="background:#0d1a2a;border:1px solid #2a5a8a;border-radius:5px;width:440px;max-width:94vw;font-family:'Courier New',monospace;overflow:hidden">
+    <div style="background:linear-gradient(to bottom,#1a3a6a,#0d2040);padding:8px 14px;font-size:12px;color:#80c8ff">🔌 接続インターフェースの指定</div>
+    <div style="padding:14px 16px;display:flex;flex-direction:column;gap:10px">
+      <div>
+        <label style="font-size:10px;color:#7090b0" id="lif-a-label"></label>
+        <input id="lif-a-input" type="text" style="width:100%;background:#060e18;border:1px solid #1a3a5a;color:#c0c0c0;padding:5px 8px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px">
+      </div>
+      <div style="text-align:center;color:#406080;font-size:14px">⇅</div>
+      <div>
+        <label style="font-size:10px;color:#7090b0" id="lif-b-label"></label>
+        <input id="lif-b-input" type="text" style="width:100%;background:#060e18;border:1px solid #1a3a5a;color:#c0c0c0;padding:5px 8px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px" onkeydown="if(event.key==='Enter')confirmLinkIface()">
+      </div>
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button onclick="confirmLinkIface()" style="flex:1;padding:7px;background:#0a3a0a;border:1px solid #00c800;color:#00c800;font-size:12px;cursor:pointer;border-radius:4px;font-family:'Courier New',monospace">接続</button>
+        <button onclick="cancelLinkIface()" style="padding:7px 14px;background:#1a1a1a;border:1px solid #555;color:#aaa;font-size:12px;cursor:pointer;border-radius:4px;font-family:'Courier New',monospace">キャンセル</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- 流し込みモーダル -->
 <div id="flow-overlay">
   <div id="flow-box">
@@ -1578,7 +1600,31 @@ function exitLinkMode(){CVS.linkMode=false;CVS.linkFrom=null;CVS.linkMouse=null;
 function commitLink(aId,bId){
   const d=DEVICES[aId],e=DEVICES[bId];if(!d||!e)return;
   const type=document.getElementById('lnk-type').value,vlan=document.getElementById('lnk-vlan').value;
-  const pa=defPort(d.type,Object.values(LINKS).length),pb=defPort(e.type,Object.values(LINKS).length+1);
+  // インターフェースを手動指定（デフォルト値をプリセット）
+  const defA=defPort(d.type,Object.values(LINKS).length);
+  const defB=defPort(e.type,Object.values(LINKS).length+1);
+  openLinkIfaceModal(aId,bId,defA,defB,type,vlan);
+}
+
+// 接続インターフェース指定モーダル
+function openLinkIfaceModal(aId,bId,defA,defB,type,vlan){
+  const d=DEVICES[aId],e=DEVICES[bId];
+  document.getElementById('lif-a-label').textContent=(d.hostname||aId)+' ('+d.type+')';
+  document.getElementById('lif-b-label').textContent=(e.hostname||bId)+' ('+e.type+')';
+  document.getElementById('lif-a-input').value=defA;
+  document.getElementById('lif-b-input').value=defB;
+  const ov=document.getElementById('lif-overlay');
+  ov.style.display='flex';
+  ov.dataset.aId=aId; ov.dataset.bId=bId; ov.dataset.type=type; ov.dataset.vlan=vlan;
+  setTimeout(()=>document.getElementById('lif-a-input').focus(),50);
+}
+function confirmLinkIface(){
+  const ov=document.getElementById('lif-overlay');
+  const aId=ov.dataset.aId, bId=ov.dataset.bId, type=ov.dataset.type, vlan=ov.dataset.vlan;
+  const pa=(document.getElementById('lif-a-input').value||'').trim();
+  const pb=(document.getElementById('lif-b-input').value||'').trim();
+  if(!pa||!pb){ alert('両方のインターフェース名を入力してください'); return; }
+  ov.style.display='none';
   const lid='l'+Date.now();
   LINKS.push({id:lid,a:aId,pa,b:bId,pb,type,vlan,active:true});
   print(aId,'');print(aId,`%LINK-3-UPDOWN: Interface ${pa}, changed state to up`,'col-g');
@@ -1587,6 +1633,7 @@ function commitLink(aId,bId){
   syncLinksToBackend();
   saveLabState();
 }
+function cancelLinkIface(){ document.getElementById('lif-overlay').style.display='none'; }
 function syncLinksToBackend(){
   // vnetにリンクを同期（インターフェース名込みでプロトコルパケットが流れる）
   fetch('/api/links/sync',{method:'POST',headers:{'Content-Type':'application/json'},
