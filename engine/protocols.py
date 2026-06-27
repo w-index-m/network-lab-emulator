@@ -3467,6 +3467,69 @@ class CefEngine:
         return '\n'.join(lines)
 
 
+    def format_forwarding_arch(self, device_id: str, device_type: str = 'catalyst') -> str:
+        """
+        入力→バックプレーン/ファブリック→出力 の転送パスを機種別に表示。
+        Catalyst（UADP + ストアアンドフォワード共有バッファ）と
+        Nexus（CLOS ファブリック + VOQ）の違いを可視化する。
+        実インターフェース数からポート負荷の概算を出す。
+        """
+        info = icmp_engine.device_ips.get(device_id, {})
+        ifaces = info.get('interfaces', {})
+        up_ports = [n for n, i in ifaces.items()
+                    if i.get('ip') or i.get('status') in ('up', 'connected')]
+        nports = max(1, len(up_ports))
+
+        if device_type == 'nexus':
+            return '\n'.join([
+                '═══ NX-OS Forwarding Architecture (CLOS Fabric + VOQ) ═══',
+                '',
+                '  [Ingress Module]      [Fabric Modules]       [Egress Module]',
+                '   ┌──────────┐   credit  ┌──────────┐  credit  ┌──────────┐',
+                '   │ Port ASIC│─────────► │ Fabric   │ ───────► │ Port ASIC│',
+                '   │  + VOQ   │ ◄───────  │ (CLOS)   │ ◄─────── │  + Egress│',
+                '   └──────────┘  grant    └──────────┘  grant   └──────────┘',
+                '',
+                ' 転送方式      : Virtual Output Queuing (VOQ) / クレジットベース',
+                ' バックプレーン: 非ブロッキング CLOS ファブリック',
+                ' HOLブロッキング: 回避（宛先ポート別VOQ）',
+                ' バッファ      : 入力分散（per-port VOQ, ingress buffered）',
+                '',
+                f' Active front-panel ports : {nports}',
+                f' Fabric utilization       : {min(99, nports * 3)}% (推定)',
+                ' VOQ drops                : 0   (no congestion)',
+                ' Fabric credit starvation : 0',
+                '',
+                ' ※ Nexusは入力側でVOQに積み、ファブリックがクレジットを発行した',
+                '   分だけ出力へ送るため、特定出力の輻輳が他フローへ波及しにくい。',
+            ])
+
+        # Catalyst (UADP ASIC, shared-buffer store-and-forward)
+        return '\n'.join([
+            '═══ Catalyst Forwarding Architecture (UADP ASIC + 共有バッファ) ═══',
+            '',
+            '   [Ingress]          [Backplane / Stack Ring]        [Egress]',
+            '   ┌──────────┐       ┌────────────────────┐       ┌──────────┐',
+            '   │ Ingress  │──────►│  UADP / Stack Ring  │──────►│  Egress  │',
+            '   │ FIFO+FIB │       │  (shared backplane) │       │  Queues  │',
+            '   └──────────┘       └────────────────────┘       └──────────┘',
+            '         │  Lookup(FIB/TCAM)         │ 共有バッファ      │ 8 queues/port',
+            '',
+            ' 転送方式      : Store-and-Forward（FIB/TCAMルックアップ後に転送）',
+            ' バックプレーン: Stack Ring / 内部クロスバー（共有）',
+            ' HOLブロッキング: 共有バッファのため輻輳時に波及しうる',
+            ' バッファ      : 出力キュー集中（egress shared buffer, 8 queue/port）',
+            '',
+            f' Active ports       : {nports}',
+            f' Backplane usage    : {min(99, nports * 4)}% (推定)',
+            ' Ingress drops      : 0',
+            ' Output queue drops : 0   (no congestion)',
+            '',
+            ' ※ Catalystは入力でFIB/TCAMを引いてからバックプレーンを介し出力キューへ。',
+            '   出力ポート輻輳時は共有バッファを介して他フローへ影響が出やすい。',
+        ])
+
+
 def _int_to_ip(n: int) -> str:
     return f'{(n >> 24) & 0xff}.{(n >> 16) & 0xff}.{(n >> 8) & 0xff}.{n & 0xff}'
 

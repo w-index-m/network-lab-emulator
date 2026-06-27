@@ -1861,6 +1861,12 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
                 re.match(r'^show\s+tcam', c) or
                 re.match(r'^show\s+hardware\s+access-list\s+tcam', c)):
             return cef_engine.format_tcam_utilization(device_id, state.device_type)
+        # 転送アーキテクチャ（入力→バックプレーン/ファブリック→出力）
+        if (re.match(r'^show\s+(platform\s+)?forwarding(\s+architecture)?$', c) or
+                re.match(r'^show\s+fabric(\s+utilization)?$', c) or
+                re.match(r'^show\s+(platform\s+)?backplane', c) or
+                re.match(r'^show\s+forwarding\s+path', c)):
+            return cef_engine.format_forwarding_arch(device_id, state.device_type)
 
     # ── NAT 変換テーブル表示 ──
     # Cisco: show ip nat translations / show ip nat statistics
