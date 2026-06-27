@@ -512,12 +512,12 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     <div style="padding:14px 16px;display:flex;flex-direction:column;gap:10px">
       <div>
         <label style="font-size:10px;color:#7090b0" id="lif-a-label"></label>
-        <input id="lif-a-input" type="text" style="width:100%;background:#060e18;border:1px solid #1a3a5a;color:#c0c0c0;padding:5px 8px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px">
+        <select id="lif-a-input" style="width:100%;background:#060e18;border:1px solid #1a3a5a;color:#c0c0c0;padding:5px 8px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px"></select>
       </div>
       <div style="text-align:center;color:#406080;font-size:14px">⇅</div>
       <div>
         <label style="font-size:10px;color:#7090b0" id="lif-b-label"></label>
-        <input id="lif-b-input" type="text" style="width:100%;background:#060e18;border:1px solid #1a3a5a;color:#c0c0c0;padding:5px 8px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px" onkeydown="if(event.key==='Enter')confirmLinkIface()">
+        <select id="lif-b-input" style="width:100%;background:#060e18;border:1px solid #1a3a5a;color:#c0c0c0;padding:5px 8px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px"></select>
       </div>
       <div style="display:flex;gap:8px;margin-top:4px">
         <button onclick="confirmLinkIface()" style="flex:1;padding:7px;background:#0a3a0a;border:1px solid #00c800;color:#00c800;font-size:12px;cursor:pointer;border-radius:4px;font-family:'Courier New',monospace">接続</button>
@@ -1611,8 +1611,8 @@ function openLinkIfaceModal(aId,bId,defA,defB,type,vlan){
   const d=DEVICES[aId],e=DEVICES[bId];
   document.getElementById('lif-a-label').textContent=(d.hostname||aId)+' ('+d.type+')';
   document.getElementById('lif-b-label').textContent=(e.hostname||bId)+' ('+e.type+')';
-  document.getElementById('lif-a-input').value=defA;
-  document.getElementById('lif-b-input').value=defB;
+  fillPortSelect('lif-a-input', d.type, defA);
+  fillPortSelect('lif-b-input', e.type, defB);
   const ov=document.getElementById('lif-overlay');
   ov.style.display='flex';
   delete ov.dataset.editId;   // 新規作成モード
@@ -1660,6 +1660,43 @@ function defPort(type,n){
   if(type==='asa')return`GigabitEthernet0/${n%3}`;
   if(type==='apresia')return`ge-${n%24}`;
   return`GigabitEthernet0/${n}`;
+}
+// 装置種別ごとの接続インターフェース候補（プルダウン用）
+function portOptions(type){
+  const o=[];
+  if(type==='catalyst'||type==='srs'){
+    for(let i=1;i<=24;i++)o.push(`GigabitEthernet1/0/${i}`);
+    for(let i=1;i<=4;i++)o.push(`Port-channel${i}`);
+    [10,20].forEach(v=>o.push(`Vlan${v}`));
+  } else if(type==='cisco'){
+    for(let i=0;i<=2;i++)o.push(`GigabitEthernet0/0/${i}`);
+    for(let i=0;i<=3;i++)o.push(`GigabitEthernet0/${i}`);
+  } else if(type==='nexus'){
+    for(let i=1;i<=48;i++)o.push(`Ethernet1/${i}`);
+    for(let i=1;i<=10;i++)o.push(`port-channel${i}`);
+  } else if(type==='sir'){
+    for(let i=0;i<=3;i++)o.push(`lan${i}`);
+    for(let i=0;i<=3;i++)o.push(`wan${i}`);
+  } else if(type==='apresia'){
+    for(let i=1;i<=24;i++)o.push(`Port1/0/${i}`);
+    [10,20].forEach(v=>o.push(`Vlan${v}`));
+  } else if(type==='asa'){
+    for(let i=0;i<=3;i++)o.push(`GigabitEthernet0/${i}`);
+    o.push('Management0/0');
+  } else if(type==='pc'){
+    o.push('eth0');
+  } else {
+    for(let i=0;i<=3;i++)o.push(`GigabitEthernet0/${i}`);
+  }
+  return o;
+}
+// セレクトにインターフェース候補を流し込み、currentを選択（候補に無ければ先頭に追加）
+function fillPortSelect(selId, type, current){
+  const sel=document.getElementById(selId);
+  if(!sel)return;
+  const opts=portOptions(type);
+  if(current && opts.indexOf(current)<0) opts.unshift(current);
+  sel.innerHTML=opts.map(p=>`<option value="${p}"${p===current?' selected':''}>${p}</option>`).join('');
 }
 function addDevice(tplKey){
   const tpl=DEV_TEMPLATES[tplKey];if(!tpl)return;
@@ -1843,8 +1880,8 @@ function editLinkIface(lid){
   const d=DEVICES[l.a], e=DEVICES[l.b];
   document.getElementById('lif-a-label').textContent=(d?.hostname||l.a)+' ('+(d?.type||'')+')';
   document.getElementById('lif-b-label').textContent=(e?.hostname||l.b)+' ('+(e?.type||'')+')';
-  document.getElementById('lif-a-input').value=l.pa;
-  document.getElementById('lif-b-input').value=l.pb;
+  fillPortSelect('lif-a-input', d?.type||'cisco', l.pa);
+  fillPortSelect('lif-b-input', e?.type||'cisco', l.pb);
   const ov=document.getElementById('lif-overlay');
   ov.style.display='flex';
   ov.dataset.editId=lid;   // 編集モード
