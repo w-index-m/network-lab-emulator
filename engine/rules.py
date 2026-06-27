@@ -4896,18 +4896,35 @@ Key Version         : A
         return '\n'.join(lines)
 
     def _pc_ip_route(self, state: DeviceState) -> str:
+        # 実際のeth0のIP/プレフィックスとゲートウェイから動的に生成
+        # （ip addr add / ip route add default の変更を確実に反映）
         lines = []
-        for r in state.routes:
-            dest = r['dest']
-            gw = r['gw']
-            iface = r['iface']
-            metric = r.get('metric', 0)
-            if dest == '0.0.0.0/0':
-                lines.append(f'default via {gw} dev {iface} proto static metric {metric}')
-            elif gw == '0.0.0.0':
-                lines.append(f'{dest} dev {iface} proto kernel scope link src {state.interfaces.get(iface,{}).get("ip","?")} metric {metric}')
-            else:
-                lines.append(f'{dest} via {gw} dev {iface} metric {metric}')
+        eth0 = state.interfaces.get('eth0', {})
+        ip = eth0.get('ip', '')
+        prefix = eth0.get('prefix', 24)
+        gw = getattr(state, 'gateway', '') or ''
+        # デフォルトルート
+        if gw:
+            lines.append(f'default via {gw} dev eth0 proto static metric 0')
+        # 直結ネットワーク
+        if ip:
+            try:
+                o = [int(x) for x in ip.split('.')]
+                ip_int = (o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3]
+                mask = (0xffffffff << (32 - prefix)) & 0xffffffff
+                net = ip_int & mask
+                net_str = f'{(net>>24)&0xff}.{(net>>16)&0xff}.{(net>>8)&0xff}.{net&0xff}'
+                lines.append(f'{net_str}/{prefix} dev eth0 proto kernel scope link '
+                             f'src {ip} metric 100')
+            except Exception:
+                pass
+        # 追加の静的ルート（ip route add で追加されたもの）
+        for r in getattr(state, 'static_routes', []):
+            d = r.get('dest'); p = r.get('prefix'); g = r.get('gw')
+            if d and g:
+                lines.append(f'{d}/{p} via {g} dev eth0 metric 0')
+        # ループバック
+        lines.append('127.0.0.0/8 dev lo proto kernel scope link src 127.0.0.1 metric 0')
         return '\n'.join(lines)
 
     def _pc_route_table(self, state: DeviceState) -> str:
