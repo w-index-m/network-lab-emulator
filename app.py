@@ -472,7 +472,7 @@ async def cli_command(body: dict):
         return {"output": icmp_out, "mode": state.mode, "hostname": state.hostname}
 
     # ── PC: nc / netcat（TCP到達性判定 — トポロジー考慮）──
-    nc_out = handle_nc(device_id, command, state)
+    nc_out = await handle_nc(device_id, command, state)
     if nc_out is not None:
         return {"output": nc_out, "mode": state.mode, "hostname": state.hostname}
 
@@ -2478,6 +2478,41 @@ def _prefix_to_mask(prefix: int) -> str:
     return f'{(mask>>24)&0xff}.{(mask>>16)&0xff}.{(mask>>8)&0xff}.{mask&0xff}'
 
 
+def _find_gateway_ip(state: DeviceState) -> str:
+    """デバイスのデフォルトゲートウェイIPを取得（device_type非依存）"""
+    # PC等が持つ明示的gateway属性
+    gw = getattr(state, 'gateway', '') or ''
+    if gw and gw not in ('0.0.0.0', 'directly'):
+        return gw
+    # routesテーブルから 0.0.0.0/0（デフォルトルート）のgwを探す
+    for r in getattr(state, 'routes', []) or []:
+        dest = r.get('dest') or r.get('net') or ''
+        if dest in ('0.0.0.0/0', '0.0.0.0', 'default'):
+            g = r.get('gw', '')
+            if g and g not in ('0.0.0.0', 'directly'):
+                return g
+    return ''
+
+
+async def _arp_before_send(device_id: str, dest: str, state: DeviceState):
+    """
+    パケット送出前のARP解決。
+    - 宛先が同一セグメント → 宛先IPを直接ARP
+    - 別セグメント → デフォルトゲートウェイのMACをARP（実機準拠）
+    """
+    info = icmp_engine.device_ips.get(device_id, {})
+    # 宛先が自分のいずれかのインターフェースと同一セグメントか判定
+    same_seg = any(icmp_engine._ip_in_network(dest, my_ip, prefix)
+                   for my_ip, prefix in info.get('ips', {}).items())
+    if same_seg:
+        await arp_engine.resolve_with_packet(device_id, dest)
+    else:
+        # 別セグメント → デフォゲのMACを解決してそこ宛に送出
+        gw = _find_gateway_ip(state)
+        if gw:
+            await arp_engine.resolve_with_packet(device_id, gw)
+
+
 async def handle_icmp(device_id: str, command: str, state: DeviceState):
     """ping / traceroute を実到達性判定で処理"""
     c = command.lower().strip()
@@ -2487,8 +2522,8 @@ async def handle_icmp(device_id: str, command: str, state: DeviceState):
     if m:
         dest = m.group(1)
         _register_icmp(device_id)
-        # ARP Request/Reply パケット交換を伴う解決（同一セグメントのみ）
-        await arp_engine.resolve_with_packet(device_id, dest)
+        # 送出前ARP（同一セグメントは宛先、別セグメントはデフォゲ）
+        await _arp_before_send(device_id, dest, state)
         result = icmp_engine.ping(device_id, dest, count=5)
         return _format_ping(dest, result, state.device_type)
 
@@ -2497,13 +2532,15 @@ async def handle_icmp(device_id: str, command: str, state: DeviceState):
     if m:
         dest = m.group(1)
         _register_icmp(device_id)
+        # 送出前ARP（同一セグメントは宛先、別セグメントはデフォゲ）
+        await _arp_before_send(device_id, dest, state)
         result = icmp_engine.traceroute(device_id, dest)
         return _format_traceroute(dest, result)
 
     return None
 
 
-def handle_nc(device_id: str, command: str, state: DeviceState):
+async def handle_nc(device_id: str, command: str, state: DeviceState):
     """nc / telnet のTCPポート到達性チェック（icmp_engineで経路確認）"""
     if state.device_type != 'pc':
         return None
@@ -2523,6 +2560,8 @@ def handle_nc(device_id: str, command: str, state: DeviceState):
 
     # icmp_engineで経路チェック
     _register_icmp(device_id)
+    # TCP通信開始前のARP解決（同一セグメントは宛先、別セグメントはデフォゲ）
+    await _arp_before_send(device_id, host, state)
     reach = icmp_engine.ping(device_id, host, count=1)
     reachable = reach.get('reachable', False)
 
