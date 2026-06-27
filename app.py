@@ -29,7 +29,7 @@ from engine.rules import RuleEngine, DeviceState
 from engine.protocols import (
     vnet, rip_engine, ospf_engine, bgp_engine, stp_engine, rib_engine,
     icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
-    nat_engine,
+    nat_engine, cef_engine,
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
@@ -1842,6 +1842,25 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     if pl_show:
         name = pl_show.group(1)
         return filter_engine.format_show_prefix_list(device_id, name)
+
+    # ── CEF / FIB（Catalyst / Nexus のハードウェア転送）──
+    if state.device_type in ('catalyst', 'nexus'):
+        # Catalyst: show ip cef
+        if re.match(r'^show\s+ip\s+cef', c):
+            return cef_engine.format_show_ip_cef(device_id, state.device_type)
+        # Nexus: show forwarding ipv4 route / show ip fib
+        if re.match(r'^show\s+forwarding\s+ipv4\s+route', c) or re.match(r'^show\s+ip\s+fib', c):
+            return cef_engine.format_show_ip_cef(device_id, 'nexus')
+        # 隣接テーブル: show adjacency
+        if re.match(r'^show\s+adjacency', c):
+            return cef_engine.format_show_adjacency(device_id, state.device_type)
+        # TCAM 使用量
+        if (re.match(r'^show\s+platform.*tcam', c) or
+                re.match(r'^show\s+platform\s+hardware.*tcam', c) or
+                re.match(r'^show\s+hardware\s+capacity', c) or
+                re.match(r'^show\s+tcam', c) or
+                re.match(r'^show\s+hardware\s+access-list\s+tcam', c)):
+            return cef_engine.format_tcam_utilization(device_id, state.device_type)
 
     # ── NAT 変換テーブル表示 ──
     # Cisco: show ip nat translations / show ip nat statistics

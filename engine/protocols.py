@@ -3289,6 +3289,192 @@ nat_engine = NatEngine()
 
 
 # ══════════════════════════════════════════
+# CEF / FIB + TCAM エンジン（Catalyst / Nexus のハードウェア転送）
+# ══════════════════════════════════════════
+class CefEngine:
+    """
+    Cisco Express Forwarding（CEF）の概念を仮想実装。
+    - FIB（Forwarding Information Base）: RIBから生成された転送テーブル
+    - 隣接テーブル（Adjacency）: 次ホップIP→MACの解決済みエントリ（ARP由来）
+    - TCAM: ハードウェアテーブル使用量（ルート/ACL/MAC等の実数から算出）
+    Catalyst（IOS-XE）と Nexus（NX-OS）で出力形式を切り替える。
+    """
+
+    # 機種ごとのTCAM論理容量（代表的なスイッチのカタログ値を模擬）
+    TCAM_CAPACITY = {
+        'catalyst': {  # Catalyst 9300相当
+            'IPv4 Routes (FIB)':     {'max': 32768},
+            'IPv4 Hosts (Adjacency)':{'max': 16384},
+            'MAC Address Table':     {'max': 16384},
+            'IPv4 ACL (Security)':   {'max': 18000},
+            'QoS ACL':               {'max': 18000},
+            'IPv4 Multicast':        {'max': 8192},
+        },
+        'nexus': {  # Nexus 9300相当
+            'IPv4 Routes (LPM)':     {'max': 98304},
+            'IPv4 Hosts':            {'max': 49152},
+            'MAC Address Table':     {'max': 90112},
+            'IPv4 ACL (Ingress)':    {'max': 4096},
+            'IPv4 ACL (Egress)':     {'max': 2048},
+            'IPv4 Multicast':        {'max': 32768},
+        },
+    }
+
+    def _fib_entries(self, device_id: str) -> list:
+        """RIBと直結からFIBエントリを生成（network, prefix, next_hop, iface, kind）"""
+        entries = []
+        seen = set()
+        # 直結ネットワーク（receive/attached）
+        info = icmp_engine.device_ips.get(device_id, {})
+        for ifname, iinfo in info.get('interfaces', {}).items():
+            ip = iinfo.get('ip')
+            if not ip:
+                continue
+            prefix = iinfo.get('prefix', 24)
+            mask = (0xffffffff << (32 - prefix)) & 0xffffffff
+            net_int = vnet._ip_to_int(ip) & mask
+            net = _int_to_ip(net_int)
+            key = (net, prefix)
+            if key not in seen:
+                seen.add(key)
+                entries.append({'network': net, 'prefix': prefix,
+                                'next_hop': 'attached', 'iface': ifname,
+                                'kind': 'attached'})
+            # ホスト自身（/32 receive）
+            hkey = (ip, 32)
+            if hkey not in seen:
+                seen.add(hkey)
+                entries.append({'network': ip, 'prefix': 32,
+                                'next_hop': 'receive', 'iface': ifname,
+                                'kind': 'receive'})
+        # RIBの最良ルート
+        try:
+            for r in rib_engine.get_best_routes(device_id):
+                key = (r['network'], r['prefix'])
+                if key in seen:
+                    continue
+                seen.add(key)
+                nh = r['next_hop'] if r['next_hop'] not in ('0.0.0.0', '') else 'attached'
+                entries.append({'network': r['network'], 'prefix': r['prefix'],
+                                'next_hop': nh, 'iface': r.get('iface', ''),
+                                'kind': r.get('source', 'static')})
+        except Exception:
+            pass
+        # 0.0.0.0/0 が無ければ glean エントリとして 0.0.0.0/0 は出さない
+        return entries
+
+    def format_show_ip_cef(self, device_id: str, device_type: str = 'catalyst') -> str:
+        entries = self._fib_entries(device_id)
+        if device_type == 'nexus':
+            return self._format_nexus_fib(device_id, entries)
+        lines = ['Prefix               Next Hop             Interface']
+        # デフォルト/受信系の特別エントリ
+        lines.append(f'{"0.0.0.0/0":<21}{"no route":<21}')
+        lines.append(f'{"0.0.0.0/32":<21}{"receive":<21}')
+        for e in sorted(entries, key=lambda x: (vnet._ip_to_int(x["network"]), x["prefix"])):
+            pfx = f'{e["network"]}/{e["prefix"]}'
+            if e['next_hop'] in ('attached', 'receive'):
+                nh = e['next_hop']
+            else:
+                nh = e['next_hop']
+            lines.append(f'{pfx:<21}{nh:<21}{e["iface"]}')
+        lines.append(f'{"224.0.0.0/4":<21}{"multicast":<21}')
+        lines.append(f'{"255.255.255.255/32":<21}{"receive":<21}')
+        return '\n'.join(lines)
+
+    def _format_nexus_fib(self, device_id: str, entries: list) -> str:
+        lines = [f'IPv4 routes for table default/base', '',
+                 '------------------+----------------------+----------+-----------',
+                 'Prefix            | Next-hop             | Interface| Type',
+                 '------------------+----------------------+----------+-----------']
+        for e in sorted(entries, key=lambda x: (vnet._ip_to_int(x["network"]), x["prefix"])):
+            pfx = f'{e["network"]}/{e["prefix"]}'
+            nh = e['next_hop']
+            lines.append(f'{pfx:<18}| {nh:<20} | {e["iface"]:<8} | {e["kind"]}')
+        return '\n'.join(lines)
+
+    def format_show_adjacency(self, device_id: str, device_type: str = 'catalyst') -> str:
+        table = arp_engine.tables.get(device_id, {})
+        if not table:
+            return 'Protocol Interface                 Address\n(隣接エントリなし — ARP解決が発生していません)'
+        lines = ['Protocol Interface                 Address']
+        for ip, e in table.items():
+            mac_flat = e.mac.replace(':', '')
+            mac_dotted = f'{mac_flat[0:4]}.{mac_flat[4:8]}.{mac_flat[8:12]}'
+            lines.append(f'IP       {e.iface:<24} {ip}({mac_dotted})')
+        return '\n'.join(lines)
+
+    def _usage_counts(self, device_id: str, device_type: str) -> dict:
+        """実際の設定量からTCAM使用エントリ数を算出"""
+        fib = self._fib_entries(device_id)
+        routes = len([e for e in fib if e['prefix'] < 32])
+        hosts = len([e for e in fib if e['prefix'] == 32]) + \
+                len(arp_engine.tables.get(device_id, {}))
+        macs = len(arp_engine.tables.get(device_id, {}))
+        # ACL: nat_engine と filter_engine のエントリ概算
+        acl = 0
+        try:
+            for name, ents in nat_engine.acls.get(device_id, {}).items():
+                acl += len(ents)
+        except Exception:
+            pass
+        try:
+            for name, ents in filter_engine.prefix_lists.get(device_id, {}).items():
+                acl += len(ents)
+        except Exception:
+            pass
+        return {'routes': routes, 'hosts': hosts, 'macs': macs, 'acl': acl}
+
+    def format_tcam_utilization(self, device_id: str, device_type: str = 'catalyst') -> str:
+        cap = self.TCAM_CAPACITY.get(device_type, self.TCAM_CAPACITY['catalyst'])
+        u = self._usage_counts(device_id, device_type)
+        # 各リソースに使用数を割り当て
+        used_map = {}
+        for name in cap:
+            low = name.lower()
+            if 'route' in low or 'lpm' in low or 'fib' in low:
+                used_map[name] = u['routes']
+            elif 'host' in low or 'adjacency' in low:
+                used_map[name] = u['hosts']
+            elif 'mac' in low:
+                used_map[name] = u['macs']
+            elif 'acl' in low or 'qos' in low:
+                used_map[name] = u['acl']
+            else:
+                used_map[name] = 0
+
+        if device_type == 'nexus':
+            lines = ['Hardware Capacity (TCAM) Utilization:', '',
+                     'Resource                     Used      Free      Total     %Used']
+            for name, info in cap.items():
+                used = used_map.get(name, 0)
+                total = info['max']
+                free = total - used
+                pct = (used / total * 100) if total else 0
+                lines.append(f'{name:<28} {used:<9} {free:<9} {total:<9} {pct:5.2f}%')
+            return '\n'.join(lines)
+
+        # Catalyst (IOS-XE)
+        lines = ['CAM Utilization for ASIC  [0]',
+                 '  Resource                       Used      Free      %Used',
+                 '  ------------------------------------------------------------']
+        for name, info in cap.items():
+            used = used_map.get(name, 0)
+            total = info['max']
+            free = total - used
+            pct = (used / total * 100) if total else 0
+            lines.append(f'  {name:<30} {used:<9} {free:<9} {pct:5.2f}%')
+        return '\n'.join(lines)
+
+
+def _int_to_ip(n: int) -> str:
+    return f'{(n >> 24) & 0xff}.{(n >> 16) & 0xff}.{(n >> 8) & 0xff}.{n & 0xff}'
+
+
+cef_engine = CefEngine()
+
+
+# ══════════════════════════════════════════
 # 経路フィルタエンジン（prefix-list / distribute-list / route-map / route-manage）
 # ══════════════════════════════════════════
 @dataclass
