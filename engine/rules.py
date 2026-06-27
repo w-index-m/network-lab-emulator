@@ -190,11 +190,13 @@ class DeviceState:
                            "allowed_vlan": "1,10,20"},
             "Vlan10": {"ip": "192.168.10.1", "prefix": 24, "status": "up", "desc": "Management"},
         }) if device_type == "apresia" else ({
+            # Catalyst 9300: スイッチポートはデフォルト no shutdown。
+            # ケーブル未接続のポートは notconnect（管理上はup）。
+            # i==3 のみ bpduguard 違反による err-disabled をデモ用に残す。
             **{f"GigabitEthernet1/0/{i}": {
                 "ip": "", "prefix": 0,
                 "status": ("connected" if i <= 2 else
-                           "err-disabled" if i == 3 else
-                           "disabled" if i == 17 else "notconnect"),
+                           "err-disabled" if i == 3 else "notconnect"),
                 "vlan": "10" if i <= 2 else "1",
                 "speed": "1000" if i <= 2 else "auto",
                 "duplex": "full" if i <= 2 else "auto",
