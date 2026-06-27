@@ -664,7 +664,8 @@ class RuleEngine:
             return f"% Invalid input detected at '^' marker.\n  do {sub}\n      ^"
 
         # 設定コマンド
-        if state.mode in ("config", "config-if", "config-router", "config-vlan", "config-crypto"):
+        if state.mode in ("config", "config-if", "config-router", "config-vlan",
+                          "config-crypto", "config-monitor"):
             return self._cmd_config(cmd, state)
 
         # 運用コマンド
@@ -696,10 +697,11 @@ class RuleEngine:
     def _cmd_exit(self, cmd, state):
         if state.mode == "config-if":
             state.mode = "config"
-        elif state.mode in ("config-router", "config-vlan", "config-vpc-domain", "config-crypto"):
+        elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
+                             "config-crypto", "config-monitor"):
             state.mode = "config"
             # Clear crypto sub-context pointers
-            for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq'):
+            for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid'):
                 if hasattr(state, attr):
                     delattr(state, attr)
         elif state.mode == "config":
@@ -863,6 +865,12 @@ class RuleEngine:
             return self._show_port_channel_summary(state)
         if re.match(r'^show\s+port-channel', c):
             return self._show_port_channel_summary(state)
+
+        # ── show monitor / show mirror（SPAN）──
+        m = re.match(r'^show\s+(?:monitor|mirror)(?:\s+session\s+(\d+))?', c)
+        if m and state.device_type in ('cisco', 'catalyst', 'srs', 'nexus', 'apresia'):
+            sid = int(m.group(1)) if m.group(1) else None
+            return self._format_show_monitor(state, sid)
 
         # ── show vlan ──
         if re.match(r'^show\s+vlan', c):
@@ -2366,6 +2374,142 @@ Configuration Revision            : 5"""
 {now.strftime('%b %d %H:%M:%S')}: %SYS-5-RESTART: System restarted"""
 
     # ─── 設定コマンド ────────────────────────
+    def _cmd_monitor(self, cmd, state):
+        """
+        SPAN / ポートミラーリングの設定。
+        対応: Cisco / Catalyst / SR-S / Nexus / APRESIA
+          monitor session <id> source interface <if> [rx|tx|both]
+          monitor session <id> destination interface <if>
+          no monitor session <id>
+          (Nexus) monitor session <id> → config-monitor サブモード
+                  source interface <if> [both]
+                  destination interface <if>
+          (APRESIA) mirror session ... も別名で受理
+        対象外（sir/asa/pc）は None を返す。
+        """
+        if state.device_type not in ('cisco', 'catalyst', 'srs', 'nexus', 'apresia'):
+            return None
+        c = cmd.lower().strip()
+        sessions = getattr(state, 'monitor_sessions', None)
+        if sessions is None:
+            sessions = {}
+            state.monitor_sessions = sessions
+
+        def _sess(sid):
+            return sessions.setdefault(sid, {'source': [], 'dest': None, 'state': 'down'})
+
+        def _norm_dir(d):
+            if d in ('rx', 'receive'):
+                return 'rx'
+            if d in ('tx', 'transmit'):
+                return 'tx'
+            return 'both'
+
+        # no monitor session <id>
+        m = re.match(r'^no\s+(?:monitor|mirror)\s+session\s+(\d+)', c)
+        if m:
+            sessions.pop(int(m.group(1)), None)
+            if state.mode == 'config-monitor':
+                state.mode = 'config'
+            return ""
+
+        # monitor session <id> source interface <if> [dir]
+        m = re.match(r'^(?:monitor|mirror)\s+session\s+(\d+)\s+source\s+interface\s+(\S+)(?:\s+(\S+))?', cmd, re.I)
+        if m:
+            sid = int(m.group(1))
+            s = _sess(sid)
+            ifname = self._resolve_ifname(m.group(2), state)
+            direction = _norm_dir((m.group(3) or 'both').lower())
+            s['source'] = [x for x in s['source'] if x[0] != ifname]
+            s['source'].append((ifname, direction))
+            if s['dest']:
+                s['state'] = 'up'
+            return ""
+
+        # monitor session <id> destination interface <if>
+        m = re.match(r'^(?:monitor|mirror)\s+session\s+(\d+)\s+destination\s+interface\s+(\S+)', cmd, re.I)
+        if m:
+            sid = int(m.group(1))
+            s = _sess(sid)
+            s['dest'] = self._resolve_ifname(m.group(2), state)
+            if s['source']:
+                s['state'] = 'up'
+            return ""
+
+        # Nexus: monitor session <id> （サブモードに入る）
+        m = re.match(r'^monitor\s+session\s+(\d+)$', c)
+        if m and state.device_type == 'nexus':
+            sid = int(m.group(1))
+            _sess(sid)
+            state.mode = 'config-monitor'
+            state._monitor_sid = sid
+            return ""
+
+        # config-monitor サブモード内の source/destination
+        if state.mode == 'config-monitor':
+            sid = getattr(state, '_monitor_sid', None)
+            if sid is None:
+                return ""
+            s = _sess(sid)
+            m = re.match(r'^source\s+interface\s+(\S+)(?:\s+(\S+))?', cmd, re.I)
+            if m:
+                ifname = self._resolve_ifname(m.group(1), state)
+                direction = _norm_dir((m.group(2) or 'both').lower())
+                s['source'] = [x for x in s['source'] if x[0] != ifname]
+                s['source'].append((ifname, direction))
+                if s['dest']:
+                    s['state'] = 'up'
+                return ""
+            m = re.match(r'^destination\s+interface\s+(\S+)', cmd, re.I)
+            if m:
+                s['dest'] = self._resolve_ifname(m.group(1), state)
+                if s['source']:
+                    s['state'] = 'up'
+                return ""
+            if c in ('no shut', 'no shutdown'):
+                s['state'] = 'up' if (s['source'] and s['dest']) else 'down'
+                return ""
+            if c in ('shut', 'shutdown'):
+                s['state'] = 'down'
+                return ""
+
+        # monitor session 行だが解釈できない → エラー
+        return f"% Invalid input detected at '^' marker."
+
+    def _format_show_monitor(self, state, sid=None):
+        """show monitor [session <id>] の出力"""
+        sessions = getattr(state, 'monitor_sessions', {}) or {}
+        if not sessions:
+            return 'No SPAN/Monitor sessions configured.'
+        out = []
+        ids = [sid] if sid is not None else sorted(sessions.keys())
+        for i in ids:
+            s = sessions.get(i)
+            if not s:
+                out.append(f'% Session {i} does not exist.')
+                continue
+            src_lines = []
+            for ifn, d in s['source']:
+                dmap = {'rx': 'Rx Only', 'tx': 'Tx Only', 'both': 'Both'}
+                src_lines.append((ifn, dmap.get(d, 'Both')))
+            out.append(f'Session {i}')
+            out.append('---------')
+            out.append('Type                   : Local Session')
+            if src_lines:
+                first = src_lines[0]
+                out.append(f'Source Ports           :')
+                out.append(f'    {first[1]:<20}: {first[0]}')
+                for ifn, dlabel in src_lines[1:]:
+                    out.append(f'    {dlabel:<20}: {ifn}')
+            else:
+                out.append('Source Ports           : (none)')
+            out.append(f'Destination Ports      : {s["dest"] or "(none)"}')
+            out.append(f'Encapsulation          : Native')
+            out.append(f'Ingress                : Disabled')
+            out.append(f'State                  : {"Up" if s["state"]=="up" else "Down (incomplete)"}')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
     def _cmd_config(self, cmd, state):
         c = cmd.lower().strip()
 
@@ -2374,6 +2518,15 @@ Configuration Revision            : 5"""
         if m:
             state.hostname = m.group(1)
             return ""
+
+        # ── SPAN / ポートミラーリング ──
+        if (re.match(r'^(no\s+)?monitor\s+session', c) or
+                re.match(r'^(no\s+)?mirror\s+session', c) or
+                (state.mode == 'config-monitor' and
+                 re.match(r'^(no\s+)?(source|destination|shut)', c))):
+            out = self._cmd_monitor(cmd, state)
+            if out is not None:
+                return out
 
         # interface ip address (CIDR notation: ip address X.X.X.X/prefix)
         m_cidr = re.match(r'^ip\s+address\s+([\d.]+)/(\d+)', c)
