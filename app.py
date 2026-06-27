@@ -513,10 +513,22 @@ async def cli_command(body: dict):
     await handle_protocol_config(device_id, command, state)
 
     # ルールベースで処理
+    c_low = command.lower().strip()
+
+    # ── debug arp / no debug arp / undebug all（ARPログ表示の切替）──
+    if re.match(r'^debug\s+arp', c_low):
+        arp_engine.debug_on(device_id)
+        return {"output": "ARP packet debugging is on", "mode": state.mode, "hostname": state.hostname}
+    if re.match(r'^(no\s+debug\s+arp|undebug\s+arp)', c_low):
+        arp_engine.debug_off(device_id)
+        return {"output": "ARP packet debugging is off", "mode": state.mode, "hostname": state.hostname}
+    if re.match(r'^(undebug\s+all|no\s+debug\s+all)', c_low):
+        arp_engine.debug_off(device_id)
+        return {"output": "All possible debugging has been turned off", "mode": state.mode, "hostname": state.hostname}
+
     output = rule_engine.process(command, state)
 
     # IPアドレス・ルート変更があればicmp_engineに再登録
-    c_low = command.lower().strip()
     # no crypto map / shutdown → DPD detecting 状態へ遷移
     if re.match(r'^no\s+crypto\s+map', c_low) or (
             c_low in ('shutdown', 'shut') and state.current_if and

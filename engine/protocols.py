@@ -176,8 +176,10 @@ class VirtualNetwork:
             # BGPはエンジン側で直接相手ノードを操作するのでスキップ
             pass
 
-        # arp_log はフロントエンドへ転送（ARPパケット可視化）
+        # arp_log は debug arp が有効な装置のみ表示（実機準拠。既定は非表示）
         if msg_type == 'arp_log':
+            if device_id not in arp_engine.debug:
+                return
             cb = self.ws_send_callbacks.get(device_id)
             if cb:
                 try:
@@ -3698,6 +3700,15 @@ class ArpEngine:
         # device_id -> {ip -> ArpEntry}
         self.tables: Dict[str, Dict[str, ArpEntry]] = defaultdict(dict)
         self.arp_timeout = 14400  # 4時間（Cisco default）
+        # ARPデバッグ（debug arp）が有効な装置。実機同様、既定では
+        # ARP Request/Reply ログは表示しない。
+        self.debug: set = set()
+
+    def debug_on(self, device_id: str):
+        self.debug.add(device_id)
+
+    def debug_off(self, device_id: str):
+        self.debug.discard(device_id)
 
     def _gen_mac(self, device_id: str, ip: str) -> str:
         """装置とIPから決定的にMACを生成"""
