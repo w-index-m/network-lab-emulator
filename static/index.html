@@ -496,6 +496,15 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 <!-- 右クリックメニュー -->
 <div id="ctx-menu"></div>
 
+<!-- ファイルドロップ オーバーレイ -->
+<div id="drop-overlay" style="position:fixed;inset:0;z-index:9500;display:none;align-items:center;justify-content:center;background:rgba(0,40,80,.55);backdrop-filter:blur(1px);pointer-events:none">
+  <div style="border:3px dashed #4aa8ff;border-radius:10px;padding:40px 60px;background:rgba(8,20,36,.92);text-align:center">
+    <div style="font-size:48px">📂</div>
+    <div style="font-size:16px;color:#80c8ff;margin-top:10px;font-weight:bold">設定ファイルをドロップ</div>
+    <div style="font-size:11px;color:#6890b0;margin-top:6px">複数ファイルで複数台を一括投入＆自動接続します<br>(.txt / .cfg / .conf)</div>
+  </div>
+</div>
+
 <!-- 流し込みモーダル -->
 <div id="flow-overlay">
   <div id="flow-box">
@@ -993,6 +1002,7 @@ function addTermDOM(id) {
   const grid = document.getElementById('terminal-grid');
   const el = document.createElement('div');
   el.className = 'term-win'; el.id = 'tw-'+id;
+  el.dataset.devid = id;
   el.style.borderTop = `2px solid ${d.color}`;
   el.innerHTML = `
     <div class="tw-title">
@@ -1818,6 +1828,195 @@ function openFlowModal(id,text){
   document.getElementById('flow-log').innerHTML='';
   if(text){const n=text.split('\n').filter(l=>l&&!l.startsWith('#')).length;addFlowLog(`📋 ${n}行を読み込みました`,'#00c8c8');}
 }
+
+// ════════════════════════════════════════════
+// 設定ファイルのドラッグ&ドロップ
+// ════════════════════════════════════════════
+function _readConfigFile(file, targetId){
+  if(!file) return;
+  // 拡張子/サイズの簡易チェック
+  if(file.size > 1024*1024){ alert('ファイルが大きすぎます（1MB以下にしてください）'); return; }
+  const okExt=/\.(txt|cfg|conf|config|ios|run|log)$/i;
+  if(!okExt.test(file.name) && file.type && !file.type.startsWith('text')){
+    if(!confirm(`"${file.name}" はテキスト設定ファイルではない可能性があります。読み込みますか？`)) return;
+  }
+  const reader=new FileReader();
+  reader.onload=function(e){
+    const text=(e.target.result||'').replace(/\r\n/g,'\n');
+    openFlowModal(targetId||focusedId||Object.keys(DEVICES)[0], text);
+    addFlowLog(`📂 ファイル "${file.name}" を読み込みました`,'#00c8c8');
+  };
+  reader.onerror=function(){ alert('ファイルの読み込みに失敗しました'); };
+  reader.readAsText(file);
+}
+
+// ドロップ先がどの端末ウィンドウかを判定（無ければ focusedId）
+function _dropTargetDevice(ev){
+  let el=ev.target;
+  while(el && el!==document.body){
+    if(el.dataset && el.dataset.devid) return el.dataset.devid;
+    el=el.parentElement;
+  }
+  return focusedId || Object.keys(DEVICES)[0];
+}
+
+function _initConfigDnD(){
+  const overlay=document.getElementById('drop-overlay');
+  let dragDepth=0;
+
+  // 流し込みモーダルの「貼付」テキストエリアへの直接ドロップ
+  const ftext=document.getElementById('flow-text');
+  if(ftext){
+    ftext.addEventListener('dragenter',function(ev){ ev.stopPropagation(); ev.preventDefault(); ftext.style.outline='2px dashed #4aa8ff'; });
+    ftext.addEventListener('dragover',function(ev){ ev.stopPropagation(); ev.preventDefault(); if(ev.dataTransfer)ev.dataTransfer.dropEffect='copy'; });
+    ftext.addEventListener('dragleave',function(ev){ ev.stopPropagation(); ftext.style.outline=''; });
+    ftext.addEventListener('drop',function(ev){
+      ev.stopPropagation(); ev.preventDefault(); ftext.style.outline='';
+      if(overlay)overlay.style.display='none'; dragDepth=0;
+      const f=ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+      if(!f) return;
+      if(f.size>1024*1024){ alert('ファイルが大きすぎます（1MB以下）'); return; }
+      const r=new FileReader();
+      r.onload=function(e){
+        ftext.value=(e.target.result||'').replace(/\r\n/g,'\n');
+        const n=ftext.value.split('\n').filter(l=>l&&!l.startsWith('#')).length;
+        addFlowLog(`📂 "${f.name}" を貼付欄に読み込みました（${n}行）`,'#00c8c8');
+      };
+      r.readAsText(f);
+    });
+  }
+  // 画面全体でファイルドラッグを受け付ける
+  window.addEventListener('dragenter',function(ev){
+    if(ev.dataTransfer && Array.from(ev.dataTransfer.types||[]).includes('Files')){
+      ev.preventDefault(); dragDepth++; if(overlay)overlay.style.display='flex';
+    }
+  });
+  window.addEventListener('dragover',function(ev){
+    if(ev.dataTransfer && Array.from(ev.dataTransfer.types||[]).includes('Files')){
+      ev.preventDefault(); ev.dataTransfer.dropEffect='copy';
+    }
+  });
+  window.addEventListener('dragleave',function(ev){
+    dragDepth--; if(dragDepth<=0){dragDepth=0; if(overlay)overlay.style.display='none';}
+  });
+  window.addEventListener('drop',function(ev){
+    if(ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length){
+      ev.preventDefault(); dragDepth=0; if(overlay)overlay.style.display='none';
+      const files=Array.from(ev.dataTransfer.files);
+      if(files.length===1){
+        // 1ファイル: 既存端末への流し込み
+        _readConfigFile(files[0], _dropTargetDevice(ev));
+      } else {
+        // 複数ファイル: 各ファイル=1台として一括作成＆自動接続
+        _importMultipleConfigs(files);
+      }
+    }
+  });
+}
+
+// 設定テキストからベンダー種別を推定
+function _inferDeviceType(text){
+  const t=text.toLowerCase();
+  if(/feature\s+(vpc|nxos)|^\s*vdc\b|nx-os|switchname/m.test(t)) return 'nexus';
+  if(/lan\s+\d+\s+ip\s+address|wan\s+\d+\s+|napt\s+use|remote\s+\d+\s+ap/m.test(t)) return 'sir';
+  if(/interface\s+gigabitethernet1\/0\/|switch\s+virtual|spanning-tree/m.test(t)) return 'catalyst';
+  if(/interface\s+port\s+\d|loopdetect|apresia/m.test(t)) return 'apresia';
+  if(/nameif|security-level|access-group.*global/m.test(t)) return 'asa';
+  if(/ip\s+address\s+[\d.]+\s+[\d.]+|router\s+(ospf|bgp|eigrp)|interface\s+gigabitethernet0\//m.test(t)) return 'cisco';
+  return 'cisco';
+}
+
+// 設定テキストからホスト名を抽出
+function _inferHostname(text, fallback){
+  const m=text.match(/^\s*(?:hostname|sysname|switchname)\s+(\S+)/mi);
+  return m?m[1]:fallback;
+}
+
+// 複数の設定ファイルを一括投入し、同一サブネットの装置を自動接続
+async function _importMultipleConfigs(files){
+  switchTab('lab');
+  const created=[];
+  for(let i=0;i<files.length;i++){
+    const file=files[i];
+    const text=await new Promise(res=>{
+      const r=new FileReader(); r.onload=e=>res((e.target.result||'').replace(/\r\n/g,'\n'));
+      r.onerror=()=>res(''); r.readAsText(file);
+    });
+    if(!text) continue;
+    const type=_inferDeviceType(text);
+    const id='dev'+Date.now().toString(36)+i;
+    const hostname=_inferHostname(text, file.name.replace(/\.[^.]+$/,''));
+    const colors={sir:'#00c840',srs:'#00a0ff',catalyst:'#1e90ff',cisco:'#e05a00',nexus:'#7050d0',apresia:'#c00040',asa:'#cc4400'};
+    DEVICES[id]={type,hostname,color:colors[type]||'#888'};
+    NODE_POS[id]={x:150+(i%3)*220,y:100+Math.floor(i/3)*160};
+    TERMS[id]={busy:false,typed:'',cur:0,history:[],histIdx:-1};
+    created.push({id,type,hostname,text});
+    // バックエンドにデバイス登録
+    await fetch('/api/device',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id,type,hostname})});
+  }
+  // グリッド再構築
+  const cols=created.length<=1?1:created.length<=4?2:3;
+  document.getElementById('terminal-grid').style.gridTemplateColumns=`repeat(${cols},1fr)`;
+  initTerminals();
+  saveLabState();
+  // 各装置にコンフィグを流し込み（順次）
+  for(const c of created){
+    await _applyConfigLines(c.id, c.text);
+  }
+  // 同一サブネットの装置同士を自動接続
+  const links=_autoLinkBySubnet(created);
+  await fetch('/api/links/sync',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({links})});
+  links.forEach(l=>{ if(!LINKS.some(x=>(x.a===l.a&&x.b===l.b)||(x.a===l.b&&x.b===l.a))) LINKS.push({a:l.a,b:l.b,pa:l.iface_a,pb:l.iface_b}); });
+  saveLabState(); renderTopoDisplay&&renderTopoDisplay(); drawCanvas&&drawCanvas();
+  const first=created[0]; if(first){ focusTerm(first.id);
+    print(first.id,`  [一括投入] ${created.length}台を作成し、${links.length}本のリンクを自動接続しました`,'col-g'); }
+}
+
+// 1台に設定行を順次投入（コメント/空行はスキップ）
+async function _applyConfigLines(id, text){
+  const lines=text.split('\n').map(l=>l.trimEnd()).filter(l=>l && !l.startsWith('#') && !l.startsWith('!'));
+  for(const line of lines){
+    await fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({device_id:id,command:line})}).catch(()=>{});
+  }
+}
+
+// 設定からIP/プレフィックスを抽出し、同一サブネットの装置ペアを接続候補にする
+function _autoLinkBySubnet(created){
+  function ipToInt(ip){const o=ip.split('.').map(Number);return ((o[0]<<24)|(o[1]<<16)|(o[2]<<8)|o[3])>>>0;}
+  // 各装置: [{ip,prefix,iface}]
+  const devNets=created.map(c=>{
+    const nets=[];
+    const re=/interface\s+(\S+)[\s\S]*?ip\s+address\s+([\d.]+)\s+([\d.]+)/gi;
+    // シンプルに行単位で「直近のinterface名 + ip address」を拾う
+    let curIf='';
+    c.text.split('\n').forEach(line=>{
+      const mi=line.match(/^\s*interface\s+(\S+)/i); if(mi){curIf=mi[1];}
+      const ml=line.match(/^\s*lan\s+(\d+)\s+ip\s+address\s+([\d.]+)\/(\d+)/i);
+      const mc=line.match(/ip\s+address\s+([\d.]+)\/(\d+)/i);
+      const mm=line.match(/ip\s+address\s+([\d.]+)\s+([\d.]+)/i);
+      if(ml){nets.push({iface:'lan'+ml[1],ip:ml[2],prefix:parseInt(ml[3])});}
+      else if(mc&&curIf){nets.push({iface:curIf,ip:mc[1],prefix:parseInt(mc[2])});}
+      else if(mm&&curIf){const p=mm[2].split('.').map(Number).reduce((a,o)=>a+((o>>>0).toString(2).split('1').length-1),0);nets.push({iface:curIf,ip:mm[1],prefix:p});}
+    });
+    return {id:c.id,nets};
+  });
+  const links=[]; const used=new Set();
+  for(let i=0;i<devNets.length;i++)for(let j=i+1;j<devNets.length;j++){
+    for(const na of devNets[i].nets)for(const nb of devNets[j].nets){
+      const p=Math.min(na.prefix,nb.prefix);
+      const mask=p===0?0:(0xffffffff<<(32-p))>>>0;
+      if((ipToInt(na.ip)&mask)===(ipToInt(nb.ip)&mask)){
+        const key=devNets[i].id+'|'+devNets[j].id;
+        if(used.has(key))continue; used.add(key);
+        links.push({a:devNets[i].id,b:devNets[j].id,iface_a:na.iface,iface_b:nb.iface});
+      }
+    }
+  }
+  return links;
+}
 document.getElementById('flow-close-btn').onclick=()=>{flowStop=true;document.getElementById('flow-overlay').style.display='none';};
 document.getElementById('flow-dev-sel').onchange=function(){document.getElementById('flow-target-label').textContent=DEVICES[this.value]?.hostname||'';};
 document.getElementById('flow-run-btn').onclick=async()=>{
@@ -2147,6 +2346,8 @@ async function doLogin() {
       _startSessionTimer();
       _touchActivity();
       document.getElementById('login-err').textContent = '';
+      // ログイン後も前回のラボを復元（初期画面に戻さない）
+      restoreLabState();
     } else {
       document.getElementById('login-err').textContent = data.error || 'ログイン失敗';
     }
@@ -2201,6 +2402,7 @@ async function _initSession() {
 
 document.addEventListener('DOMContentLoaded', async function() {
   applyScreenLayout();
+  _initConfigDnD();
   // ログイン画面を表示してトークン確認
   document.getElementById('login-screen').style.display = 'flex';
   const ok = await _initSession();
