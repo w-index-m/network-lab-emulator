@@ -333,23 +333,48 @@ from fastapi import Response as _Response
 _AUTH_USER = os.environ.get("NETLAB_AUTH_USER", "admin")
 _AUTH_PASS = os.environ.get("NETLAB_AUTH_PASS", "admin")
 _AUTH_DISABLED = os.environ.get("NETLAB_AUTH_DISABLE") == "1"
-_SESSION_TTL = 600  # 10分（秒）
+_SESSION_TTL = 600  # クライアント側の無操作タイムアウト（10分）に合わせる値
+# サーバー側トークンの絶対有効期限（リロード/サーバー再起動をまたいでも維持）。
+# 無操作10分でのログアウトはブラウザ側のタイマーが担当する。
+_TOKEN_ABS_TTL = int(os.environ.get("NETLAB_TOKEN_TTL", str(12 * 3600)))  # 既定12時間
 
-# トークン -> 最終アクセス時刻
-_sessions: Dict[str, float] = {}
+import hashlib as _hashlib
+
+# 署名用シークレット（環境変数で固定推奨。未設定でも固定既定値で再起動をまたいで有効）
+_TOKEN_SECRET = os.environ.get(
+    "NETLAB_SECRET",
+    "netlab-default-secret-change-me"
+).encode("utf-8")
+
+def _sign(payload: str) -> str:
+    import hmac as _hmac
+    return _hmac.new(_TOKEN_SECRET, payload.encode("utf-8"),
+                     _hashlib.sha256).hexdigest()
 
 def _new_token() -> str:
-    return _secrets.token_hex(32)
+    # ステートレス署名トークン: "<expiry>.<nonce>.<sig>"
+    exp = int(time.time()) + _TOKEN_ABS_TTL
+    nonce = _secrets.token_hex(8)
+    payload = f"{exp}.{nonce}"
+    return f"{payload}.{_sign(payload)}"
 
 def _valid_token(token: str) -> bool:
-    exp = _sessions.get(token)
-    if exp is None:
+    if not token:
         return False
-    if time.time() - exp > _SESSION_TTL:
-        del _sessions[token]
+    try:
+        parts = token.rsplit(".", 1)
+        if len(parts) != 2:
+            return False
+        payload, sig = parts
+        if not _secrets.compare_digest(sig, _sign(payload)):
+            return False
+        exp_str = payload.split(".", 1)[0]
+        exp = int(exp_str)
+        if time.time() > exp:
+            return False
+        return True
+    except Exception:
         return False
-    _sessions[token] = time.time()  # タッチ（延長）
-    return True
 
 # パスホワイトリスト（認証不要）
 # ルート "/" と各種静的アセットはHTML/ログインJSを返すため公開し、
@@ -385,23 +410,22 @@ async def login(body: dict):
     if (_secrets.compare_digest(user, _AUTH_USER)
             and _secrets.compare_digest(pw, _AUTH_PASS)):
         token = _new_token()
-        _sessions[token] = time.time()
         return {"ok": True, "token": token, "ttl": _SESSION_TTL}
     return JSONResponse(status_code=401, content={"ok": False, "error": "ユーザー名またはパスワードが違います"})
 
 
 @app.post("/api/logout")
 async def logout(body: dict):
-    token = body.get("token", "")
-    _sessions.pop(token, None)
+    # ステートレストークンのためサーバー側状態は持たない。
+    # クライアントがトークンを破棄すればログアウト完了。
     return {"ok": True}
 
 
 @app.get("/api/session/refresh")
 async def session_refresh(token: str = ""):
+    # 署名トークンを検証（サーバー再起動をまたいでも有効）。
     if _valid_token(token):
-        remaining = int(_SESSION_TTL - (time.time() - _sessions.get(token, time.time())))
-        return {"ok": True, "remaining": remaining}
+        return {"ok": True, "remaining": _SESSION_TTL}
     return JSONResponse(status_code=401, content={"ok": False})
 
 
