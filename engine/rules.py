@@ -644,6 +644,13 @@ class RuleEngine:
         if re.match(r'^vlan\s+\d+$', c) and state.mode == "config":
             return self._cmd_vlan_mode(cmd, state)
 
+        # ISSU の show（show install / show issu）は専用ハンドラ優先
+        if (re.match(r'^show\s+(install|issu)\b', c) and
+                state.device_type in ('catalyst', 'nexus')):
+            issu_show = self._cmd_issu(cmd, state)
+            if issu_show is not None:
+                return issu_show
+
         # show系
         if c.startswith("show "):
             return self._cmd_show(cmd, state)
@@ -669,6 +676,11 @@ class RuleEngine:
                           "config-cmap", "config-pmap", "config-pmap-c",
                           "config-vs-domain"):
             return self._cmd_config(cmd, state)
+
+        # ── ISSU / ソフトウェアアップグレード（Catalyst / Nexus）──
+        issu_out = self._cmd_issu(cmd, state)
+        if issu_out is not None:
+            return issu_out
 
         # 運用コマンド
         if c.startswith("ping "):
@@ -2849,6 +2861,194 @@ Configuration Revision            : 5"""
             f'Peer switch operational role : Virtual Switch '
             f'{2 if sw==1 else 1} ({vss["peer_role"]})',
         ])
+
+    def _issu_store(self, state):
+        if not hasattr(state, 'issu'):
+            cur = '17.09.03' if state.device_type == 'catalyst' else '9.3.10'
+            state.issu = {
+                'current': cur, 'target': None, 'state': 'committed',
+                'added_image': None, 'mode': 'INSTALL',
+            }
+        return state.issu
+
+    def _cmd_issu(self, cmd, state):
+        """
+        ISSU（In-Service Software Upgrade）/ ソフトウェアアップグレードを仮想実装。
+        - Catalyst(IOS-XE): install add file → install activate [issu] → install commit
+                            show install summary / show issu state detail
+        - Nexus(NX-OS):     install all nxos <image> [non-disruptive]
+                            show install all status / show install all impact
+        対象外は None。
+        """
+        if state.device_type not in ('catalyst', 'nexus'):
+            return None
+        c = cmd.lower().strip()
+        issu = self._issu_store(state)
+
+        def _ver_from_image(img):
+            m = re.search(r'(\d+\.\d+\.\d+)', img)
+            return m.group(1) if m else 'unknown'
+
+        # ── Catalyst (IOS-XE install ワークフロー) ──
+        if state.device_type == 'catalyst':
+            m = re.match(r'^install\s+add\s+file\s+(\S+)(\s+activate\s+commit)?', c)
+            if m:
+                img = m.group(1)
+                issu['added_image'] = img
+                issu['target'] = _ver_from_image(img)
+                issu['state'] = 'added'
+                lines = [
+                    f'install_add: START {img}',
+                    'install_add: Adding IMG',
+                    '--- Starting initial file syncing ---',
+                    'Info: Finished copying to the selected switches',
+                    'Finished initial file syncing',
+                    '',
+                    f'--- Starting Add ---',
+                    'Performing Add on all members',
+                    f'  [1] Add package(s) on switch 1',
+                    f'  [1] Finished Add on switch 1',
+                    'Checking status of Add on [1]',
+                    'Add: Passed on [1]',
+                    'Finished Add',
+                    '',
+                    f'SUCCESS: install_add  {img}',
+                ]
+                if m.group(2):  # activate commit も同時指定
+                    issu['current'] = issu['target']
+                    issu['state'] = 'committed'
+                    lines.append('install_activate: Activating and committing (ISSU, non-disruptive)')
+                    lines.append(f'SUCCESS: install_add_activate_commit')
+                return '\n'.join(lines)
+
+            if re.match(r'^install\s+activate(\s+issu)?', c):
+                if issu['state'] != 'added':
+                    return '% No image added. Run "install add file ..." first.'
+                issu['state'] = 'activated'
+                issu['current'] = issu['target']
+                issu_flag = 'ISSU' if 'issu' in c else 'reload'
+                return '\n'.join([
+                    f'install_activate: START',
+                    f'install_activate: Activating IMG ({issu_flag})',
+                    'Following packages shall be activated:',
+                    f'  cat9k image {issu["target"]}',
+                    '',
+                    'This operation may require a reload of the system. '
+                    'Do you want to proceed? [y/n] y',
+                    ('ISSU: traffic forwarding continues during activation '
+                     '(non-disruptive)' if 'issu' in c else
+                     'Reloading with new image...'),
+                    f'SUCCESS: install_activate  {issu["target"]}',
+                    '',
+                    '※ commit するには "install commit" を実行してください'
+                    '（未commitは自動ロールバック対象）',
+                ])
+
+            if re.match(r'^install\s+commit', c):
+                if issu['state'] not in ('activated',):
+                    return '% No activated image to commit.'
+                issu['state'] = 'committed'
+                return '\n'.join([
+                    'install_commit: START',
+                    'install_commit: Committing IMG',
+                    'Finished Commit operations',
+                    f'SUCCESS: install_commit  {issu["current"]}',
+                ])
+
+            if re.match(r'^install\s+abort', c):
+                if issu['state'] == 'activated':
+                    issu['state'] = 'committed'
+                    issu['current'] = issu.get('_prev', issu['current'])
+                    return 'install_abort: Rolling back to previous version. SUCCESS.'
+                return '% Nothing to abort.'
+
+            if re.match(r'^show\s+install\s+summary', c):
+                st = issu['state'].upper()
+                imgs = []
+                imgs.append(f'  IMG   C  {issu["current"]}   (committed)')
+                if issu['state'] in ('added', 'activated') and issu['target']:
+                    flag = 'A' if issu['state'] == 'activated' else 'I'
+                    imgs.append(f'  IMG   {flag}  {issu["target"]}   ({issu["state"]})')
+                return '\n'.join([
+                    '[ Switch 1 ] Installed Package(s) Information:',
+                    'State (St): I-Inactive, U-Activated & Uncommitted,',
+                    '            C-Activated & Committed, D-Deactivated & Uncommitted',
+                    '--------------------------------------------------------------',
+                    'Type  St   Version',
+                    '--------------------------------------------------------------',
+                ] + imgs)
+
+            if re.match(r'^show\s+issu\s+state', c):
+                return '\n'.join([
+                    '--- Starting local lock acquisition on switch 1 ---',
+                    '',
+                    f'Finished local lock acquisition on switch 1',
+                    '',
+                    f'No ISSU operation is in progress'
+                    if issu['state'] == 'committed' else
+                    f'ISSU operation in progress: state = {issu["state"].upper()}',
+                    f'  Current version : {issu["current"]}',
+                    f'  Target version  : {issu["target"] or "-"}',
+                    f'  Mode            : {issu["mode"]} (non-disruptive)',
+                ])
+
+        # ── Nexus (NX-OS install all) ──
+        if state.device_type == 'nexus':
+            m = re.match(r'^install\s+all\s+nxos\s+(\S+)(\s+non-disruptive)?', c)
+            if m:
+                img = m.group(1)
+                tgt = _ver_from_image(img)
+                disruptive = not bool(m.group(2))
+                issu['_prev'] = issu['current']
+                issu['target'] = tgt
+                issu['current'] = tgt
+                issu['state'] = 'committed'
+                impact = 'disruptive' if disruptive else 'non-disruptive'
+                return '\n'.join([
+                    'Installer will perform compatibility check first.',
+                    'Performing module support checks.',
+                    'Verifying image bootflash:/' + img + ' for boot variable "nxos".',
+                    '[####################] 100% -- SUCCESS',
+                    '',
+                    'Performing runtime checks.',
+                    '[####################] 100% -- SUCCESS',
+                    '',
+                    'Compatibility check is done:',
+                    'Module  bootable          Impact  Install-type  Reason',
+                    '------  --------  --------------  ------------  ------',
+                    f'     1       yes  {impact:>14}  {"reset" if disruptive else "  none"}  ',
+                    '',
+                    'Images will be upgraded according to following table:',
+                    'Module       Image         Running-Version       New-Version',
+                    '------  ----------  --------------------  --------------------',
+                    f'     1        nxos  {issu["_prev"]:>20}  {tgt:>20}',
+                    '',
+                    ('Switch will be reloaded for disruptive upgrade.'
+                     if disruptive else
+                     'Non-disruptive upgrading. Traffic forwarding continues.'),
+                    'Install has been successful.',
+                ])
+
+            if re.match(r'^show\s+install\s+all\s+status', c):
+                return '\n'.join([
+                    'This is the log of last installation.',
+                    '',
+                    f'Continuing with installation, please wait',
+                    'Trying to start the installer...',
+                    '',
+                    f'Install has been successful. Running version: {issu["current"]}',
+                ])
+
+            if re.match(r'^show\s+install\s+all\s+impact', c):
+                return '\n'.join([
+                    'Impact analysis (no changes applied):',
+                    'Module  bootable          Impact  Install-type  Reason',
+                    '------  --------  --------------  ------------  ------',
+                    '     1       yes  non-disruptive          none  ',
+                    f'  Current running-version: {issu["current"]}',
+                ])
+
+        return None
 
     def _cmd_config(self, cmd, state):
         c = cmd.lower().strip()
