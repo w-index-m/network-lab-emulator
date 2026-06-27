@@ -800,6 +800,19 @@ function clearLabState() {
   localStorage.removeItem(LAB_STATE_KEY);
 }
 
+// 復元したラボをバックエンドに同期（デバイス登録＋リンク）
+function _syncRestoredLabToBackend() {
+  if (!Object.keys(DEVICES).length) return;
+  Promise.all(Object.entries(DEVICES).map(([id, d]) =>
+    fetch('/api/device', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id, type: d.type, hostname: d.hostname})})
+  )).then(() => {
+    fetch('/api/links/sync', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({links: LINKS.map(l => ({a:l.a, b:l.b,
+        iface_a:l.pa, iface_b:l.pb}))})});
+  }).catch(()=>{});
+}
+
 function restoreLabState() {
   let state;
   try {
@@ -827,14 +840,11 @@ function restoreLabState() {
   const cols = count <= 1 ? 1 : count <= 2 ? 2 : count <= 4 ? 2 : 3;
   document.getElementById('terminal-grid').style.gridTemplateColumns = `repeat(${cols},1fr)`;
 
-  // バックエンドにデバイス登録 & リンク同期
-  Promise.all(Object.entries(DEVICES).map(([id, d]) =>
-    fetch('/api/device', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({id, type: d.type, hostname: d.hostname})})
-  )).then(() => {
-    fetch('/api/links/sync', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({links: LINKS.map(l => ({a:l.a, b:l.b}))})});
-  });
+  // バックエンドにデバイス登録 & リンク同期（認証済みのときだけ）
+  // 未認証時はUI復元のみ行い、ログイン後に _syncRestoredLabToBackend() で同期する
+  if (typeof _sessionToken !== 'undefined' && _sessionToken) {
+    _syncRestoredLabToBackend();
+  }
 
   // ターミナルDOM構築
   initTerminals();
@@ -2403,11 +2413,21 @@ async function _initSession() {
 document.addEventListener('DOMContentLoaded', async function() {
   applyScreenLayout();
   _initConfigDnD();
+  // ラボ状態は認証と独立して先に復元（ログイン画面の裏で再現しておく）
+  // → サーバー再起動でトークンが切れても、ログイン後すぐ前回の状態が見える
+  let restored = false;
+  try { restored = restoreLabState(); } catch(e) { restored = false; }
   // ログイン画面を表示してトークン確認
   document.getElementById('login-screen').style.display = 'flex';
   const ok = await _initSession();
   if (ok) {
-    restoreLabState();
+    if (!restored) {
+      // 事前復元に失敗していた場合はここで復元（バックエンド同期込み）
+      try { restoreLabState(); } catch(e) {}
+    } else {
+      // UIは復元済み → バックエンドへ同期だけ実行
+      _syncRestoredLabToBackend();
+    }
   }
 });
 

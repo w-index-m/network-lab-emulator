@@ -352,7 +352,10 @@ def _valid_token(token: str) -> bool:
     return True
 
 # パスホワイトリスト（認証不要）
-_NO_AUTH_PATHS = {"/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
+# ルート "/" と各種静的アセットはHTML/ログインJSを返すため公開し、
+# 認証はAPI（/api/*）とWebSocket側で行う。
+_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico",
+                  "/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
 
 @app.middleware("http")
 async def session_auth_middleware(request, call_next):
