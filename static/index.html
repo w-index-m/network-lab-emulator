@@ -1000,6 +1000,9 @@ async function initLauncher() {
 // ターミナル初期化
 // ════════════════════════════════════════════
 function initTerminals() {
+  // 二重生成防止: 既存のターミナルDOMをクリアしてから再構築
+  const grid = document.getElementById('terminal-grid');
+  if (grid) grid.innerHTML = '';
   Object.entries(DEVICES).forEach(([id,d]) => {
     TERMS[id] = {busy:false, typed:'', cur:0, history:[], histIdx:-1};
     addTermDOM(id);
@@ -2268,6 +2271,7 @@ const DANGER_AT  = 30;        // 残り30秒で赤
 let _sessionToken = null;
 let _sessionStart = 0;        // 最終アクティビティ時刻（ms）
 let _sessionTimerID = null;
+let _authReady = false;   // _initSession 完了後に true（認証確定前の401で誤ログアウトしないため）
 
 function _getToken() { return _sessionToken; }
 
@@ -2279,7 +2283,10 @@ window.fetch = function(url, opts) {
     opts.headers = Object.assign({'X-Session-Token': _sessionToken}, opts.headers || {});
   }
   return _origFetch(url, opts).then(function(res) {
-    if (res.status === 401 && url !== '/api/login') {
+    // 認証が確定し、かつトークンを持っている状態での401＝セッション失効。
+    // 認証確定前（_authReady=false）やトークン未保持時の401では強制ログアウトしない
+    // （リロード直後の競合で誤ってログイン画面に飛ぶのを防ぐ）。
+    if (res.status === 401 && url !== '/api/login' && _authReady && _sessionToken) {
       _forceLogout('セッションが無効です。再ログインしてください。');
     }
     return res;
@@ -2413,6 +2420,8 @@ async function _initSession() {
 document.addEventListener('DOMContentLoaded', async function() {
   applyScreenLayout();
   _initConfigDnD();
+  // 保存済みトークンを先にセット（リロード直後のfetchにも付与され、有効なら成功する）
+  _sessionToken = localStorage.getItem(SESSION_KEY) || null;
   // ラボ状態は認証と独立して先に復元（ログイン画面の裏で再現しておく）
   // → サーバー再起動でトークンが切れても、ログイン後すぐ前回の状態が見える
   let restored = false;
@@ -2420,6 +2429,7 @@ document.addEventListener('DOMContentLoaded', async function() {
   // ログイン画面を表示してトークン確認
   document.getElementById('login-screen').style.display = 'flex';
   const ok = await _initSession();
+  _authReady = true;   // 以降の401はセッション失効として扱う
   if (ok) {
     if (!restored) {
       // 事前復元に失敗していた場合はここで復元（バックエンド同期込み）
