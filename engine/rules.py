@@ -666,7 +666,8 @@ class RuleEngine:
         # 設定コマンド
         if state.mode in ("config", "config-if", "config-router", "config-vlan",
                           "config-crypto", "config-monitor",
-                          "config-cmap", "config-pmap", "config-pmap-c"):
+                          "config-cmap", "config-pmap", "config-pmap-c",
+                          "config-vs-domain"):
             return self._cmd_config(cmd, state)
 
         # 運用コマンド
@@ -705,7 +706,7 @@ class RuleEngine:
                 delattr(state, '_qos_class')
         elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
                              "config-crypto", "config-monitor",
-                             "config-cmap", "config-pmap"):
+                             "config-cmap", "config-pmap", "config-vs-domain"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
@@ -811,6 +812,16 @@ class RuleEngine:
             return self._show_int_counters_errors(state)
         if re.match(r'^show\s+interfaces?\s+brief$', c) or re.match(r'^show\s+ip\s+interfaces?\s+brief$', c):
             return self._show_ip_int_brief(state)
+
+        # ── show switch virtual（VSS）── ※ show switch より先に判定 ──
+        if re.match(r'^show\s+switch\s+virtual', c) and state.device_type == 'catalyst':
+            if re.search(r'\brole\b', c):
+                return self._format_show_switch_virtual(state, 'role')
+            if re.search(r'\blink\b', c):
+                return self._format_show_switch_virtual(state, 'link')
+            if re.search(r'dual-active', c):
+                return self._format_show_switch_virtual(state, 'dual-active')
+            return self._format_show_switch_virtual(state, '')
 
         # ── Stack（3.1章）──
         if re.match(r'^show\s+switch\s+detail', c):
@@ -2726,6 +2737,119 @@ Configuration Revision            : 5"""
                 lines.append(f'  {pname}')
         return '\n'.join(lines)
 
+    def _vss_store(self, state):
+        if not hasattr(state, 'vss'):
+            state.vss = {
+                'domain': None, 'switch_num': 1, 'configured': False,
+                'dual_active_method': [], 'vsl_links': [],
+                'recovery_reload_disable': False,
+                'role': 'ACTIVE', 'peer_role': 'STANDBY',
+            }
+        return state.vss
+
+    def _cmd_vss(self, cmd, state):
+        """
+        VSS（Virtual Switching System）と Dual-Active Detection（DAD）。
+        Catalyst のみ対応。
+          switch virtual domain <id>      → config-vs-domain サブモード
+            switch <1|2>
+            dual-active detection pagp
+            dual-active detection fast-hello
+            dual-active recovery-reload-disable
+          interface: switch virtual link <n>（VSL指定）
+        """
+        if state.device_type != 'catalyst':
+            return None
+        c = cmd.lower().strip()
+        vss = self._vss_store(state)
+
+        # switch virtual domain <id>
+        m = re.match(r'^switch\s+virtual\s+domain\s+(\d+)', c)
+        if m and state.mode == 'config':
+            vss['domain'] = int(m.group(1))
+            vss['configured'] = True
+            state.mode = 'config-vs-domain'
+            return ('% Now configuring VSS domain. '
+                    'Switch will operate in VSS mode after reload.')
+
+        # config-vs-domain サブモード
+        if state.mode == 'config-vs-domain':
+            m = re.match(r'^switch\s+(\d+)$', c)
+            if m:
+                vss['switch_num'] = int(m.group(1))
+                return ''
+            if re.match(r'^dual-active\s+detection\s+pagp', c):
+                if 'pagp' not in vss['dual_active_method']:
+                    vss['dual_active_method'].append('pagp')
+                return ''
+            if re.match(r'^dual-active\s+detection\s+fast-hello', c):
+                if 'fast-hello' not in vss['dual_active_method']:
+                    vss['dual_active_method'].append('fast-hello')
+                return ''
+            if re.match(r'^dual-active\s+recovery-reload-disable', c):
+                vss['recovery_reload_disable'] = True
+                return ''
+            if re.match(r'^dual-active\s+exclude', c):
+                return ''
+            # サブモード内の未知コマンドはconfigに委譲しない
+            return None
+
+        # interface: switch virtual link <n>
+        m = re.match(r'^switch\s+virtual\s+link\s+(\d+)', c)
+        if m and state.current_if:
+            vss['vsl_links'].append({'link': int(m.group(1)), 'iface': state.current_if})
+            return ''
+
+        return None
+
+    def _format_show_switch_virtual(self, state, sub=''):
+        vss = getattr(state, 'vss', None)
+        if not vss or not vss.get('configured'):
+            return 'Switch is not in Virtual Switching System (VSS) mode.'
+        dom = vss['domain']
+        sw = vss['switch_num']
+        if sub == 'role':
+            return '\n'.join([
+                'Switch  Switch  Status  Priority  Role     Session ID',
+                'Number                                     Local  Remote',
+                '-------------------------------------------------------',
+                f'LOCAL   {sw:<7} UP      100       {vss["role"]:<8} 0      0',
+                f'REMOTE  {2 if sw==1 else 1:<7} UP      100       '
+                f'{vss["peer_role"]:<8} 0      0',
+            ])
+        if sub == 'link':
+            if not vss['vsl_links']:
+                return 'VSL not configured (interface に switch virtual link を設定してください)'
+            lines = ['VSL Links Information :', '',
+                     'Flags : U-Up  D-Down', '',
+                     'Port        State  Link']
+            for v in vss['vsl_links']:
+                lines.append(f'{v["iface"]:<12}U      {v["link"]}')
+            return '\n'.join(lines)
+        if sub == 'dual-active':
+            methods = ', '.join(vss['dual_active_method']) or 'None (未設定)'
+            return '\n'.join([
+                'Pagp dual-active detection enabled: '
+                f'{"Yes" if "pagp" in vss["dual_active_method"] else "No"}',
+                'Fast-hello dual-active detection enabled: '
+                f'{"Yes" if "fast-hello" in vss["dual_active_method"] else "No"}',
+                '',
+                f'Dual-Active Detection methods configured: {methods}',
+                f'Recovery reload disable: '
+                f'{"Yes" if vss["recovery_reload_disable"] else "No"}',
+                'Dual-active state: No dual-active condition detected',
+            ])
+        # show switch virtual（概要）
+        return '\n'.join([
+            f'Switch mode              : Virtual Switch',
+            f'Virtual switch domain number : {dom}',
+            f'Local switch number      : {sw}',
+            f'Local switch operational role: Virtual Switch {sw} ({vss["role"]})',
+            f'Peer switch number       : {2 if sw==1 else 1}',
+            f'Peer switch operational role : Virtual Switch '
+            f'{2 if sw==1 else 1} ({vss["peer_role"]})',
+        ])
+
     def _cmd_config(self, cmd, state):
         c = cmd.lower().strip()
 
@@ -2748,6 +2872,11 @@ Configuration Revision            : 5"""
         qos_out = self._cmd_qos(cmd, state)
         if qos_out is not None:
             return qos_out
+
+        # ── VSS / デュアルアクティブ検知（Catalyst）──
+        vss_out = self._cmd_vss(cmd, state)
+        if vss_out is not None:
+            return vss_out
 
         # interface ip address (CIDR notation: ip address X.X.X.X/prefix)
         m_cidr = re.match(r'^ip\s+address\s+([\d.]+)/(\d+)', c)
