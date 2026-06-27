@@ -2639,15 +2639,18 @@ class RibEngine:
                          prefix: int, next_hop: str, ad: int = 1):
         n = self._node(device_id)
         n['hostname'] = hostname
-        # 同一宛先で既存ルートがあり、ADが高い（悪い）場合のみ追加
+        # 完全に同一のルート（宛先/プレフィックス/next-hop/AD）が既にあれば何もしない
+        # （_register_icmp が設定コマンドごとに呼ばれても重複登録しないため）
+        for r in n['static_routes']:
+            if (r.network == network and r.prefix == prefix
+                    and r.next_hop == next_hop and r.ad == ad):
+                return r
+        # 同一宛先で別ルートがある場合のADによる置換判定
         existing = [r for r in n['static_routes']
                     if r.network == network and r.prefix == prefix]
         if existing:
             best_existing_ad = min(r.ad for r in existing)
-            if ad >= best_existing_ad:
-                # より良いルートが既にある → フローティングとして追加だけ
-                pass
-            else:
+            if ad < best_existing_ad:
                 # 既存より良いAD → 既存を置換
                 n['static_routes'] = [r for r in n['static_routes']
                                       if not (r.network == network and r.prefix == prefix)]

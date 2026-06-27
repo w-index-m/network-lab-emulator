@@ -2352,7 +2352,15 @@ def _build_running_config(device_id: str, state) -> str:
         # スタティックルート
         rib_node = rib_engine.nodes.get(device_id)
         if rib_node:
+            _seen_routes = set()
             for r in rib_node['static_routes']:
+                # 直結ネットワーク(next-hop 0.0.0.0)は ip route として出さない
+                if r.next_hop in ('0.0.0.0', ''):
+                    continue
+                key = (r.network, r.prefix, r.next_hop)
+                if key in _seen_routes:
+                    continue
+                _seen_routes.add(key)
                 mask = _prefix_to_mask(r.prefix)
                 ad = f' {r.ad}' if r.ad != 1 else ''
                 lines.append(f'ip route {r.network} {mask} {r.next_hop}{ad}')
@@ -2482,7 +2490,14 @@ def _build_running_config(device_id: str, state) -> str:
                 lines.append(f'wan {idx} ip address {ip}/{iinfo.get("prefix",24)}')
         rib_node = rib_engine.nodes.get(device_id)
         if rib_node:
+            _seen_r = set()
             for r in rib_node['static_routes']:
+                if r.next_hop in ('0.0.0.0', ''):
+                    continue
+                key = (r.network, r.prefix, r.next_hop)
+                if key in _seen_r:
+                    continue
+                _seen_r.add(key)
                 ad = f' {r.ad}' if r.ad != 1 else ''
                 lines.append(f'ip route {r.network}/{r.prefix} {r.next_hop}{ad}')
         rn = rip_engine.nodes.get(device_id)
