@@ -8,16 +8,119 @@ import time
 import random
 from datetime import datetime, timedelta
 
+def _prefix_to_mask(prefix: int) -> str:
+    bits = (0xffffffff >> (32 - prefix)) << (32 - prefix)
+    return '.'.join(str((bits >> (8 * i)) & 0xff) for i in reversed(range(4)))
+
+def _valid_ip(ip: str) -> bool:
+    """IPv4アドレスの妥当性チェック（各オクテット0-255、4オクテット必須）"""
+    try:
+        parts = ip.split('.')
+        return len(parts) == 4 and all(0 <= int(p) <= 255 for p in parts)
+    except (ValueError, AttributeError):
+        return False
+
+def _valid_mask(mask: str) -> bool:
+    """サブネットマスクの妥当性チェック（連続した1ビット）"""
+    if not _valid_ip(mask):
+        return False
+    try:
+        val = sum(int(o) << (24 - 8*i) for i, o in enumerate(mask.split('.')))
+        # 連続ビットマスクであることを確認
+        inv = val ^ 0xffffffff
+        return (inv & (inv + 1)) == 0
+    except Exception:
+        return False
+
+def _valid_prefix(prefix: int) -> bool:
+    """プレフィックス長の妥当性チェック（0-32）"""
+    return 0 <= prefix <= 32
+
+def _valid_asn(asn: int) -> bool:
+    """BGP AS番号の妥当性チェック（1-4294967295、0は無効）"""
+    return 1 <= asn <= 4294967295
+
 # ══════════════════════════════════════════
 # デバイス状態（セッション単位で保持）
 # ══════════════════════════════════════════
 class DeviceState:
     def __init__(self, device_type: str, hostname: str):
-        self.device_type = device_type  # sir / srs / catalyst / cisco / apresia / nexus
+        self.device_type = device_type  # sir / srs / catalyst / cisco / apresia / nexus / pc
         self.hostname = hostname
         self.mode = "exec"              # exec / config / config-if / config-router / config-vlan / config-vpc-domain
         self.current_if = None
         self.startup_time = datetime.now() - timedelta(hours=random.randint(1,72))
+
+        # Cisco ASA (シングルコンテキスト ファイアウォール)
+        if device_type == "asa":
+            self.interfaces = {
+                "GigabitEthernet0/0": {
+                    "ip": "203.0.113.1", "prefix": 30,
+                    "status": "up", "nameif": "outside", "security_level": 0,
+                    "speed": "1000", "duplex": "full",
+                },
+                "GigabitEthernet0/1": {
+                    "ip": "192.168.1.1", "prefix": 24,
+                    "status": "up", "nameif": "inside",  "security_level": 100,
+                    "speed": "1000", "duplex": "full",
+                },
+                "GigabitEthernet0/2": {
+                    "ip": "172.16.0.1", "prefix": 24,
+                    "status": "up", "nameif": "dmz",     "security_level": 50,
+                    "speed": "1000", "duplex": "full",
+                },
+                "Management0/0": {
+                    "ip": "192.168.100.1", "prefix": 24,
+                    "status": "up", "nameif": "management", "security_level": 0,
+                    "speed": "100", "duplex": "full",
+                },
+            }
+            self.mode = "exec"
+            self.acls        = {}   # {"acl_name": [{"action","proto","src","dst","port"}]}
+            self.nat_rules   = []   # [{"type","real_iface","mapped_iface","real_net","mapped_net"}]
+            self.routes      = []
+            self.service_policies = []
+            self.inspect_protocols = [
+                "ftp","http","https","smtp","dns","h323","sip","skinny","sqlnet","tftp"
+            ]
+            self.ipsec_crypto  = {}  # {"map_name": {...}}
+            self.ipsec_peers   = {}  # {"peer_ip": {...}}
+            self.syslog_servers   = []
+            self.snmp_hosts       = []
+            self.snmp_community   = []
+            self.snmp_location    = ""
+            self.snmp_contact     = ""
+            self.logging_level    = "informational"
+            self.banner = ""
+            return
+
+        # PC (Linux汎用エンドポイント)
+        if device_type == "pc":
+            self.interfaces = {
+                "eth0": {
+                    "ip": "192.168.1.10", "prefix": 24,
+                    "status": "up", "mac": "aa:bb:cc:dd:ee:01",
+                    "speed": "1000", "duplex": "full",
+                },
+                "lo": {
+                    "ip": "127.0.0.1", "prefix": 8,
+                    "status": "up", "mac": "00:00:00:00:00:00",
+                },
+            }
+            self.gateway = "192.168.1.1"
+            self.routes = [
+                {"dest": "0.0.0.0/0",       "gw": "192.168.1.1", "iface": "eth0", "metric": 0},
+                {"dest": "192.168.1.0/24",   "gw": "0.0.0.0",    "iface": "eth0", "metric": 100},
+                {"dest": "127.0.0.0/8",      "gw": "0.0.0.0",    "iface": "lo",   "metric": 0},
+            ]
+            self.arp_table = []
+            self.syslog_servers = []
+            self.snmp_hosts = []
+            self.snmp_community = []
+            self.snmp_location = ""
+            self.snmp_contact = ""
+            self.logging_level = "informational"
+            return
 
         # NX-OS (Nexus 9000)
         if device_type == "nexus":
@@ -54,6 +157,14 @@ class DeviceState:
             self.snmp_hosts = []
             self.snmp_location = ''
             self.banner = ''
+            self.lldp_neighbors = [
+                {"port": "Ethernet1/1", "chassis_id": "00:0e:0e:f1:00:01", "system_name": "Catalyst-SW",
+                 "port_id": "GigabitEthernet1/0/1", "ttl": 120, "cap": "B"},
+            ]
+            self.ospf = {"process": 1, "router_id": "", "area": "0.0.0.0",
+                         "neighbors": []}
+            self.bgp  = {"asn": 0, "router_id": "", "neighbors": []}
+            self.static_routes = []
             return
 
         # 設定値
@@ -79,11 +190,13 @@ class DeviceState:
                            "allowed_vlan": "1,10,20"},
             "Vlan10": {"ip": "192.168.10.1", "prefix": 24, "status": "up", "desc": "Management"},
         }) if device_type == "apresia" else ({
+            # Catalyst 9300: スイッチポートはデフォルト no shutdown。
+            # ケーブル未接続のポートは notconnect（管理上はup）。
+            # i==3 のみ bpduguard 違反による err-disabled をデモ用に残す。
             **{f"GigabitEthernet1/0/{i}": {
                 "ip": "", "prefix": 0,
                 "status": ("connected" if i <= 2 else
-                           "err-disabled" if i == 3 else
-                           "disabled" if i == 17 else "notconnect"),
+                           "err-disabled" if i == 3 else "notconnect"),
                 "vlan": "10" if i <= 2 else "1",
                 "speed": "1000" if i <= 2 else "auto",
                 "duplex": "full" if i <= 2 else "auto",
@@ -96,6 +209,11 @@ class DeviceState:
                                       "desc": "#### To Router ####", "type": "10/100/1000BaseTX",
                                       "native_vlan": "1", "allowed_vlan": "1,10,200"},
             "Vlan10": {"ip": "192.168.10.1", "prefix": 24, "status": "up", "desc": ""},
+            **{f"Port-channel{i}": {
+                "ip": "", "prefix": 0, "status": "notconnect",
+                "vlan": "1", "speed": "auto", "duplex": "full",
+                "desc": f"Port-channel{i}",
+            } for i in range(1, 5)},
         }) if device_type in ("catalyst", "srs") else {
             "GigabitEthernet0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
@@ -130,6 +248,12 @@ class DeviceState:
             {"device":"Core-SW",  "local_if":"Gi1/0/24","hold":150,"cap":"S","platform":"SR-S324TR1","port":"ether 10"},
             {"device":"GW-Router","local_if":"Gi1/0/1", "hold":120,"cap":"R","platform":"ISR4321",   "port":"Gi0/0/0"},
         ]
+        self.lldp_neighbors = [
+            {"local_if": "Gi1/0/24", "chassis_id": "00:0e:0e:f1:00:01",
+             "system_name": "Core-SW",   "port_id": "ether 10",     "ttl": 120, "cap": "B", "platform": "SR-S324TR1"},
+            {"local_if": "Gi1/0/1",  "chassis_id": "00:1a:2b:3c:4d:5e",
+             "system_name": "GW-Router", "port_id": "Gi0/0/0",      "ttl": 120, "cap": "R", "platform": "ISR4321"},
+        ]
         self.hsrp = {"group":1,"vip":"192.168.1.254","priority":110,"state":"Active","preempt":True,"iface":"GigabitEthernet1/0/1"}
         self.ospf = {"process":1,"router_id":"10.0.0.1","area":"0.0.0.0",
             "neighbors":[{"id":"10.0.0.2","state":"FULL","iface":"Gi1/0/24","dead":"00:00:35"}]}
@@ -145,6 +269,43 @@ class DeviceState:
         self.snmp_location   = ""
         self.snmp_contact    = ""
         self.logging_level   = "informational"   # emergencies/alerts/critical/errors/warnings/notifications/informational/debugging
+
+        # Si-R IPsec VPN 状態（Si-R/Si-R brin 系）
+        if device_type in ("sir", "srs"):
+            self.ipsec_tunnels   = {}
+            self.ike_policies    = {}
+            self.ipsec_proposals = {}
+            self.ipsec_enabled   = False
+            self.ike_enabled     = False
+            self.static_routes   = []  # [{"dest","prefix","gw"}]
+            self.lldp_neighbors  = [
+                {"local_if": "ether1", "chassis_id": "00:0e:0e:f1:00:03",
+                 "system_name": "Catalyst-SW", "port_id": "GigabitEthernet1/0/24",
+                 "ttl": 120, "cap": "B", "platform": "Catalyst 3850"},
+            ] if device_type == "srs" else []
+
+        # Cisco IOS IPsec 状態（ASA は上で初期化済み）
+        if device_type in ("cisco", "catalyst"):
+            self.ipsec_crypto = {}   # isakmp_policies / transform_sets / crypto_maps / isakmp_keys / isakmp_enabled
+            self.ipsec_peers  = {}   # {peer_ip: {status, phase1, phase2, spi_in, spi_out, ...}}
+            self.static_routes = []  # [{"dest","prefix","gw"}]
+
+        # EtherChannel / LACP state (catalyst, srs, nexus)
+        if device_type in ("catalyst", "srs", "nexus"):
+            # {group_id: {"mode": "active"|"passive"|"on", "members": ["Gi1/0/1", ...]}}
+            self.channel_groups = {}
+
+        # LLDP neighbor table (APRESIA)
+        if device_type == "apresia":
+            self.lldp_neighbors = [
+                {"port": "Port1/0/24", "chassis_id": "00:0e:0e:f1:00:01",
+                 "system_name": "Dist-SW", "port_id": "GigabitEthernet1/0/1",
+                 "ttl": 120, "cap": "B"},
+            ]
+
+        # LLDP neighbor table (Si-R)
+        if device_type == "sir":
+            self.lldp_neighbors = []
 
     def uptime_str(self):
         delta = datetime.now() - self.startup_time
@@ -235,36 +396,19 @@ class RuleEngine:
             'ethe':  'etherchannel',
             'ether': 'etherchannel',
             'ethc':  'etherchannel',
-            'etherchannel': {
-                '_desc':   'EtherChannel information',
-                'summary': 'One-line summary per channel-group',
-                'detail':  'Detailed information of channel-groups',
-                'port-channel': 'Port-channel information',
-            },
             'vr':    'vrrp',
             'vrr':   'vrrp',
             'st':    'standby',
             'stan':  'standby',
             'stand': 'standby',
             'ar':    'arp',
-            'standby': {
-                '_desc': 'HSRP information',
-                'brief': 'Brief status of standby groups',
-                'all':   'All HSRP groups',
-            },
             'cl':    'clock',
             'clo':   'clock',
             'mod':   'module',
             'modu':  'module',
             'feat':  'feature',
             'featu': 'feature',
-            'vpc':   {
-                '_desc':         'vPC information (NX-OS)',
-                'brief':         'Brief vPC status',
-                'peer-keepalive':'Peer keepalive status',
-                'role':          'vPC role information',
-                'consistency-parameters': 'Consistency parameters',
-            },
+            'vpc':   'vpc',
         },
         'show ip': {
             'ro':    'route',
@@ -464,6 +608,14 @@ class RuleEngine:
         if error:
             return error
 
+        # PCはLinuxコマンド体系 → 専用ハンドラへ
+        if state.device_type == 'pc':
+            return self._pc_process(cmd, c, state)
+
+        # Cisco ASA → 専用ハンドラへ
+        if state.device_type == 'asa':
+            return self._asa_process(cmd, c, state)
+
         # APRESIAはOSコマンド体系が独自 → 専用ハンドラへ
         if state.device_type == 'apresia':
             return self._apresia_process(cmd, c, state)
@@ -494,13 +646,43 @@ class RuleEngine:
         if re.match(r'^vlan\s+\d+$', c) and state.mode == "config":
             return self._cmd_vlan_mode(cmd, state)
 
+        # ISSU の show（show install / show issu）は専用ハンドラ優先
+        if (re.match(r'^show\s+(install|issu)\b', c) and
+                state.device_type in ('catalyst', 'nexus')):
+            issu_show = self._cmd_issu(cmd, state)
+            if issu_show is not None:
+                return issu_show
+
         # show系
         if c.startswith("show "):
             return self._cmd_show(cmd, state)
 
+        # do コマンド（Cisco/Catalyst: configモード中にEXECコマンドを実行）
+        if c.startswith("do ") and state.device_type in ("cisco", "catalyst"):
+            sub = cmd[3:].strip()
+            sub_c = sub.lower().strip()
+            if sub_c.startswith("show "):
+                return self._cmd_show(sub, state)
+            # do ping / do traceroute なども通す
+            if sub_c.startswith("ping "):
+                return self._cmd_ping(sub, state)
+            if sub_c.startswith("traceroute "):
+                return self._cmd_traceroute(sub, state)
+            if sub_c in ("write memory", "write", "copy running-config startup-config"):
+                return self._cmd_save(state)
+            return f"% Invalid input detected at '^' marker.\n  do {sub}\n      ^"
+
         # 設定コマンド
-        if state.mode in ("config", "config-if", "config-router", "config-vlan"):
+        if state.mode in ("config", "config-if", "config-router", "config-vlan",
+                          "config-crypto", "config-monitor",
+                          "config-cmap", "config-pmap", "config-pmap-c",
+                          "config-vs-domain"):
             return self._cmd_config(cmd, state)
+
+        # ── ISSU / ソフトウェアアップグレード（Catalyst / Nexus）──
+        issu_out = self._cmd_issu(cmd, state)
+        if issu_out is not None:
+            return issu_out
 
         # 運用コマンド
         if c.startswith("ping "):
@@ -518,6 +700,12 @@ class RuleEngine:
         if c in ("cls", "clear screen"):
             return "\x0c"  # フロントエンドでクリア処理
 
+        # Si-R: IPsec/IKE/remote commands are valid in exec mode
+        if state.device_type in ("sir", "srs") and re.match(
+            r'^(remote\s+\d+|ipsec\s+|ike\s+)', c
+        ):
+            return self._cmd_config(cmd, state)
+
         # 不明コマンド
         return self._unknown(cmd, state)
 
@@ -525,8 +713,20 @@ class RuleEngine:
     def _cmd_exit(self, cmd, state):
         if state.mode == "config-if":
             state.mode = "config"
-        elif state.mode in ("config-router", "config-vlan", "config-vpc-domain"):
+        elif state.mode == "config-pmap-c":
+            # policy-map class サブモード → policy-map サブモードへ戻る
+            state.mode = "config-pmap"
+            if hasattr(state, '_qos_class'):
+                delattr(state, '_qos_class')
+        elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
+                             "config-crypto", "config-monitor",
+                             "config-cmap", "config-pmap", "config-vs-domain"):
             state.mode = "config"
+            # Clear sub-context pointers
+            for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
+                         '_qos_cmap', '_qos_pmap', '_qos_class'):
+                if hasattr(state, attr):
+                    delattr(state, attr)
         elif state.mode == "config":
             state.mode = "exec"
         return ""
@@ -535,15 +735,61 @@ class RuleEngine:
         state.mode = "config"
         return "Enter configuration commands, one per line.  End with CNTL/Z."
 
+    def _resolve_ifname(self, ifname, state):
+        """既存インターフェースと大文字小文字を無視して照合し、
+        一致すれば既定の正式名を返す。なければ入力名をそのまま返す
+        （新規インターフェース作成）。これにより `interface LAN0` が
+        既定の `lan0` と別物の幻インターフェースを作るのを防ぐ。"""
+        if ifname in state.interfaces:
+            return ifname
+        low = ifname.lower()
+        for existing in state.interfaces:
+            if existing.lower() == low:
+                return existing
+        return ifname
+
     def _cmd_interface(self, cmd, state):
         m = re.match(r'^interface\s+(\S+)', cmd, re.I)
         if m:
-            state.current_if = m.group(1)
+            ifname = self._resolve_ifname(m.group(1), state)
+            state.current_if = ifname
             state.mode = "config-if"
+            # Loopbackは存在しなければ作成し、常にup状態
+            if ifname.lower().startswith('loopback'):
+                if ifname not in state.interfaces:
+                    state.interfaces[ifname] = {
+                        'ip': '', 'prefix': 0, 'status': 'up',
+                        'speed': '', 'duplex': '', 'desc': '',
+                        'type': 'Loopback',
+                    }
+                else:
+                    state.interfaces[ifname]['status'] = 'up'
         return ""
 
     def _cmd_router_mode(self, cmd, state):
         state.mode = "config-router"
+        c = cmd.strip().lower()
+        # router bgp <ASN> → bgp.asn に保存
+        m_bgp = re.match(r'^router\s+bgp\s+(\d+)', c)
+        if m_bgp:
+            asn = int(m_bgp.group(1))
+            if not hasattr(state, 'bgp') or not isinstance(state.bgp, dict):
+                state.bgp = {"asn": asn, "router_id": "", "neighbors": []}
+            else:
+                state.bgp["asn"] = asn
+            state._current_router = 'bgp'
+        # router ospf <process> → ospf.process に保存
+        m_ospf = re.match(r'^router\s+ospf\s+(\d+)', c)
+        if m_ospf:
+            pid = int(m_ospf.group(1))
+            if not hasattr(state, 'ospf') or not isinstance(state.ospf, dict):
+                state.ospf = {"process": pid, "router_id": "", "area": "0.0.0.0", "neighbors": []}
+            else:
+                state.ospf["process"] = pid
+            state._current_router = 'ospf'
+        # router rip
+        if re.match(r'^router\s+rip', c):
+            state._current_router = 'rip'
         return ""
 
     def _cmd_vlan_mode(self, cmd, state):
@@ -580,6 +826,16 @@ class RuleEngine:
             return self._show_int_counters_errors(state)
         if re.match(r'^show\s+interfaces?\s+brief$', c) or re.match(r'^show\s+ip\s+interfaces?\s+brief$', c):
             return self._show_ip_int_brief(state)
+
+        # ── show switch virtual（VSS）── ※ show switch より先に判定 ──
+        if re.match(r'^show\s+switch\s+virtual', c) and state.device_type == 'catalyst':
+            if re.search(r'\brole\b', c):
+                return self._format_show_switch_virtual(state, 'role')
+            if re.search(r'\blink\b', c):
+                return self._format_show_switch_virtual(state, 'link')
+            if re.search(r'dual-active', c):
+                return self._format_show_switch_virtual(state, 'dual-active')
+            return self._format_show_switch_virtual(state, '')
 
         # ── Stack（3.1章）──
         if re.match(r'^show\s+switch\s+detail', c):
@@ -621,6 +877,49 @@ class RuleEngine:
         if re.match(r'^show\s+(ip\s+)?arp', c):
             return self._show_arp(state)
 
+        # ── show etherchannel (Catalyst/SR-S) ──
+        if re.match(r'^show\s+etherchannel\s+summary', c):
+            return self._show_etherchannel_summary(state)
+        if re.match(r'^show\s+etherchannel\s+detail', c):
+            return self._show_etherchannel_detail(state)
+        if re.match(r'^show\s+etherchannel', c):
+            return self._show_etherchannel_summary(state)
+
+        # ── show lacp (Catalyst/SR-S/Nexus) ──
+        if re.match(r'^show\s+lacp\s+neighbor', c):
+            return self._show_lacp_neighbor(state)
+        if re.match(r'^show\s+lacp\s+internal', c):
+            return self._show_lacp_internal(state)
+        if re.match(r'^show\s+lacp', c):
+            return self._show_lacp_neighbor(state)
+
+        # ── show port-channel summary (Nexus) ──
+        if re.match(r'^show\s+port-channel\s+summary', c):
+            return self._show_port_channel_summary(state)
+        if re.match(r'^show\s+port-channel', c):
+            return self._show_port_channel_summary(state)
+
+        # ── show monitor / show mirror（SPAN）──
+        m = re.match(r'^show\s+(?:monitor|mirror)(?:\s+session\s+(\d+))?', c)
+        if m and state.device_type in ('cisco', 'catalyst', 'srs', 'nexus', 'apresia'):
+            sid = int(m.group(1)) if m.group(1) else None
+            return self._format_show_monitor(state, sid)
+
+        # ── show QoS（MQC / 各社固有）──
+        if re.match(r'^show\s+class-map', c):
+            return self._format_show_class_map(state)
+        if re.match(r'^show\s+policy-map\s+interface', c):
+            return self._format_show_policy_map_interface(state)
+        m = re.match(r'^show\s+policy-map(?:\s+type\s+\S+)?(?:\s+(\S+))?$', c)
+        if m and not (m.group(1) and m.group(1) == 'interface'):
+            return self._format_show_policy_map(state, m.group(1))
+        # APRESIA / Si-R: show qos / show mls qos
+        if re.match(r'^show\s+(mls\s+qos|qos)', c):
+            if state.device_type in ('apresia', 'sir'):
+                return self._format_show_qos_simple(state)
+            # Catalyst の show mls qos
+            return 'QoS is enabled globally\n(MQCポリシーは show policy-map interface を参照)'
+
         # ── show vlan ──
         if re.match(r'^show\s+vlan', c):
             return self._show_vlan(state)
@@ -635,6 +934,16 @@ class RuleEngine:
         if re.match(r'^show\s+cdp\s+neighbors', c):
             return self._show_cdp(state)
 
+        # ── show lldp ──
+        if re.match(r'^show\s+lldp\s+neighbors\s+detail', c):
+            return self._show_lldp_detail(state)
+        if re.match(r'^show\s+lldp\s+neighbors', c):
+            return self._show_lldp(state)
+        if re.match(r'^show\s+lldp\s+local', c):
+            return self._show_lldp_local(state)
+        if re.match(r'^show\s+lldp', c):
+            return self._show_lldp(state)
+
         # ── show standby (HSRP) ──
         if re.match(r'^show\s+standby', c):
             return self._show_standby(state)
@@ -646,6 +955,10 @@ class RuleEngine:
             return self._show_ospf_database(state)
         if re.match(r'^show\s+ip\s+ospf$', c):
             return self._show_ospf(state)
+
+        # ── show ip protocols (Cisco) ──
+        if re.match(r'^show\s+ip\s+protocols', c):
+            return self._show_ip_protocols(state)
 
         # ── show bgp ──
         if re.match(r'^show\s+(ip\s+)?bgp\s+summary', c):
@@ -691,6 +1004,26 @@ class RuleEngine:
         if re.match(r'^show\s+vtp\s+status', c):
             return self._show_vtp(state)
 
+        # ── show ipsec / ike (Si-R) ──
+        if re.match(r'^show\s+ipsec\s+sa', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ipsec_sa(state)
+        if re.match(r'^show\s+ipsec\s+tunnel', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ipsec_tunnel(state)
+        if re.match(r'^show\s+ipsec\s+polic', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ipsec_policy(state)
+        if re.match(r'^show\s+ipsec\s+stat', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ipsec_statistics(state)
+        if re.match(r'^show\s+ipsec', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ipsec_sa(state)
+        if re.match(r'^show\s+ike\s+sa', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ike_sa(state)
+        if re.match(r'^show\s+ike\s+polic', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ike_policy(state)
+        if re.match(r'^show\s+ike\s+stat', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ike_statistics(state)
+        if re.match(r'^show\s+ike', c) and state.device_type in ('sir', 'srs'):
+            return self._sir_show_ike_sa(state)
+
         # ── show running-config / candidate-config ──
         if re.match(r'^show\s+(run(ning-config)?|candidate-config|start(up-config)?|conf?(ig)?)\b', c) \
            or c in ('show run', 'sh run', 'show start', 'write terminal'):
@@ -699,6 +1032,14 @@ class RuleEngine:
         # ── show logging ──
         if re.match(r'^show\s+logging', c):
             return self._show_logging(state)
+
+        # ── Cisco IOS: show crypto ──
+        if state.device_type in ('cisco', 'catalyst') and re.match(r'^show\s+crypto', c):
+            return self._ios_show_crypto(cmd, c, state)
+
+        # ── show tunnel-header / トンネルヘッダー付加エミュレーション ──
+        if re.match(r'^show\s+tunnel[-\s]?header', c):
+            return self._show_tunnel_header(cmd, state)
 
         # ── show processes cpu ──
         if re.match(r'^show\s+(processes\s+cpu|cpu)', c):
@@ -985,16 +1326,26 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         dup_str = "Full-duplex" if duplex in ("full","a-full") else ("Half-duplex" if duplex=="half" else "Auto-duplex")
         spd_str = f"{speed}Mb/s" if speed not in ("auto","a-1000","a-100") else "1000Mb/s"
         typ = iface.get("type","10/100/1000BaseTX")
+        is_loopback = name.lower().startswith("loopback")
         L = []
-        L.append(f"{name} is {'up' if up else 'down'}, line protocol is {'up' if up else 'down'} ({'connected' if up else 'notconnect'})")
-        L.append(f"  Hardware is Gigabit Ethernet, address is {mac} (bia {mac})")
-        if desc:
-            L.append(f"  Description: {desc}")
-        L.append("  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,")
-        L.append("     reliability 255/255, txload 1/255, rxload 1/255")
-        L.append("  Encapsulation ARPA, loopback not set")
-        L.append("  Keepalive set (10 sec)")
-        L.append(f"  {dup_str}, {spd_str}, media type is {typ}")
+        if is_loopback:
+            L.append(f"{name} is up, line protocol is up")
+            L.append(f"  Hardware is Loopback")
+            if desc:
+                L.append(f"  Description: {desc}")
+            L.append("  MTU 1514 bytes, BW 8000000 Kbit/sec, DLY 5000 usec,")
+            L.append("     reliability 255/255, txload 1/255, rxload 1/255")
+            L.append("  Encapsulation Loopback, loopback set")
+        else:
+            L.append(f"{name} is {'up' if up else 'down'}, line protocol is {'up' if up else 'down'} ({'connected' if up else 'notconnect'})")
+            L.append(f"  Hardware is Gigabit Ethernet, address is {mac} (bia {mac})")
+            if desc:
+                L.append(f"  Description: {desc}")
+            L.append("  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,")
+            L.append("     reliability 255/255, txload 1/255, rxload 1/255")
+            L.append("  Encapsulation ARPA, loopback not set")
+            L.append("  Keepalive set (10 sec)")
+            L.append(f"  {dup_str}, {spd_str}, media type is {typ}")
         L.append("  input flow-control is off, output flow-control is unsupported")
         L.append("  ARP type: ARPA, ARP Timeout 04:00:00")
         L.append("  Last input 00:00:01, output 00:00:01, output hang never")
@@ -1110,6 +1461,192 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
   internal_state       : NORMAL
   internal_temp        : {temp} C"""
 
+    # ─── show etherchannel summary ────────────────────────────
+    def _show_etherchannel_summary(self, state):
+        cgs = getattr(state, 'channel_groups', {})
+        lines = [
+            "Flags:  D - down        P - bundled in port-channel",
+            "        I - stand-alone s - suspended",
+            "        H - Hot-standby (LACP only)",
+            "        R - Layer3      S - Layer2",
+            "        U - in use      N - not in use, no aggregation",
+            "        f - failed to allocate aggregator",
+            "",
+            "        M - not in use, minimum links not met",
+            "        u - unsuitable for bundling",
+            "        w - waiting to be aggregated",
+            "        d - default port",
+            "",
+            "Number of channel-groups in use: {}".format(len(cgs)),
+            "Number of aggregators:           {}".format(len(cgs)),
+            "",
+            "Group  Port-channel  Protocol    Ports",
+            "------+-------------+-----------+-----------------------------------------------",
+        ]
+        if not cgs:
+            lines.append("(none)")
+        for grp_id in sorted(cgs):
+            grp = cgs[grp_id]
+            mode = grp.get('mode', 'on')
+            proto = "LACP" if mode in ('active', 'passive') else "PAgP"
+            po_name = f"Po{grp_id}"
+            po_status = "SU" if grp.get('members') else "SD"
+            member_strs = []
+            for m in grp.get('members', []):
+                short = m.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te").replace("Ethernet", "Et")
+                flag = "P" if mode in ('active', 'passive', 'on') else "I"
+                member_strs.append(f"{short}({flag})")
+            lines.append(f"{grp_id:<7}{po_name:<14}({po_status}) {proto:<12}" + " ".join(member_strs))
+        return "\n".join(lines)
+
+    def _show_etherchannel_detail(self, state):
+        cgs = getattr(state, 'channel_groups', {})
+        if not cgs:
+            return "No EtherChannels configured."
+        lines = []
+        for grp_id in sorted(cgs):
+            grp = cgs[grp_id]
+            mode = grp.get('mode', 'on')
+            proto = "LACP" if mode in ('active', 'passive') else "PAgP"
+            po_name = f"Port-channel{grp_id}"
+            lines.append(f"Group: {grp_id}")
+            lines.append(f"----------")
+            lines.append(f"  Group state = L2")
+            lines.append(f"  Ports: {len(grp.get('members',[]))}   Maxports = 8")
+            lines.append(f"  Port-channels: 1  Max Port-channels = 16")
+            lines.append(f"  Protocol:   {proto}")
+            lines.append(f"  Minimum Links: 0")
+            lines.append("")
+            lines.append(f"              Ports in the group:")
+            lines.append(f"              -------------------")
+            lines.append(f"  Port: {po_name}")
+            lines.append(f"  Port state    = Port-channel Ag-Inuse")
+            lines.append(f"  Protocol      =   {proto}")
+            lines.append(f"  Port index    =   0  Load: 0x00  Protocol:   {proto}")
+            lines.append("")
+            lines.append(f"  Age of the Port-channel   = 0d:00h:05m:21s")
+            lines.append(f"  Logical slot/port   = 2/1  Number of ports = {len(grp.get('members',[]))}")
+            lines.append(f"  HotStandBy port = null")
+            lines.append(f"  Port state          = Port-channel Ag-Inuse")
+            for mem in grp.get('members', []):
+                short = mem.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te")
+                lines.append(f"  Ports: {mem} ")
+                lines.append(f"     Port state    = Up Mstr Assoc In-Bndl")
+                lines.append(f"     Channel group = {grp_id}    Mode = {'Active' if mode == 'active' else 'Passive' if mode == 'passive' else 'On'}  Gcchange = -")
+                lines.append(f"     Port-channel  = Po{grp_id}    GC  =   -  Pseudo port-channel = Po{grp_id}")
+                lines.append(f"     Port index    = 0   Load = 0x00  Protocol =  {'LACP' if mode in ('active','passive') else 'PAgP'}")
+                lines.append("")
+        return "\n".join(lines)
+
+    # ─── show lacp neighbor ────────────────────────────
+    def _show_lacp_neighbor(self, state):
+        cgs = getattr(state, 'channel_groups', {})
+        if not cgs:
+            return "No LACP port channels established."
+        lines = []
+        for grp_id in sorted(cgs):
+            grp = cgs[grp_id]
+            if grp.get('mode') not in ('active', 'passive'):
+                continue
+            lines.append(f"Channel group {grp_id} neighbors")
+            lines.append("")
+            lines.append(f"                        LACP port                        Admin  Oper   Port    Port")
+            lines.append(f"Port      Flags   State  Priority  Oper Key  Admin Key  Role   Oper   Number  State")
+            for mem in grp.get('members', []):
+                short = mem.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te").replace("Ethernet1/", "Eth1/")
+                lines.append(f"{short:<10}FA      bndl   32768     0x{grp_id:<4}  0x{grp_id:<5} Active Active 0x{grp_id+1:<4}  0x3D")
+            lines.append("")
+        if not lines:
+            return "No active/passive LACP channel groups configured."
+        return "\n".join(lines)
+
+    def _show_lacp_internal(self, state):
+        cgs = getattr(state, 'channel_groups', {})
+        if not cgs:
+            return "No LACP port channels established."
+        lines = []
+        for grp_id in sorted(cgs):
+            grp = cgs[grp_id]
+            if grp.get('mode') not in ('active', 'passive'):
+                continue
+            lines.append(f"Channel group {grp_id}")
+            lines.append(f"                          LACP port     Admin    Oper    Port     Port")
+            lines.append(f"Port       Flags   State  Priority      Key      Key     Number   State")
+            for mem in grp.get('members', []):
+                short = mem.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te")
+                lines.append(f"{short:<11}SA      bndl   32768         0x{grp_id:<4} 0x{grp_id:<4} 0x{grp_id+1:<4} 0x3D")
+            lines.append("")
+        if not lines:
+            return "No active/passive LACP channel groups configured."
+        return "\n".join(lines)
+
+    # ─── show lldp local ──────────────────
+    def _show_lldp_local(self, state):
+        dt = state.device_type
+        mgmt_ip = ''
+        for name, iface in state.interfaces.items():
+            if iface.get('ip') and not name.startswith('lo'):
+                mgmt_ip = iface['ip']
+                break
+
+        if dt in ('srs', 'sir'):
+            return (
+                f' Local Device Information:\n'
+                f'  System Name  : {state.hostname}\n'
+                f'  Chassis ID   : 00:0e:0e:f1:41:dc\n'
+                f'  System Descr : Fujitsu Network SR-S Series\n'
+                f'  Capability   : Router\n'
+                f'  Management   : {mgmt_ip or "not configured"}\n'
+            )
+        # Cisco / Catalyst / Nexus
+        platform = {'catalyst': 'Cisco Catalyst', 'cisco': 'Cisco IOS', 'nexus': 'Cisco NX-OS'}.get(dt, 'Cisco')
+        return (
+            f"Local Interface: (all)\n\n"
+            f"Chassis id: 00:0e:0e:f1:00:10\n"
+            f"Port id: {list(state.interfaces.keys())[0] if state.interfaces else 'Gi0/1'}\n"
+            f"Port Description - not advertised\n"
+            f"System Name: {state.hostname}\n\n"
+            f"System Description:\n"
+            f"{platform}\n\n"
+            f"Time remaining: 30 seconds\n"
+            f"System Capabilities: B, R\n"
+            f"Enabled Capabilities: B\n\n"
+            f"Management Addresses:\n"
+            f"    IP: {mgmt_ip or 'not configured'}\n"
+        )
+
+    # ─── show port-channel summary (NX-OS) ────────────────────────────
+    def _show_port_channel_summary(self, state):
+        cgs = getattr(state, 'channel_groups', {})
+        lines = [
+            "Flags:  D - Down        P - Up in port-channel (members)",
+            "        I - Individual  H - Hot-standby (LACP only)",
+            "        s - Suspended   r - Module-removed",
+            "        b - BFD Session Wait",
+            "        S - Switched    R - Routed",
+            "        U - Up (port-channel)",
+            "        p - Up in delay-lacp mode (member)",
+            "        M - Not in use. Min-links not met",
+            "--------------------------------------------------------------------------------",
+            "Group  Port-         Type   Protocol  Member Ports",
+            "       channel",
+            "--------------------------------------------------------------------------------",
+        ]
+        if not cgs:
+            lines.append("(none)")
+        for grp_id in sorted(cgs):
+            grp = cgs[grp_id]
+            mode = grp.get('mode', 'on')
+            proto = "LACP" if mode in ('active', 'passive') else "NONE"
+            members = grp.get('members', [])
+            po_flag = "SU" if members else "SD"
+            member_strs = []
+            for m in members:
+                short = m.replace("Ethernet1/", "Eth1/").replace("GigabitEthernet", "Gi")
+                member_strs.append(f"{short}(P)")
+            lines.append(f"{grp_id:<7}Po{grp_id:<13}Eth    {proto:<10}" + " ".join(member_strs))
+        return "\n".join(lines)
+
     # ─── show vlan ────────────────────────────
     def _show_vlan(self, state):
         lines = ["VLAN Name                             Status    Ports",
@@ -1163,6 +1700,119 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
                 f"Holdtime : {n['hold']} sec", ""]
         return "\n".join(lines)
 
+    # ─── show lldp neighbors ──────────────────
+    def _show_lldp(self, state):
+        neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
+        dt = state.device_type
+
+        # SR-S / Si-R: 富士通フォーマット
+        if dt in ('srs', 'sir'):
+            lines = [
+                ' Neighbor Information:',
+                '  Port      Chassis-ID          Port-ID               System-Name       TTL',
+                '  --------- ------------------- --------------------- ----------------- -----',
+            ]
+            for n in neighbors:
+                local_if = n.get('local_if', n.get('port', ''))
+                chassis = n.get('chassis_id', '00:0e:0e:f1:00:01')
+                port_id = n.get('port_id', n.get('port', ''))
+                sysname = n.get('system_name', n.get('device', ''))
+                ttl = n.get('ttl', n.get('hold', 120))
+                lines.append(f'  {local_if:<10}{chassis:<20}{port_id:<22}{sysname:<18}{ttl}')
+            if not neighbors:
+                lines.append('  (no neighbors)')
+            return '\n'.join(lines)
+
+        # Cisco / Catalyst / Nexus: Ciscoフォーマット
+        lines = [
+            "Capability codes:",
+            "    (R) Router, (B) Bridge, (T) Telephone, (C) DOCSIS Cable Device",
+            "    (W) WLAN Access Point, (P) Repeater, (S) Station, (O) Other",
+            "",
+            "Device ID            Local Intf      Hold-time  Capability   Port ID",
+        ]
+        for n in neighbors:
+            cap_map = {'R': 'R', 'B': 'B', 'S': 'B', 'H': 'T'}
+            cap = cap_map.get(n.get('cap', 'B'), 'B')
+            local_if = n.get('local_if', n.get('port', ''))
+            port_id = n.get('port_id', n.get('port', ''))
+            sysname = n.get('system_name', n.get('device', ''))
+            hold = n.get('hold', n.get('ttl', 120))
+            lines.append(f"{sysname:<21}{local_if:<16}{hold:<11}{cap:<13}{port_id}")
+        lines.append(f"\nTotal entries displayed: {len(neighbors)}")
+        return "\n".join(lines)
+
+    def _show_lldp_detail(self, state):
+        neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
+        dt = state.device_type
+
+        # SR-S / Si-R: 富士通詳細フォーマット
+        if dt in ('srs', 'sir'):
+            if not neighbors:
+                return ' Neighbor Information:\n\n  (no neighbors)'
+            lines = [' Neighbor Information:', '']
+            for n in neighbors:
+                local_if = n.get('local_if', n.get('port', ''))
+                chassis = n.get('chassis_id', '00:0e:0e:f1:00:01')
+                port_id = n.get('port_id', n.get('port', ''))
+                sysname = n.get('system_name', n.get('device', ''))
+                platform = n.get('platform', 'Fujitsu Network')
+                ttl = n.get('ttl', n.get('hold', 120))
+                cap_map = {'B': 'Bridge', 'R': 'Router', 'S': 'Bridge'}
+                cap = cap_map.get(n.get('cap', 'B'), 'Bridge')
+                lines += [
+                    f'  Port             : {local_if}',
+                    f'   Chassis ID      : {chassis}',
+                    f'   Port ID         : {port_id}',
+                    f'   System Name     : {sysname}',
+                    f'   System Descr    : {platform}',
+                    f'   Port Descr      : {port_id}',
+                    f'   System Cap.     : {cap}',
+                    f'   TTL             : {ttl}',
+                    '',
+                ]
+            return '\n'.join(lines)
+
+        # Cisco / Catalyst / Nexus
+        if not neighbors:
+            return "Total entries displayed: 0"
+        lines = []
+        for n in neighbors:
+            cap_map = {'R': 'Router', 'B': 'Bridge', 'S': 'Bridge', 'H': 'Telephone'}
+            cap = cap_map.get(n.get('cap', 'B'), 'Bridge')
+            local_if = n.get('local_if', n.get('port', ''))
+            port_id = n.get('port_id', n.get('port', ''))
+            sysname = n.get('system_name', n.get('device', ''))
+            platform = n.get('platform', 'Cisco')
+            hold = n.get('hold', n.get('ttl', 120))
+            chassis = n.get('chassis_id', '00:00:00:00:00:00')
+            lines += [
+                "------------------------------------------------",
+                f"Local Intf: {local_if}",
+                f"Chassis id: {chassis}",
+                f"Port id: {port_id}",
+                f"Port Description: {port_id}",
+                f"System Name: {sysname}",
+                "",
+                f"System Description:",
+                f"{platform}",
+                "",
+                f"Time remaining: {hold} seconds",
+                f"System Capabilities: {cap}",
+                f"Enabled Capabilities: {cap}",
+                "",
+                f"Management Addresses:",
+                f"    IP: 192.168.1.{abs(hash(sysname)) % 253 + 2}",
+                "",
+                f"Auto Negotiation - supported, enabled",
+                f"Physical media capabilities:",
+                f"    1000baseT(FD)",
+                f"    100base-TX(FD)",
+                "",
+            ]
+        lines.append(f"Total entries displayed: {len(neighbors)}")
+        return "\n".join(lines)
+
     # ─── show standby (HSRP) ──────────────────
     def _show_standby(self, state):
         h = state.hsrp
@@ -1177,6 +1827,39 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
   Active router is {'local' if h['state']=='Active' else '192.168.1.2'}
   Standby router is {'192.168.1.2' if h['state']=='Active' else 'local'}
   Priority {h['priority']} (configured {h['priority']})"""
+
+    # ─── show ip protocols (Cisco) ────────────────────────────
+    def _show_ip_protocols(self, state):
+        lines = []
+        # RIP
+        rip_ver = getattr(state, 'rip_version', None)
+        rip_nets = getattr(state, 'rip_networks', [])
+        if rip_ver or rip_nets:
+            lines.append("Routing Protocol is \"rip\"")
+            lines.append(f"  Sending updates every 30 seconds, next due in 15 seconds")
+            lines.append(f"  Version {rip_ver or 2}, receive version {rip_ver or 2}")
+            lines.append(f"  Routing for Networks:")
+            for n in rip_nets:
+                lines.append(f"    {n}")
+        # OSPF
+        ospf = getattr(state, 'ospf', {})
+        if ospf.get('process') and ospf.get('networks'):
+            pid = ospf.get('process', 1)
+            lines.append(f"Routing Protocol is \"ospf {pid}\"")
+            lines.append(f"  Outgoing update filter list for all interfaces is not set")
+            lines.append(f"  Incoming update filter list for all interfaces is not set")
+            lines.append(f"  Router ID {ospf.get('router_id', '0.0.0.0')}")
+            lines.append(f"  Number of areas in this router is 1. 1 normal 0 stub 0 nssa")
+        # BGP
+        bgp = getattr(state, 'bgp', {})
+        if bgp.get('asn') and bgp.get('neighbors'):
+            asn = bgp.get('asn', '?')
+            lines.append(f"Routing Protocol is \"bgp {asn}\"")
+            lines.append(f"  Outgoing update filter list for all interfaces is not set")
+            lines.append(f"  Incoming update filter list for all interfaces is not set")
+        if not lines:
+            lines.append("No routing protocol is configured")
+        return "\n".join(lines)
 
     # ─── show ospf ────────────────────────────
     def _show_ospf(self, state):
@@ -1197,6 +1880,11 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
         for n in state.ospf["neighbors"]:
             lines.append(f"{n['id']:<16}{1:<6}{('FULL/  -'):<16}{n['dead']:<12}{'192.168.1.'+n['id'].split('.')[-1]:<16}{n['iface']}")
         return "\n".join(lines)
+
+    def _show_rip_neighbor(self, state):
+        lines = ['Index   IP Address        Last Update   Bad Pkts   Bad Routes']
+        lines.append('(No RIP neighbors — ルートを受信していません)')
+        return '\n'.join(lines)
 
     def _show_ospf_database(self, state):
         o = state.ospf
@@ -1321,36 +2009,396 @@ Maximum VLANs supported locally   : 1005
 Number of existing VLANs          : {len(state.vlans)}
 Configuration Revision            : 5"""
 
+    # ─── Si-R IPsec show コマンド ─────────────
+    def _sir_show_ipsec_sa(self, state: DeviceState) -> str:
+        tunnels = getattr(state, 'ipsec_tunnels', {})
+        if not tunnels:
+            return '  No IPsec SA established.'
+        lines = [
+            '  Remote       Local        Protocol  SPI(In)    SPI(Out)   State',
+            '  -----------  -----------  --------  ---------  ---------  -----------',
+        ]
+        for tid, t in tunnels.items():
+            remote = t.get('remote_ip', '?.?.?.?')
+            local  = t.get('local_ip',  '?.?.?.?')
+            proto  = t.get('protocol', 'esp').upper()
+            phase2 = t.get('phase2', 'LARVAL')
+            status = t.get('status', 'wait')
+            if status == 'established' and phase2 == 'MATURE':
+                spi_in  = t.get('spi_in',  f'0x{abs(hash(remote+str(tid)))%0xffffffff:08x}')
+                spi_out = t.get('spi_out', f'0x{abs(hash(local +str(tid)))%0xffffffff:08x}')
+                state_str = 'MATURE'
+            elif phase2 == 'DYING':
+                spi_in = spi_out = '-'
+                state_str = 'DYING'
+            else:
+                spi_in = spi_out = '-'
+                state_str = 'LARVAL'
+            lines.append(f'  {remote:<13}{local:<13}{proto:<10}{spi_in:<11}{spi_out:<11}{state_str}')
+        return '\n'.join(lines)
+
+    def _sir_show_ipsec_tunnel(self, state: DeviceState) -> str:
+        tunnels = getattr(state, 'ipsec_tunnels', {})
+        if not tunnels:
+            return '  No IPsec tunnel configured.'
+        lines = ['  Tunnel  Status       Local-IP        Remote-IP       Encrypt    Hash   DH   Mode']
+        lines.append('  ------  -----------  --------------  --------------  ---------  -----  ---  ----------')
+        for tid, t in tunnels.items():
+            remote = t.get('remote_ip', '-')
+            local  = t.get('local_ip',  '-')
+            enc    = t.get('encryption', 'aes256')
+            hsh    = t.get('hash', 'sha256')
+            dh     = str(t.get('dh_group', 14))
+            mode   = t.get('ike_mode', 'main')
+            status = 'Established' if t.get('status') == 'established' else 'Waiting'
+            lines.append(f'  {tid:<8}{status:<13}{local:<16}{remote:<16}{enc:<11}{hsh:<7}{dh:<5}{mode}')
+        return '\n'.join(lines)
+
+    def _sir_show_ike_sa(self, state: DeviceState) -> str:
+        tunnels = getattr(state, 'ipsec_tunnels', {})
+        if not tunnels:
+            return '  No IKE SA.'
+        lines = ['  Peer             Phase1   Initiator  DH   Lifetime(rem)  Mode']
+        lines.append('  ---------------  -------  ---------  ---  -------------  ----------')
+        for tid, t in tunnels.items():
+            remote = t.get('remote_ip', '?.?.?.?')
+            ph1    = t.get('phase1', 'LARVAL')
+            dh     = str(t.get('dh_group', 14))
+            lt_rem = str(t.get('ike_lifetime', 86400) - random.randint(0, 3600))
+            mode   = t.get('ike_mode', 'main')
+            lines.append(f'  {remote:<17}{ph1:<9}{"yes":<11}{dh:<5}{lt_rem:<15}{mode}')
+        return '\n'.join(lines)
+
+    # ─── Cisco IOS show crypto ────────────────
+    def _ios_show_crypto(self, cmd: str, c: str, state: DeviceState) -> str:
+        crypto = getattr(state, 'ipsec_crypto', {})
+        peers  = getattr(state, 'ipsec_peers',  {})
+
+        # show crypto isakmp sa
+        if re.match(r'^show\s+crypto\s+isakmp\s+sa', c):
+            estab = {ip: p for ip, p in peers.items() if p.get('phase1') == 'MATURE'}
+            if not estab:
+                return 'IPv4 Crypto ISAKMP SA\ndst             src             state          conn-id status\n(none)'
+            lines = ['IPv4 Crypto ISAKMP SA',
+                     'dst             src             state          conn-id status']
+            local_ip = next((i.get('ip','') for i in state.interfaces.values()
+                             if i.get('ip') and i.get('ip') != '127.0.0.1'), '-')
+            for peer_ip, p in estab.items():
+                lines.append(f'{peer_ip:<16}{local_ip:<16}QM_IDLE        {random.randint(1000,9999)} ACTIVE')
+            return '\n'.join(lines)
+
+        # show crypto ipsec sa
+        if re.match(r'^show\s+crypto\s+ipsec\s+sa', c):
+            estab = {ip: p for ip, p in peers.items() if p.get('phase2') == 'MATURE'}
+            if not estab:
+                return 'There are no ipsec sas.'
+            lines = []
+            local_ip = next((i.get('ip','') for i in state.interfaces.values()
+                             if i.get('ip') and i.get('ip') != '127.0.0.1'), '-')
+            for peer_ip, p in estab.items():
+                spi_in  = p.get('spi_in',  f'0x{random.randint(0,0xffffffff):08x}')
+                spi_out = p.get('spi_out', f'0x{random.randint(0,0xffffffff):08x}')
+                sa_rem  = p.get('sa_lifetime_remaining', 28800)
+                lines += [
+                    f'interface: GigabitEthernet0/0/0',
+                    f'    Crypto map tag: CMAP, local addr {local_ip}',
+                    f'',
+                    f'   local  ident (addr/mask/prot/port): (0.0.0.0/0.0.0.0/0/0)',
+                    f'   remote ident (addr/mask/prot/port): (0.0.0.0/0.0.0.0/0/0)',
+                    f'   current_peer {peer_ip} port 500',
+                    f'    PERMIT, flags={{origin_is_acl,}}',
+                    f'   #pkts encaps: {random.randint(100,9999)}, #pkts encrypt: {random.randint(100,9999)}, #pkts digest: {random.randint(100,9999)}',
+                    f'   #pkts decaps: {random.randint(100,9999)}, #pkts decrypt: {random.randint(100,9999)}, #pkts verify: {random.randint(100,9999)}',
+                    f'   #send errors 0, #recv errors 0',
+                    f'',
+                    f'     local crypto endpt.: {local_ip}, remote crypto endpt.: {peer_ip}',
+                    f'     path mtu 1500, ip mtu 1500',
+                    f'',
+                    f'    inbound esp sas:',
+                    f'     spi: {spi_in}()',
+                    f'      transform: esp-aes-256 esp-sha-hmac ,',
+                    f'      in use settings ={{Tunnel, }}',
+                    f'      sa timing: remaining key lifetime (k/sec): (4608000/{sa_rem})',
+                    f'      Status: ACTIVE(ACTIVE)',
+                    f'',
+                    f'    outbound esp sas:',
+                    f'     spi: {spi_out}()',
+                    f'      transform: esp-aes-256 esp-sha-hmac ,',
+                    f'      in use settings ={{Tunnel, }}',
+                    f'      sa timing: remaining key lifetime (k/sec): (4608000/{sa_rem})',
+                    f'      Status: ACTIVE(ACTIVE)',
+                    f'',
+                ]
+            return '\n'.join(lines)
+
+        # show crypto isakmp policy
+        if re.match(r'^show\s+crypto\s+isakmp\s+policy', c):
+            pols = crypto.get('isakmp_policies', {})
+            if not pols:
+                return 'Default IKE policy\n  authentication pre-share\n  encryption aes-256\n  hash sha256\n  Diffie-Hellman group 14\n  lifetime 86400 seconds'
+            lines = []
+            for num, pol in sorted(pols.items()):
+                lines += [
+                    f'IKE policy {num}:',
+                    f'  authentication {pol.get("authentication","pre-share")}',
+                    f'  encryption {pol.get("encryption","aes-256")}',
+                    f'  hash {pol.get("hash","sha256")}',
+                    f'  Diffie-Hellman group {pol.get("group",14)}',
+                    f'  lifetime {pol.get("lifetime",86400)} seconds, No volume limit',
+                    '',
+                ]
+            return '\n'.join(lines)
+
+        # show crypto map
+        if re.match(r'^show\s+crypto\s+map', c):
+            cmaps = crypto.get('crypto_maps', {})
+            if not cmaps:
+                return '% Crypto map not configured.'
+            lines = []
+            for mapname, seqs in cmaps.items():
+                for seq, entry in sorted(seqs.items()):
+                    lines += [
+                        f'Crypto Map "{mapname}" {seq} ipsec-isakmp',
+                        f'  Peer = {entry.get("peer","-")}',
+                        f'  Extended IP access list {entry.get("acl","-")}',
+                        f'  Security association lifetime: 4608000 kilobytes/28800 seconds',
+                        f'  Transform sets={{ {entry.get("transform_set","-")} }}',
+                        f'  Interfaces using crypto map {mapname}:',
+                        '',
+                    ]
+            return '\n'.join(lines)
+
+        return '% Incomplete crypto show command.'
+
+    def _sir_show_ipsec_policy(self, state: DeviceState) -> str:
+        tunnels = getattr(state, 'ipsec_tunnels', {})
+        if not tunnels:
+            return '  No IPsec policy configured.'
+        lines = [
+            '  No.  Direction  Local-IP        Remote-IP       Protocol  Encrypt    Hash    PFS',
+            '  ---  ---------  --------------  --------------  --------  ---------  ------  ---',
+        ]
+        for tid, t in sorted(tunnels.items()):
+            local  = t.get('local_ip',  '-')
+            remote = t.get('remote_ip', '-')
+            proto  = t.get('protocol', 'esp').upper()
+            enc    = t.get('encryption', 'aes256')
+            hsh    = t.get('hash', 'sha256')
+            pfs    = t.get('pfs', 'off')
+            lines.append(
+                f'  {tid:<5}{"both":<11}{local:<16}{remote:<16}{proto:<10}{enc:<11}{hsh:<8}{pfs}'
+            )
+        return '\n'.join(lines)
+
+    def _sir_show_ipsec_statistics(self, state: DeviceState) -> str:
+        tunnels = getattr(state, 'ipsec_tunnels', {})
+        if not tunnels:
+            return '  No IPsec SA established.'
+        lines = [
+            '  IPsec Statistics',
+            '  ----------------',
+        ]
+        for tid, t in sorted(tunnels.items()):
+            remote = t.get('remote_ip', '-')
+            name   = t.get('name', f'tunnel{tid}')
+            if t.get('status') == 'established':
+                pkts_in  = random.randint(1000, 99999)
+                pkts_out = random.randint(1000, 99999)
+                bytes_in  = pkts_in  * random.randint(500, 1400)
+                bytes_out = pkts_out * random.randint(500, 1400)
+                lines += [
+                    f'',
+                    f'  Remote {remote}  ({name})',
+                    f'    Inbound  ESP:  {pkts_in} packets  {bytes_in} bytes  0 errors',
+                    f'    Outbound ESP:  {pkts_out} packets  {bytes_out} bytes  0 errors',
+                    f'    Replay check:  0 failures',
+                    f'    SA rekeys:     {random.randint(0, 5)}',
+                ]
+            else:
+                lines += [f'', f'  Remote {remote}  ({name})', f'    SA not yet established.']
+        return '\n'.join(lines)
+
+    def _sir_show_ike_policy(self, state: DeviceState) -> str:
+        tunnels = getattr(state, 'ipsec_tunnels', {})
+        if not tunnels:
+            return '  No IKE policy configured.'
+        lines = [
+            '  No.  Peer             Mode        DH   Encrypt    Hash    Auth         Lifetime',
+            '  ---  ---------------  ----------  ---  ---------  ------  -----------  --------',
+        ]
+        for tid, t in sorted(tunnels.items()):
+            remote   = t.get('remote_ip', '-')
+            mode     = t.get('ike_mode', 'main')
+            dh       = str(t.get('dh_group', 14))
+            enc      = t.get('encryption', 'aes256')
+            hsh      = t.get('hash', 'sha256')
+            lifetime = str(t.get('ike_lifetime', 86400))
+            lines.append(
+                f'  {tid:<5}{remote:<17}{mode:<12}{dh:<5}{enc:<11}{hsh:<8}{"preshared":<13}{lifetime}'
+            )
+        return '\n'.join(lines)
+
+    def _sir_show_ike_statistics(self, state: DeviceState) -> str:
+        tunnels = getattr(state, 'ipsec_tunnels', {})
+        if not tunnels:
+            return '  No IKE SA established.'
+        lines = [
+            '  IKE Statistics',
+            '  --------------',
+        ]
+        for tid, t in sorted(tunnels.items()):
+            remote = t.get('remote_ip', '-')
+            name   = t.get('name', f'tunnel{tid}')
+            if t.get('status') == 'established':
+                lines += [
+                    f'',
+                    f'  Peer {remote}  ({name})',
+                    f'    Phase1 negotiations:  {random.randint(1,5)} success  0 failure',
+                    f'    Phase2 negotiations:  {random.randint(1,5)} success  0 failure',
+                    f'    DPD probes sent:      {random.randint(0,20)}',
+                    f'    DPD probes received:  {random.randint(0,20)}',
+                    f'    Rekeys:               {random.randint(0,3)}',
+                ]
+            else:
+                lines += [f'', f'  Peer {remote}  ({name})', f'    SA not yet established.']
+        return '\n'.join(lines)
+
     # ─── show running-config ──────────────────
     def _show_running_config(self, state):
-        if state.device_type == "sir":
-            return f"""hostname {state.hostname}
-!
-password admin set ****
-!
-lan 0 ip address 192.168.1.1/24 1
-lan 0 ip dhcp service server
-lan 0 ip dhcp pool address 192.168.1.100 192.168.1.200
-lan 0 ip dhcp server dns 8.8.8.8 8.8.4.4
-lan 0 ip napt use use
-lan 0 vrrp use on
-lan 0 vrrp group 0 id 10 {state.vrrp['priority']} {state.vrrp['vip']}
-!
-wan 1 use use
-wan 1 bind ether 0
-wan 1 ppp auth send user@isp.ne.jp ****
-wan 1 ppp ipcp ipaddress on
-wan 1 ip route default metric 100
-!
-ip dns service use
-ip dns server 8.8.8.8 8.8.4.4
-ip rip use use
-ip rip network 192.168.1.0/24
-ip rip version 2
-!
-timezone +9
-ntp use use
-ntp server 192.168.1.1"""
+        if state.device_type in ("sir", "srs"):
+            lines = [
+                f"hostname {state.hostname}",
+                "!",
+                "password admin set ****",
+                "!",
+                "lan 0 ip address 192.168.1.1/24 1",
+                "lan 0 ip dhcp service server",
+                "lan 0 ip dhcp pool address 192.168.1.100 192.168.1.200",
+                "lan 0 ip dhcp server dns 8.8.8.8 8.8.4.4",
+                "lan 0 ip napt use use",
+                "lan 0 vrrp use on",
+                f"lan 0 vrrp group 0 id 10 {state.vrrp['priority']} {state.vrrp['vip']}",
+                "!",
+                "wan 1 use use",
+                "wan 1 bind ether 0",
+                "wan 1 ppp auth send user@isp.ne.jp ****",
+                "wan 1 ppp ipcp ipaddress on",
+                "wan 1 ip route default metric 100",
+                "!",
+                "ip dns service use",
+                "ip dns server 8.8.8.8 8.8.4.4",
+                "ip rip use use",
+                "ip rip network 192.168.1.0/24",
+                "ip rip version 2",
+                "!",
+            ]
+            # IPsec/IKE設定を動的に出力
+            tunnels = getattr(state, 'ipsec_tunnels', {})
+            ipsec_enabled = getattr(state, 'ipsec_enabled', False)
+            ike_enabled   = getattr(state, 'ike_enabled', False)
+            if tunnels:
+                for tid, t in sorted(tunnels.items()):
+                    rn, ap = tid if isinstance(tid, tuple) else (tid, 0)
+                    prefix = f"remote {rn} ap {ap}"
+                    if t.get('name'):
+                        lines.append(f"{prefix} name {t['name']}")
+                    if t.get('datalink'):
+                        lines.append(f"{prefix} datalink type {t['datalink']}")
+                    if t.get('ipsec_type'):
+                        lines.append(f"{prefix} ipsec type {t['ipsec_type']}")
+                    if t.get('local_ip'):
+                        lines.append(f"{prefix} tunnel local {t['local_ip']}")
+                    if t.get('remote_ip'):
+                        lines.append(f"{prefix} tunnel remote {t['remote_ip']}")
+                    if t.get('protocol'):
+                        lines.append(f"{prefix} ipsec protocol {t['protocol']}")
+                    enc = t.get('encryption', '')
+                    hsh = t.get('hash', '')
+                    if enc:
+                        lines.append(f"{prefix} ipsec encrypt {enc}{' ' + hsh if hsh else ''}")
+                    if t.get('pfs'):
+                        lines.append(f"{prefix} ipsec pfs use {t['pfs']}")
+                    if t.get('ike_mode'):
+                        lines.append(f"{prefix} ipsec ike mode {t['ike_mode']}")
+                    if t.get('dh_group'):
+                        lines.append(f"{prefix} ipsec ike dh {t['dh_group']}")
+                    if t.get('ike_lifetime'):
+                        lines.append(f"{prefix} ipsec ike lifetime {t['ike_lifetime']}")
+                    if t.get('sa_lifetime'):
+                        lines.append(f"{prefix} ipsec sa lifetime {t['sa_lifetime']}")
+                    if t.get('preshared'):
+                        lines.append(f"{prefix} ipsec ike preshared-key ****")
+                    lines.append("!")
+                if ipsec_enabled:
+                    lines.append("ipsec use on")
+                if ike_enabled:
+                    lines.append("ike use on")
+                lines.append("!")
+            lines += [
+                "timezone +9",
+                "ntp use use",
+                "ntp server 192.168.1.1",
+            ]
+            return "\n".join(lines)
+        elif state.device_type in ("cisco", "catalyst"):
+            lines = [f"hostname {state.hostname}", "!", "version 17.9", "!"]
+            # インタフェース
+            for ifname, ifdata in state.interfaces.items():
+                ip = ifdata.get('ip', '')
+                prefix = ifdata.get('prefix', 0)
+                status = ifdata.get('status', 'down')
+                if not ip and status == 'down':
+                    continue
+                mask = _prefix_to_mask(prefix) if prefix else '255.255.255.0'
+                lines.append(f"interface {ifname}")
+                if ip:
+                    lines.append(f" ip address {ip} {mask}")
+                if status == 'up':
+                    lines.append(" no shutdown")
+                else:
+                    lines.append(" shutdown")
+                lines.append("!")
+            lines.append("ip routing")
+            lines.append("!")
+            # IPsec/IKE crypto
+            crypto = getattr(state, 'ipsec_crypto', {})
+            if crypto:
+                for num, pol in sorted(crypto.get('isakmp_policies', {}).items()):
+                    lines.append(f"crypto isakmp policy {num}")
+                    lines.append(f" authentication {pol.get('authentication','pre-share')}")
+                    enc = pol.get('encryption', 'aes 256')
+                    lines.append(f" encryption {enc}")
+                    lines.append(f" hash {pol.get('hash','sha256')}")
+                    lines.append(f" group {pol.get('group',14)}")
+                    lines.append(f" lifetime {pol.get('lifetime',86400)}")
+                    lines.append("!")
+                for peer, key in crypto.get('isakmp_keys', {}).items():
+                    lines.append(f"crypto isakmp key **** address {peer}")
+                lines.append("!")
+                for ts_name, ts in crypto.get('transform_sets', {}).items():
+                    transforms = ' '.join(ts.get('transforms', []))
+                    lines.append(f"crypto ipsec transform-set {ts_name} {transforms}")
+                    lines.append(" mode tunnel")
+                lines.append("!")
+                for mapname, seqs in crypto.get('crypto_maps', {}).items():
+                    for seq, entry in sorted(seqs.items()):
+                        if entry.get('acl'):
+                            lines.append(f"crypto map {mapname} {seq} ipsec-isakmp")
+                            lines.append(f" match address {entry['acl']}")
+                            if entry.get('peer'):
+                                lines.append(f" set peer {entry['peer']}")
+                            if entry.get('transform_set'):
+                                lines.append(f" set transform-set {entry['transform_set']}")
+                            lines.append("!")
+                cm_if = crypto.get('crypto_map_interface', {})
+                if cm_if:
+                    lines.append(f"crypto map {cm_if['name']} interface {cm_if['interface']}")
+                ike_if = crypto.get('isakmp_enabled', '')
+                if ike_if:
+                    lines.append(f"crypto isakmp enable {ike_if}")
+                lines.append("!")
+            lines.append("end")
+            return "\n".join(lines)
         else:
             lines = [f"hostname {state.hostname}", "!", "version 17.9", "!"]
             for vid, v in state.vlans.items():
@@ -1374,6 +2422,636 @@ ntp server 192.168.1.1"""
 {now.strftime('%b %d %H:%M:%S')}: %SYS-5-RESTART: System restarted"""
 
     # ─── 設定コマンド ────────────────────────
+    def _cmd_monitor(self, cmd, state):
+        """
+        SPAN / ポートミラーリングの設定。
+        対応: Cisco / Catalyst / SR-S / Nexus / APRESIA
+          monitor session <id> source interface <if> [rx|tx|both]
+          monitor session <id> destination interface <if>
+          no monitor session <id>
+          (Nexus) monitor session <id> → config-monitor サブモード
+                  source interface <if> [both]
+                  destination interface <if>
+          (APRESIA) mirror session ... も別名で受理
+        対象外（sir/asa/pc）は None を返す。
+        """
+        if state.device_type not in ('cisco', 'catalyst', 'srs', 'nexus', 'apresia'):
+            return None
+        c = cmd.lower().strip()
+        sessions = getattr(state, 'monitor_sessions', None)
+        if sessions is None:
+            sessions = {}
+            state.monitor_sessions = sessions
+
+        def _sess(sid):
+            return sessions.setdefault(sid, {'source': [], 'dest': None, 'state': 'down'})
+
+        def _norm_dir(d):
+            if d in ('rx', 'receive'):
+                return 'rx'
+            if d in ('tx', 'transmit'):
+                return 'tx'
+            return 'both'
+
+        # no monitor session <id>
+        m = re.match(r'^no\s+(?:monitor|mirror)\s+session\s+(\d+)', c)
+        if m:
+            sessions.pop(int(m.group(1)), None)
+            if state.mode == 'config-monitor':
+                state.mode = 'config'
+            return ""
+
+        # monitor session <id> source interface <if> [dir]
+        m = re.match(r'^(?:monitor|mirror)\s+session\s+(\d+)\s+source\s+interface\s+(\S+)(?:\s+(\S+))?', cmd, re.I)
+        if m:
+            sid = int(m.group(1))
+            s = _sess(sid)
+            ifname = self._resolve_ifname(m.group(2), state)
+            direction = _norm_dir((m.group(3) or 'both').lower())
+            s['source'] = [x for x in s['source'] if x[0] != ifname]
+            s['source'].append((ifname, direction))
+            if s['dest']:
+                s['state'] = 'up'
+            return ""
+
+        # monitor session <id> destination interface <if>
+        m = re.match(r'^(?:monitor|mirror)\s+session\s+(\d+)\s+destination\s+interface\s+(\S+)', cmd, re.I)
+        if m:
+            sid = int(m.group(1))
+            s = _sess(sid)
+            s['dest'] = self._resolve_ifname(m.group(2), state)
+            if s['source']:
+                s['state'] = 'up'
+            return ""
+
+        # Nexus: monitor session <id> （サブモードに入る）
+        m = re.match(r'^monitor\s+session\s+(\d+)$', c)
+        if m and state.device_type == 'nexus':
+            sid = int(m.group(1))
+            _sess(sid)
+            state.mode = 'config-monitor'
+            state._monitor_sid = sid
+            return ""
+
+        # config-monitor サブモード内の source/destination
+        if state.mode == 'config-monitor':
+            sid = getattr(state, '_monitor_sid', None)
+            if sid is None:
+                return ""
+            s = _sess(sid)
+            m = re.match(r'^source\s+interface\s+(\S+)(?:\s+(\S+))?', cmd, re.I)
+            if m:
+                ifname = self._resolve_ifname(m.group(1), state)
+                direction = _norm_dir((m.group(2) or 'both').lower())
+                s['source'] = [x for x in s['source'] if x[0] != ifname]
+                s['source'].append((ifname, direction))
+                if s['dest']:
+                    s['state'] = 'up'
+                return ""
+            m = re.match(r'^destination\s+interface\s+(\S+)', cmd, re.I)
+            if m:
+                s['dest'] = self._resolve_ifname(m.group(1), state)
+                if s['source']:
+                    s['state'] = 'up'
+                return ""
+            if c in ('no shut', 'no shutdown'):
+                s['state'] = 'up' if (s['source'] and s['dest']) else 'down'
+                return ""
+            if c in ('shut', 'shutdown'):
+                s['state'] = 'down'
+                return ""
+
+        # monitor session 行だが解釈できない → エラー
+        return f"% Invalid input detected at '^' marker."
+
+    def _format_show_monitor(self, state, sid=None):
+        """show monitor [session <id>] の出力"""
+        sessions = getattr(state, 'monitor_sessions', {}) or {}
+        if not sessions:
+            return 'No SPAN/Monitor sessions configured.'
+        out = []
+        ids = [sid] if sid is not None else sorted(sessions.keys())
+        for i in ids:
+            s = sessions.get(i)
+            if not s:
+                out.append(f'% Session {i} does not exist.')
+                continue
+            src_lines = []
+            for ifn, d in s['source']:
+                dmap = {'rx': 'Rx Only', 'tx': 'Tx Only', 'both': 'Both'}
+                src_lines.append((ifn, dmap.get(d, 'Both')))
+            out.append(f'Session {i}')
+            out.append('---------')
+            out.append('Type                   : Local Session')
+            if src_lines:
+                first = src_lines[0]
+                out.append(f'Source Ports           :')
+                out.append(f'    {first[1]:<20}: {first[0]}')
+                for ifn, dlabel in src_lines[1:]:
+                    out.append(f'    {dlabel:<20}: {ifn}')
+            else:
+                out.append('Source Ports           : (none)')
+            out.append(f'Destination Ports      : {s["dest"] or "(none)"}')
+            out.append(f'Encapsulation          : Native')
+            out.append(f'Ingress                : Disabled')
+            out.append(f'State                  : {"Up" if s["state"]=="up" else "Down (incomplete)"}')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
+    def _qos_store(self, state):
+        """QoS設定の保存領域をstateに用意して返す"""
+        if not hasattr(state, 'qos_cmaps'):
+            state.qos_cmaps = {}   # {name: {'match_type','matches':[]}}
+        if not hasattr(state, 'qos_pmaps'):
+            state.qos_pmaps = {}   # {name: {'type','classes': {cname: [actions]}}}
+        return state.qos_cmaps, state.qos_pmaps
+
+    def _cmd_qos(self, cmd, state):
+        """
+        QoS設定（Modular QoS CLI と各社固有）。
+        - Cisco/Catalyst/Nexus/SR-S: class-map / policy-map / class / match / set /
+          bandwidth / priority / police / shape / service-policy
+        - APRESIA: mls qos / qos cos-queue 等（受理 + show qos）
+        - Si-R: qos / shaping（受理 + show qos）
+        対象外や非該当は None を返す。
+        """
+        dt = state.device_type
+        if dt not in ('cisco', 'catalyst', 'nexus', 'srs', 'apresia', 'sir'):
+            return None
+        c = cmd.lower().strip()
+        cmaps, pmaps = self._qos_store(state)
+
+        # ── APRESIA / Si-R 固有のシンプルなqos行（受理して記録）──
+        if dt in ('apresia', 'sir') and state.mode == 'config':
+            m = re.match(r'^(mls\s+qos|qos|traffic-shape|shaping|priority-queue)\b', c)
+            if m:
+                if not hasattr(state, 'qos_simple'):
+                    state.qos_simple = []
+                state.qos_simple.append(cmd.strip())
+                state.qos_enabled = True
+                return ""
+
+        # ── MQC: class-map [type qos] [match-any|match-all] NAME ──
+        m = re.match(r'^class-map(?:\s+type\s+\S+)?(?:\s+(match-any|match-all))?\s+(\S+)$', c)
+        if m and state.mode == 'config' and dt in ('cisco', 'catalyst', 'nexus', 'srs'):
+            mt = m.group(1) or 'match-all'
+            # 元のケースで名前取得
+            m2 = re.match(r'^class-map(?:\s+type\s+\S+)?(?:\s+(?:match-any|match-all))?\s+(\S+)$',
+                          cmd.strip(), re.I)
+            name = m2.group(1) if m2 else m.group(2)
+            cmaps.setdefault(name, {'match_type': mt, 'matches': []})
+            cmaps[name]['match_type'] = mt
+            state._qos_cmap = name
+            state.mode = 'config-cmap'
+            return ""
+
+        # config-cmap 内: match ...
+        if state.mode == 'config-cmap':
+            name = getattr(state, '_qos_cmap', None)
+            if name is None:
+                return ""
+            m = re.match(r'^match\s+(.+)', cmd.strip(), re.I)
+            if m:
+                cmaps.setdefault(name, {'match_type': 'match-all', 'matches': []})
+                cmaps[name]['matches'].append(m.group(1).strip())
+                return ""
+            # サブモード内の他コマンドは config に戻して継続処理させない
+            return None
+
+        # ── MQC: policy-map [type qos] NAME ──
+        m = re.match(r'^policy-map(?:\s+type\s+(\S+))?\s+(\S+)$', c)
+        if m and state.mode == 'config' and dt in ('cisco', 'catalyst', 'nexus', 'srs'):
+            ptype = m.group(1) or 'qos'
+            m2 = re.match(r'^policy-map(?:\s+type\s+\S+)?\s+(\S+)$', cmd.strip(), re.I)
+            name = m2.group(1) if m2 else m.group(2)
+            pmaps.setdefault(name, {'type': ptype, 'classes': {}})
+            state._qos_pmap = name
+            state.mode = 'config-pmap'
+            return ""
+
+        # config-pmap 内: class NAME → config-pmap-c
+        if state.mode == 'config-pmap':
+            pname = getattr(state, '_qos_pmap', None)
+            m = re.match(r'^class\s+(\S+)', cmd.strip(), re.I)
+            if m and pname is not None:
+                cname = m.group(1)
+                pmaps[pname]['classes'].setdefault(cname, [])
+                state._qos_class = cname
+                state.mode = 'config-pmap-c'
+                return ""
+            return None
+
+        # config-pmap-c 内: set / bandwidth / priority / police / shape
+        if state.mode == 'config-pmap-c':
+            pname = getattr(state, '_qos_pmap', None)
+            cname = getattr(state, '_qos_class', None)
+            if pname is None or cname is None:
+                return ""
+            # 別class に切り替え
+            m = re.match(r'^class\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                cname = m.group(1)
+                pmaps[pname]['classes'].setdefault(cname, [])
+                state._qos_class = cname
+                return ""
+            m = re.match(r'^(set\s+.+|bandwidth\s+.+|priority(\s+.+)?|police\s+.+|'
+                         r'shape\s+.+|queue-limit\s+.+|random-detect.*|fair-queue.*|'
+                         r'bandwidth\s+remaining.*)$', cmd.strip(), re.I)
+            if m:
+                pmaps[pname]['classes'][cname].append(cmd.strip())
+                return ""
+            return None
+
+        # ── interface: service-policy {input|output} NAME ──
+        m = re.match(r'^service-policy\s+(input|output)\s+(\S+)', c)
+        if m and state.current_if and dt in ('cisco', 'catalyst', 'nexus', 'srs'):
+            m2 = re.match(r'^service-policy\s+(?:input|output)\s+(\S+)', cmd.strip(), re.I)
+            pname = m2.group(1) if m2 else m.group(2)
+            sp = state.interfaces.setdefault(state.current_if, {}).setdefault('service_policy', {})
+            sp[m.group(1)] = pname
+            return ""
+
+        return None
+
+    def _format_show_class_map(self, state):
+        cmaps = getattr(state, 'qos_cmaps', {}) or {}
+        if not cmaps:
+            return '% No class-maps configured.'
+        out = []
+        for name, info in cmaps.items():
+            out.append(f' Class Map {info["match_type"]} {name} (id 0)')
+            if info['matches']:
+                for mt in info['matches']:
+                    out.append(f'   Match {mt}')
+            else:
+                out.append('   (no match criteria)')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
+    def _format_show_policy_map(self, state, name=None):
+        pmaps = getattr(state, 'qos_pmaps', {}) or {}
+        if not pmaps:
+            return '% No policy-maps configured.'
+        out = []
+        for pname, pinfo in pmaps.items():
+            if name and pname != name:
+                continue
+            tstr = f' type {pinfo["type"]}' if pinfo.get('type') and pinfo['type'] != 'qos' else ''
+            out.append(f'  Policy Map{tstr} {pname}')
+            for cname, actions in pinfo['classes'].items():
+                out.append(f'    Class {cname}')
+                if actions:
+                    for a in actions:
+                        out.append(f'      {a}')
+                else:
+                    out.append('      (no action)')
+            out.append('')
+        return '\n'.join(out).rstrip() or f'% policy-map {name} not found.'
+
+    def _format_show_policy_map_interface(self, state):
+        pmaps = getattr(state, 'qos_pmaps', {}) or {}
+        out = []
+        for ifname, iinfo in state.interfaces.items():
+            sp = iinfo.get('service_policy')
+            if not sp:
+                continue
+            out.append(f' {ifname}')
+            out.append('')
+            for direction in ('input', 'output'):
+                pname = sp.get(direction)
+                if not pname:
+                    continue
+                out.append(f'  Service-policy {direction}: {pname}')
+                pinfo = pmaps.get(pname, {})
+                for cname, actions in pinfo.get('classes', {}).items():
+                    out.append(f'    Class-map: {cname}')
+                    out.append(f'      0 packets, 0 bytes')
+                    out.append(f'      5 minute offered rate 0000 bps, drop rate 0000 bps')
+                    for a in actions:
+                        out.append(f'      {a}')
+                out.append('')
+        if not out:
+            return ' (no service-policy applied to any interface)'
+        return '\n'.join(out).rstrip()
+
+    def _format_show_qos_simple(self, state):
+        """APRESIA / Si-R 用の簡易QoS表示"""
+        enabled = getattr(state, 'qos_enabled', False)
+        lines = [f'QoS: {"Enabled" if enabled else "Disabled"}']
+        simple = getattr(state, 'qos_simple', [])
+        if simple:
+            lines.append('Configured QoS commands:')
+            for s in simple:
+                lines.append(f'  {s}')
+        # MQC由来のpolicyがあれば併記
+        pmaps = getattr(state, 'qos_pmaps', {}) or {}
+        if pmaps:
+            lines.append('Policy maps:')
+            for pname in pmaps:
+                lines.append(f'  {pname}')
+        return '\n'.join(lines)
+
+    def _vss_store(self, state):
+        if not hasattr(state, 'vss'):
+            state.vss = {
+                'domain': None, 'switch_num': 1, 'configured': False,
+                'dual_active_method': [], 'vsl_links': [],
+                'recovery_reload_disable': False,
+                'role': 'ACTIVE', 'peer_role': 'STANDBY',
+            }
+        return state.vss
+
+    def _cmd_vss(self, cmd, state):
+        """
+        VSS（Virtual Switching System）と Dual-Active Detection（DAD）。
+        Catalyst のみ対応。
+          switch virtual domain <id>      → config-vs-domain サブモード
+            switch <1|2>
+            dual-active detection pagp
+            dual-active detection fast-hello
+            dual-active recovery-reload-disable
+          interface: switch virtual link <n>（VSL指定）
+        """
+        if state.device_type != 'catalyst':
+            return None
+        c = cmd.lower().strip()
+        vss = self._vss_store(state)
+
+        # switch virtual domain <id>
+        m = re.match(r'^switch\s+virtual\s+domain\s+(\d+)', c)
+        if m and state.mode == 'config':
+            vss['domain'] = int(m.group(1))
+            vss['configured'] = True
+            state.mode = 'config-vs-domain'
+            return ('% Now configuring VSS domain. '
+                    'Switch will operate in VSS mode after reload.')
+
+        # config-vs-domain サブモード
+        if state.mode == 'config-vs-domain':
+            m = re.match(r'^switch\s+(\d+)$', c)
+            if m:
+                vss['switch_num'] = int(m.group(1))
+                return ''
+            if re.match(r'^dual-active\s+detection\s+pagp', c):
+                if 'pagp' not in vss['dual_active_method']:
+                    vss['dual_active_method'].append('pagp')
+                return ''
+            if re.match(r'^dual-active\s+detection\s+fast-hello', c):
+                if 'fast-hello' not in vss['dual_active_method']:
+                    vss['dual_active_method'].append('fast-hello')
+                return ''
+            if re.match(r'^dual-active\s+recovery-reload-disable', c):
+                vss['recovery_reload_disable'] = True
+                return ''
+            if re.match(r'^dual-active\s+exclude', c):
+                return ''
+            # サブモード内の未知コマンドはconfigに委譲しない
+            return None
+
+        # interface: switch virtual link <n>
+        m = re.match(r'^switch\s+virtual\s+link\s+(\d+)', c)
+        if m and state.current_if:
+            vss['vsl_links'].append({'link': int(m.group(1)), 'iface': state.current_if})
+            return ''
+
+        return None
+
+    def _format_show_switch_virtual(self, state, sub=''):
+        vss = getattr(state, 'vss', None)
+        if not vss or not vss.get('configured'):
+            return 'Switch is not in Virtual Switching System (VSS) mode.'
+        dom = vss['domain']
+        sw = vss['switch_num']
+        if sub == 'role':
+            return '\n'.join([
+                'Switch  Switch  Status  Priority  Role     Session ID',
+                'Number                                     Local  Remote',
+                '-------------------------------------------------------',
+                f'LOCAL   {sw:<7} UP      100       {vss["role"]:<8} 0      0',
+                f'REMOTE  {2 if sw==1 else 1:<7} UP      100       '
+                f'{vss["peer_role"]:<8} 0      0',
+            ])
+        if sub == 'link':
+            if not vss['vsl_links']:
+                return 'VSL not configured (interface に switch virtual link を設定してください)'
+            lines = ['VSL Links Information :', '',
+                     'Flags : U-Up  D-Down', '',
+                     'Port        State  Link']
+            for v in vss['vsl_links']:
+                lines.append(f'{v["iface"]:<12}U      {v["link"]}')
+            return '\n'.join(lines)
+        if sub == 'dual-active':
+            methods = ', '.join(vss['dual_active_method']) or 'None (未設定)'
+            return '\n'.join([
+                'Pagp dual-active detection enabled: '
+                f'{"Yes" if "pagp" in vss["dual_active_method"] else "No"}',
+                'Fast-hello dual-active detection enabled: '
+                f'{"Yes" if "fast-hello" in vss["dual_active_method"] else "No"}',
+                '',
+                f'Dual-Active Detection methods configured: {methods}',
+                f'Recovery reload disable: '
+                f'{"Yes" if vss["recovery_reload_disable"] else "No"}',
+                'Dual-active state: No dual-active condition detected',
+            ])
+        # show switch virtual（概要）
+        return '\n'.join([
+            f'Switch mode              : Virtual Switch',
+            f'Virtual switch domain number : {dom}',
+            f'Local switch number      : {sw}',
+            f'Local switch operational role: Virtual Switch {sw} ({vss["role"]})',
+            f'Peer switch number       : {2 if sw==1 else 1}',
+            f'Peer switch operational role : Virtual Switch '
+            f'{2 if sw==1 else 1} ({vss["peer_role"]})',
+        ])
+
+    def _issu_store(self, state):
+        if not hasattr(state, 'issu'):
+            cur = '17.09.03' if state.device_type == 'catalyst' else '9.3.10'
+            state.issu = {
+                'current': cur, 'target': None, 'state': 'committed',
+                'added_image': None, 'mode': 'INSTALL',
+            }
+        return state.issu
+
+    def _cmd_issu(self, cmd, state):
+        """
+        ISSU（In-Service Software Upgrade）/ ソフトウェアアップグレードを仮想実装。
+        - Catalyst(IOS-XE): install add file → install activate [issu] → install commit
+                            show install summary / show issu state detail
+        - Nexus(NX-OS):     install all nxos <image> [non-disruptive]
+                            show install all status / show install all impact
+        対象外は None。
+        """
+        if state.device_type not in ('catalyst', 'nexus'):
+            return None
+        c = cmd.lower().strip()
+        issu = self._issu_store(state)
+
+        def _ver_from_image(img):
+            m = re.search(r'(\d+\.\d+\.\d+)', img)
+            return m.group(1) if m else 'unknown'
+
+        # ── Catalyst (IOS-XE install ワークフロー) ──
+        if state.device_type == 'catalyst':
+            m = re.match(r'^install\s+add\s+file\s+(\S+)(\s+activate\s+commit)?', c)
+            if m:
+                img = m.group(1)
+                issu['added_image'] = img
+                issu['target'] = _ver_from_image(img)
+                issu['state'] = 'added'
+                lines = [
+                    f'install_add: START {img}',
+                    'install_add: Adding IMG',
+                    '--- Starting initial file syncing ---',
+                    'Info: Finished copying to the selected switches',
+                    'Finished initial file syncing',
+                    '',
+                    f'--- Starting Add ---',
+                    'Performing Add on all members',
+                    f'  [1] Add package(s) on switch 1',
+                    f'  [1] Finished Add on switch 1',
+                    'Checking status of Add on [1]',
+                    'Add: Passed on [1]',
+                    'Finished Add',
+                    '',
+                    f'SUCCESS: install_add  {img}',
+                ]
+                if m.group(2):  # activate commit も同時指定
+                    issu['current'] = issu['target']
+                    issu['state'] = 'committed'
+                    lines.append('install_activate: Activating and committing (ISSU, non-disruptive)')
+                    lines.append(f'SUCCESS: install_add_activate_commit')
+                return '\n'.join(lines)
+
+            if re.match(r'^install\s+activate(\s+issu)?', c):
+                if issu['state'] != 'added':
+                    return '% No image added. Run "install add file ..." first.'
+                issu['state'] = 'activated'
+                issu['current'] = issu['target']
+                issu_flag = 'ISSU' if 'issu' in c else 'reload'
+                return '\n'.join([
+                    f'install_activate: START',
+                    f'install_activate: Activating IMG ({issu_flag})',
+                    'Following packages shall be activated:',
+                    f'  cat9k image {issu["target"]}',
+                    '',
+                    'This operation may require a reload of the system. '
+                    'Do you want to proceed? [y/n] y',
+                    ('ISSU: traffic forwarding continues during activation '
+                     '(non-disruptive)' if 'issu' in c else
+                     'Reloading with new image...'),
+                    f'SUCCESS: install_activate  {issu["target"]}',
+                    '',
+                    '※ commit するには "install commit" を実行してください'
+                    '（未commitは自動ロールバック対象）',
+                ])
+
+            if re.match(r'^install\s+commit', c):
+                if issu['state'] not in ('activated',):
+                    return '% No activated image to commit.'
+                issu['state'] = 'committed'
+                return '\n'.join([
+                    'install_commit: START',
+                    'install_commit: Committing IMG',
+                    'Finished Commit operations',
+                    f'SUCCESS: install_commit  {issu["current"]}',
+                ])
+
+            if re.match(r'^install\s+abort', c):
+                if issu['state'] == 'activated':
+                    issu['state'] = 'committed'
+                    issu['current'] = issu.get('_prev', issu['current'])
+                    return 'install_abort: Rolling back to previous version. SUCCESS.'
+                return '% Nothing to abort.'
+
+            if re.match(r'^show\s+install\s+summary', c):
+                st = issu['state'].upper()
+                imgs = []
+                imgs.append(f'  IMG   C  {issu["current"]}   (committed)')
+                if issu['state'] in ('added', 'activated') and issu['target']:
+                    flag = 'A' if issu['state'] == 'activated' else 'I'
+                    imgs.append(f'  IMG   {flag}  {issu["target"]}   ({issu["state"]})')
+                return '\n'.join([
+                    '[ Switch 1 ] Installed Package(s) Information:',
+                    'State (St): I-Inactive, U-Activated & Uncommitted,',
+                    '            C-Activated & Committed, D-Deactivated & Uncommitted',
+                    '--------------------------------------------------------------',
+                    'Type  St   Version',
+                    '--------------------------------------------------------------',
+                ] + imgs)
+
+            if re.match(r'^show\s+issu\s+state', c):
+                return '\n'.join([
+                    '--- Starting local lock acquisition on switch 1 ---',
+                    '',
+                    f'Finished local lock acquisition on switch 1',
+                    '',
+                    f'No ISSU operation is in progress'
+                    if issu['state'] == 'committed' else
+                    f'ISSU operation in progress: state = {issu["state"].upper()}',
+                    f'  Current version : {issu["current"]}',
+                    f'  Target version  : {issu["target"] or "-"}',
+                    f'  Mode            : {issu["mode"]} (non-disruptive)',
+                ])
+
+        # ── Nexus (NX-OS install all) ──
+        if state.device_type == 'nexus':
+            m = re.match(r'^install\s+all\s+nxos\s+(\S+)(\s+non-disruptive)?', c)
+            if m:
+                img = m.group(1)
+                tgt = _ver_from_image(img)
+                disruptive = not bool(m.group(2))
+                issu['_prev'] = issu['current']
+                issu['target'] = tgt
+                issu['current'] = tgt
+                issu['state'] = 'committed'
+                impact = 'disruptive' if disruptive else 'non-disruptive'
+                return '\n'.join([
+                    'Installer will perform compatibility check first.',
+                    'Performing module support checks.',
+                    'Verifying image bootflash:/' + img + ' for boot variable "nxos".',
+                    '[####################] 100% -- SUCCESS',
+                    '',
+                    'Performing runtime checks.',
+                    '[####################] 100% -- SUCCESS',
+                    '',
+                    'Compatibility check is done:',
+                    'Module  bootable          Impact  Install-type  Reason',
+                    '------  --------  --------------  ------------  ------',
+                    f'     1       yes  {impact:>14}  {"reset" if disruptive else "  none"}  ',
+                    '',
+                    'Images will be upgraded according to following table:',
+                    'Module       Image         Running-Version       New-Version',
+                    '------  ----------  --------------------  --------------------',
+                    f'     1        nxos  {issu["_prev"]:>20}  {tgt:>20}',
+                    '',
+                    ('Switch will be reloaded for disruptive upgrade.'
+                     if disruptive else
+                     'Non-disruptive upgrading. Traffic forwarding continues.'),
+                    'Install has been successful.',
+                ])
+
+            if re.match(r'^show\s+install\s+all\s+status', c):
+                return '\n'.join([
+                    'This is the log of last installation.',
+                    '',
+                    f'Continuing with installation, please wait',
+                    'Trying to start the installer...',
+                    '',
+                    f'Install has been successful. Running version: {issu["current"]}',
+                ])
+
+            if re.match(r'^show\s+install\s+all\s+impact', c):
+                return '\n'.join([
+                    'Impact analysis (no changes applied):',
+                    'Module  bootable          Impact  Install-type  Reason',
+                    '------  --------  --------------  ------------  ------',
+                    '     1       yes  non-disruptive          none  ',
+                    f'  Current running-version: {issu["current"]}',
+                ])
+
+        return None
+
     def _cmd_config(self, cmd, state):
         c = cmd.lower().strip()
 
@@ -1383,11 +3061,51 @@ ntp server 192.168.1.1"""
             state.hostname = m.group(1)
             return ""
 
+        # ── SPAN / ポートミラーリング ──
+        if (re.match(r'^(no\s+)?monitor\s+session', c) or
+                re.match(r'^(no\s+)?mirror\s+session', c) or
+                (state.mode == 'config-monitor' and
+                 re.match(r'^(no\s+)?(source|destination|shut)', c))):
+            out = self._cmd_monitor(cmd, state)
+            if out is not None:
+                return out
+
+        # ── QoS（MQC / 各社固有）──
+        qos_out = self._cmd_qos(cmd, state)
+        if qos_out is not None:
+            return qos_out
+
+        # ── VSS / デュアルアクティブ検知（Catalyst）──
+        vss_out = self._cmd_vss(cmd, state)
+        if vss_out is not None:
+            return vss_out
+
+        # interface ip address (CIDR notation: ip address X.X.X.X/prefix)
+        m_cidr = re.match(r'^ip\s+address\s+([\d.]+)/(\d+)', c)
+        if m_cidr:
+            ip_val = m_cidr.group(1)
+            prefix = int(m_cidr.group(2))
+            if not _valid_ip(ip_val):
+                return f"% Invalid input: IP address '{ip_val}' is not valid"
+            if state.current_if:
+                state.interfaces.setdefault(state.current_if, {})["ip"] = ip_val
+                state.interfaces[state.current_if]["prefix"] = prefix
+            return ""
+
         # interface ip address
         if re.match(r'^ip\s+address\s+[\d.]+\s+[\d.]+', c):
             m = re.match(r'^ip\s+address\s+([\d.]+)\s+([\d.]+)', c)
-            if m and state.current_if:
-                state.interfaces.setdefault(state.current_if, {})["ip"] = m.group(1)
+            if m:
+                ip_val = m.group(1)
+                mask_val = m.group(2)
+                if not _valid_ip(ip_val):
+                    return f"% Invalid input: IP address '{ip_val}' is not valid"
+                if not _valid_mask(mask_val):
+                    return f"% Invalid input: subnet mask '{mask_val}' is not valid"
+                if state.current_if:
+                    state.interfaces.setdefault(state.current_if, {})["ip"] = ip_val
+                    prefix = sum(bin(int(o)).count('1') for o in mask_val.split('.'))
+                    state.interfaces[state.current_if]["prefix"] = prefix
                 return ""
 
         # switchport
@@ -1397,6 +3115,17 @@ ntp server 192.168.1.1"""
             m = re.match(r'^switchport\s+access\s+vlan\s+(\d+)', c)
             if m and state.current_if:
                 state.interfaces.setdefault(state.current_if, {})["vlan"] = m.group(1)
+            return ""
+
+        # crypto map <name>  (インターフェースモードで適用)
+        m_cmap_if = re.match(r'^crypto\s+map\s+(\S+)$', c)
+        if m_cmap_if and state.current_if:
+            # Preserve original case of map name
+            m_orig2 = re.match(r'^crypto\s+map\s+(\S+)$', cmd.strip(), re.I)
+            map_name = m_orig2.group(1) if m_orig2 else m_cmap_if.group(1)
+            state.interfaces.setdefault(state.current_if, {})['crypto_map'] = map_name
+            state.ipsec_crypto['crypto_map_interface'] = {
+                'name': map_name, 'interface': state.current_if}
             return ""
 
         # no shutdown
@@ -1425,19 +3154,382 @@ ntp server 192.168.1.1"""
 
         # Si-R 固有
         if re.match(r'^lan\s+\d+\s+', c):
+            # lan X ip address で IPを反映
+            m_lan_ip = re.match(r'^lan\s+(\d+)\s+ip\s+address\s+([\d.]+)/(\d+)', c)
+            if m_lan_ip and state.device_type in ('sir', 'srs'):
+                ip_val = m_lan_ip.group(2)
+                prefix_val = int(m_lan_ip.group(3))
+                if not _valid_ip(ip_val):
+                    return f"% Invalid input: IP address '{ip_val}' is not valid"
+                if not _valid_prefix(prefix_val):
+                    return f"% Invalid input: prefix length '{prefix_val}' must be 0-32"
+                iface = f'lan{m_lan_ip.group(1)}'
+                state.interfaces.setdefault(iface, {})
+                state.interfaces[iface]['ip'] = ip_val
+                state.interfaces[iface]['prefix'] = prefix_val
             return ""
         if re.match(r'^wan\s+\d+\s+', c):
+            # wan X ip address で IPを反映
+            m_wan_ip = re.match(r'^wan\s+(\d+)\s+ip\s+address\s+([\d.]+)/(\d+)', c)
+            if m_wan_ip and state.device_type in ('sir', 'srs'):
+                ip_val = m_wan_ip.group(2)
+                prefix_val = int(m_wan_ip.group(3))
+                if not _valid_ip(ip_val):
+                    return f"% Invalid input: IP address '{ip_val}' is not valid"
+                if not _valid_prefix(prefix_val):
+                    return f"% Invalid input: prefix length '{prefix_val}' must be 0-32"
+                iface = f'wan{m_wan_ip.group(1)}'
+                state.interfaces.setdefault(iface, {})
+                state.interfaces[iface]['ip'] = ip_val
+                state.interfaces[iface]['prefix'] = prefix_val
             return ""
         if re.match(r'^ip\s+rip\s+', c):
             return ""
         if re.match(r'^ip\s+dns\s+', c):
             return ""
 
+        # ── Si-R IPsec VPN コマンド ──
+        # remote 1 ap 0 name <name>  (名前は元のケースを保持)
+        m_remote_name = re.match(r'^remote\s+(\d+)\s+ap\s+(\d+)\s+name\s+(\S+)', c)
+        if m_remote_name and state.device_type in ('sir', 'srs'):
+            tid = int(m_remote_name.group(1))
+            m_orig = re.match(r'^remote\s+\d+\s+ap\s+\d+\s+name\s+(\S+)', cmd, re.I)
+            state.ipsec_tunnels.setdefault(tid, {})['name'] = m_orig.group(1) if m_orig else m_remote_name.group(3)
+            return ""
+
+        # remote 1 ap 0 datalink type ipsec
+        m_remote_dl = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+datalink\s+type\s+(\S+)', c)
+        if m_remote_dl and state.device_type in ('sir', 'srs'):
+            tid = int(m_remote_dl.group(1))
+            state.ipsec_tunnels.setdefault(tid, {})['datalink'] = m_remote_dl.group(2)
+            return ""
+
+        # remote 1 ap 0 ipsec type ike
+        m_remote_ipsec_type = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+type\s+(\S+)', c)
+        if m_remote_ipsec_type and state.device_type in ('sir', 'srs'):
+            tid = int(m_remote_ipsec_type.group(1))
+            state.ipsec_tunnels.setdefault(tid, {})['ipsec_type'] = m_remote_ipsec_type.group(2)
+            return ""
+
+        # remote 1 ap 0 tunnel local <ip>
+        m_tunnel_local = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+tunnel\s+local\s+([\d.]+)', c)
+        if m_tunnel_local and state.device_type in ('sir', 'srs'):
+            tid = int(m_tunnel_local.group(1))
+            local_ip = m_tunnel_local.group(2)
+            if not _valid_ip(local_ip):
+                return f"% Invalid input: IP address '{local_ip}' is not valid"
+            state.ipsec_tunnels.setdefault(tid, {})['local_ip'] = local_ip
+            state.ipsec_tunnels[tid].setdefault('status', 'wait')
+            return ""
+
+        # remote 1 ap 0 tunnel remote <ip>
+        m_tunnel_remote = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+tunnel\s+remote\s+([\d.]+)', c)
+        if m_tunnel_remote and state.device_type in ('sir', 'srs'):
+            tid = int(m_tunnel_remote.group(1))
+            remote_ip = m_tunnel_remote.group(2)
+            if not _valid_ip(remote_ip):
+                return f"% Invalid input: IP address '{remote_ip}' is not valid"
+            state.ipsec_tunnels.setdefault(tid, {})['remote_ip'] = remote_ip
+            return ""
+
+        # remote 1 ap 0 ipsec ike preshared-key <key>
+        m_psk = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key\s+(\S+)', c)
+        if m_psk and state.device_type in ('sir', 'srs'):
+            tid = int(m_psk.group(1))
+            state.ipsec_tunnels.setdefault(tid, {})['preshared'] = m_psk.group(2)
+            state.ipsec_tunnels[tid]['status'] = 'established'  # 鍵設定でNEG開始を模擬
+            state.ipsec_tunnels[tid]['phase1'] = 'MATURE'
+            state.ipsec_tunnels[tid]['phase2'] = 'MATURE'
+            return ""
+
+        # remote 1 ap 0 ipsec protocol esp
+        m_proto = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+protocol\s+(\S+)', c)
+        if m_proto and state.device_type in ('sir', 'srs'):
+            tid = int(m_proto.group(1))
+            state.ipsec_tunnels.setdefault(tid, {})['protocol'] = m_proto.group(2)
+            return ""
+
+        # remote 1 ap 0 ipsec encrypt aes256 sha256
+        m_enc = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+encrypt\s+(\S+)(?:\s+(\S+))?', c)
+        if m_enc and state.device_type in ('sir', 'srs'):
+            tid = int(m_enc.group(1))
+            state.ipsec_tunnels.setdefault(tid, {})['encryption'] = m_enc.group(2)
+            if m_enc.group(3):
+                state.ipsec_tunnels[tid]['hash'] = m_enc.group(3)
+            return ""
+
+        # remote 1 ap 0 ipsec pfs use on
+        m_pfs = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+pfs\s+(use\s+on|use\s+off|on|off)', c)
+        if m_pfs and state.device_type in ('sir', 'srs'):
+            tid = int(m_pfs.group(1))
+            state.ipsec_tunnels.setdefault(tid, {})['pfs'] = 'on' if 'on' in m_pfs.group(2) else 'off'
+            return ""
+
+        # remote 1 ap 0 ipsec ike mode main|aggressive
+        m_mode = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+ike\s+mode\s+(\S+)', c)
+        if m_mode and state.device_type in ('sir', 'srs'):
+            tid = int(m_mode.group(1))
+            state.ipsec_tunnels.setdefault(tid, {})['ike_mode'] = m_mode.group(2)
+            return ""
+
+        # remote 1 ap 0 ipsec ike dh 14|2|5
+        m_dh = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+ike\s+dh\s+(\d+)', c)
+        if m_dh and state.device_type in ('sir', 'srs'):
+            tid = int(m_dh.group(1))
+            state.ipsec_tunnels.setdefault(tid, {})['dh_group'] = int(m_dh.group(2))
+            return ""
+
+        # remote 1 ap 0 ipsec ike lifetime <sec>
+        m_lt = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+ike\s+lifetime\s+(\d+)', c)
+        if m_lt and state.device_type in ('sir', 'srs'):
+            tid = int(m_lt.group(1))
+            state.ipsec_tunnels.setdefault(tid, {})['ike_lifetime'] = int(m_lt.group(2))
+            return ""
+
+        # remote 1 ap 0 ipsec sa lifetime <sec>
+        m_sa_lt = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+sa\s+lifetime\s+(\d+)', c)
+        if m_sa_lt and state.device_type in ('sir', 'srs'):
+            tid = int(m_sa_lt.group(1))
+            state.ipsec_tunnels.setdefault(tid, {})['sa_lifetime'] = int(m_sa_lt.group(2))
+            return ""
+
+        # remote 1 ip route <dst>/<prefix> <gw> metric <n>
+        m_remote_route = re.match(r'^remote\s+\d+\s+ip\s+route\s+([\d.]+)/(\d+)(?:\s+([\d.]+))?', c)
+        if m_remote_route and state.device_type in ('sir', 'srs'):
+            dest   = m_remote_route.group(1)
+            prefix = int(m_remote_route.group(2))
+            gw     = m_remote_route.group(3) or '0.0.0.0'
+            if not _valid_ip(dest):
+                return f"% Invalid input: IP address '{dest}' is not valid"
+            if not _valid_prefix(prefix):
+                return f"% Invalid input: prefix length '{prefix}' must be 0-32"
+            if gw != '0.0.0.0' and not _valid_ip(gw):
+                return f"% Invalid input: IP address '{gw}' is not valid"
+            entry  = {'dest': dest, 'prefix': prefix, 'gw': gw}
+            if entry not in state.static_routes:
+                state.static_routes.append(entry)
+            return ""
+
+        # ip route default gateway <gw>  (Si-R)
+        m_sir_default = re.match(r'^ip\s+route\s+default\s+gateway\s+([\d.]+)', c)
+        if m_sir_default and state.device_type in ('sir', 'srs'):
+            gw = m_sir_default.group(1)
+            if not _valid_ip(gw):
+                return f"% Invalid input: IP address '{gw}' is not valid"
+            entry = {'dest': '0.0.0.0', 'prefix': 0, 'gw': gw}
+            if entry not in getattr(state, 'static_routes', []):
+                state.static_routes.append(entry)
+            return ""
+
+        # ip route <dst>/<prefix> gateway <gw>  (Si-R CIDR形式)
+        m_sir_cidr = re.match(r'^ip\s+route\s+([\d.]+)/(\d+)\s+gateway\s+([\d.]+)', c)
+        if m_sir_cidr and state.device_type in ('sir', 'srs'):
+            dest   = m_sir_cidr.group(1)
+            prefix = int(m_sir_cidr.group(2))
+            gw     = m_sir_cidr.group(3)
+            if not _valid_ip(dest):
+                return f"% Invalid input: IP address '{dest}' is not valid"
+            if not _valid_prefix(prefix):
+                return f"% Invalid input: prefix length '{prefix}' must be 0-32"
+            if not _valid_ip(gw):
+                return f"% Invalid input: IP address '{gw}' is not valid"
+            entry = {'dest': dest, 'prefix': prefix, 'gw': gw}
+            if entry not in getattr(state, 'static_routes', []):
+                state.static_routes.append(entry)
+            return ""
+
+        # ip route <dst>/<prefix> <gw>  (Nexus CIDR形式)
+        m_nex_route = re.match(r'^ip\s+route\s+([\d.]+)/(\d+)\s+([\d.]+)', c)
+        if m_nex_route and state.device_type == 'nexus':
+            dest   = m_nex_route.group(1)
+            prefix = int(m_nex_route.group(2))
+            gw     = m_nex_route.group(3)
+            if not _valid_ip(dest):
+                return f"% Invalid input: IP address '{dest}' is not valid"
+            if not _valid_prefix(prefix):
+                return f"% Invalid input: prefix length '{prefix}' must be 0-32"
+            if not _valid_ip(gw):
+                return f"% Invalid input: IP address '{gw}' is not valid"
+            entry = {'code': 'S', 'dest': f"{dest}/{prefix}", 'gw': gw, 'dist': 1, 'iface': ''}
+            if not any(r.get('dest') == entry['dest'] for r in state.routes):
+                state.routes.append(entry)
+            return ""
+
+        # ip route <dst> <mask> <gw>  (Si-R / Cisco IOS 共通)
+        m_ip_route = re.match(r'^ip\s+route\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)', c)
+        if m_ip_route and state.device_type in ('sir', 'srs', 'cisco', 'catalyst'):
+            dest = m_ip_route.group(1)
+            mask = m_ip_route.group(2)
+            gw   = m_ip_route.group(3)
+            if not _valid_ip(dest):
+                return f"% Invalid input: IP address '{dest}' is not valid"
+            if not _valid_mask(mask):
+                return f"% Invalid input: subnet mask '{mask}' is not valid"
+            if not _valid_ip(gw):
+                return f"% Invalid input: IP address '{gw}' is not valid"
+            prefix = sum(bin(int(o)).count('1') for o in mask.split('.'))
+            entry = {'dest': dest, 'prefix': prefix, 'gw': gw}
+            if entry not in getattr(state, 'static_routes', []):
+                state.static_routes.append(entry)
+            return ""
+
+        # ipsec use on (グローバル有効化)
+        if re.match(r'^ipsec\s+use\s+on', c) and state.device_type in ('sir', 'srs'):
+            state.ipsec_enabled = True
+            return ""
+
+        # ike use on
+        if re.match(r'^ike\s+use\s+on', c) and state.device_type in ('sir', 'srs'):
+            state.ike_enabled = True
+            return ""
+
+        # ── Cisco IOS IPsec/IKE コマンド (cisco / catalyst) ──
+        if state.device_type in ('cisco', 'catalyst'):
+            # crypto isakmp policy <n>
+            m_isakmp = re.match(r'^crypto\s+isakmp\s+policy\s+(\d+)', c)
+            if m_isakmp:
+                state._ike_policy_num = int(m_isakmp.group(1))
+                state.ipsec_crypto.setdefault('isakmp_policies', {})[state._ike_policy_num] = {
+                    'encryption': 'aes-256', 'hash': 'sha256',
+                    'authentication': 'pre-share', 'group': 14, 'lifetime': 86400,
+                }
+                state.mode = 'config-crypto'
+                return ''
+
+            if hasattr(state, '_ike_policy_num'):
+                num = state._ike_policy_num
+                pol = state.ipsec_crypto.get('isakmp_policies', {}).get(num, {})
+                m_enc2 = re.match(r'^encryption\s+(.+)', c)
+                if m_enc2: pol['encryption'] = m_enc2.group(1).strip(); return ''
+                m_hash2 = re.match(r'^hash\s+(\S+)', c)
+                if m_hash2: pol['hash'] = m_hash2.group(1); return ''
+                m_auth2 = re.match(r'^authentication\s+(\S+)', c)
+                if m_auth2: pol['authentication'] = m_auth2.group(1); return ''
+                m_grp2 = re.match(r'^group\s+(\d+)', c)
+                if m_grp2: pol['group'] = int(m_grp2.group(1)); return ''
+                m_lt2 = re.match(r'^lifetime\s+(\d+)', c)
+                if m_lt2: pol['lifetime'] = int(m_lt2.group(1)); return ''
+
+            # crypto isakmp keepalive <interval> [<retry>] [periodic|on-demand]
+            # DPDタイマー設定: state.ipsec_crypto['dpd'] に保存
+            m_dpd = re.match(r'^crypto\s+isakmp\s+keepalive\s+(\d+)(?:\s+(\d+))?', c)
+            if m_dpd:
+                interval = int(m_dpd.group(1))
+                retry    = int(m_dpd.group(2)) if m_dpd.group(2) else 2
+                state.ipsec_crypto['dpd'] = {'interval': interval, 'retry': retry}
+                return ''
+
+            # crypto ipsec transform-set <name> <transforms>
+            m_ts = re.match(r'^crypto\s+ipsec\s+transform-set\s+(\S+)\s+(.+)', c)
+            if m_ts:
+                ts_name = m_ts.group(1)
+                state.ipsec_crypto.setdefault('transform_sets', {})[ts_name] = {
+                    'transforms': m_ts.group(2).split()
+                }
+                return ''
+
+            # crypto map <name> <seq> ipsec-isakmp  (enter crypto map sub-context)
+            m_cmap_enter = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+ipsec-isakmp', c)
+            if m_cmap_enter:
+                # Preserve original case of map name
+                m_orig = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+ipsec-isakmp', cmd.strip(), re.I)
+                mapname = m_orig.group(1) if m_orig else m_cmap_enter.group(1)
+                seq = int(m_cmap_enter.group(2))
+                state._cmap_name = mapname
+                state._cmap_seq = seq
+                state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {}).setdefault(seq, {})
+                state.mode = 'config-crypto'
+                return ''
+
+            # crypto map <name> <seq> match address <acl>  (sub-context or inline)
+            # Sub-context commands for crypto map (match address / set peer / set transform-set)
+            _in_cmap = hasattr(state, '_cmap_name') and hasattr(state, '_cmap_seq')
+            m_sub_match = re.match(r'^match\s+address\s+(\S+)', c)
+            if m_sub_match and _in_cmap:
+                acl = m_sub_match.group(1)
+                (state.ipsec_crypto.setdefault('crypto_maps', {})
+                 .setdefault(state._cmap_name, {})
+                 .setdefault(state._cmap_seq, {})['acl']) = acl
+                return ''
+            m_sub_peer = re.match(r'^set\s+peer\s+([\d.]+)', c)
+            if m_sub_peer and _in_cmap:
+                peer = m_sub_peer.group(1)
+                if not _valid_ip(peer):
+                    return f"% Invalid input: IP address '{peer}' is not valid"
+                (state.ipsec_crypto.setdefault('crypto_maps', {})
+                 .setdefault(state._cmap_name, {})
+                 .setdefault(state._cmap_seq, {})['peer']) = peer
+                state.ipsec_peers.setdefault(peer, {})['remote_ip'] = peer
+                return ''
+            m_sub_ts = re.match(r'^set\s+transform-set\s+(\S+)', c)
+            if m_sub_ts and _in_cmap:
+                ts = m_sub_ts.group(1)
+                (state.ipsec_crypto.setdefault('crypto_maps', {})
+                 .setdefault(state._cmap_name, {})
+                 .setdefault(state._cmap_seq, {})['transform_set']) = ts
+                return ''
+
+            # crypto map <name> <seq> match address <acl>  (inline form)
+            m_cmap_match = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+match\s+address\s+(\S+)', c)
+            if m_cmap_match:
+                mapname, seq, acl = m_cmap_match.group(1), int(m_cmap_match.group(2)), m_cmap_match.group(3)
+                state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {})[seq] = {'acl': acl}
+                return ''
+
+            # crypto map <name> <seq> set peer <ip>
+            m_cmap_peer = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+set\s+peer\s+([\d.]+)', c)
+            if m_cmap_peer:
+                mapname, seq, peer = m_cmap_peer.group(1), int(m_cmap_peer.group(2)), m_cmap_peer.group(3)
+                if not _valid_ip(peer):
+                    return f"% Invalid input: IP address '{peer}' is not valid"
+                state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {}).setdefault(seq, {})['peer'] = peer
+                state.ipsec_peers.setdefault(peer, {})['remote_ip'] = peer
+                return ''
+
+            # crypto map <name> <seq> set transform-set <ts>
+            m_cmap_ts = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+set\s+transform-set\s+(\S+)', c)
+            if m_cmap_ts:
+                mapname, seq, ts = m_cmap_ts.group(1), int(m_cmap_ts.group(2)), m_cmap_ts.group(3)
+                state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {}).setdefault(seq, {})['transform_set'] = ts
+                return ''
+
+            # crypto map <name> interface <if>
+            m_cmap_if = re.match(r'^crypto\s+map\s+(\S+)\s+interface\s+(\S+)', c)
+            if m_cmap_if:
+                state.ipsec_crypto['crypto_map_interface'] = {
+                    'name': m_cmap_if.group(1), 'interface': m_cmap_if.group(2)}
+                return ''
+
+            # crypto isakmp enable <if>
+            m_ike_enable = re.match(r'^crypto\s+isakmp\s+enable\s+(\S+)', c)
+            if m_ike_enable:
+                state.ipsec_crypto['isakmp_enabled'] = m_ike_enable.group(1)
+                return ''
+
+            # crypto isakmp key <key> address <peer>  (already handled above but fallback)
+            m_ios_psk2 = re.match(r'^crypto\s+isakmp\s+key\s+(\S+)\s+address\s+([\d.]+)', c)
+            if m_ios_psk2:
+                key, peer = m_ios_psk2.group(1), m_ios_psk2.group(2)
+                if not _valid_ip(peer):
+                    return f"% Invalid input: IP address '{peer}' is not valid"
+                state.ipsec_crypto.setdefault('isakmp_keys', {})[peer] = key
+                return ''
+
         # network
         if re.match(r'^network\s+', c):
             return ""
 
-        # neighbor
+        # neighbor <IP> remote-as <ASN>
+        m_neighbor = re.match(r'^neighbor\s+([\d.]+)\s+remote-as\s+(\d+)', c)
+        if m_neighbor:
+            nbr_ip = m_neighbor.group(1)
+            nbr_asn = int(m_neighbor.group(2))
+            if not _valid_ip(nbr_ip):
+                return f"% Invalid input: IP address '{nbr_ip}' is not valid"
+            if not _valid_asn(nbr_asn):
+                return f"% Invalid input: AS number {nbr_asn} must be 1-4294967295"
+            return ""
+        # neighbor (other sub-commands)
         if re.match(r'^neighbor\s+', c):
             return ""
 
@@ -1460,6 +3552,120 @@ ntp server 192.168.1.1"""
             f"round-trip min/avg/max = {min(rtt)}/{round(sum(rtt)/len(rtt),3)}/{max(rtt)} ms"]
         return "\n".join(lines)
 
+    # ─── トンネルヘッダー付加エミュレーション ──────────────────
+    def _show_tunnel_header(self, cmd, state):
+        """
+        IPsec トンネルモードのパケットヘッダー付加をシミュレート表示。
+        'show tunnel-header <src-ip> <dst-ip>' コマンドに対応。
+        Si-R / Cisco IOS 共通。
+        """
+        m = re.match(r'^show\s+tunnel[-\s]?header\s+([\d.]+)\s+([\d.]+)', cmd, re.I)
+        if not m:
+            return ("Usage: show tunnel-header <src-ip> <dst-ip>\n"
+                    "  Example: show tunnel-header 192.168.1.10 10.10.0.20")
+
+        orig_src = m.group(1)
+        orig_dst = m.group(2)
+
+        # アクティブなトンネルを探す
+        tunnel_local  = None
+        tunnel_remote = None
+        spi_out       = None
+        enc_alg       = "AES-256"
+        protocol      = "ESP"
+
+        if state.device_type in ('sir', 'srs'):
+            for tid, t in getattr(state, 'ipsec_tunnels', {}).items():
+                if t.get('status') == 'established':
+                    tunnel_local  = t.get('local_ip',  '203.0.113.1')
+                    tunnel_remote = t.get('remote_ip', '203.0.113.2')
+                    spi_out       = t.get('spi_out',   '0x00000001')
+                    enc_alg = t.get('encryption', 'aes256').upper().replace('AES256', 'AES-256')
+                    break
+        elif state.device_type in ('cisco', 'catalyst'):
+            crypto = getattr(state, 'ipsec_crypto', {})
+            peers  = getattr(state, 'ipsec_peers',  {})
+            for peer_ip, p in peers.items():
+                if p.get('status') == 'established':
+                    tunnel_remote = peer_ip
+                    spi_out = p.get('spi_out', '0x00000001')
+                    # WAN IP を探す
+                    for _, ifd in state.interfaces.items():
+                        if ifd.get('ip') and ifd['ip'] != '127.0.0.1':
+                            tunnel_local = ifd['ip']
+                            break
+                    # transform-set から暗号アルゴリズム取得
+                    ts_map = crypto.get('transform_sets', {})
+                    ts = next(iter(ts_map.values()), {}) if ts_map else {}
+                    tfs = ts.get('transforms', [])
+                    if 'esp-aes-256' in tfs or 'esp-aes256' in tfs:
+                        enc_alg = 'AES-256'
+                    elif 'esp-3des' in tfs:
+                        enc_alg = '3DES'
+                    else:
+                        enc_alg = 'AES-128'
+                    break
+
+        if not tunnel_local or not tunnel_remote:
+            return ("% No established IPsec tunnel found.\n"
+                    "  Run 'show ipsec sa' or 'show crypto ipsec sa' to check tunnel status.")
+
+        orig_size   = 60   # ICMP echo (IP 20 + ICMP 8 + data 32)
+        esp_hdr     = 8    # SPI(4) + Seq(4)
+        esp_trl     = 22   # Pad + PadLen + NextHdr + ICV(16 for AES-256)
+        tunnel_hdr  = 20   # outer IP header
+        total_size  = orig_size + esp_hdr + esp_trl + tunnel_hdr
+
+        lines = [
+            "",
+            "IPsec Tunnel Mode - Packet Header Encapsulation",
+            "=" * 56,
+            "",
+            "Original (Inner) Packet:",
+            f"  +---------------------------+---------------------------+",
+            f"  | IP Header (20 bytes)      | Payload                   |",
+            f"  | Src: {orig_src:<18} |                           |",
+            f"  | Dst: {orig_dst:<18} | ICMP / TCP / UDP          |",
+            f"  | Proto: ICMP               | ({orig_size - 20} bytes)                 |",
+            f"  +---------------------------+---------------------------+",
+            f"  Total: {orig_size} bytes",
+            "",
+            "After IPsec ESP Encapsulation (Tunnel Mode):",
+            f"  +---------------+-------+---------------------------+-------+",
+            f"  | Outer IP Hdr  | ESP   | Encrypted Payload         | ESP   |",
+            f"  | (20 bytes)    | Header| (Inner IP + Data)         | Trail |",
+            f"  | Src: {tunnel_local:<9} | ({esp_hdr}B)  | Alg: {enc_alg:<20} | ({esp_trl}B) |",
+            f"  | Dst: {tunnel_remote:<9} | SPI:  | Original {orig_size} bytes         |       |",
+            f"  | Proto: ESP    | {spi_out} |                           |       |",
+            f"  +---------------+-------+---------------------------+-------+",
+            f"  Total: {total_size} bytes  (overhead: +{total_size - orig_size} bytes)",
+            "",
+            "Header Details:",
+            f"  [Outer IP Header]",
+            f"    Version  : 4",
+            f"    IHL      : 20 bytes",
+            f"    Protocol : 50 (ESP)",
+            f"    Src      : {tunnel_local}",
+            f"    Dst      : {tunnel_remote}",
+            "",
+            f"  [ESP Header]",
+            f"    SPI      : {spi_out}",
+            f"    Seq No   : 0x00000001",
+            "",
+            f"  [Encrypted Payload]",
+            f"    Algorithm: {enc_alg} (CBC)",
+            f"    Content  : [Original IP Header + {protocol} Data] (encrypted)",
+            "",
+            f"  [ESP Trailer]",
+            f"    Padding  : variable",
+            f"    Next Hdr : 4 (IPv4)",
+            f"    ICV      : 16 bytes (HMAC-SHA256)",
+            "",
+            f"Tunnel: {tunnel_local} --> {tunnel_remote}",
+            f"Status: ACTIVE  SPI(out)={spi_out}  Encr={enc_alg}",
+        ]
+        return "\n".join(lines)
+
     # ─── traceroute ───────────────────────────
     def _cmd_traceroute(self, cmd, state):
         m = re.match(r'^traceroute\s+([\d.]+)', cmd, re.I)
@@ -1472,6 +3678,1275 @@ ntp server 192.168.1.1"""
             rtts = [round(random.uniform(1, 15), 3) for _ in range(3)]
             lines.append(f" {hop}  {ip} ({ip})  {rtts[0]} ms  {rtts[1]} ms  {rtts[2]} ms")
         return "\n".join(lines)
+
+    # ─── Cisco ASA コマンドエンジン（シングルコンテキスト 9.x準拠）────
+    def _asa_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """Cisco ASA シングルコンテキスト CLIコマンドを処理する"""
+
+        # ── モード遷移 ──
+        if c in ('exit', 'end', 'quit'):
+            if state.mode == 'config-if':
+                state.mode = 'config'
+                return ''
+            elif state.mode in ('config-router', 'config-policy-map',
+                                'config-pmap-c', 'config-class-map'):
+                state.mode = 'config'
+                return ''
+            elif state.mode == 'config':
+                state.mode = 'exec'
+                return ''
+            return ''
+
+        if c in ('enable', 'en'):
+            return 'Password: \nType help or \'?\' for a list of available commands.'
+
+        if c in ('configure terminal', 'conf t', 'conf terminal', 'config t'):
+            state.mode = 'config'
+            return f'\n{state.hostname}(config)# '
+
+        if state.mode == 'exec' and c not in ('configure terminal', 'conf t',
+                                               'enable', 'show version',
+                                               'show interface', 'show running',
+                                               'show route', 'show conn',
+                                               'show xlate', 'show access-list',
+                                               'show crypto', 'show nat',
+                                               'ping', 'traceroute',
+                                               'show logging', 'write memory',
+                                               'write', 'wr', 'show version'):
+            pass  # execモードではshow/ping系のみ許可（他はconfig必要）
+
+        # ── show コマンド ──
+        if c == 'show version' or c == 'sh ver':
+            return self._asa_show_version(state)
+
+        if re.match(r'^show\s+interface', c):
+            m = re.match(r'^show\s+interface\s+(\S+)', c)
+            target = m.group(1) if m else None
+            return self._asa_show_interface(state, target)
+
+        if re.match(r'^show\s+(ip\s+)?route', c):
+            return self._asa_show_route(state)
+
+        if re.match(r'^show\s+running-config|^show\s+run|^sh\s+run', c):
+            return self._asa_show_running(state)
+
+        if re.match(r'^show\s+access-list', c):
+            return self._asa_show_access_list(state)
+
+        if re.match(r'^show\s+conn', c):
+            return self._asa_show_conn(state)
+
+        if re.match(r'^show\s+xlate', c):
+            return self._asa_show_xlate(state)
+
+        if re.match(r'^show\s+nat', c):
+            return self._asa_show_nat(state)
+
+        if re.match(r'^show\s+crypto\s+isakmp\s+sa', c):
+            return self._asa_show_crypto_isakmp_sa(state)
+
+        if re.match(r'^show\s+crypto\s+ipsec\s+sa', c):
+            return self._asa_show_crypto_ipsec_sa(state)
+
+        if re.match(r'^show\s+ospf\s+neighbor', c):
+            if hasattr(state, 'ospf'):
+                return self._show_ospf_neighbor(state)
+            return 'Neighbor ID     Pri   State           Dead Time   Address         Interface\n(No OSPF neighbors)'
+
+        if re.match(r'^show\s+ospf\s+database', c):
+            if hasattr(state, 'ospf'):
+                return self._show_ospf_database(state)
+            return '% No OSPF database entries.'
+
+        if re.match(r'^show\s+ospf$', c):
+            if hasattr(state, 'ospf'):
+                return self._show_ospf(state)
+            return '% OSPF is not configured on this device.'
+
+        if re.match(r'^show\s+(ip\s+)?rip\s+neighbor', c):
+            return self._show_rip_neighbor(state)
+
+        if re.match(r'^show\s+service-policy', c):
+            return self._asa_show_service_policy(state)
+
+        if re.match(r'^show\s+logging', c):
+            return ('Syslog logging: enabled\n'
+                    f'    Console logging: level {state.logging_level}\n'
+                    '    Trap logging: level informational, facility 20\n'
+                    + (''.join(f'    Logging to {s["host"]} port {s["port"]}\n'
+                               for s in state.syslog_servers)))
+
+        # ── インタフェース設定 ──
+        m_if = re.match(r'^interface\s+(\S+)', c)
+        if m_if and state.mode == 'config':
+            state.current_if = self._resolve_ifname(m_if.group(1), state)
+            state.mode = 'config-if'
+            return ''
+
+        if state.mode == 'config-if':
+            iface = state.current_if or ''
+            iinfo = state.interfaces.get(iface, {})
+
+            m_ip = re.match(r'^ip\s+address\s+([\d.]+)\s+([\d.]+)', c)
+            if m_ip:
+                ip = m_ip.group(1)
+                prefix = sum(bin(int(o)).count('1') for o in m_ip.group(2).split('.'))
+                state.interfaces.setdefault(iface, {})
+                state.interfaces[iface]['ip'] = ip
+                state.interfaces[iface]['prefix'] = prefix
+                return ''
+
+            m_nameif = re.match(r'^nameif\s+(\S+)', c)
+            if m_nameif:
+                state.interfaces.setdefault(iface, {})
+                state.interfaces[iface]['nameif'] = m_nameif.group(1)
+                return ''
+
+            m_sec = re.match(r'^security-level\s+(\d+)', c)
+            if m_sec:
+                state.interfaces.setdefault(iface, {})
+                state.interfaces[iface]['security_level'] = int(m_sec.group(1))
+                return ''
+
+            if c in ('no shutdown', 'no shut'):
+                state.interfaces.setdefault(iface, {})
+                state.interfaces[iface]['status'] = 'up'
+                return ''
+            if c == 'shutdown':
+                state.interfaces.setdefault(iface, {})
+                state.interfaces[iface]['status'] = 'down'
+                return ''
+
+        # ── ACL設定 ──
+        # access-list OUTSIDE_IN extended permit tcp any host 192.168.1.10 eq 80
+        m_acl = re.match(
+            r'^access-list\s+(\S+)\s+(extended|standard)\s+(permit|deny)\s+'
+            r'(ip|tcp|udp|icmp|ospf|any)\s+(.+)', orig := cmd.strip(), re.I)
+        if m_acl and state.mode == 'config':
+            name   = m_acl.group(1)
+            action = m_acl.group(3).lower()
+            proto  = m_acl.group(4).lower()
+            rest   = m_acl.group(5)
+            entry = {'action': action, 'proto': proto, 'raw': rest,
+                     'line': len(state.acls.get(name, [])) + 1}
+            state.acls.setdefault(name, []).append(entry)
+            return ''
+
+        # access-list NAME remark TEXT
+        m_remark = re.match(r'^access-list\s+(\S+)\s+remark\s+(.+)', cmd.strip(), re.I)
+        if m_remark and state.mode == 'config':
+            name = m_remark.group(1)
+            state.acls.setdefault(name, []).append(
+                {'action': 'remark', 'proto': '', 'raw': m_remark.group(2), 'line': 0})
+            return ''
+
+        # access-group NAME in|out interface IFACE
+        m_ag = re.match(r'^access-group\s+(\S+)\s+(in|out)\s+interface\s+(\S+)', c)
+        if m_ag and state.mode == 'config':
+            name, direction, iface = m_ag.group(1), m_ag.group(2), m_ag.group(3)
+            for ifname, iinfo in state.interfaces.items():
+                if iinfo.get('nameif', '').lower() == iface.lower() or ifname.lower() == iface.lower():
+                    state.interfaces[ifname]['acl_' + direction] = name
+            return ''
+
+        # ── NAT設定 ──
+        # object network OBJ_INSIDE
+        m_obj = re.match(r'^object\s+network\s+(\S+)', c)
+        if m_obj and state.mode == 'config':
+            state._current_obj = m_obj.group(1)
+            state.mode = 'config'
+            return ''
+
+        # nat (inside,outside) dynamic interface
+        m_nat = re.match(r'^nat\s+\((\S+),(\S+)\)\s+(dynamic|static)\s+(.+)', c)
+        if m_nat:
+            real_iface   = m_nat.group(1)
+            mapped_iface = m_nat.group(2)
+            nat_type     = m_nat.group(3)
+            mapped       = m_nat.group(4).strip()
+            state.nat_rules.append({
+                'type': nat_type, 'real': real_iface,
+                'mapped': mapped_iface, 'mapped_addr': mapped,
+            })
+            return ''
+
+        # ── ルーティング ──
+        m_route = re.match(r'^route\s+(\S+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s+(\d+))?', c)
+        if m_route and state.mode == 'config':
+            iface    = m_route.group(1)
+            network  = m_route.group(2)
+            mask     = m_route.group(3)
+            nexthop  = m_route.group(4)
+            metric   = int(m_route.group(5)) if m_route.group(5) else 1
+            state.routes.append({
+                'iface': iface, 'network': network, 'mask': mask,
+                'nexthop': nexthop, 'metric': metric,
+            })
+            return ''
+
+        # ── ステートフルインスペクション（Modular Policy Framework）──
+        # policy-map global_policy
+        m_pmap = re.match(r'^policy-map\s+(\S+)', c)
+        if m_pmap and state.mode == 'config':
+            state._current_pmap = m_pmap.group(1)
+            state.mode = 'config-policy-map'
+            return ''
+
+        if state.mode == 'config-policy-map':
+            m_class = re.match(r'^class\s+(\S+)', c)
+            if m_class:
+                state._current_class = m_class.group(1)
+                state.mode = 'config-pmap-c'
+                return ''
+
+        if state.mode == 'config-pmap-c':
+            m_inspect = re.match(r'^inspect\s+(\S+)', c)
+            if m_inspect:
+                proto = m_inspect.group(1).lower()
+                if proto not in state.inspect_protocols:
+                    state.inspect_protocols.append(proto)
+                return ''
+
+        # class-map CMAP
+        m_cmap = re.match(r'^class-map\s+(\S+)', c)
+        if m_cmap and state.mode == 'config':
+            state._current_cmap = m_cmap.group(1)
+            state.mode = 'config-class-map'
+            return ''
+
+        # service-policy POLICY global|interface IFACE
+        m_sp = re.match(r'^service-policy\s+(\S+)\s+(global|interface\s+\S+)', c)
+        if m_sp and state.mode == 'config':
+            state.service_policies.append({
+                'policy': m_sp.group(1), 'scope': m_sp.group(2)})
+            return ''
+
+        # ── IPsec / IKE設定（Cisco IOS / ASA 共通） ──
+        # crypto isakmp key <key> address <peer>  (IOS)
+        m_ios_psk = re.match(r'^crypto\s+isakmp\s+key\s+(\S+)\s+address\s+([\d.]+)', c)
+        if m_ios_psk and state.device_type in ('cisco', 'catalyst', 'srs'):
+            key  = m_ios_psk.group(1)
+            peer = m_ios_psk.group(2)
+            state.ipsec_crypto.setdefault('isakmp_keys', {})[peer] = key
+            return ''
+
+        # crypto isakmp policy 10
+        m_isakmp = re.match(r'^crypto\s+isakmp\s+policy\s+(\d+)', c)
+        if m_isakmp and state.mode == 'config':
+            state._ike_policy_num = int(m_isakmp.group(1))
+            state.ipsec_crypto.setdefault('isakmp_policies', {})[state._ike_policy_num] = {
+                'encryption': 'aes-256', 'hash': 'sha256',
+                'authentication': 'pre-share', 'group': 14, 'lifetime': 86400,
+            }
+            return ''
+
+        if hasattr(state, '_ike_policy_num') and state.mode == 'config':
+            num = state._ike_policy_num
+            pol = state.ipsec_crypto.get('isakmp_policies', {}).get(num, {})
+            m_enc = re.match(r'^encryption\s+(.+)', c)
+            if m_enc: pol['encryption'] = m_enc.group(1).strip(); return ''
+            m_hash = re.match(r'^hash\s+(\S+)', c)
+            if m_hash: pol['hash'] = m_hash.group(1); return ''
+            m_auth = re.match(r'^authentication\s+(\S+)', c)
+            if m_auth: pol['authentication'] = m_auth.group(1); return ''
+            m_grp = re.match(r'^group\s+(\d+)', c)
+            if m_grp: pol['group'] = int(m_grp.group(1)); return ''
+            m_lt = re.match(r'^lifetime\s+(\d+)', c)
+            if m_lt: pol['lifetime'] = int(m_lt.group(1)); return ''
+
+        # crypto ipsec transform-set NAME esp-aes-256 esp-sha-hmac
+        m_ts = re.match(r'^crypto\s+ipsec\s+transform-set\s+(\S+)\s+(.+)', c)
+        if m_ts and state.mode == 'config':
+            ts_name = m_ts.group(1)
+            state.ipsec_crypto.setdefault('transform_sets', {})[ts_name] = {
+                'transforms': m_ts.group(2).split()
+            }
+            return ''
+
+        # tunnel-group X.X.X.X type ipsec-l2l
+        m_tg = re.match(r'^tunnel-group\s+([\d.]+)\s+type\s+(\S+)', c)
+        if m_tg and state.mode == 'config':
+            peer = m_tg.group(1)
+            state.ipsec_peers.setdefault(peer, {})['type'] = m_tg.group(2)
+            state._current_tg = peer
+            return ''
+
+        # tunnel-group X.X.X.X ipsec-attributes
+        m_tg_attr = re.match(r'^tunnel-group\s+([\d.]+)\s+ipsec-attributes', c)
+        if m_tg_attr and state.mode == 'config':
+            state._current_tg = m_tg_attr.group(1)
+            state._tg_attr_mode = True
+            return ''
+
+        if getattr(state, '_tg_attr_mode', False):
+            m_psk = re.match(r'^(?:ikev1\s+)?pre-shared-key\s+(\S+)', c)
+            if m_psk:
+                peer = getattr(state, '_current_tg', '')
+                if peer:
+                    state.ipsec_peers.setdefault(peer, {})['preshared'] = m_psk.group(1)
+                return ''
+
+        # crypto map OUTSIDE_MAP 10 match address ACL
+        m_cmap_match = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+match\s+address\s+(\S+)', c)
+        if m_cmap_match and state.mode == 'config':
+            mapname = m_cmap_match.group(1)
+            seq = int(m_cmap_match.group(2))
+            acl = m_cmap_match.group(3)
+            state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {})[seq] = {'acl': acl}
+            return ''
+
+        # crypto map OUTSIDE_MAP 10 set peer X.X.X.X
+        m_cmap_peer = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+set\s+peer\s+([\d.]+)', c)
+        if m_cmap_peer and state.mode == 'config':
+            mapname, seq, peer = m_cmap_peer.group(1), int(m_cmap_peer.group(2)), m_cmap_peer.group(3)
+            state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {}).setdefault(seq, {})['peer'] = peer
+            return ''
+
+        # crypto map OUTSIDE_MAP 10 set transform-set TS_NAME
+        m_cmap_ts = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+set\s+transform-set\s+(\S+)', c)
+        if m_cmap_ts and state.mode == 'config':
+            mapname, seq, ts = m_cmap_ts.group(1), int(m_cmap_ts.group(2)), m_cmap_ts.group(3)
+            state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {}).setdefault(seq, {})['transform_set'] = ts
+            return ''
+
+        # crypto map OUTSIDE_MAP interface outside
+        m_cmap_if = re.match(r'^crypto\s+map\s+(\S+)\s+interface\s+(\S+)', c)
+        if m_cmap_if and state.mode == 'config':
+            state.ipsec_crypto['crypto_map_interface'] = {
+                'name': m_cmap_if.group(1), 'interface': m_cmap_if.group(2)}
+            return ''
+
+        # crypto isakmp enable outside
+        m_ike_enable = re.match(r'^crypto\s+isakmp\s+enable\s+(\S+)', c)
+        if m_ike_enable and state.mode == 'config':
+            state.ipsec_crypto['isakmp_enabled'] = m_ike_enable.group(1)
+            return ''
+
+        # ── ロギング ──
+        m_log = re.match(r'^logging\s+(?:host|server)\s+([\d.]+)', c)
+        if m_log and state.mode == 'config':
+            ip = m_log.group(1)
+            if not any(s['host'] == ip for s in state.syslog_servers):
+                state.syslog_servers.append({'host': ip, 'port': 514, 'facility': 'local7', 'level': 'informational'})
+            return ''
+
+        # write memory / write / wr
+        if c in ('write memory', 'write', 'wr', 'copy running-config startup-config'):
+            return ('Building configuration...\n'
+                    f'Cryptochecksum: a1b2c3d4 e5f60718 90ab1234 cdef5678\n'
+                    f'[OK]\n'
+                    f'{state.hostname}# ')
+
+        # ── hostname ──
+        m_hn = re.match(r'^hostname\s+(\S+)', c)
+        if m_hn and state.mode == 'config':
+            state.hostname = m_hn.group(1)
+            return ''
+
+        # ── domain-name ──
+        if re.match(r'^domain-name\s+', c):
+            return ''
+
+        # ── ping ──
+        m_ping = re.match(r'^ping\s+([\d.]+)', c)
+        if m_ping:
+            dest = m_ping.group(1)
+            return (f'Type escape sequence to abort.\n'
+                    f'Sending 5, 100-byte ICMP Echos to {dest}, timeout is 2 seconds:\n'
+                    f'!!!!!\n'
+                    f'Success rate is 100 percent (5/5), round-trip min/avg/max = 1/2/5 ms')
+
+        # ── help ──
+        if c in ('?', 'help'):
+            return self._asa_help()
+
+        # 不明コマンド
+        if cmd.strip():
+            return f'ERROR: % Invalid input detected at \'^\'  marker.\n{cmd}\n      ^'
+        return ''
+
+    def _asa_show_version(self, state: DeviceState) -> str:
+        up = state.uptime_str()
+        return f"""Cisco Adaptive Security Appliance Software Version 9.16(4)
+Device Manager Version 7.18(1)
+
+Compiled on Tue 25-Jan-22 17:42 PST by builders
+System image file is "disk0:/asa9164-smp-k8.bin"
+Config file at boot was "startup-config"
+
+{state.hostname} up {up}
+
+Hardware:   ASA5525-X, 8192 MB RAM, CPU Lynnfield 2394 MHz, 1 CPU (8 cores)
+Internal ATA Compact Flash, 8192MB
+BIOS Flash M25P64 @ 0xfed01000, 16384KB
+
+Encryption hardware device : Cisco ASA Crypto on-board accelerator
+                             (revision 0x1) with 4096KB, HW_DES, HW_3DES, HW_AES, HW_AESCCM
+                             HW_AAD, HW_HMACSHA1, HW_RANDOM
+
+ 0: Ext: GigabitEthernet0/0  : address is 0000.dead.1001, irq 11
+ 1: Ext: GigabitEthernet0/1  : address is 0000.dead.1002, irq 11
+ 2: Ext: GigabitEthernet0/2  : address is 0000.dead.1003, irq 11
+ 3: Ext: Management0/0       : address is 0000.dead.1004, irq 11
+
+Licensed features for this platform:
+Maximum Physical Interfaces       : Unlimited      perpetual
+Maximum VLANs                     : 150            perpetual
+Inside Hosts                      : Unlimited      perpetual
+Failover                          : Active/Active  perpetual
+Encryption-DES                    : Enabled        perpetual
+Encryption-3DES-AES               : Enabled        perpetual
+Security Contexts                 : 2              perpetual
+GTP/GPRS                          : Disabled       perpetual
+AnyConnect Premium Peers          : 750            perpetual
+AnyConnect Essentials             : Disabled       perpetual
+Other VPN Peers                   : 750            perpetual
+Total VPN Peers                   : 750            perpetual
+Shared License                    : Disabled       perpetual
+AnyConnect for Mobile             : Disabled       perpetual
+AnyConnect for Cisco VPN Phone    : Disabled       perpetual
+Advanced Endpoint Assessment      : Disabled       perpetual
+UC Phone Proxy Sessions           : 2              perpetual
+Total UC Proxy Sessions           : 2              perpetual
+Botnet Traffic Filter             : Disabled       perpetual
+Intercompany Media Engine         : Disabled       perpetual
+
+This platform has an ASA 5525-X with SW, 8GE Data, 1GE Mgmt license.
+
+Serial Number: FTX1234A00B
+Running Permanent Activation Key: 0x01234567 0x89abcdef 0xfedcba98 0x76543210 0x01234567
+Configuration register is 0x1
+Image type          : Release
+Key Version         : A
+"""
+
+    def _asa_show_interface(self, state: DeviceState, target: str = None) -> str:
+        lines = []
+        for ifname, info in state.interfaces.items():
+            if target and target.lower() not in ifname.lower():
+                continue
+            status  = info.get('status', 'up')
+            nameif  = info.get('nameif', 'N/A')
+            sec     = info.get('security_level', 0)
+            ip      = info.get('ip', 'unassigned')
+            prefix  = info.get('prefix', 0)
+            mask_int = (0xffffffff << (32 - prefix)) & 0xffffffff if prefix else 0
+            mask = (f'{(mask_int>>24)&0xff}.{(mask_int>>16)&0xff}.'
+                    f'{(mask_int>>8)&0xff}.{mask_int&0xff}')
+            line_proto = 'up' if status == 'up' else 'down'
+            lines.append(f'Interface {ifname} "{nameif}", is {status}, line protocol is {line_proto}')
+            lines.append(f'  Security level is {sec}, Link is up (Connected)')
+            if ip and ip != 'unassigned':
+                lines.append(f'  IP address {ip}, subnet mask {mask}')
+            else:
+                lines.append(f'  IP address unassigned')
+            lines.append(f'  MAC address 0000.dead.{abs(hash(ifname)) % 0xffff:04x}, MTU 1500')
+            lines.append(f'  Input: 1234567 packets, 123456789 bytes; Errors: 0')
+            lines.append(f'  Output: 987654 packets, 98765432 bytes; Errors: 0')
+            lines.append('')
+        return '\n'.join(lines).rstrip()
+
+    def _asa_show_route(self, state: DeviceState) -> str:
+        lines = [
+            'Codes: C - connected, S - static, I - IGRP, R - RIP, M - mobile, B - BGP',
+            '       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area',
+            '       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2',
+            '       E1 - OSPF external type 1, E2 - OSPF external type 2',
+            '       i - IS-IS, L1 - IS-IS level-1, L2 - IS-IS level-2, ia - IS-IS inter area',
+            '       * - candidate default, U - per-user static route, o - ODR',
+            '',
+            'Gateway of last resort is not set',
+            '',
+        ]
+        for ifname, info in state.interfaces.items():
+            ip = info.get('ip', '')
+            prefix = info.get('prefix', 24)
+            if not ip:
+                continue
+            # 直結ネットワーク
+            try:
+                octets = [int(x) for x in ip.split('.')]
+                ip_int = (octets[0]<<24)|(octets[1]<<16)|(octets[2]<<8)|octets[3]
+                mask = (0xffffffff << (32 - prefix)) & 0xffffffff
+                net_int = ip_int & mask
+                net = (f'{(net_int>>24)&0xff}.{(net_int>>16)&0xff}.'
+                       f'{(net_int>>8)&0xff}.{net_int&0xff}')
+                lines.append(f'C        {net}/{prefix} is directly connected, {info.get("nameif","?")}')
+            except Exception:
+                pass
+        for r in state.routes:
+            net = r.get('network', '')
+            mask_str = r.get('mask', '255.255.255.0')
+            prefix = sum(bin(int(o)).count('1') for o in mask_str.split('.'))
+            nh = r.get('nexthop', '0.0.0.0')
+            iface = r.get('iface', '')
+            metric = r.get('metric', 1)
+            lines.append(f'S        {net}/{prefix} [1/{metric}] via {nh}, {iface}')
+        return '\n'.join(lines)
+
+    def _asa_show_access_list(self, state: DeviceState) -> str:
+        if not state.acls:
+            return 'access-list: No access lists configured.'
+        lines = []
+        for name, entries in state.acls.items():
+            for i, e in enumerate(entries):
+                if e['action'] == 'remark':
+                    lines.append(f'access-list {name} remark {e["raw"]}')
+                else:
+                    lines.append(f'access-list {name} line {i+1} extended '
+                                 f'{e["action"]} {e["proto"]} {e["raw"]} '
+                                 f'(hitcnt={random.randint(0,999)}) 0x{abs(hash(e["raw"]))%0xffffffff:08x}')
+        return '\n'.join(lines)
+
+    def _asa_show_conn(self, state: DeviceState) -> str:
+        lines = [
+            f'{random.randint(50,200)} in use, {random.randint(1,50)} most used',
+            'Flags: A - awaiting inside ACK to SYN, a - awaiting outside ACK to SYN,',
+            '       B - initial SYN from outside, C - CTIQBE media, D - DNS, d - dump,',
+            '       E - outside back connection, F - outside FIN, f - inside FIN,',
+            '       G - group, g - MGCP, H - H.323, h - H.225.0, I - inbound data,',
+            '       i - incomplete, J - GTP, j - GTP data, K - GTP t3-response',
+            '',
+            'TCP inside 192.168.1.100:54321 outside 203.0.113.10:80, idle 0:00:03, bytes 1234, flags UIO',
+            'TCP inside 192.168.1.101:55555 outside 8.8.8.8:443, idle 0:00:01, bytes 5678, flags UIO',
+            'UDP inside 192.168.1.100:12345 outside 8.8.8.8:53, idle 0:00:00, bytes 128, flags -',
+        ]
+        return '\n'.join(lines)
+
+    def _asa_show_xlate(self, state: DeviceState) -> str:
+        nat_count = len(state.nat_rules)
+        lines = [
+            f'{nat_count} in use, {nat_count} most used',
+            'Flags: D - DNS, e - extended, I - identity, i - dynamic, r - portmap,',
+            '       s - static, T - twice, N - net-to-net',
+        ]
+        if state.nat_rules:
+            for r in state.nat_rules:
+                lines.append(f'NAT from {r["real"]}:any to {r["mapped"]}:{r.get("mapped_addr","interface")} flags si')
+        else:
+            lines.append('(empty)')
+        return '\n'.join(lines)
+
+    def _asa_show_nat(self, state: DeviceState) -> str:
+        lines = ['Auto NAT Policies (Section 2)', '']
+        if not state.nat_rules:
+            lines.append('  (No NAT rules configured)')
+        for i, r in enumerate(state.nat_rules, 1):
+            lines.append(f'{i} (inside) to (outside) source {r.get("type","dynamic")} '
+                         f'any interface')
+        lines += ['', 'Manual NAT Policies (Section 3)', '  (empty)']
+        return '\n'.join(lines)
+
+    def _asa_show_crypto_isakmp_sa(self, state: DeviceState) -> str:
+        if not state.ipsec_peers:
+            return 'There are no IKEv1 SAs\nThere are no IKEv2 SAs'
+        lines = ['IKEv1 SAs:', '', '   Active SA: 1', '    Rekey SA: 0 (A tunnel will start rekey 30 seconds before the lifetime expires.)',
+                 '    Total IKE SA: 1', '',
+                 '1   IKE Peer: ' + list(state.ipsec_peers.keys())[0]]
+        lines += ['    Type    : L2L             Role    : initiator',
+                  '    Rekey   : no              State   : MM_ACTIVE']
+        return '\n'.join(lines)
+
+    def _asa_show_crypto_ipsec_sa(self, state: DeviceState) -> str:
+        if not state.ipsec_peers:
+            return 'There are no ipsec sas.'
+        peer = list(state.ipsec_peers.keys())[0]
+        lines = [
+            f'interface: outside',
+            f'    Crypto map tag: OUTSIDE_MAP, seq num: 10, local addr: 203.0.113.1',
+            f'',
+            f'      local  ident  (addr/mask/prot/port): (192.168.1.0/255.255.255.0/0/0)',
+            f'      remote ident (addr/mask/prot/port): (10.1.1.0/255.255.255.0/0/0)',
+            f'      current_peer: {peer}',
+            f'',
+            f'      #pkts encaps: 12345, #pkts encrypt: 12345, #pkts digest: 12345',
+            f'      #pkts decaps: 12200, #pkts decrypt: 12200, #pkts verify: 12200',
+            f'      #pkts compressed: 0, #pkts decompressed: 0',
+            f'      #pkts not compressed: 12345, #pkts comp failed: 0, #pkts decomp failed: 0',
+            f'      #pre-frag successes: 0, #pre-frag failures: 0, #fragments created: 0',
+            f'      #PMTUs sent: 0, #PMTUs rcvd: 0, #decapsulated frgs needing reassembly: 0',
+            f'      #TFC rcvd: 0, #TFC sent: 0',
+            f'      #Valid ICMP Errors rcvd: 0, #Invalid ICMP Errors rcvd: 0',
+            f'      #send errors: 0, #recv errors: 0',
+            f'',
+            f'      local crypto endpt.: 203.0.113.1/0, remote crypto endpt.: {peer}/0',
+            f'      path mtu 1500, ipsec overhead 74(44), media mtu 1500',
+            f'      PMTU time remaining (sec): 0, DF policy: copy-df',
+            f'      ICMP error validation: disabled, TFC packets: disabled',
+            f'      current outbound spi: 0xA1B2C3D4',
+            f'      current inbound spi : 0xD4C3B2A1',
+            f'',
+            f'    inbound esp sas:',
+            f'      spi: 0xD4C3B2A1 (3569939105)',
+            f'        transform: esp-aes-256 esp-sha-hmac no compression',
+            f'        in use settings =={{Tunnel, TFC pessimize}}',
+            f'        slot: 0, conn_id: 12288, crypto-map: OUTSIDE_MAP',
+            f'        sa timing: remaining key lifetime (kB/sec): (4374000/28799)',
+            f'',
+            f'    outbound esp sas:',
+            f'      spi: 0xA1B2C3D4 (2712847316)',
+            f'        transform: esp-aes-256 esp-sha-hmac no compression',
+            f'        in use settings =={{Tunnel, TFC pessimize}}',
+            f'        slot: 0, conn_id: 12288, crypto-map: OUTSIDE_MAP',
+            f'        sa timing: remaining key lifetime (kB/sec): (4374000/28799)',
+        ]
+        return '\n'.join(lines)
+
+    def _asa_show_service_policy(self, state: DeviceState) -> str:
+        lines = ['Global policy:',
+                 '  Service-policy: global_policy',
+                 '    Class-map: inspection_default',
+                 '      Inspect:']
+        for proto in state.inspect_protocols:
+            lines.append(f'        {proto}, packet 0, lock fail 0, drop 0, reset-drop 0, 5-min-pkt-rate 0 pkts/sec, v6-fail-close 0 sctp-drop-override 0')
+        return '\n'.join(lines)
+
+    def _asa_show_running(self, state: DeviceState) -> str:
+        lines = [
+            ': Saved',
+            ':',
+            f'ASA Version 9.16(4)',
+            '!',
+            f'hostname {state.hostname}',
+            'enable password *** encrypted',
+            'passwd *** encrypted',
+            'names',
+            '!',
+        ]
+        # インタフェース
+        for ifname, info in state.interfaces.items():
+            lines.append(f'interface {ifname}')
+            nameif = info.get('nameif', '')
+            if nameif:
+                lines.append(f' nameif {nameif}')
+                lines.append(f' security-level {info.get("security_level", 0)}')
+            ip = info.get('ip', '')
+            if ip:
+                prefix = info.get('prefix', 24)
+                mask_int = (0xffffffff << (32 - prefix)) & 0xffffffff
+                mask = (f'{(mask_int>>24)&0xff}.{(mask_int>>16)&0xff}.'
+                        f'{(mask_int>>8)&0xff}.{mask_int&0xff}')
+                lines.append(f' ip address {ip} {mask}')
+            if info.get('status', 'up') != 'down':
+                lines.append(' no shutdown')
+            lines.append('!')
+        # ACL
+        for name, entries in state.acls.items():
+            for e in entries:
+                if e['action'] == 'remark':
+                    lines.append(f'access-list {name} remark {e["raw"]}')
+                else:
+                    lines.append(f'access-list {name} extended {e["action"]} {e["proto"]} {e["raw"]}')
+        # NAT
+        for r in state.nat_rules:
+            lines.append(f'nat ({r["real"]},{r["mapped"]}) {r["type"]} {r.get("mapped_addr","interface")}')
+        # ルート
+        for r in state.routes:
+            lines.append(f'route {r["iface"]} {r["network"]} {r["mask"]} {r["nexthop"]} {r.get("metric",1)}')
+        # IKE/IPsec
+        for num, pol in state.ipsec_crypto.get('isakmp_policies', {}).items():
+            lines += [
+                f'crypto isakmp policy {num}',
+                f' authentication {pol.get("authentication","pre-share")}',
+                f' encryption {pol.get("encryption","aes-256")}',
+                f' hash {pol.get("hash","sha256")}',
+                f' group {pol.get("group",14)}',
+                f' lifetime {pol.get("lifetime",86400)}',
+            ]
+        for ts_name, ts in state.ipsec_crypto.get('transform_sets', {}).items():
+            lines.append(f'crypto ipsec transform-set {ts_name} ' + ' '.join(ts.get('transforms', [])))
+        for mapname, seqs in state.ipsec_crypto.get('crypto_maps', {}).items():
+            for seq, entry in seqs.items():
+                if entry.get('acl'):
+                    lines.append(f'crypto map {mapname} {seq} match address {entry["acl"]}')
+                if entry.get('peer'):
+                    lines.append(f'crypto map {mapname} {seq} set peer {entry["peer"]}')
+                if entry.get('transform_set'):
+                    lines.append(f'crypto map {mapname} {seq} set transform-set {entry["transform_set"]}')
+        cm_if = state.ipsec_crypto.get('crypto_map_interface', {})
+        if cm_if:
+            lines.append(f'crypto map {cm_if["name"]} interface {cm_if["interface"]}')
+        ike_if = state.ipsec_crypto.get('isakmp_enabled', '')
+        if ike_if:
+            lines.append(f'crypto isakmp enable {ike_if}')
+        for peer, pinfo in state.ipsec_peers.items():
+            lines.append(f'tunnel-group {peer} type {pinfo.get("type","ipsec-l2l")}')
+            lines.append(f'tunnel-group {peer} ipsec-attributes')
+            psk = pinfo.get('preshared', '')
+            if psk:
+                lines.append(f' ikev1 pre-shared-key {psk}')
+        # サービスポリシー
+        lines += [
+            '!',
+            'class-map inspection_default',
+            ' match default-inspection-traffic',
+            '!',
+            'policy-map global_policy',
+            ' class inspection_default',
+        ]
+        for proto in state.inspect_protocols:
+            lines.append(f'  inspect {proto}')
+        for sp in state.service_policies:
+            lines.append(f'service-policy {sp["policy"]} {sp["scope"]}')
+        # syslog
+        for s in state.syslog_servers:
+            lines.append(f'logging host {s["host"]}')
+        lines += ['!', 'end']
+        return '\n'.join(lines)
+
+    def _asa_help(self) -> str:
+        return (
+            'Available commands (Cisco ASA 9.x シングルコンテキスト):\n'
+            '\n[設定モード]\n'
+            '  configure terminal            -- 設定モードへ移行\n'
+            '  interface <if>                -- インタフェース設定モード\n'
+            '    nameif <name>               -- インタフェース名前付け\n'
+            '    security-level <0-100>      -- セキュリティレベル設定\n'
+            '    ip address <ip> <mask>      -- IPアドレス設定\n'
+            '    [no] shutdown               -- ポートUP/DOWN\n'
+            '\n[ACL]\n'
+            '  access-list <name> extended permit|deny <proto> <src> <dst> [eq <port>]\n'
+            '  access-list <name> remark <text>\n'
+            '  access-group <name> in|out interface <nameif>\n'
+            '\n[NAT]\n'
+            '  nat (inside,outside) dynamic interface\n'
+            '  nat (inside,outside) static <ip>\n'
+            '\n[ルーティング]\n'
+            '  route <nameif> <net> <mask> <nexthop> [metric]\n'
+            '\n[ステートフルインスペクション (MPF)]\n'
+            '  class-map inspection_default\n'
+            '    match default-inspection-traffic\n'
+            '  policy-map global_policy\n'
+            '    class inspection_default\n'
+            '      inspect ftp|http|https|smtp|dns|h323|sip|skinny\n'
+            '  service-policy global_policy global\n'
+            '\n[IPsec/IKE]\n'
+            '  crypto isakmp policy <num>\n'
+            '    authentication pre-share\n'
+            '    encryption aes-256\n'
+            '    hash sha256\n'
+            '    group 14\n'
+            '    lifetime 86400\n'
+            '  crypto ipsec transform-set <name> esp-aes-256 esp-sha-hmac\n'
+            '  crypto map <name> <seq> match address <acl>\n'
+            '  crypto map <name> <seq> set peer <ip>\n'
+            '  crypto map <name> <seq> set transform-set <ts>\n'
+            '  crypto map <name> interface outside\n'
+            '  crypto isakmp enable outside\n'
+            '  tunnel-group <peer-ip> type ipsec-l2l\n'
+            '  tunnel-group <peer-ip> ipsec-attributes\n'
+            '    ikev1 pre-shared-key <key>\n'
+            '\n[確認]\n'
+            '  show version\n'
+            '  show interface\n'
+            '  show ip route\n'
+            '  show access-list\n'
+            '  show conn\n'
+            '  show xlate / show nat\n'
+            '  show crypto isakmp sa\n'
+            '  show crypto ipsec sa\n'
+            '  show service-policy\n'
+            '  show running-config\n'
+        )
+
+    # ─── PC コマンドエンジン（Linux汎用エンドポイント）─────────
+    def _pc_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """PCのLinuxライクなコマンドを処理する"""
+
+        # ping / traceroute はapp.pyのhandle_icmpで処理されるが、
+        # ここでは到達前にフォールスルーしないよう念のためNoneを示す
+        # （実際は呼ばれない）
+
+        # ping
+        if re.match(r'^ping\s+', c):
+            return self._pc_ping(cmd, c, state)
+
+        # traceroute / tracepath
+        if re.match(r'^traceroute\s+|^tracepath\s+', c):
+            return self._pc_traceroute(cmd, c, state)
+
+        # nc / netcat  (TCP接続テスト)
+        if re.match(r'^nc\s+|^netcat\s+', c):
+            return self._pc_nc(cmd, c, state)
+
+        # telnet (TCP ポート確認)
+        if re.match(r'^telnet\s+', c):
+            return self._pc_telnet(cmd, c, state)
+
+        # curl
+        if re.match(r'^curl\s+', c):
+            return self._pc_curl(cmd, c, state)
+
+        # wget
+        if re.match(r'^wget\s+', c):
+            return self._pc_wget(cmd, c, state)
+
+        # ssh
+        if re.match(r'^ssh\s+', c):
+            return self._pc_ssh(cmd, c, state)
+
+        # hostname
+        if c == 'hostname':
+            return state.hostname
+
+        # uname
+        if c.startswith('uname'):
+            if '-a' in c:
+                return f'Linux {state.hostname} 5.15.0 #1 SMP x86_64 GNU/Linux'
+            return 'Linux'
+
+        # whoami / id
+        if c in ('whoami', 'id'):
+            return 'root' if c == 'whoami' else 'uid=0(root) gid=0(root) groups=0(root)'
+
+        # ifconfig
+        m_ifconfig = re.match(r'^ifconfig(?:\s+(\S+))?', c)
+        if m_ifconfig:
+            target = m_ifconfig.group(1)
+            return self._pc_ifconfig(state, target)
+
+        # ip addr add X.X.X.X/prefix dev ethX  ← MUST be before generic show handler
+        m_addr_add = re.match(r'^ip\s+addr(?:ess)?\s+add\s+([\d.]+)/(\d+)(?:\s+dev\s+(\S+))?', c)
+        if m_addr_add:
+            ip_val = m_addr_add.group(1)
+            prefix  = int(m_addr_add.group(2))
+            ifname  = m_addr_add.group(3) or 'eth0'
+            state.interfaces.setdefault(ifname, {'status': 'up'})['ip'] = ip_val
+            state.interfaces[ifname]['prefix'] = prefix
+            state.interfaces[ifname]['status'] = 'up'
+            return ''
+
+        # ip addr / ip address (show) — exact match so "ip addr add" above handles adds
+        if re.match(r'^ip\s+addr(?:ess)?(?:\s+show)?$', c) or c == 'ip a':
+            return self._pc_ip_addr(state)
+
+        # ip route add default via X.X.X.X  ← MUSTbe before generic "ip route" handler
+        m_route_def = re.match(r'^ip\s+route\s+add\s+default\s+via\s+([\d.]+)', c)
+        if m_route_def:
+            state.gateway = m_route_def.group(1)
+            return ''
+
+        # ip route add X.X.X.X/prefix via X.X.X.X
+        m_route_add = re.match(r'^ip\s+route\s+add\s+([\d.]+)/(\d+)\s+via\s+([\d.]+)', c)
+        if m_route_add:
+            dest   = m_route_add.group(1)
+            prefix = int(m_route_add.group(2))
+            gw     = m_route_add.group(3)
+            if not hasattr(state, 'static_routes'):
+                state.static_routes = []
+            state.static_routes.append({'dest': dest, 'prefix': prefix, 'gw': gw})
+            return ''
+
+        # ip route del / ip route delete
+        m_route_del = re.match(r'^ip\s+route\s+(?:del|delete)\s+', c)
+        if m_route_del:
+            return ''
+
+        # ip route show / ip route / ip r
+        if re.match(r'^ip\s+route(?:\s+show)?$', c) or c == 'ip r':
+            return self._pc_ip_route(state)
+        if re.match(r'^(?:route|netstat\s+-r)', c):
+            return self._pc_route_table(state)
+
+        # ip link
+        if re.match(r'^ip\s+link(?:\s+show)?', c) or c == 'ip l':
+            return self._pc_ip_link(state)
+
+        # arp -n
+        if re.match(r'^arp', c):
+            eth0 = state.interfaces.get('eth0', {})
+            gw = state.gateway
+            lines = ['Address                  HWtype  HWaddress           Flags Mask            Iface']
+            lines.append(f'{gw:<25}ether   aa:bb:cc:00:11:22   C                     eth0')
+            return '\n'.join(lines)
+
+        # cat /etc/hosts
+        if 'cat' in c and '/etc/hosts' in c:
+            return f'127.0.0.1   localhost\n127.0.1.1   {state.hostname}'
+
+        # cat /etc/resolv.conf
+        if 'cat' in c and 'resolv.conf' in c:
+            return 'nameserver 8.8.8.8\nnameserver 1.1.1.1'
+
+        # ss -tuln / netstat -tuln
+        if re.match(r'^(?:ss|netstat)\s+-', c):
+            return ('Netid  State   Recv-Q  Send-Q  Local Address:Port  Peer Address:Port\n'
+                    'tcp    LISTEN  0       128     0.0.0.0:22          0.0.0.0:*')
+
+        # ps aux / ps
+        if re.match(r'^ps', c):
+            return (f'  PID TTY          TIME CMD\n'
+                    f'    1 ?        00:00:01 init\n'
+                    f'  100 ?        00:00:00 sshd\n'
+                    f'  200 pts/0    00:00:00 bash\n'
+                    f'  201 pts/0    00:00:00 ps')
+
+        # uptime
+        if c == 'uptime':
+            delta = datetime.now() - state.startup_time
+            h = int(delta.total_seconds() // 3600)
+            return f' {datetime.now().strftime("%H:%M:%S")} up {h}:00,  1 user,  load average: 0.00, 0.00, 0.00'
+
+        # date
+        if c == 'date':
+            return datetime.now().strftime('%a %b %d %H:%M:%S JST %Y')
+
+        # clear
+        if c in ('clear', 'cls'):
+            return '\x0c'
+
+        # help / ?
+        if c in ('help', '?', 'man'):
+            return (
+                'Available commands:\n'
+                '  ifconfig / ip addr      -- ネットワークインタフェース表示\n'
+                '  ip route / route        -- ルーティングテーブル表示\n'
+                '  ip link                 -- リンク状態表示\n'
+                '  ping <IP>               -- 到達性確認 (ICMPエコー)\n'
+                '  traceroute <IP>         -- 経路トレース\n'
+                '  nc -zv <IP> <PORT>      -- TCP ポート接続テスト\n'
+                '  nc -zv <IP> <PORT1>-<PORT2>  -- TCP ポートレンジスキャン\n'
+                '  telnet <IP> <PORT>      -- TCP Telnet 接続テスト\n'
+                '  curl http://<IP>/       -- HTTP GET リクエスト\n'
+                '  curl -v http://<IP>/    -- HTTP GET 詳細表示\n'
+                '  wget http://<IP>/       -- HTTP ファイル取得\n'
+                '  ssh user@<IP>           -- SSH 接続テスト\n'
+                '  arp -n                  -- ARPテーブル表示\n'
+                '  hostname                -- ホスト名表示\n'
+                '  uname -a                -- OS情報表示\n'
+                '  uptime                  -- 稼働時間表示\n'
+                '  ps                      -- プロセス一覧\n'
+                '  ss -tuln                -- ソケット一覧\n'
+            )
+
+        # 不明コマンド
+        prog = cmd.split()[0] if cmd.split() else cmd
+        return f'-bash: {prog}: command not found'
+
+    # ── PC 通信テスト系コマンド ──────────────────────────────────
+
+    def _pc_my_ip(self, state) -> str:
+        """PC の eth0 IP を返す"""
+        return state.interfaces.get('eth0', {}).get('ip', '192.168.1.10')
+
+    def _pc_ping(self, cmd, c, state) -> str:
+        m = re.match(r'^ping\s+(?:-c\s*(\d+)\s+)?([\d.]+)', c)
+        if not m:
+            return "Usage: ping [-c count] <destination>"
+        count = int(m.group(1)) if m.group(1) else 5
+        dest  = m.group(2)
+        my_ip = self._pc_my_ip(state)
+        rtt_base = round(random.uniform(0.5, 3.0), 3)
+        lines = [f"PING {dest} ({dest}) 56(84) bytes of data."]
+        for i in range(count):
+            rtt = round(rtt_base + random.uniform(-0.2, 0.5), 3)
+            lines.append(f"64 bytes from {dest}: icmp_seq={i+1} ttl=64 time={rtt} ms")
+        rtts = [rtt_base + random.uniform(-0.2, 0.5) for _ in range(count)]
+        lines += [
+            "",
+            f"--- {dest} ping statistics ---",
+            f"{count} packets transmitted, {count} received, 0% packet loss, time {count*1000}ms",
+            f"rtt min/avg/max/mdev = {min(rtts):.3f}/{sum(rtts)/len(rtts):.3f}/{max(rtts):.3f}/0.100 ms",
+        ]
+        return "\n".join(lines)
+
+    def _pc_traceroute(self, cmd, c, state) -> str:
+        m = re.match(r'^trace(?:route|path)\s+([\d.]+)', c)
+        if not m:
+            return "Usage: traceroute <destination>"
+        dest = m.group(1)
+        lines = [f"traceroute to {dest} ({dest}), 30 hops max, 60 byte packets"]
+        # Use topology-aware icmp_engine when available
+        try:
+            from engine.protocols import icmp_engine as _icmp_engine
+            my_ip = self._pc_my_ip(state)
+            # Find device_id by matching this PC's IP
+            src_id = None
+            for dev_id, info in _icmp_engine.device_ips.items():
+                if my_ip in info.get('ips', {}):
+                    src_id = dev_id
+                    break
+            if src_id:
+                result = _icmp_engine.trace_path(src_id, dest)
+                hop_num = 1
+                hops_to_show = result['hops']
+                # Skip first hop if it's the source device itself
+                if hops_to_show and hops_to_show[0].get('device') == src_id:
+                    hops_to_show = hops_to_show[1:]
+                for hop in hops_to_show:
+                    if hop.get('timeout'):
+                        lines.append(f" {hop_num}  * * *  (no route)")
+                    else:
+                        rtts = [round(hop_num * random.uniform(0.5, 2.0) + random.uniform(0, 3), 3) for _ in range(3)]
+                        host = hop.get('hostname', hop.get('ip', '?'))
+                        ip = hop.get('ip', '?')
+                        lines.append(f" {hop_num}  {host} ({ip})  {rtts[0]} ms  {rtts[1]} ms  {rtts[2]} ms")
+                    hop_num += 1
+                if not result['reachable'] and not any(h.get('timeout') for h in hops_to_show):
+                    lines.append(f" {hop_num}  * * *  (destination unreachable)")
+                return "\n".join(lines)
+        except Exception:
+            pass
+        # Fallback: default gateway + dest
+        gw = state.gateway
+        hops = [(1, gw, round(random.uniform(0.5, 2.0), 3)),
+                (2, dest, round(random.uniform(8, 25), 3))]
+        for n, ip, rtt in hops:
+            r2, r3 = round(rtt + random.uniform(0, 1), 3), round(rtt + random.uniform(0, 1), 3)
+            lines.append(f" {n}  {ip}  {rtt} ms  {r2} ms  {r3} ms")
+        return "\n".join(lines)
+
+    def _pc_nc(self, cmd, c, state) -> str:
+        """nc -zv <host> <port> または nc -zv <host> <port1>-<port2>"""
+        m_range = re.match(r'^nc\s+.*?(-z)?.*?([\d.]+)\s+(\d+)-(\d+)', c)
+        m_single = re.match(r'^nc\s+.*?([\d.]+)\s+(\d+)', c)
+        my_ip = self._pc_my_ip(state)
+        if m_range:
+            host  = m_range.group(2)
+            p_lo  = int(m_range.group(3))
+            p_hi  = int(m_range.group(4))
+            total = p_hi - p_lo + 1
+            # 100ポート以下は全件表示、超える場合は先頭10件+サマリー+末尾10件
+            if total <= 100:
+                lines = []
+                for port in range(p_lo, p_hi + 1):
+                    rtt = round(random.uniform(0.3, 5.0), 2)
+                    lines.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
+                return "\n".join(lines) if lines else f"nc: connect to {host} port {p_lo} failed"
+            else:
+                head = []
+                for port in range(p_lo, p_lo + 10):
+                    rtt = round(random.uniform(0.3, 5.0), 2)
+                    head.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
+                tail = []
+                for port in range(p_hi - 9, p_hi + 1):
+                    rtt = round(random.uniform(0.3, 5.0), 2)
+                    tail.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
+                avg_rtt = round(random.uniform(1.5, 3.5), 2)
+                summary = [
+                    f"",
+                    f"  ... (ports {p_lo + 10} - {p_hi - 10} tested, all succeeded) ...",
+                    f"",
+                ]
+                all_lines = head + summary + tail + [
+                    f"",
+                    f"--- nc scan summary ---",
+                    f"Host   : {host}",
+                    f"Range  : {p_lo} - {p_hi}",
+                    f"Total  : {total} ports scanned",
+                    f"Open   : {total} ports",
+                    f"Closed : 0 ports",
+                    f"Avg RTT: {avg_rtt} ms",
+                ]
+                return "\n".join(all_lines)
+        elif m_single:
+            host = m_single.group(1)
+            port = int(m_single.group(2))
+            rtt  = round(random.uniform(0.3, 5.0), 2)
+            lines = [
+                f"Connection to {host} {port} port [tcp/*] succeeded!",
+                f"  Local:  {my_ip}:{random.randint(40000,60000)}",
+                f"  Remote: {host}:{port}",
+                f"  RTT:    {rtt} ms",
+                f"  State:  ESTABLISHED",
+            ]
+            return "\n".join(lines)
+        return "Usage: nc -zv <host> <port>"
+
+    def _pc_telnet(self, cmd, c, state) -> str:
+        m = re.match(r'^telnet\s+([\d.]+)(?:\s+(\d+))?', c)
+        if not m:
+            return "Usage: telnet <host> [port]"
+        host = m.group(1)
+        port = int(m.group(2)) if m.group(2) else 23
+        my_ip = self._pc_my_ip(state)
+        rtt = round(random.uniform(0.5, 8.0), 2)
+        if port == 23:
+            return (f"Trying {host}...\n"
+                    f"Connected to {host}.\n"
+                    f"Escape character is '^]'.\n"
+                    f"\n"
+                    f"login: ")
+        else:
+            return (f"Trying {host}...\n"
+                    f"Connected to {host} port {port}.\n"
+                    f"Escape character is '^]'.\n"
+                    f"  TCP connection established in {rtt} ms\n"
+                    f"  Local:  {my_ip}:{random.randint(40000,60000)}\n"
+                    f"  Remote: {host}:{port}")
+
+    def _pc_curl(self, cmd, c, state) -> str:
+        verbose = '-v' in c or '--verbose' in c
+        m = re.match(r'^curl\s+(?:-\S+\s+)*(?:http://|https://)?([\d.]+\S*)', c)
+        if not m:
+            return "curl: try 'curl http://<IP>/'"
+        url_part = m.group(1)
+        host = url_part.split('/')[0]
+        path = '/' + '/'.join(url_part.split('/')[1:]) if '/' in url_part else '/'
+        my_ip = self._pc_my_ip(state)
+        rtt = round(random.uniform(1.0, 15.0), 3)
+        if verbose:
+            lines = [
+                f"*   Trying {host}:80...",
+                f"* Connected to {host} ({host}) port 80 (#0)",
+                f"> GET {path} HTTP/1.1",
+                f"> Host: {host}",
+                f"> User-Agent: curl/7.88.1",
+                f"> Accept: */*",
+                f">",
+                f"< HTTP/1.1 200 OK",
+                f"< Content-Type: text/html",
+                f"< Content-Length: 612",
+                f"< Connection: keep-alive",
+                f"<",
+                f"<!DOCTYPE html>",
+                f"<html><head><title>Network Lab Test Page</title></head>",
+                f"<body><h1>TCP Connection OK</h1>",
+                f"<p>Server: {host} | Client: {my_ip} | RTT: {rtt}ms</p>",
+                f"</body></html>",
+                f"* Connection #0 to host {host} left intact",
+            ]
+        else:
+            lines = [
+                f"<!DOCTYPE html>",
+                f"<html><head><title>Network Lab Test Page</title></head>",
+                f"<body><h1>TCP Connection OK</h1>",
+                f"<p>Server: {host} | Client: {my_ip} | RTT: {rtt}ms</p>",
+                f"</body></html>",
+            ]
+        return "\n".join(lines)
+
+    def _pc_wget(self, cmd, c, state) -> str:
+        m = re.match(r'^wget\s+(?:-\S+\s+)*(?:http://|https://)?([\d.]+\S*)', c)
+        if not m:
+            return "wget: missing URL"
+        url_part = m.group(1)
+        host = url_part.split('/')[0]
+        rtt = round(random.uniform(1.0, 15.0), 3)
+        size = random.randint(200, 800)
+        lines = [
+            f"--{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  http://{url_part}",
+            f"Resolving {host}... {host}",
+            f"Connecting to {host}|{host}|:80... connected.",
+            f"HTTP request sent, awaiting response... 200 OK",
+            f"Length: {size} [text/html]",
+            f"Saving to: 'index.html'",
+            f"",
+            f"index.html        100%[==========>]  {size}  --.-KB/s    in {rtt}s",
+            f"",
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ({size/rtt:.0f} B/s) - 'index.html' saved [{size}/{size}]",
+        ]
+        return "\n".join(lines)
+
+    def _pc_ssh(self, cmd, c, state) -> str:
+        m = re.match(r'^ssh\s+(?:-\S+\s+)*(?:(\S+)@)?([\d.]+)', c)
+        if not m:
+            return "Usage: ssh [user@]<host>"
+        user = m.group(1) or 'root'
+        host = m.group(2)
+        return (f"The authenticity of host '{host} ({host})' can't be established.\n"
+                f"ED25519 key fingerprint is SHA256:abc123xyz/networklab.\n"
+                f"Are you sure you want to continue connecting (yes/no/[fingerprint])? yes\n"
+                f"Warning: Permanently added '{host}' (ED25519) to the list of known hosts.\n"
+                f"{user}@{host}'s password: \n"
+                f"Last login: {datetime.now().strftime('%a %b %d %H:%M:%S %Y')} from {self._pc_my_ip(state)}\n"
+                f"[{user}@{host} ~]$ ")
+
+    def _pc_ifconfig(self, state: DeviceState, target: str = None) -> str:
+        lines = []
+        for ifname, info in state.interfaces.items():
+            if target and ifname != target:
+                continue
+            ip = info.get('ip', '')
+            prefix = info.get('prefix', 24)
+            mac = info.get('mac', '00:00:00:00:00:00')
+            status = info.get('status', 'up')
+            flags = 'UP,BROADCAST,RUNNING,MULTICAST' if status == 'up' else 'DOWN'
+            if ifname == 'lo':
+                flags = 'UP,LOOPBACK,RUNNING'
+            # サブネットマスク計算
+            mask_int = (0xffffffff << (32 - prefix)) & 0xffffffff
+            mask = f'{(mask_int>>24)&0xff}.{(mask_int>>16)&0xff}.{(mask_int>>8)&0xff}.{mask_int&0xff}'
+            lines.append(f'{ifname}: flags={flags}  mtu 1500')
+            if ip:
+                lines.append(f'        inet {ip}  netmask {mask}  broadcast {self._broadcast(ip, prefix)}')
+            lines.append(f'        ether {mac}  txqueuelen 1000  (Ethernet)')
+            lines.append(f'        RX packets 1234  bytes 567890 (567.8 KB)')
+            lines.append(f'        TX packets 456   bytes 123456 (123.4 KB)')
+            lines.append('')
+        return '\n'.join(lines).rstrip()
+
+    def _pc_ip_addr(self, state: DeviceState) -> str:
+        lines = []
+        idx = 1
+        for ifname, info in state.interfaces.items():
+            ip = info.get('ip', '')
+            prefix = info.get('prefix', 24)
+            mac = info.get('mac', '00:00:00:00:00:00')
+            status = info.get('status', 'up')
+            state_str = 'UP' if status == 'up' else 'DOWN'
+            flags = 'LOOPBACK,UP,LOWER_UP' if ifname == 'lo' else f'BROADCAST,MULTICAST,{state_str},LOWER_UP'
+            lines.append(f'{idx}: {ifname}: <{flags}> mtu 1500 qdisc pfifo_fast state {state_str}')
+            lines.append(f'    link/ether {mac} brd ff:ff:ff:ff:ff:ff')
+            if ip:
+                bcast = self._broadcast(ip, prefix)
+                lines.append(f'    inet {ip}/{prefix} brd {bcast} scope global {ifname}')
+                lines.append(f'       valid_lft forever preferred_lft forever')
+            idx += 1
+        return '\n'.join(lines)
+
+    def _pc_ip_route(self, state: DeviceState) -> str:
+        lines = []
+        for r in state.routes:
+            dest = r['dest']
+            gw = r['gw']
+            iface = r['iface']
+            metric = r.get('metric', 0)
+            if dest == '0.0.0.0/0':
+                lines.append(f'default via {gw} dev {iface} proto static metric {metric}')
+            elif gw == '0.0.0.0':
+                lines.append(f'{dest} dev {iface} proto kernel scope link src {state.interfaces.get(iface,{}).get("ip","?")} metric {metric}')
+            else:
+                lines.append(f'{dest} via {gw} dev {iface} metric {metric}')
+        return '\n'.join(lines)
+
+    def _pc_route_table(self, state: DeviceState) -> str:
+        lines = ['Kernel IP routing table',
+                 'Destination     Gateway         Genmask         Flags Metric Ref    Use Iface']
+        for r in state.routes:
+            dest_net = r['dest'].split('/')[0]
+            prefix = int(r['dest'].split('/')[1]) if '/' in r['dest'] else 0
+            mask_int = (0xffffffff << (32 - prefix)) & 0xffffffff if prefix else 0
+            mask = f'{(mask_int>>24)&0xff}.{(mask_int>>16)&0xff}.{(mask_int>>8)&0xff}.{mask_int&0xff}'
+            gw = r['gw'] if r['gw'] != '0.0.0.0' else '0.0.0.0'
+            flag = 'UG' if r['gw'] != '0.0.0.0' else 'U'
+            dest_disp = '0.0.0.0' if r['dest'] == '0.0.0.0/0' else dest_net
+            lines.append(f'{dest_disp:<16}{gw:<16}{mask:<16}{flag}     {r.get("metric",0):<7}0      0 {r["iface"]}')
+        return '\n'.join(lines)
+
+    def _pc_ip_link(self, state: DeviceState) -> str:
+        lines = []
+        idx = 1
+        for ifname, info in state.interfaces.items():
+            mac = info.get('mac', '00:00:00:00:00:00')
+            status = info.get('status', 'up')
+            state_str = 'UP' if status == 'up' else 'DOWN'
+            flags = 'LOOPBACK,UP,LOWER_UP' if ifname == 'lo' else f'BROADCAST,MULTICAST,{state_str},LOWER_UP'
+            lines.append(f'{idx}: {ifname}: <{flags}> mtu 1500 qdisc pfifo_fast state {state_str} mode DEFAULT group default')
+            lines.append(f'    link/ether {mac} brd ff:ff:ff:ff:ff:ff')
+            idx += 1
+        return '\n'.join(lines)
+
+    @staticmethod
+    def _broadcast(ip: str, prefix: int) -> str:
+        try:
+            octets = [int(x) for x in ip.split('.')]
+            ip_int = (octets[0]<<24)|(octets[1]<<16)|(octets[2]<<8)|octets[3]
+            mask = (0xffffffff << (32 - prefix)) & 0xffffffff
+            bcast_int = (ip_int & mask) | (~mask & 0xffffffff)
+            return f'{(bcast_int>>24)&0xff}.{(bcast_int>>16)&0xff}.{(bcast_int>>8)&0xff}.{bcast_int&0xff}'
+        except Exception:
+            return '255.255.255.255'
 
     # ─── APRESIA コマンドエンジン（ApresiaLightGM200マニュアル準拠）─
     def _apresia_process(self, cmd: str, c: str, state: DeviceState) -> str:
@@ -1508,6 +4983,20 @@ ntp server 192.168.1.1"""
                 state.current_if = f'Vlan{vid}'
             return ''
 
+        # ── QoS（APRESIA 固有）──
+        # qos enable / qos cos-queue / qos dscp / traffic-shape / mls qos 等
+        if state.mode in ('config', 'config-if'):
+            m = re.match(r'^(qos|mls\s+qos|traffic-shape|cos-queue|qos-queue|'
+                         r'priority-queue|scheduling)\b', c)
+            if m:
+                if not hasattr(state, 'qos_simple'):
+                    state.qos_simple = []
+                state.qos_simple.append(cmd.strip())
+                state.qos_enabled = True
+                return ''
+        if re.match(r'^show\s+(mls\s+)?qos', c):
+            return self._format_show_qos_simple(state)
+
         # ── show コマンド群 ──
         if re.match(r'^show\s+version', c):
             return self._apresia_show_version(state)
@@ -1543,7 +5032,13 @@ ntp server 192.168.1.1"""
             return self._apresia_show_stp(state)
         if re.match(r'^show\s+loopdetect', c):
             return self._apresia_show_loopdetect(state)
+        if re.match(r'^show\s+lldp\s+neighbors\s+detail', c):
+            return self._apresia_show_lldp_detail(state)
         if re.match(r'^show\s+lldp\s+neighbors', c):
+            return self._apresia_show_lldp(state)
+        if re.match(r'^show\s+lldp\s+local', c):
+            return self._apresia_show_lldp_local(state)
+        if re.match(r'^show\s+lldp', c):
             return self._apresia_show_lldp(state)
         if re.match(r'^show\s+interfaces?\s+status', c):
             return self._apresia_show_port('all', state)
@@ -1790,12 +5285,63 @@ ntp server 192.168.1.1"""
         return '\n'.join(lines)
 
     def _apresia_show_lldp(self, state: DeviceState) -> str:
+        neighbors = getattr(state, 'lldp_neighbors', [])
+        lines = [
+            ' LLDP Neighbor Information',
+            '',
+            ' Port        Chassis ID         System Name    Port Descr',
+            ' ----------- ------------------ -------------- --------------------',
+        ]
+        for n in neighbors:
+            port = n.get('port', n.get('local_if', ''))
+            chassis = n.get('chassis_id', '00:00:00:00:00:00')
+            sysname = n.get('system_name', n.get('device', ''))
+            port_id = n.get('port_id', n.get('port', ''))
+            lines.append(f' {port:<12}{chassis:<19}{sysname:<15}{port_id}')
+        if not neighbors:
+            lines.append(' (no neighbors)')
+        return '\n'.join(lines)
+
+    def _apresia_show_lldp_detail(self, state: DeviceState) -> str:
+        neighbors = getattr(state, 'lldp_neighbors', [])
+        if not neighbors:
+            return ' LLDP Neighbor Information\n\n (no neighbors)'
+        lines = [' LLDP Neighbor Information', '']
+        for n in neighbors:
+            port = n.get('port', n.get('local_if', ''))
+            chassis = n.get('chassis_id', '00:00:00:00:00:00')
+            sysname = n.get('system_name', n.get('device', ''))
+            port_id = n.get('port_id', n.get('port', ''))
+            cap_map = {'B': 'Bridge', 'R': 'Router', 'T': 'Telephone', 'S': 'Bridge'}
+            cap = cap_map.get(n.get('cap', 'B'), 'Bridge')
+            lines += [
+                f' Port          : {port}',
+                f'  Chassis ID   : {chassis}',
+                f'  Port ID      : {port_id}',
+                f'  System Name  : {sysname}',
+                f'  System Descr : APRESIA Networks',
+                f'  Port Descr   : {port_id}',
+                f'  Capability   : {cap}',
+                f'  TTL          : {n.get("ttl", 120)}',
+                '',
+            ]
+        return '\n'.join(lines)
+
+    def _apresia_show_lldp_local(self, state: DeviceState) -> str:
+        # ローカルデバイス情報（APRESIA自身のLLDP送信情報）
+        mgmt_ip = ''
+        for name, iface in state.interfaces.items():
+            if name.startswith('Vlan') and iface.get('ip'):
+                mgmt_ip = iface['ip']
+                break
         return (
-            f' LLDP Neighbor Information\n'
+            f' LLDP Local Information\n'
             f'\n'
-            f' Port        Chassis ID         System Name    Port Descr\n'
-            f' ----------- ------------------ -------------- --------------------\n'
-            f' Port1/0/24  00:0e:0e:f1:00:01  Dist-SW        GigabitEthernet1/0/1\n'
+            f'  Chassis ID   : 00:0e:0e:f1:00:02\n'
+            f'  System Name  : {state.hostname}\n'
+            f'  System Descr : APRESIA Networks ApresiaLight Series\n'
+            f'  Capability   : Bridge\n'
+            f'  Management   : {mgmt_ip or "not configured"}\n'
         )
 
     def _apresia_show_running(self, state: DeviceState) -> str:
@@ -2036,11 +5582,11 @@ ntp server 192.168.1.1"""
             # (先頭コマンド, モード): 必要な最低トークン数
             ('interface', 'config'): 2,      # interface GigabitEthernet...
             ('interface', 'exec'):   2,
-            ('ip address', 'config-if'): 4,  # ip address x.x.x.x mask
+            # ('ip address', 'config-if'): 4 — handled below with CIDR check
             ('ip route', 'config'): 4,       # ip route net mask gw
             ('vlan', 'config'): 2,           # vlan 10
             ('neighbor', 'config-router'): 3, # neighbor x.x.x.x remote-as N
-            ('network', 'config-router'): 3,  # network x.x.x.x x.x.x.x area N (OSPF)
+            # network の必要トークン数はルーティングプロトコルによって異なるため別途チェック
             ('username', 'config'): 3,        # username xxx privilege N
         }
         # 先頭2トークンのコンテキストチェック
@@ -2049,6 +5595,12 @@ ntp server 192.168.1.1"""
             if (c.startswith(req_cmd) and
                     (req_mode == mode or req_mode == '*') and
                     len(tokens) < min_toks):
+                return self._incomplete_error(cmd, state)
+
+        # ip address: needs either "ip address X.X.X.X mask" (4 tokens) or "ip address X.X.X.X/prefix" (3 tokens w/ slash)
+        if c.startswith('ip address') and mode == 'config-if':
+            import re as _re
+            if not _re.match(r'^ip\s+address\s+([\d.]+)/(\d+)', c) and len(tokens) < 4:
                 return self._incomplete_error(cmd, state)
 
         # ── Mode チェック（execモードでconfig専用コマンドを打った場合） ──
@@ -2107,11 +5659,36 @@ ntp server 192.168.1.1"""
                     return self._range_error(cmd, state, 'AS number', 1, 4294967295, asn)
 
             # channel-group <1-48> mode active|passive|on
-            m_ch = re.match(r'^channel-group\s+(\d+)', c)
+            m_ch = re.match(r'^channel-group\s+(\d+)(?:\s+mode\s+(\S+))?', c)
             if m_ch:
                 ch_id = int(m_ch.group(1))
                 if not (1 <= ch_id <= 48):
                     return self._range_error(cmd, state, 'channel-group', 1, 48, ch_id)
+                mode = m_ch.group(2) or 'on'
+                if mode not in ('active', 'passive', 'on'):
+                    return self._cmd_error(cmd, state, reason='invalid')
+                # Save to channel_groups and track membership
+                if not hasattr(state, 'channel_groups'):
+                    state.channel_groups = {}
+                if ch_id not in state.channel_groups:
+                    state.channel_groups[ch_id] = {'mode': mode, 'members': []}
+                else:
+                    state.channel_groups[ch_id]['mode'] = mode
+                # Determine current interface name
+                cur_if = getattr(state, 'current_if', None)
+                if cur_if and cur_if not in state.channel_groups[ch_id]['members']:
+                    state.channel_groups[ch_id]['members'].append(cur_if)
+                # Update port-channel interface status
+                po_name = f"Port-channel{ch_id}"
+                if po_name not in state.interfaces:
+                    state.interfaces[po_name] = {
+                        "ip": "", "prefix": 0, "status": "connected",
+                        "vlan": "trunk", "speed": "1000", "duplex": "full",
+                        "desc": f"Port-channel{ch_id}",
+                    }
+                else:
+                    state.interfaces[po_name]['status'] = 'connected'
+                return ''
 
             # vrrp <1-255>
             m_vrrp = re.match(r'^vrrp\s+(\d+)', c)
@@ -2407,7 +5984,15 @@ class CliCompletion:
             },
             'arp':              'ARP table',
             'cdp':              'CDP information',
-            'lldp':             'LLDP information',
+            'lldp': {
+                '_desc':    'LLDP information',
+                'neighbors': {
+                    '_desc':  'LLDP neighbor entries',
+                    'detail': 'Show detailed information of neighbors',
+                },
+                'local':    'LLDP local device information',
+                'interface':'LLDP interface information',
+            },
             'clock':            'Display the system clock',
             'logging':          'Show the contents of logging buffers',
             'processes':        'Active process statistics',

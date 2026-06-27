@@ -2,6 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>ネットワークラボ エミュレーター</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -36,6 +37,22 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 
 /* メイン */
 #main{flex:1;display:flex;overflow:hidden}
+
+/* ════ ログイン画面 ════ */
+#login-screen{position:fixed;inset:0;z-index:19999;background:#000;display:flex;align-items:center;justify-content:center}
+#login-box{background:#0a0f18;border:1px solid #1a3a5a;border-radius:6px;width:360px;max-width:94vw;overflow:hidden;box-shadow:0 4px 32px rgba(0,80,160,.4)}
+#login-hdr{background:linear-gradient(to bottom,#1a3a6a,#0d2040);padding:10px 16px;border-bottom:1px solid #1a3a5a;font-size:14px;color:#80c8ff;font-weight:bold}
+#login-body{padding:20px;display:flex;flex-direction:column;gap:12px}
+#login-body label{font-size:11px;color:#8ab4e0;margin-bottom:2px;display:block}
+#login-body input{width:100%;background:#060e18;border:1px solid #1a3a5a;color:#c0c0c0;padding:6px 8px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px}
+#login-body input:focus{outline:none;border-color:#3a7abf}
+#login-err{color:#ff5050;font-size:11px;min-height:16px}
+#login-timeout-msg{color:#c8c800;font-size:11px;min-height:16px}
+#btn-login{width:100%;padding:8px;background:#0a3a0a;border:1px solid #00c800;color:#00c800;font-size:13px;font-weight:bold;cursor:pointer;border-radius:4px;font-family:'Courier New',monospace}
+#btn-login:hover{background:#0a5a0a}
+#session-timer{font-size:10px;color:#606060;cursor:default;padding:2px 8px;border-radius:2px}
+#session-timer.warn{color:#c8c800}
+#session-timer.danger{color:#c80000}
 
 /* ════ 起動選択画面 ════ */
 #launcher{position:fixed;inset:0;z-index:9999;background:#000;display:flex;align-items:center;justify-content:center;flex-direction:column}
@@ -141,9 +158,72 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 .flow-hdr{background:#1a3a6a;padding:7px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #2a5a8a}
 #flow-text{width:100%;height:200px;background:#050e18;border:1px solid #1a3a5a;color:#00c800;font-family:'Courier New',monospace;font-size:12px;padding:8px;outline:none;resize:vertical;line-height:1.5;display:block}
 #flow-log{height:60px;overflow-y:auto;background:#050e18;border:1px solid #1a3a5a;padding:4px 8px;font-size:10px;scrollbar-width:thin;margin-top:6px;color:#406060}
+
+/* ── モバイル対応 ── */
+@media (max-width: 600px) {
+  /* ランチャー: 全画面表示 */
+  #launcher{padding:0}
+  #launcher-box{width:100vw;max-width:100vw;border-radius:0;border-left:none;border-right:none;min-height:100vh}
+  #launcher-hdr{padding:10px 12px}
+  .lh-title{font-size:14px}
+  .dev-sel-row{padding:8px 10px;min-height:44px}
+  .dev-sel-row label{font-size:13px}
+  .dev-sel-row input[type=checkbox]{width:20px;height:20px}
+  #launcher-add{padding:8px 10px;gap:6px;flex-wrap:wrap}
+  .add-btn{font-size:12px;padding:5px 10px}
+  #launcher-links{padding:8px 10px}
+  #launcher-launch{padding:14px}
+  #launcher-launch button{font-size:15px;padding:12px;border-radius:6px}
+
+  /* メニューバー: スクロール可能に */
+  #menubar{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+  #menubar::-webkit-scrollbar{display:none}
+
+  /* タイトルバー: コンパクト化 */
+  #titlebar .title{font-size:11px}
+  #mode-badge{font-size:9px;padding:1px 6px}
+
+  /* ターミナルウィンドウ: フォントサイズ調整 */
+  .tw-buf{font-size:13px;line-height:1.5}
+  .tw-hdr{font-size:11px}
+  .tw-inp{font-size:13px}
+
+  /* トポロジー左パネル: 横幅縮小 */
+  .topo-left{width:100%;flex-shrink:0}
+
+  /* コンフィグ左パネル */
+  .cfg-left{width:100%}
+
+  /* フローボックス: 全幅 */
+  #flow-box{width:98vw;max-width:98vw}
+  #flow-text{font-size:13px}
+
+  /* タブ操作しやすくする */
+  .tab-btn{padding:5px 10px;font-size:11px}
+}
 </style>
 </head>
 <body>
+
+<!-- ════ ログイン画面 ════ -->
+<div id="login-screen" style="display:none">
+  <div id="login-box">
+    <div id="login-hdr">🔒 ネットワークラボ — ログイン</div>
+    <div id="login-body">
+      <div id="login-timeout-msg"></div>
+      <div>
+        <label>ユーザー名</label>
+        <input id="login-user" type="text" value="admin" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('login-pass').focus()">
+      </div>
+      <div>
+        <label>パスワード</label>
+        <input id="login-pass" type="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+      </div>
+      <div id="login-err"></div>
+      <button id="btn-login" onclick="doLogin()">ログイン</button>
+    </div>
+  </div>
+</div>
 
 <!-- ════ 起動選択画面 ════ -->
 <div id="launcher">
@@ -210,6 +290,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
     </div>
     <div id="launcher-foot">
       <span id="launcher-count">0台選択中</span>
+      <button id="btn-clear-state" onclick="clearLabState();this.textContent='✅ リセット完了';setTimeout(()=>this.textContent='🗑 前回セッションをリセット',1500)" style="background:transparent;border:1px solid #3a2a00;color:#806040;font-size:10px;padding:3px 10px;cursor:pointer;font-family:'Courier New',monospace;border-radius:3px">🗑 前回セッションをリセット</button>
       <button id="btn-launch" onclick="launchLab()">▶ ラボ起動</button>
     </div>
   </div>
@@ -219,6 +300,8 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 <div id="titlebar">
   <div class="title">🖥 ネットワークラボ エミュレーター — Si-R × SR-S × Catalyst × Cisco</div>
   <span id="mode-badge" class="badge-rules">● ルールベース</span>
+  <span id="session-timer" title="セッション残り時間">&#x23F2; --:--</span>
+  <button onclick="doLogout()" style="background:#1a0a0a;border:1px solid #5a2a2a;color:#c06060;font-size:10px;padding:1px 7px;cursor:pointer;border-radius:2px;font-family:'Courier New',monospace">ログアウト</button>
   <div style="display:flex;gap:3px;margin-left:8px"><div class="tbtn">_</div><div class="tbtn">□</div><div class="tbtn">×</div></div>
 </div>
 
@@ -413,6 +496,15 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 <!-- 右クリックメニュー -->
 <div id="ctx-menu"></div>
 
+<!-- ファイルドロップ オーバーレイ -->
+<div id="drop-overlay" style="position:fixed;inset:0;z-index:9500;display:none;align-items:center;justify-content:center;background:rgba(0,40,80,.55);backdrop-filter:blur(1px);pointer-events:none">
+  <div style="border:3px dashed #4aa8ff;border-radius:10px;padding:40px 60px;background:rgba(8,20,36,.92);text-align:center">
+    <div style="font-size:48px">📂</div>
+    <div style="font-size:16px;color:#80c8ff;margin-top:10px;font-weight:bold">設定ファイルをドロップ</div>
+    <div style="font-size:11px;color:#6890b0;margin-top:6px">複数ファイルで複数台を一括投入＆自動接続します<br>(.txt / .cfg / .conf)</div>
+  </div>
+</div>
+
 <!-- 流し込みモーダル -->
 <div id="flow-overlay">
   <div id="flow-box">
@@ -498,11 +590,13 @@ const DEV_TEMPLATES = {
 
 // ランチャー用の装置リスト（選択状態を管理）
 const LAUNCHER_DEVICES = {
-  'sir-a':    {checked:true,  name:'Router-A', model:'Si-R G120',     color:'#00c840', type:'sir'},
-  'sir-b':    {checked:false, name:'Router-B', model:'Si-R G120',     color:'#00a040', type:'sir'},
-  'srs':      {checked:false, name:'Core-SW',  model:'SR-S324TR1',    color:'#00a0ff', type:'srs'},
-  'catalyst': {checked:false, name:'Dist-SW',  model:'Catalyst 9300', color:'#1e90ff', type:'catalyst'},
-  'cisco':    {checked:false, name:'GW-Router',model:'Cisco ISR4321', color:'#e05a00', type:'cisco'},
+  'sir-a':    {checked:true,  name:'Router-A', model:'Si-R G120',            color:'#00c840', type:'sir'},
+  'sir-b':    {checked:false, name:'Router-B', model:'Si-R G120',            color:'#00a040', type:'sir'},
+  'srs':      {checked:false, name:'Core-SW',  model:'SR-S324TR1',           color:'#00a0ff', type:'srs'},
+  'catalyst': {checked:false, name:'Dist-SW',  model:'Catalyst 9300',        color:'#1e90ff', type:'catalyst'},
+  'cisco':    {checked:false, name:'GW-Router',model:'Cisco ISR4321',        color:'#e05a00', type:'cisco'},
+  'nexus':    {checked:false, name:'Nexus-SW', model:'Nexus 9300',           color:'#ff6a00', type:'nexus'},
+  'apresia':  {checked:false, name:'AP-SW',    model:'APRESIA ApresiaLight', color:'#00d4aa', type:'apresia'},
 };
 let launcherDevCounter = 10;
 
@@ -510,7 +604,7 @@ function renderLauncherList() {
   const el = document.getElementById('dev-sel-list');
   if (!el) return;
   el.innerHTML = Object.entries(LAUNCHER_DEVICES).map(([id, d]) => {
-    const isDefault = ['sir-a','sir-b','srs','catalyst','cisco'].includes(id);
+    const isDefault = ['sir-a','sir-b','srs','catalyst','cisco','nexus','apresia'].includes(id);
     const checked = d.checked ? 'checked' : '';
     const active  = d.checked ? 'active' : '';
     const del     = isDefault ? '' :
@@ -679,6 +773,103 @@ function launchLab() {
     focusTerm(selected[0][0]);
     checkStatus();
   }, 100);
+
+  // ラボ状態をlocalStorageに保存
+  saveLabState();
+}
+
+// ════════════════════════════════════════════
+// ラボ状態の保存・復元（ブラウザリロード対応）
+// ════════════════════════════════════════════
+const LAB_STATE_KEY = 'nlabState_v1';
+
+function saveLabState() {
+  try {
+    const state = {
+      labActive: true,
+      devices: JSON.parse(JSON.stringify(DEVICES)),
+      links: JSON.parse(JSON.stringify(LINKS)),
+      nodePos: JSON.parse(JSON.stringify(NODE_POS)),
+      savedAt: Date.now(),
+    };
+    localStorage.setItem(LAB_STATE_KEY, JSON.stringify(state));
+  } catch(e) { /* localStorage が使えない場合は無視 */ }
+}
+
+function clearLabState() {
+  localStorage.removeItem(LAB_STATE_KEY);
+}
+
+// 復元したラボをバックエンドに同期（デバイス登録＋リンク）
+function _syncRestoredLabToBackend() {
+  if (!Object.keys(DEVICES).length) return;
+  Promise.all(Object.entries(DEVICES).map(([id, d]) =>
+    fetch('/api/device', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id, type: d.type, hostname: d.hostname})})
+  )).then(() => {
+    fetch('/api/links/sync', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({links: LINKS.map(l => ({a:l.a, b:l.b,
+        iface_a:l.pa, iface_b:l.pb}))})});
+  }).catch(()=>{});
+}
+
+function restoreLabState() {
+  let state;
+  try {
+    const raw = localStorage.getItem(LAB_STATE_KEY);
+    if (!raw) return false;
+    state = JSON.parse(raw);
+  } catch(e) { return false; }
+  if (!state || !state.labActive || !state.devices) return false;
+
+  // DEVICES・LINKS・NODE_POSを復元
+  Object.keys(DEVICES).forEach(k => delete DEVICES[k]);
+  Object.keys(NODE_POS).forEach(k => delete NODE_POS[k]);
+  LINKS.length = 0;
+  Object.assign(DEVICES, state.devices);
+  Object.assign(NODE_POS, state.nodePos || {});
+  (state.links || []).forEach(l => LINKS.push(l));
+
+  // TERMSを初期化
+  Object.keys(DEVICES).forEach(id => {
+    if (!TERMS[id]) TERMS[id] = {busy:false, typed:'', cur:0, history:[], histIdx:-1};
+  });
+
+  // グリッド列数を設定
+  const count = Object.keys(DEVICES).length;
+  const cols = count <= 1 ? 1 : count <= 2 ? 2 : count <= 4 ? 2 : 3;
+  document.getElementById('terminal-grid').style.gridTemplateColumns = `repeat(${cols},1fr)`;
+
+  // バックエンドにデバイス登録 & リンク同期（認証済みのときだけ）
+  // 未認証時はUI復元のみ行い、ログイン後に _syncRestoredLabToBackend() で同期する
+  if (typeof _sessionToken !== 'undefined' && _sessionToken) {
+    _syncRestoredLabToBackend();
+  }
+
+  // ターミナルDOM構築
+  initTerminals();
+
+  // ランチャーを隠す
+  document.getElementById('launcher').style.display = 'none';
+
+  renderTopoDisplay();
+  renderLinkList();
+  updateStatusBar();
+  updateVrrpBadges();
+  updateFlowDevSel();
+
+  // 復元メッセージ
+  setTimeout(() => {
+    const firstId = Object.keys(DEVICES)[0];
+    if (firstId) {
+      print(firstId, '  [セッション復元] 前回の設定を読み込みました', 'col-d');
+      renderInput(firstId);
+      focusTerm(firstId);
+    }
+    checkStatus();
+  }, 200);
+
+  return true;
 }
 
 function calcPositions(count) {
@@ -802,6 +993,7 @@ async function initLauncher() {
     badge.textContent = '● ルールベース ℹ';
     badge.className = 'badge-rules';
   }
+  applyScreenLayout();
 }
 
 // ════════════════════════════════════════════
@@ -820,6 +1012,7 @@ function addTermDOM(id) {
   const grid = document.getElementById('terminal-grid');
   const el = document.createElement('div');
   el.className = 'term-win'; el.id = 'tw-'+id;
+  el.dataset.devid = id;
   el.style.borderTop = `2px solid ${d.color}`;
   el.innerHTML = `
     <div class="tw-title">
@@ -971,6 +1164,15 @@ function pollProtocolLog(id, times) {
         d.logs.forEach(function(log) {
           var line = (typeof log === 'string') ? log : (log.message || JSON.stringify(log));
           var cls = 'col-d';
+          // ARP パケットログは専用の色分け
+          if (typeof log === 'object' && log.type === 'arp_log') {
+            var sub = log.subtype || '';
+            if (sub === 'request' || sub === 'request_received') cls = 'col-y';
+            else if (sub === 'reply' || sub === 'reply_received') cls = 'col-g';
+            print(id, line, cls);
+            renderInput(id);
+            return;
+          }
           if (line.indexOf('up') >= 0 || line.indexOf('Up') >= 0 ||
               line.indexOf('FULL') >= 0 || line.indexOf('Established') >= 0 ||
               line.indexOf('学習') >= 0 || line.indexOf('root') >= 0 ||
@@ -1311,7 +1513,12 @@ function onMM(e){
 
   if(CVS.linkMode){CVS.linkMouse={wx,wy};drawCanvas();}
 }
-function onMU(){CVS.dragging=null;CVS.panning=false;CVS.panStart=null;CVS.cvs.style.cursor=CVS.linkMode?'crosshair':'default';renderLinkList();renderTopoDisplay();}
+function onMU(){
+  const wasDragging = !!CVS.dragging;
+  CVS.dragging=null;CVS.panning=false;CVS.panStart=null;CVS.cvs.style.cursor=CVS.linkMode?'crosshair':'default';
+  renderLinkList();renderTopoDisplay();
+  if (wasDragging) saveLabState();
+}
 function onMW(e){
   e.preventDefault();
   const r=CVS.cvs.getBoundingClientRect(),sx=e.clientX-r.left,sy=e.clientY-r.top;
@@ -1360,18 +1567,22 @@ function commitLink(aId,bId){
   print(bId,'');print(bId,`%LINK-3-UPDOWN: Interface ${pb}, changed state to up`,'col-g');
   renderLinkList();renderTopoDisplay();drawCanvas();
   syncLinksToBackend();
+  saveLabState();
 }
 function syncLinksToBackend(){
-  // vnetにリンクを同期（プロトコルパケットが流れる）
+  // vnetにリンクを同期（インターフェース名込みでプロトコルパケットが流れる）
   fetch('/api/links/sync',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({links:LINKS.map(function(l){return {a:l.a,b:l.b};})})});
+    body:JSON.stringify({links:LINKS.map(function(l){return {a:l.a,b:l.b,iface_a:l.pa,iface_b:l.pb};})})});
 }
 function defPort(type,n){
   if(type==='sir')return`lan${n%3}`;
-  if(type==='srs')return`ether ${n+1}`;
+  if(type==='srs')return`GigabitEthernet1/0/${n+1}`;
+  if(type==='nexus')return`Ethernet1/${n+1}`;
   if(type==='catalyst')return`GigabitEthernet1/0/${n+1}`;
-  if(type==='cisco')return`GigabitEthernet0/0/${n%2}`;
-  return`eth${n}`;
+  if(type==='cisco')return`GigabitEthernet0/${n%3}`;
+  if(type==='asa')return`GigabitEthernet0/${n%3}`;
+  if(type==='apresia')return`ge-${n%24}`;
+  return`GigabitEthernet0/${n}`;
 }
 function addDevice(tplKey){
   const tpl=DEV_TEMPLATES[tplKey];if(!tpl)return;
@@ -1386,6 +1597,7 @@ function addDevice(tplKey){
   fetch('/api/device',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({id:newId,type:tpl.type,hostname:tpl.prefix+devCounter})});
   renderLinkList();renderTopoDisplay();drawCanvas();updateFlowDevSel();
+  saveLabState();
 }
 function deleteSelectedNode(){
   const id=CVS.selected;if(!id)return;
@@ -1399,6 +1611,7 @@ function deleteSelectedNode(){
   CVS.selected=null;document.getElementById('btn-del-sel').style.display='none';
   document.getElementById('node-detail-box').style.display='none';
   renderLinkList();renderTopoDisplay();drawCanvas();updateFlowDevSel();
+  saveLabState();
 }
 function showNodeDetail(id){
   const d=DEVICES[id];
@@ -1407,7 +1620,7 @@ function showNodeDetail(id){
     <div style="display:flex;gap:8px;margin-bottom:6px">
       <div style="flex:1"><div style="font-size:9px;color:var(--text2)">ホスト名</div>
         <input style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 5px;font-size:11px;font-family:'Courier New',monospace;outline:none"
-          value="${d.hostname}" onchange="DEVICES['${id}'].hostname=this.value;renderInput('${id}');renderTopoDisplay();drawCanvas();fetch('/api/device/${id}/hostname',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({hostname:this.value})})">
+          value="${d.hostname}" onchange="DEVICES['${id}'].hostname=this.value;renderInput('${id}');renderTopoDisplay();drawCanvas();saveLabState();fetch('/api/device/${id}/hostname',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({hostname:this.value})})">
       </div>
     </div>
     <div style="display:flex;gap:6px">
@@ -1532,6 +1745,7 @@ function deleteLink(lid){
   print(lnk.b,'');print(lnk.b,`%LINK-3-UPDOWN: Interface ${lnk.pb}, changed state to down`,'col-r');
   LINKS=LINKS.filter(l=>l.id!==lid);renderLinkList();renderTopoDisplay();drawCanvas();
   syncLinksToBackend();
+  saveLabState();
 }
 function renderLinkList(){
   const el=document.getElementById('link-list');if(!el)return;
@@ -1624,6 +1838,195 @@ function openFlowModal(id,text){
   document.getElementById('flow-log').innerHTML='';
   if(text){const n=text.split('\n').filter(l=>l&&!l.startsWith('#')).length;addFlowLog(`📋 ${n}行を読み込みました`,'#00c8c8');}
 }
+
+// ════════════════════════════════════════════
+// 設定ファイルのドラッグ&ドロップ
+// ════════════════════════════════════════════
+function _readConfigFile(file, targetId){
+  if(!file) return;
+  // 拡張子/サイズの簡易チェック
+  if(file.size > 1024*1024){ alert('ファイルが大きすぎます（1MB以下にしてください）'); return; }
+  const okExt=/\.(txt|cfg|conf|config|ios|run|log)$/i;
+  if(!okExt.test(file.name) && file.type && !file.type.startsWith('text')){
+    if(!confirm(`"${file.name}" はテキスト設定ファイルではない可能性があります。読み込みますか？`)) return;
+  }
+  const reader=new FileReader();
+  reader.onload=function(e){
+    const text=(e.target.result||'').replace(/\r\n/g,'\n');
+    openFlowModal(targetId||focusedId||Object.keys(DEVICES)[0], text);
+    addFlowLog(`📂 ファイル "${file.name}" を読み込みました`,'#00c8c8');
+  };
+  reader.onerror=function(){ alert('ファイルの読み込みに失敗しました'); };
+  reader.readAsText(file);
+}
+
+// ドロップ先がどの端末ウィンドウかを判定（無ければ focusedId）
+function _dropTargetDevice(ev){
+  let el=ev.target;
+  while(el && el!==document.body){
+    if(el.dataset && el.dataset.devid) return el.dataset.devid;
+    el=el.parentElement;
+  }
+  return focusedId || Object.keys(DEVICES)[0];
+}
+
+function _initConfigDnD(){
+  const overlay=document.getElementById('drop-overlay');
+  let dragDepth=0;
+
+  // 流し込みモーダルの「貼付」テキストエリアへの直接ドロップ
+  const ftext=document.getElementById('flow-text');
+  if(ftext){
+    ftext.addEventListener('dragenter',function(ev){ ev.stopPropagation(); ev.preventDefault(); ftext.style.outline='2px dashed #4aa8ff'; });
+    ftext.addEventListener('dragover',function(ev){ ev.stopPropagation(); ev.preventDefault(); if(ev.dataTransfer)ev.dataTransfer.dropEffect='copy'; });
+    ftext.addEventListener('dragleave',function(ev){ ev.stopPropagation(); ftext.style.outline=''; });
+    ftext.addEventListener('drop',function(ev){
+      ev.stopPropagation(); ev.preventDefault(); ftext.style.outline='';
+      if(overlay)overlay.style.display='none'; dragDepth=0;
+      const f=ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+      if(!f) return;
+      if(f.size>1024*1024){ alert('ファイルが大きすぎます（1MB以下）'); return; }
+      const r=new FileReader();
+      r.onload=function(e){
+        ftext.value=(e.target.result||'').replace(/\r\n/g,'\n');
+        const n=ftext.value.split('\n').filter(l=>l&&!l.startsWith('#')).length;
+        addFlowLog(`📂 "${f.name}" を貼付欄に読み込みました（${n}行）`,'#00c8c8');
+      };
+      r.readAsText(f);
+    });
+  }
+  // 画面全体でファイルドラッグを受け付ける
+  window.addEventListener('dragenter',function(ev){
+    if(ev.dataTransfer && Array.from(ev.dataTransfer.types||[]).includes('Files')){
+      ev.preventDefault(); dragDepth++; if(overlay)overlay.style.display='flex';
+    }
+  });
+  window.addEventListener('dragover',function(ev){
+    if(ev.dataTransfer && Array.from(ev.dataTransfer.types||[]).includes('Files')){
+      ev.preventDefault(); ev.dataTransfer.dropEffect='copy';
+    }
+  });
+  window.addEventListener('dragleave',function(ev){
+    dragDepth--; if(dragDepth<=0){dragDepth=0; if(overlay)overlay.style.display='none';}
+  });
+  window.addEventListener('drop',function(ev){
+    if(ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length){
+      ev.preventDefault(); dragDepth=0; if(overlay)overlay.style.display='none';
+      const files=Array.from(ev.dataTransfer.files);
+      if(files.length===1){
+        // 1ファイル: 既存端末への流し込み
+        _readConfigFile(files[0], _dropTargetDevice(ev));
+      } else {
+        // 複数ファイル: 各ファイル=1台として一括作成＆自動接続
+        _importMultipleConfigs(files);
+      }
+    }
+  });
+}
+
+// 設定テキストからベンダー種別を推定
+function _inferDeviceType(text){
+  const t=text.toLowerCase();
+  if(/feature\s+(vpc|nxos)|^\s*vdc\b|nx-os|switchname/m.test(t)) return 'nexus';
+  if(/lan\s+\d+\s+ip\s+address|wan\s+\d+\s+|napt\s+use|remote\s+\d+\s+ap/m.test(t)) return 'sir';
+  if(/interface\s+gigabitethernet1\/0\/|switch\s+virtual|spanning-tree/m.test(t)) return 'catalyst';
+  if(/interface\s+port\s+\d|loopdetect|apresia/m.test(t)) return 'apresia';
+  if(/nameif|security-level|access-group.*global/m.test(t)) return 'asa';
+  if(/ip\s+address\s+[\d.]+\s+[\d.]+|router\s+(ospf|bgp|eigrp)|interface\s+gigabitethernet0\//m.test(t)) return 'cisco';
+  return 'cisco';
+}
+
+// 設定テキストからホスト名を抽出
+function _inferHostname(text, fallback){
+  const m=text.match(/^\s*(?:hostname|sysname|switchname)\s+(\S+)/mi);
+  return m?m[1]:fallback;
+}
+
+// 複数の設定ファイルを一括投入し、同一サブネットの装置を自動接続
+async function _importMultipleConfigs(files){
+  switchTab('lab');
+  const created=[];
+  for(let i=0;i<files.length;i++){
+    const file=files[i];
+    const text=await new Promise(res=>{
+      const r=new FileReader(); r.onload=e=>res((e.target.result||'').replace(/\r\n/g,'\n'));
+      r.onerror=()=>res(''); r.readAsText(file);
+    });
+    if(!text) continue;
+    const type=_inferDeviceType(text);
+    const id='dev'+Date.now().toString(36)+i;
+    const hostname=_inferHostname(text, file.name.replace(/\.[^.]+$/,''));
+    const colors={sir:'#00c840',srs:'#00a0ff',catalyst:'#1e90ff',cisco:'#e05a00',nexus:'#7050d0',apresia:'#c00040',asa:'#cc4400'};
+    DEVICES[id]={type,hostname,color:colors[type]||'#888'};
+    NODE_POS[id]={x:150+(i%3)*220,y:100+Math.floor(i/3)*160};
+    TERMS[id]={busy:false,typed:'',cur:0,history:[],histIdx:-1};
+    created.push({id,type,hostname,text});
+    // バックエンドにデバイス登録
+    await fetch('/api/device',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id,type,hostname})});
+  }
+  // グリッド再構築
+  const cols=created.length<=1?1:created.length<=4?2:3;
+  document.getElementById('terminal-grid').style.gridTemplateColumns=`repeat(${cols},1fr)`;
+  initTerminals();
+  saveLabState();
+  // 各装置にコンフィグを流し込み（順次）
+  for(const c of created){
+    await _applyConfigLines(c.id, c.text);
+  }
+  // 同一サブネットの装置同士を自動接続
+  const links=_autoLinkBySubnet(created);
+  await fetch('/api/links/sync',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({links})});
+  links.forEach(l=>{ if(!LINKS.some(x=>(x.a===l.a&&x.b===l.b)||(x.a===l.b&&x.b===l.a))) LINKS.push({a:l.a,b:l.b,pa:l.iface_a,pb:l.iface_b}); });
+  saveLabState(); renderTopoDisplay&&renderTopoDisplay(); drawCanvas&&drawCanvas();
+  const first=created[0]; if(first){ focusTerm(first.id);
+    print(first.id,`  [一括投入] ${created.length}台を作成し、${links.length}本のリンクを自動接続しました`,'col-g'); }
+}
+
+// 1台に設定行を順次投入（コメント/空行はスキップ）
+async function _applyConfigLines(id, text){
+  const lines=text.split('\n').map(l=>l.trimEnd()).filter(l=>l && !l.startsWith('#') && !l.startsWith('!'));
+  for(const line of lines){
+    await fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({device_id:id,command:line})}).catch(()=>{});
+  }
+}
+
+// 設定からIP/プレフィックスを抽出し、同一サブネットの装置ペアを接続候補にする
+function _autoLinkBySubnet(created){
+  function ipToInt(ip){const o=ip.split('.').map(Number);return ((o[0]<<24)|(o[1]<<16)|(o[2]<<8)|o[3])>>>0;}
+  // 各装置: [{ip,prefix,iface}]
+  const devNets=created.map(c=>{
+    const nets=[];
+    const re=/interface\s+(\S+)[\s\S]*?ip\s+address\s+([\d.]+)\s+([\d.]+)/gi;
+    // シンプルに行単位で「直近のinterface名 + ip address」を拾う
+    let curIf='';
+    c.text.split('\n').forEach(line=>{
+      const mi=line.match(/^\s*interface\s+(\S+)/i); if(mi){curIf=mi[1];}
+      const ml=line.match(/^\s*lan\s+(\d+)\s+ip\s+address\s+([\d.]+)\/(\d+)/i);
+      const mc=line.match(/ip\s+address\s+([\d.]+)\/(\d+)/i);
+      const mm=line.match(/ip\s+address\s+([\d.]+)\s+([\d.]+)/i);
+      if(ml){nets.push({iface:'lan'+ml[1],ip:ml[2],prefix:parseInt(ml[3])});}
+      else if(mc&&curIf){nets.push({iface:curIf,ip:mc[1],prefix:parseInt(mc[2])});}
+      else if(mm&&curIf){const p=mm[2].split('.').map(Number).reduce((a,o)=>a+((o>>>0).toString(2).split('1').length-1),0);nets.push({iface:curIf,ip:mm[1],prefix:p});}
+    });
+    return {id:c.id,nets};
+  });
+  const links=[]; const used=new Set();
+  for(let i=0;i<devNets.length;i++)for(let j=i+1;j<devNets.length;j++){
+    for(const na of devNets[i].nets)for(const nb of devNets[j].nets){
+      const p=Math.min(na.prefix,nb.prefix);
+      const mask=p===0?0:(0xffffffff<<(32-p))>>>0;
+      if((ipToInt(na.ip)&mask)===(ipToInt(nb.ip)&mask)){
+        const key=devNets[i].id+'|'+devNets[j].id;
+        if(used.has(key))continue; used.add(key);
+        links.push({a:devNets[i].id,b:devNets[j].id,iface_a:na.iface,iface_b:nb.iface});
+      }
+    }
+  }
+  return links;
+}
 document.getElementById('flow-close-btn').onclick=()=>{flowStop=true;document.getElementById('flow-overlay').style.display='none';};
 document.getElementById('flow-dev-sel').onchange=function(){document.getElementById('flow-target-label').textContent=DEVICES[this.value]?.hostname||'';};
 document.getElementById('flow-run-btn').onclick=async()=>{
@@ -1632,6 +2035,13 @@ document.getElementById('flow-run-btn').onclick=async()=>{
   const text=document.getElementById('flow-text').value;
   const lines=text.split('\n').map(l=>l.trimEnd()).filter(l=>l&&!l.startsWith('#'));
   if(!lines.length){addFlowLog('コマンドがありません','#c8c800');return;}
+  // 投入前にバックエンドで異常値チェック（空・2バイト文字・行数・空白率）
+  try{
+    const vr=await fetch('/api/config/validate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({config:lines.join('\n')})}).then(r=>r.json());
+    (vr.issues||[]).forEach(it=>addFlowLog((it.level==='error'?'❌ ':'⚠️ ')+it.message,it.level==='error'?'#ff5050':'#c8c800'));
+    if(!vr.ok){addFlowLog('■ エラーのため中止しました（投入していません）','#ff5050');return;}
+  }catch(e){addFlowLog('⚠️ 検証をスキップ（サーバー応答なし）','#c8c800');}
   const delay=parseInt(document.getElementById('flow-delay').value);
   flowStop=false;flowRunning=true;
   document.getElementById('flow-run-btn').style.display='none';
@@ -1776,6 +2186,250 @@ function copyLastOutput(id) {
     if (btn) { const orig = btn.textContent; btn.textContent='✅コピー済'; setTimeout(()=>btn.textContent=orig, 1500); }
   });
 }
+
+// ページ読み込み時に復元を試みる
+// ── スクリーンサイズに基づくUI動的スケーリング ──
+function applyScreenLayout() {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const r  = document.documentElement;
+
+  if (vw <= 480) {
+    // 小型スマホ (〜480px)
+    const scale = vw / 480;
+    r.style.setProperty('--ui-font',      Math.round(11 * scale) + 'px');
+    r.style.setProperty('--ui-font-sm',   Math.round(9  * scale) + 'px');
+    r.style.setProperty('--ui-font-term', Math.round(12 * scale) + 'px');
+    r.style.setProperty('--ui-pad',       Math.round(6  * scale) + 'px');
+    r.style.setProperty('--ui-launcher-w', '100vw');
+    r.style.setProperty('--ui-launcher-radius', '0px');
+    r.style.setProperty('--ui-row-h',     Math.round(44 * scale) + 'px');
+    r.style.setProperty('--ui-chk',       Math.round(20 * scale) + 'px');
+  } else if (vw <= 768) {
+    // 大型スマホ・タブレット縦 (481〜768px)
+    const scale = vw / 768;
+    r.style.setProperty('--ui-font',      Math.round(12 * scale + 6) + 'px');
+    r.style.setProperty('--ui-font-sm',   Math.round(10 * scale + 4) + 'px');
+    r.style.setProperty('--ui-font-term', Math.round(13 * scale + 5) + 'px');
+    r.style.setProperty('--ui-pad',       Math.round(8  * scale + 3) + 'px');
+    r.style.setProperty('--ui-launcher-w', Math.min(vw * 0.96, 520) + 'px');
+    r.style.setProperty('--ui-launcher-radius', '4px');
+    r.style.setProperty('--ui-row-h',     '40px');
+    r.style.setProperty('--ui-chk',       '18px');
+  } else {
+    // PC (769px〜)
+    r.style.setProperty('--ui-font',      '11px');
+    r.style.setProperty('--ui-font-sm',   '10px');
+    r.style.setProperty('--ui-font-term', '12px');
+    r.style.setProperty('--ui-pad',       '6px');
+    r.style.setProperty('--ui-launcher-w', '520px');
+    r.style.setProperty('--ui-launcher-radius', '6px');
+    r.style.setProperty('--ui-row-h',     'auto');
+    r.style.setProperty('--ui-chk',       '16px');
+  }
+
+  // ランチャーボックス幅を動的に適用
+  const lb = document.getElementById('launcher-box');
+  if (lb) {
+    lb.style.width          = r.style.getPropertyValue('--ui-launcher-w');
+    lb.style.maxWidth       = vw <= 480 ? '100vw' : '96vw';
+    lb.style.borderRadius   = r.style.getPropertyValue('--ui-launcher-radius');
+  }
+
+  // ターミナルフォントサイズを全ウィンドウに適用
+  const termFont = r.style.getPropertyValue('--ui-font-term');
+  document.querySelectorAll('.tw-buf, .tw-inp').forEach(function(el) {
+    el.style.fontSize = termFont;
+  });
+
+  // デバイス行の高さ
+  const rowH = r.style.getPropertyValue('--ui-row-h');
+  document.querySelectorAll('.dev-sel-row').forEach(function(el) {
+    el.style.minHeight = rowH;
+  });
+
+  // チェックボックスサイズ
+  const chk = r.style.getPropertyValue('--ui-chk');
+  document.querySelectorAll('.dev-sel-row input[type=checkbox]').forEach(function(el) {
+    el.style.width  = chk;
+    el.style.height = chk;
+  });
+}
+
+window.addEventListener('resize', applyScreenLayout);
+
+// ════════════════════════════════════════════
+// セッション管理
+// ════════════════════════════════════════════
+const SESSION_KEY = 'netlabToken_v1';
+const SESSION_TTL = 600;      // 10分（サーバーと同値）
+const WARN_AT    = 120;       // 残り2分で警告色
+const DANGER_AT  = 30;        // 残り30秒で赤
+let _sessionToken = null;
+let _sessionStart = 0;        // 最終アクティビティ時刻（ms）
+let _sessionTimerID = null;
+
+function _getToken() { return _sessionToken; }
+
+// fetch ラッパー（全APIリクエストに自動でトークンを付与）
+const _origFetch = window.fetch;
+window.fetch = function(url, opts) {
+  opts = opts || {};
+  if (_sessionToken && typeof url === 'string' && url.startsWith('/api/')) {
+    opts.headers = Object.assign({'X-Session-Token': _sessionToken}, opts.headers || {});
+  }
+  return _origFetch(url, opts).then(function(res) {
+    if (res.status === 401 && url !== '/api/login') {
+      _forceLogout('セッションが無効です。再ログインしてください。');
+    }
+    return res;
+  });
+};
+
+function _touchActivity() {
+  _sessionStart = Date.now();
+}
+
+function _startSessionTimer() {
+  if (_sessionTimerID) clearInterval(_sessionTimerID);
+  _sessionStart = Date.now();
+  _sessionTimerID = setInterval(function() {
+    const elapsed = Math.floor((Date.now() - _sessionStart) / 1000);
+    const remaining = SESSION_TTL - elapsed;
+    const el = document.getElementById('session-timer');
+    if (!el) return;
+    if (remaining <= 0) {
+      clearInterval(_sessionTimerID);
+      _forceLogout('セッションがタイムアウトしました（10分無操作）。');
+      return;
+    }
+    const mm = String(Math.floor(remaining / 60)).padStart(2, '0');
+    const ss = String(remaining % 60).padStart(2, '0');
+    el.textContent = '⏲ ' + mm + ':' + ss;
+    el.className = remaining <= DANGER_AT ? 'danger' : remaining <= WARN_AT ? 'warn' : '';
+  }, 1000);
+}
+
+function _stopSessionTimer() {
+  if (_sessionTimerID) { clearInterval(_sessionTimerID); _sessionTimerID = null; }
+  const el = document.getElementById('session-timer');
+  if (el) { el.textContent = '⏲ --:--'; el.className = ''; }
+}
+
+// マウス・キー操作でアクティビティタイマーをリセット
+['mousemove','keydown','click','touchstart'].forEach(function(ev) {
+  document.addEventListener(ev, function() {
+    if (_sessionToken) _touchActivity();
+  }, {passive: true});
+});
+
+function showLoginScreen(msg, isTimeout) {
+  const ls = document.getElementById('login-screen');
+  ls.style.display = 'flex';
+  document.getElementById('login-err').textContent = '';
+  document.getElementById('login-timeout-msg').textContent = isTimeout ? (msg || '') : '';
+  if (!isTimeout) document.getElementById('login-err').textContent = msg || '';
+  document.getElementById('login-pass').value = '';
+  setTimeout(function() { document.getElementById('login-pass').focus(); }, 100);
+  _stopSessionTimer();
+}
+
+function hideLoginScreen() {
+  document.getElementById('login-screen').style.display = 'none';
+}
+
+async function doLogin() {
+  const user = document.getElementById('login-user').value.trim();
+  const pass = document.getElementById('login-pass').value;
+  document.getElementById('login-err').textContent = '認証中...';
+  try {
+    const res = await _origFetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: user, password: pass})
+    });
+    const data = await res.json();
+    if (data.ok && data.token) {
+      _sessionToken = data.token;
+      localStorage.setItem(SESSION_KEY, data.token);
+      hideLoginScreen();
+      _startSessionTimer();
+      _touchActivity();
+      document.getElementById('login-err').textContent = '';
+      // ログイン後も前回のラボを復元（初期画面に戻さない）
+      restoreLabState();
+    } else {
+      document.getElementById('login-err').textContent = data.error || 'ログイン失敗';
+    }
+  } catch(e) {
+    document.getElementById('login-err').textContent = 'サーバー接続エラー';
+  }
+}
+
+async function doLogout() {
+  if (_sessionToken) {
+    await _origFetch('/api/logout', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token: _sessionToken})
+    }).catch(()=>{});
+  }
+  _sessionToken = null;
+  localStorage.removeItem(SESSION_KEY);
+  showLoginScreen('ログアウトしました。', false);
+}
+
+function _forceLogout(msg) {
+  _sessionToken = null;
+  localStorage.removeItem(SESSION_KEY);
+  showLoginScreen(msg, true);
+}
+
+async function _initSession() {
+  // 保存済みトークンを確認
+  const saved = localStorage.getItem(SESSION_KEY);
+  if (saved) {
+    // サーバー側でまだ有効か確認
+    try {
+      const res = await _origFetch('/api/session/refresh?token=' + saved);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.ok) {
+          _sessionToken = saved;
+          hideLoginScreen();
+          _startSessionTimer();
+          _touchActivity();
+          return true;
+        }
+      }
+    } catch(e) {}
+    // 無効なら削除
+    localStorage.removeItem(SESSION_KEY);
+  }
+  showLoginScreen('', false);
+  return false;
+}
+
+document.addEventListener('DOMContentLoaded', async function() {
+  applyScreenLayout();
+  _initConfigDnD();
+  // ラボ状態は認証と独立して先に復元（ログイン画面の裏で再現しておく）
+  // → サーバー再起動でトークンが切れても、ログイン後すぐ前回の状態が見える
+  let restored = false;
+  try { restored = restoreLabState(); } catch(e) { restored = false; }
+  // ログイン画面を表示してトークン確認
+  document.getElementById('login-screen').style.display = 'flex';
+  const ok = await _initSession();
+  if (ok) {
+    if (!restored) {
+      // 事前復元に失敗していた場合はここで復元（バックエンド同期込み）
+      try { restoreLabState(); } catch(e) {}
+    } else {
+      // UIは復元済み → バックエンドへ同期だけ実行
+      _syncRestoredLabToBackend();
+    }
+  }
+});
 
 </script>
 </body>

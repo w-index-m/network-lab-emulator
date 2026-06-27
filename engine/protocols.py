@@ -46,14 +46,86 @@ def _normalize_area(area: str) -> str:
 # ══════════════════════════════════════════
 class VirtualNetwork:
     """装置間の仮想リンクを管理し、パケットを転送する"""
+
+    # スイッチ系デバイス種別（MAC flapログを出す対象）
+    _SWITCH_TYPES = frozenset({'catalyst', 'srs', 'apresia', 'nexus'})
+
     def __init__(self):
         self.links: Dict[str, set] = defaultdict(set)  # device_id -> {peer_ids}
+        self.interface_links: Dict[str, Dict[str, str]] = defaultdict(dict)  # device_id -> {peer_id -> iface_name}
+        self.down_interfaces: Dict[str, set] = defaultdict(set)  # device_id -> {shutdown中のiface名}
         self.send_callbacks: Dict[str, Callable] = {}  # device_id -> ws_send関数
         self.ws_send_callbacks: Dict[str, Callable] = {}  # フロントエンド表示用
+        self.device_types: Dict[str, str] = {}  # device_id -> device_type
 
-    def add_link(self, a: str, b: str):
+    # ── MAC flap検知 ────────────────────────────────────────────
+    def _has_path(self, src: str, dst: str) -> list:
+        """BFSで src→dst の経由パスを返す（なければ空リスト）"""
+        from collections import deque
+        q = deque([[src]])
+        visited = {src}
+        while q:
+            path = q.popleft()
+            node = path[-1]
+            if node == dst:
+                return path
+            for nbr in self.links.get(node, set()):
+                if nbr not in visited:
+                    visited.add(nbr)
+                    q.append(path + [nbr])
+        return []
+
+    async def _notify_mac_flap(self, a: str, b: str, iface_a: str, iface_b: str, loop_path: list):
+        """ループ検出時にスイッチ系デバイスへMACフラップログを送信"""
+        # ループを構成する全ノードからスイッチを抽出
+        loop_nodes = set(loop_path) | {a, b}
+        for dev_id in loop_nodes:
+            dtype = self.device_types.get(dev_id, '')
+            if dtype not in self._SWITCH_TYPES:
+                continue
+            # そのスイッチから見た2つのポートを特定
+            nbrs = list(self.links.get(dev_id, set()) & loop_nodes - {dev_id})
+            if len(nbrs) < 2:
+                continue
+            port1 = self.interface_links.get(dev_id, {}).get(nbrs[0], nbrs[0])
+            port2 = self.interface_links.get(dev_id, {}).get(nbrs[1], nbrs[1])
+            # ループの反対側の末端デバイスのMACを生成（代表MAC）
+            far_dev = nbrs[0]
+            h = abs(hash(far_dev)) % (16 ** 8)
+            mac = f'00:1b:0d:{(h >> 16) & 0xff:02x}:{(h >> 8) & 0xff:02x}:{h & 0xff:02x}'
+            log_msg = (f'%SW_MATM-4-MACFLAP_NOTIF: Host {mac} in vlan 1 '
+                       f'is flapping between port {port1} and port {port2}')
+            await self.send_to(dev_id, {'type': 'stp_log', 'message': log_msg})
+            # ループガードログも追加
+            await self.send_to(dev_id, {
+                'type': 'stp_log',
+                'message': f'%SPANTREE-2-LOOPGUARD_BLOCK: Loop guard blocking port {port2} on vlan 1'
+            })
+
+    def add_link(self, a: str, b: str, iface_a: str = None, iface_b: str = None):
+        # リンク追加前にループ（既存パス）を検出
+        loop_path = self._has_path(a, b) if b not in self.links.get(a, set()) else []
         self.links[a].add(b)
         self.links[b].add(a)
+        if iface_a:
+            self.interface_links[a][b] = iface_a
+        if iface_b:
+            self.interface_links[b][a] = iface_b
+        if loop_path:
+            _spawn(self._notify_mac_flap(a, b, iface_a or a, iface_b or b, loop_path))
+
+    def interface_down(self, device_id: str, iface: str):
+        """インターフェースをshutdown状態にする（broadcast_to_neighborsがスキップする）"""
+        self.down_interfaces[device_id].add(iface)
+
+    def interface_up(self, device_id: str, iface: str):
+        """インターフェースをno shutdown状態に戻す"""
+        self.down_interfaces[device_id].discard(iface)
+
+    def get_peers_on_interface(self, device_id: str, iface: str) -> set:
+        """指定インターフェース経由で接続されているpeer device_idのセット"""
+        return {peer for peer, if_name in self.interface_links.get(device_id, {}).items()
+                if if_name == iface}
 
     def remove_link(self, a: str, b: str):
         self.links[a].discard(b)
@@ -103,6 +175,16 @@ class VirtualNetwork:
         elif msg_type == 'bgp_open' or msg_type == 'bgp_update':
             # BGPはエンジン側で直接相手ノードを操作するのでスキップ
             pass
+
+        # arp_log はフロントエンドへ転送（ARPパケット可視化）
+        if msg_type == 'arp_log':
+            cb = self.ws_send_callbacks.get(device_id)
+            if cb:
+                try:
+                    await cb(msg)
+                except Exception:
+                    pass
+            return
 
         # それ以外（表示用）はフロントエンドへ + syslog送信
         cb = self.ws_send_callbacks.get(device_id)
@@ -215,9 +297,15 @@ class VirtualNetwork:
 
     async def broadcast_to_neighbors(self, src_id: str, msg: dict, exclude: set = None):
         msg_type = msg.get('type', '')
+        down = self.down_interfaces.get(src_id, set())
         for peer_id in list(self.links.get(src_id, set())):
             if exclude and peer_id in exclude:
                 continue
+            # shutdownされているインターフェース経由のピアには送信しない
+            if down:
+                connecting_iface = self.interface_links.get(src_id, {}).get(peer_id)
+                if connecting_iface and connecting_iface in down:
+                    continue
             # L2マルチキャスト系プロトコル（RIP/OSPF/STP/VRRP/LACP）は
             # 同一セグメントのみ届く
             if msg_type in ('rip_update', 'rip_request', 'rip_packet',
@@ -261,6 +349,7 @@ class RipEngine:
                 'timer_task': None,
                 'expire_tasks': {},   # "net/prefix" -> task
                 'redistributed': {},  # net/prefix -> {metric, source}
+                'peers': {},          # peer_id -> {hostname, last_seen, routes}
             }
         return self.nodes[device_id]
 
@@ -313,7 +402,26 @@ class RipEngine:
         for t in n['expire_tasks'].values():
             t.cancel()
         n['enabled'] = False
-        n['table'] = []
+
+    async def interface_down(self, device_id: str, peer_ids: set):
+        """インターフェースダウン時: 対象ピアから学習したルートをポイズンして削除"""
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return
+        removed = [r for r in n['table'] if r.learned_from in peer_ids]
+        n['table'] = [r for r in n['table'] if r.learned_from not in peer_ids]
+        # 自ノードのピアレコードから削除 + 相手ノードからも自分を削除
+        for peer_id in peer_ids:
+            n.get('peers', {}).pop(peer_id, None)
+            peer_n = self.nodes.get(peer_id)
+            if peer_n:
+                peer_n.get('peers', {}).pop(device_id, None)
+        if removed:
+            poison = [{'network': r.network, 'prefix': r.prefix, 'metric': 16}
+                      for r in removed]
+            pkt = {'type': 'rip_packet', 'command': 'response', 'version': 2,
+                   'src_id': device_id, 'src_hostname': n['hostname'], 'entries': poison}
+            await vnet.broadcast_to_neighbors(device_id, pkt)
 
     async def _update_loop(self, device_id: str):
         jitter = random.uniform(1, RIP_JITTER_MAX)
@@ -340,7 +448,13 @@ class RipEngine:
         if not n or not n['enabled']:
             return
 
+        down = vnet.down_interfaces.get(device_id, set())
         for peer_id in vnet.get_neighbors(device_id):
+            # shutdownインターフェース経由のピアには送信しない
+            if down:
+                connecting_iface = vnet.interface_links.get(device_id, {}).get(peer_id)
+                if connecting_iface and connecting_iface in down:
+                    continue
             # セグメントチェック: 共通IPセグメントがなければ届かない
             if not vnet._shares_segment(device_id, peer_id):
                 continue
@@ -388,6 +502,30 @@ class RipEngine:
         if command == 'request':
             await self._send_update(receiver_id)
             return
+
+        # ピアとして記録（ルートの有無に関わらず）
+        if src_id:
+            # ピアの接続IPを検索（icmp_engineの同一セグメントIPを使用）
+            peer_ip = src_id
+            try:
+                recv_nets = vnet._get_device_networks(receiver_id)
+                for ip, prefix in icmp_engine.device_ips.get(src_id, {}).get('ips', {}).items():
+                    mask = (0xffffffff << (32 - prefix)) & 0xffffffff
+                    net_int = vnet._ip_to_int(ip) & mask
+                    for r_net, r_mask, r_prefix in recv_nets:
+                        if r_prefix == prefix and r_net == net_int:
+                            peer_ip = ip
+                            break
+                    if peer_ip != src_id:
+                        break
+            except Exception:
+                pass
+            n.setdefault('peers', {})[src_id] = {
+                'hostname': src_hostname,
+                'ip': peer_ip,
+                'last_seen': time.time(),
+                'routes': len(msg.get('entries', [])),
+            }
 
         # Response処理（ベルマン-フォード）
         changed = False
@@ -549,34 +687,33 @@ class RipEngine:
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
             return '% RIP is not configured on this device.'
-        # ルートを学習した送信元をネイバーとして表示
-        neighbors = {}
+        # peers dict（パケット受信時に記録）を優先。なければ学習ルートから補完
+        peers = dict(n.get('peers', {}))
         for r in n['table']:
-            if r.learned_from and r.learned_from != 'direct':
-                src = r.learned_from
-                if src not in neighbors:
-                    neighbors[src] = {
-                        'hostname': r.learned_from_hostname or src,
-                        'last_update': f'00:00:{random.randint(5,29):02d}',
-                        'routes': 0,
-                        'next_hop': r.next_hop or src,
-                    }
-                neighbors[src]['routes'] += 1
-        if not neighbors:
+            if r.learned_from and r.learned_from != 'direct' and r.learned_from not in peers:
+                peers[r.learned_from] = {
+                    'hostname': r.learned_from_hostname or r.learned_from,
+                    'last_seen': r.timestamp,
+                    'routes': 1,
+                }
+        if not peers:
             return ('Index   IP Address        Last Update   Bad Pkts   Bad Routes\n'
                     '(No RIP neighbors — ルートを受信していません)')
-        lines = [
-            'Index   IP Address        Last Update   Bad Pkts   Bad Routes',
-        ]
-        for i, (nid, info) in enumerate(neighbors.items(), 1):
-            ip = info['next_hop']
-            upd = info['last_update']
-            lines.append(f'{i:<8}{ip:<18}{upd:<14}0          0')
+        lines = ['Index   IP Address        Last Update   Bad Pkts   Bad Routes']
+        for i, (peer_id, info) in enumerate(peers.items(), 1):
+            age_sec = int(time.time() - info.get('last_seen', time.time()))
+            mm, ss = divmod(age_sec, 60)
+            hh, mm = divmod(mm, 60)
+            upd = f'{hh:02d}:{mm:02d}:{ss:02d}'
+            display_ip = info.get('ip', info.get('hostname', peer_id))
+            lines.append(f'{i:<8}{display_ip:<18}{upd:<14}0          0')
         lines.append('')
-        lines.append(f'Routing Information Sources:')
-        for nid, info in neighbors.items():
-            lines.append(f'  {info["next_hop"]:<20}{info["hostname"]:<16}'
-                         f'  {info["routes"]} routes')
+        lines.append('Routing Information Sources:')
+        for peer_id, info in peers.items():
+            hostname = info.get('hostname', peer_id)
+            display_ip = info.get('ip', hostname)
+            routes = info.get('routes', 0)
+            lines.append(f'  {display_ip:<20}{hostname:<16}  {routes} routes')
         return '\n'.join(lines)
 
 
@@ -722,6 +859,27 @@ class OspfEngine:
         n['neighbors'] = {}
         n['dr'] = None
         n['bdr'] = None
+
+    async def interface_down(self, device_id: str, peer_ids: set):
+        """インターフェースダウン時: 対象ピアとのネイバーを即座に削除してルート再計算"""
+        n = self.nodes.get(device_id)
+        if not n:
+            return
+        removed = False
+        for peer_id in list(peer_ids):
+            if peer_id in n['neighbors']:
+                nbr = n['neighbors'].pop(peer_id)
+                if nbr.dead_task:
+                    nbr.dead_task.cancel()
+                await vnet.send_to(device_id, {
+                    'type': 'ospf_log',
+                    'message': (f'%OSPF-5-ADJCHG: Process {n["process_id"]}, '
+                                f'Nbr {nbr.router_id} interface down, '
+                                f'changing state from FULL to DOWN')
+                })
+                removed = True
+        if removed:
+            self._recalc_routes(device_id)
 
     async def _hello_loop(self, device_id: str):
         await asyncio.sleep(random.uniform(0.5, 1.5))
@@ -2649,8 +2807,99 @@ class IcmpEngine:
     送信元から宛先まで実際に経路をたどって到達性を判定。
     各装置のIP・接続ネットワークを把握し、RIBを参照してホップ転送する。
     """
+    # DPD タイマーデフォルト値
+    DPD_DETECT_SEC  = 30   # no crypto map 後、tunnelがDOWNになるまでの秒数
+    IKE_NEGO_SEC    = 3    # crypto map 再適用後、ESTABLISHEDになるまでの秒数
+
     def __init__(self):
+        import time as _time
+        self._time = _time
         self.device_ips: Dict[str, dict] = {}
+        # IPsecトンネル: {device_id: [{'local': ip, 'peer': ip, 'state': str, 'since': float}]}
+        # state: 'established' | 'detecting' | 'down' | 'negotiating'
+        self.ipsec_tunnels: Dict[str, list] = {}
+
+    def register_ipsec(self, device_id: str, local_ip: str, peer_ip: str):
+        """IPsecトンネルを登録。既存エントリは negotiating 状態で再開"""
+        now = self._time.time()
+        tunnels = self.ipsec_tunnels.setdefault(device_id, [])
+        for t in tunnels:
+            if t['local'] == local_ip and t['peer'] == peer_ip:
+                if t['state'] not in ('established',):
+                    t['state'] = 'negotiating'
+                    t['since'] = now
+                return
+        tunnels.append({'local': local_ip, 'peer': peer_ip,
+                        'state': 'negotiating', 'since': now})
+
+    def clear_ipsec(self, device_id: str):
+        """crypto map 削除 / interface shutdown → detecting 状態へ遷移"""
+        now = self._time.time()
+        tunnels = self.ipsec_tunnels.get(device_id, [])
+        for t in tunnels:
+            if t['state'] == 'established':
+                t['state'] = 'detecting'
+                t['since'] = now
+            elif t['state'] == 'negotiating':
+                # ネゴ中に削除 → すぐ down
+                t['state'] = 'down'
+                t['since'] = now
+        # established でも detecting でもない（=設定なし）ならエントリ削除
+        self.ipsec_tunnels[device_id] = [
+            t for t in tunnels if t['state'] in ('detecting', 'down')
+        ]
+        if not self.ipsec_tunnels[device_id]:
+            self.ipsec_tunnels.pop(device_id, None)
+
+    def _advance_dpd(self, t: dict) -> str:
+        """タイマーを進めて現在の state を返す"""
+        now = self._time.time()
+        elapsed = now - t.get('since', now)
+        if t['state'] == 'detecting' and elapsed >= self.DPD_DETECT_SEC:
+            t['state'] = 'down'
+            t['since'] = now
+        elif t['state'] == 'negotiating' and elapsed >= self.IKE_NEGO_SEC:
+            t['state'] = 'established'
+            t['since'] = now
+        return t['state']
+
+    def _has_ipsec_to(self, device_id: str, next_device_id: str) -> bool:
+        """device_id から next_device_id へのIPsecトンネルが established か"""
+        tunnels = self.ipsec_tunnels.get(device_id, [])
+        if not tunnels:
+            return False
+        peer_ips = set(self.device_ips.get(next_device_id, {}).get('ips', {}).keys())
+        for t in tunnels:
+            state = self._advance_dpd(t)
+            if state == 'established' and t['peer'] in peer_ips:
+                return True
+        return False
+
+    def get_ipsec_sa_status(self, device_id: str) -> list:
+        """show crypto ipsec sa 用のステータスリストを返す"""
+        import time as _t
+        now = _t.time()
+        result = []
+        for t in self.ipsec_tunnels.get(device_id, []):
+            state = self._advance_dpd(t)
+            elapsed = int(now - t.get('since', now))
+            if state == 'established':
+                remain = None
+                label = 'ESTABLISHED'
+            elif state == 'detecting':
+                remain = max(0, self.DPD_DETECT_SEC - elapsed)
+                label = f'DPD-DETECTING (DOWN まで {remain}s)'
+            elif state == 'negotiating':
+                remain = max(0, self.IKE_NEGO_SEC - elapsed)
+                label = f'IKE-NEGOTIATING (確立まで {remain}s)'
+            else:
+                remain = None
+                label = 'DOWN'
+            result.append({
+                'local': t['local'], 'peer': t['peer'],
+                'state': state, 'label': label, 'elapsed': elapsed,
+            })
+        return result
 
     def register_device(self, device_id: str, hostname: str, interfaces: dict):
         ips = {}
@@ -2706,46 +2955,49 @@ class IcmpEngine:
             visited.add(current)
             cur_info = self.device_ips.get(current, {})
 
-            # 宛先と同じ直接接続ネットワークにいるか
+            # 宛先と同一直結ネットワーク → 到達（最後のホップは宛先自身なので追加しない）
             for dev_ip, prefix in cur_info.get('ips', {}).items():
                 if self._ip_in_network(dest_ip, dev_ip, prefix):
-                    hops.append({'device': current,
-                                 'hostname': cur_info.get('hostname', current),
-                                 'ip': dev_ip})
                     return {'reachable': True, 'hops': hops,
                             'reason': 'connected', 'dest_device': dest_device}
 
-            # 宛先装置に直接リンクで繋がっているか
-            if dest_device and dest_device in vnet.get_neighbors(current):
-                hops.append({'device': current,
-                             'hostname': cur_info.get('hostname', current),
-                             'ip': next(iter(cur_info.get('ips', {})), '?')})
-                dest_info = self.device_ips.get(dest_device, {})
-                hops.append({'device': dest_device,
-                             'hostname': dest_info.get('hostname', dest_device),
-                             'ip': dest_ip})
-                return {'reachable': True, 'hops': hops,
-                        'reason': 'reached', 'dest_device': dest_device}
-
-            # ルーティングテーブルで次ホップ決定
-            next_hop_device = self._resolve_next_hop(current, dest_ip)
+            # 次ホップデバイスとIPを解決
+            next_hop_device, next_hop_ip = self._resolve_next_hop_detail(current, dest_ip)
             if not next_hop_device:
-                hops.append({'device': current,
-                             'hostname': cur_info.get('hostname', current),
-                             'ip': next(iter(cur_info.get('ips', {})), '?'),
-                             'timeout': True})
-                return {'reachable': False, 'hops': hops,
-                        'reason': 'no route to host'}
+                # 経路なし: 現在デバイスがタイムアウト
+                cur_ip = next(iter(cur_info.get('ips', {})), '?')
+                hops.append({'device': current, 'hostname': cur_info.get('hostname', current),
+                             'ip': cur_ip, 'timeout': True})
+                return {'reachable': False, 'hops': hops, 'reason': 'no route to host'}
 
-            hops.append({'device': current,
-                         'hostname': cur_info.get('hostname', current),
-                         'ip': next(iter(cur_info.get('ips', {})), '?')})
+            next_info = self.device_ips.get(next_hop_device, {})
+            has_ipsec = self._has_ipsec_to(current, next_hop_device)
+
+            if has_ipsec:
+                # IPsecトンネル: next_hopのLAN側IP（dest方向）を表示、WAN区間は透過
+                tunnel_exit_ip = self._local_ip_toward(next_hop_device, dest_ip) or \
+                                 next(iter(next_info.get('ips', {})), '?')
+                hops.append({'device': next_hop_device,
+                             'hostname': next_info.get('hostname', next_hop_device),
+                             'ip': tunnel_exit_ip,
+                             'ipsec': True})
+            else:
+                # 通常ルーティング: next_hop_ip（受信側インターフェースIP）を表示
+                hops.append({'device': next_hop_device,
+                             'hostname': next_info.get('hostname', next_hop_device),
+                             'ip': next_hop_ip})
+
             current = next_hop_device
             ttl -= 1
 
         return {'reachable': False, 'hops': hops, 'reason': 'TTL exceeded'}
 
     def _resolve_next_hop(self, device_id: str, dest_ip: str) -> Optional[str]:
+        dev, _ = self._resolve_next_hop_detail(device_id, dest_ip)
+        return dev
+
+    def _resolve_next_hop_detail(self, device_id: str, dest_ip: str):
+        """(next_device_id, next_hop_ip) を返す"""
         best_routes = rib_engine.get_best_routes(device_id)
         matched = None
         matched_prefix = -1
@@ -2760,20 +3012,30 @@ class IcmpEngine:
                     matched = r
                     break
         if not matched:
-            return None
+            return None, None
         next_hop_ip = matched['next_hop']
         if next_hop_ip in ('0.0.0.0', ''):
-            return self._find_device_owning_ip(dest_ip) or \
-                   self._find_device_in_network(dest_ip)
+            dev = self._find_device_owning_ip(dest_ip) or \
+                  self._find_device_in_network(dest_ip)
+            return dev, dest_ip
         nh_device = self._find_device_owning_ip(next_hop_ip)
         if nh_device:
-            return nh_device
+            return nh_device, next_hop_ip
         for peer in vnet.get_neighbors(device_id):
             peer_info = self.device_ips.get(peer, {})
             if next_hop_ip in peer_info.get('ips', {}):
-                return peer
+                return peer, next_hop_ip
         neighbors = vnet.get_neighbors(device_id)
-        return next(iter(neighbors), None) if neighbors else None
+        dev = next(iter(neighbors), None) if neighbors else None
+        return dev, next_hop_ip
+
+    def _local_ip_toward(self, device_id: str, next_hop_ip: str) -> Optional[str]:
+        """next_hop_ipと同一セグメントの自分のIPを返す"""
+        info = self.device_ips.get(device_id, {})
+        for my_ip, prefix in info.get('ips', {}).items():
+            if self._ip_in_network(next_hop_ip, my_ip, prefix):
+                return my_ip
+        return None
 
     def ping(self, src_id: str, dest_ip: str, count: int = 5) -> dict:
         result = self.trace_path(src_id, dest_ip)
@@ -2795,6 +3057,484 @@ class IcmpEngine:
 
 
 icmp_engine = IcmpEngine()
+
+
+# ══════════════════════════════════════════
+# NAT / NAPT エンジン（Si-R / Cisco ルーター）
+# ══════════════════════════════════════════
+@dataclass
+class NatEntry:
+    proto: str           # icmp | tcp | udp | ---
+    inside_local: str    # 変換前（内部）IP
+    inside_global: str   # 変換後（外部）IP
+    outside_local: str   # 宛先IP
+    outside_global: str  # 宛先IP
+    in_port: int = 0
+    glob_port: int = 0
+    is_static: bool = False
+    age: float = field(default_factory=time.time)
+
+
+class NatEngine:
+    """
+    NAT / NAPT(PAT) を実装。
+    - Cisco: interface 'ip nat inside/outside' + 'ip nat inside source list <acl> interface <if> overload'
+             静的: 'ip nat inside source static <inside> <outside>'
+    - Si-R : 'lan/wan N ip napt use use'（インターフェース単位のNAPT有効化）
+    内部→外部へ越えるトラフィックの送信元IPを外側インターフェースIPに変換する。
+    """
+    def __init__(self):
+        # device_id -> 設定
+        self.cfg: Dict[str, dict] = defaultdict(lambda: {
+            'inside': set(),       # inside指定のインターフェース名
+            'outside': set(),      # outside指定のインターフェース名
+            'pat': [],             # [{'acl','iface','overload'}]
+            'static': [],          # [{'inside','outside'}]
+            'napt_ifaces': set(),  # Si-R: NAPT有効インターフェース
+            'proxy_arp': {},       # iface -> bool（Cisco既定True）
+        })
+        # device_id -> {acl_name -> [(action, net, prefix)]}
+        self.acls: Dict[str, Dict[str, list]] = defaultdict(lambda: defaultdict(list))
+        # device_id -> [NatEntry]
+        self.translations: Dict[str, list] = defaultdict(list)
+        self._port_counter = 1024
+
+    # ── 設定 ──
+    def set_iface_role(self, device_id: str, iface: str, role: str):
+        if role == 'inside':
+            self.cfg[device_id]['inside'].add(iface)
+        elif role == 'outside':
+            self.cfg[device_id]['outside'].add(iface)
+
+    def add_pat(self, device_id: str, acl: str, iface: str, overload: bool = True):
+        self.cfg[device_id]['pat'].append({'acl': acl, 'iface': iface, 'overload': overload})
+
+    def add_static(self, device_id: str, inside: str, outside: str):
+        self.cfg[device_id]['static'].append({'inside': inside, 'outside': outside})
+
+    def enable_napt(self, device_id: str, iface: str):
+        """Si-R: インターフェースにNAPTを有効化（そのifaceをoutside扱い）"""
+        self.cfg[device_id]['napt_ifaces'].add(iface)
+        self.cfg[device_id]['outside'].add(iface)
+
+    def add_acl(self, device_id: str, name: str, action: str, net: str, prefix: int):
+        self.acls[device_id][name].append((action, net, prefix))
+
+    def set_proxy_arp(self, device_id: str, iface: str, enabled: bool):
+        self.cfg[device_id]['proxy_arp'][iface] = enabled
+
+    def proxy_arp_enabled(self, device_id: str, iface: str, device_type: str = 'cisco') -> bool:
+        pa = self.cfg.get(device_id, {}).get('proxy_arp', {})
+        if iface in pa:
+            return pa[iface]
+        # Ciscoルーターは既定で有効、Si-Rは既定無効
+        return device_type in ('cisco',)
+
+    def has_nat(self, device_id: str) -> bool:
+        c = self.cfg.get(device_id)
+        if not c:
+            return False
+        return bool(c['pat'] or c['static'] or c['napt_ifaces'])
+
+    def _acl_permits(self, device_id: str, acl: str, src_ip: str) -> bool:
+        entries = self.acls.get(device_id, {}).get(acl, [])
+        if not entries:
+            return True  # ACL未定義なら全許可（簡易）
+        for action, net, prefix in entries:
+            if icmp_engine._ip_in_network(src_ip, net, prefix):
+                return action == 'permit'
+        return False
+
+    def _outside_iface_ip(self, device_id: str, src_ip: str = '',
+                          dest_ip: str = '') -> Optional[str]:
+        """
+        outside指定インターフェースのIPを返す（inside global用）。
+        送信元と同一セグメントのインターフェース（=内部側）は除外し、
+        可能なら宛先方向のインターフェースを選ぶ。
+        """
+        info = icmp_engine.device_ips.get(device_id, {})
+        ifaces = info.get('interfaces', {})
+        candidates = list(self.cfg[device_id]['outside']) or \
+                     list(self.cfg[device_id]['napt_ifaces'])
+
+        def iface_ip(ifname):
+            ii = ifaces.get(ifname)
+            return ii.get('ip') if ii else None
+
+        # 1) 宛先と同一セグメントのoutsideインターフェース（egress）を優先
+        if dest_ip:
+            for ifname in candidates:
+                ip = iface_ip(ifname)
+                if ip and icmp_engine._ip_in_network(dest_ip, ip,
+                        ifaces.get(ifname, {}).get('prefix', 24)):
+                    return ip
+        # 2) 送信元と同一セグメント（=内部側）でないインターフェースを選ぶ
+        for ifname in candidates:
+            ip = iface_ip(ifname)
+            if not ip:
+                continue
+            if src_ip and icmp_engine._ip_in_network(src_ip, ip,
+                    ifaces.get(ifname, {}).get('prefix', 24)):
+                continue  # 内部側インターフェースはスキップ
+            return ip
+        # 3) フォールバック: 最初に見つかったIP
+        for ifname in candidates:
+            ip = iface_ip(ifname)
+            if ip:
+                return ip
+        return None
+
+    def translate(self, device_id: str, src_ip: str, dest_ip: str,
+                  proto: str = 'icmp') -> Optional[NatEntry]:
+        """
+        内部送信元 src_ip を外側グローバルIPへ変換。
+        変換が起きた場合 NatEntry を返す（show ip nat translations 用に記録）。
+        """
+        if not self.has_nat(device_id):
+            return None
+        cfg = self.cfg[device_id]
+
+        # 静的NAT優先
+        for s in cfg['static']:
+            if s['inside'] == src_ip:
+                entry = self._record(device_id, proto, src_ip, s['outside'],
+                                     dest_ip, is_static=True)
+                return entry
+
+        # 動的PAT/NAPT: ACLにマッチ（CiscoはACL、Si-Rは全内部）
+        permitted = False
+        if cfg['napt_ifaces']:
+            permitted = True  # Si-R NAPTは内部全体
+        else:
+            for p in cfg['pat']:
+                if self._acl_permits(device_id, p['acl'], src_ip):
+                    permitted = True
+                    break
+        if not permitted:
+            return None
+
+        global_ip = self._outside_iface_ip(device_id, src_ip=src_ip, dest_ip=dest_ip)
+        if not global_ip:
+            return None
+        port = self._next_port()
+        entry = self._record(device_id, proto, src_ip, global_ip, dest_ip,
+                             glob_port=port, in_port=port)
+        return entry
+
+    def _next_port(self) -> int:
+        self._port_counter += 1
+        if self._port_counter > 65000:
+            self._port_counter = 1024
+        return self._port_counter
+
+    def _record(self, device_id, proto, inside_local, inside_global,
+                dest_ip, glob_port=0, in_port=0, is_static=False) -> NatEntry:
+        # 既存の同一変換があれば更新
+        for e in self.translations[device_id]:
+            if (e.inside_local == inside_local and e.outside_global == dest_ip
+                    and e.proto == proto):
+                e.age = time.time()
+                return e
+        entry = NatEntry(proto=proto, inside_local=inside_local,
+                         inside_global=inside_global, outside_local=dest_ip,
+                         outside_global=dest_ip, glob_port=glob_port,
+                         in_port=in_port, is_static=is_static)
+        self.translations[device_id].append(entry)
+        if len(self.translations[device_id]) > 200:
+            self.translations[device_id].pop(0)
+        return entry
+
+    def clear(self, device_id: str):
+        self.translations[device_id] = []
+
+    # ── show 出力 ──
+    def format_show_translations(self, device_id: str) -> str:
+        entries = self.translations.get(device_id, [])
+        if not entries:
+            return ('Pro Inside global      Inside local       Outside local      Outside global\n'
+                    '(変換エントリなし — 内部→外部通信が発生していません)')
+        lines = ['Pro Inside global      Inside local       Outside local      Outside global']
+        for e in entries:
+            if e.proto in ('icmp', 'tcp', 'udp') and e.glob_port:
+                ig = f'{e.inside_global}:{e.glob_port}'
+                il = f'{e.inside_local}:{e.in_port}'
+                ol = f'{e.outside_local}:{e.glob_port}'
+                og = f'{e.outside_global}:{e.glob_port}'
+            else:
+                ig, il = e.inside_global, e.inside_local
+                ol, og = e.outside_local or '---', e.outside_global or '---'
+            pro = e.proto if e.glob_port else '---'
+            lines.append(f'{pro:<4}{ig:<19}{il:<19}{ol:<19}{og}')
+        return '\n'.join(lines)
+
+    def format_show_statistics(self, device_id: str) -> str:
+        entries = self.translations.get(device_id, [])
+        cfg = self.cfg.get(device_id, {})
+        active = len(entries)
+        inside = ', '.join(cfg.get('inside', set())) or '-'
+        outside = ', '.join(cfg.get('outside', set())) or '-'
+        return '\n'.join([
+            f'Total active translations: {active} ({sum(1 for e in entries if e.is_static)} static, '
+            f'{sum(1 for e in entries if not e.is_static)} dynamic; '
+            f'{sum(1 for e in entries if e.glob_port)} extended)',
+            'Peak translations: %d' % active,
+            f'Outside interfaces:',
+            f'  {outside}',
+            f'Inside interfaces:',
+            f'  {inside}',
+        ])
+
+
+nat_engine = NatEngine()
+
+
+# ══════════════════════════════════════════
+# CEF / FIB + TCAM エンジン（Catalyst / Nexus のハードウェア転送）
+# ══════════════════════════════════════════
+class CefEngine:
+    """
+    Cisco Express Forwarding（CEF）の概念を仮想実装。
+    - FIB（Forwarding Information Base）: RIBから生成された転送テーブル
+    - 隣接テーブル（Adjacency）: 次ホップIP→MACの解決済みエントリ（ARP由来）
+    - TCAM: ハードウェアテーブル使用量（ルート/ACL/MAC等の実数から算出）
+    Catalyst（IOS-XE）と Nexus（NX-OS）で出力形式を切り替える。
+    """
+
+    # 機種ごとのTCAM論理容量（代表的なスイッチのカタログ値を模擬）
+    TCAM_CAPACITY = {
+        'catalyst': {  # Catalyst 9300相当
+            'IPv4 Routes (FIB)':     {'max': 32768},
+            'IPv4 Hosts (Adjacency)':{'max': 16384},
+            'MAC Address Table':     {'max': 16384},
+            'IPv4 ACL (Security)':   {'max': 18000},
+            'QoS ACL':               {'max': 18000},
+            'IPv4 Multicast':        {'max': 8192},
+        },
+        'nexus': {  # Nexus 9300相当
+            'IPv4 Routes (LPM)':     {'max': 98304},
+            'IPv4 Hosts':            {'max': 49152},
+            'MAC Address Table':     {'max': 90112},
+            'IPv4 ACL (Ingress)':    {'max': 4096},
+            'IPv4 ACL (Egress)':     {'max': 2048},
+            'IPv4 Multicast':        {'max': 32768},
+        },
+    }
+
+    def _fib_entries(self, device_id: str) -> list:
+        """RIBと直結からFIBエントリを生成（network, prefix, next_hop, iface, kind）"""
+        entries = []
+        seen = set()
+        # 直結ネットワーク（receive/attached）
+        info = icmp_engine.device_ips.get(device_id, {})
+        for ifname, iinfo in info.get('interfaces', {}).items():
+            ip = iinfo.get('ip')
+            if not ip:
+                continue
+            prefix = iinfo.get('prefix', 24)
+            mask = (0xffffffff << (32 - prefix)) & 0xffffffff
+            net_int = vnet._ip_to_int(ip) & mask
+            net = _int_to_ip(net_int)
+            key = (net, prefix)
+            if key not in seen:
+                seen.add(key)
+                entries.append({'network': net, 'prefix': prefix,
+                                'next_hop': 'attached', 'iface': ifname,
+                                'kind': 'attached'})
+            # ホスト自身（/32 receive）
+            hkey = (ip, 32)
+            if hkey not in seen:
+                seen.add(hkey)
+                entries.append({'network': ip, 'prefix': 32,
+                                'next_hop': 'receive', 'iface': ifname,
+                                'kind': 'receive'})
+        # RIBの最良ルート
+        try:
+            for r in rib_engine.get_best_routes(device_id):
+                key = (r['network'], r['prefix'])
+                if key in seen:
+                    continue
+                seen.add(key)
+                nh = r['next_hop'] if r['next_hop'] not in ('0.0.0.0', '') else 'attached'
+                entries.append({'network': r['network'], 'prefix': r['prefix'],
+                                'next_hop': nh, 'iface': r.get('iface', ''),
+                                'kind': r.get('source', 'static')})
+        except Exception:
+            pass
+        # 0.0.0.0/0 が無ければ glean エントリとして 0.0.0.0/0 は出さない
+        return entries
+
+    def format_show_ip_cef(self, device_id: str, device_type: str = 'catalyst') -> str:
+        entries = self._fib_entries(device_id)
+        if device_type == 'nexus':
+            return self._format_nexus_fib(device_id, entries)
+        lines = ['Prefix               Next Hop             Interface']
+        # デフォルト/受信系の特別エントリ
+        lines.append(f'{"0.0.0.0/0":<21}{"no route":<21}')
+        lines.append(f'{"0.0.0.0/32":<21}{"receive":<21}')
+        for e in sorted(entries, key=lambda x: (vnet._ip_to_int(x["network"]), x["prefix"])):
+            pfx = f'{e["network"]}/{e["prefix"]}'
+            if e['next_hop'] in ('attached', 'receive'):
+                nh = e['next_hop']
+            else:
+                nh = e['next_hop']
+            lines.append(f'{pfx:<21}{nh:<21}{e["iface"]}')
+        lines.append(f'{"224.0.0.0/4":<21}{"multicast":<21}')
+        lines.append(f'{"255.255.255.255/32":<21}{"receive":<21}')
+        return '\n'.join(lines)
+
+    def _format_nexus_fib(self, device_id: str, entries: list) -> str:
+        lines = [f'IPv4 routes for table default/base', '',
+                 '------------------+----------------------+----------+-----------',
+                 'Prefix            | Next-hop             | Interface| Type',
+                 '------------------+----------------------+----------+-----------']
+        for e in sorted(entries, key=lambda x: (vnet._ip_to_int(x["network"]), x["prefix"])):
+            pfx = f'{e["network"]}/{e["prefix"]}'
+            nh = e['next_hop']
+            lines.append(f'{pfx:<18}| {nh:<20} | {e["iface"]:<8} | {e["kind"]}')
+        return '\n'.join(lines)
+
+    def format_show_adjacency(self, device_id: str, device_type: str = 'catalyst') -> str:
+        table = arp_engine.tables.get(device_id, {})
+        if not table:
+            return 'Protocol Interface                 Address\n(隣接エントリなし — ARP解決が発生していません)'
+        lines = ['Protocol Interface                 Address']
+        for ip, e in table.items():
+            mac_flat = e.mac.replace(':', '')
+            mac_dotted = f'{mac_flat[0:4]}.{mac_flat[4:8]}.{mac_flat[8:12]}'
+            lines.append(f'IP       {e.iface:<24} {ip}({mac_dotted})')
+        return '\n'.join(lines)
+
+    def _usage_counts(self, device_id: str, device_type: str) -> dict:
+        """実際の設定量からTCAM使用エントリ数を算出"""
+        fib = self._fib_entries(device_id)
+        routes = len([e for e in fib if e['prefix'] < 32])
+        hosts = len([e for e in fib if e['prefix'] == 32]) + \
+                len(arp_engine.tables.get(device_id, {}))
+        macs = len(arp_engine.tables.get(device_id, {}))
+        # ACL: nat_engine と filter_engine のエントリ概算
+        acl = 0
+        try:
+            for name, ents in nat_engine.acls.get(device_id, {}).items():
+                acl += len(ents)
+        except Exception:
+            pass
+        try:
+            for name, ents in filter_engine.prefix_lists.get(device_id, {}).items():
+                acl += len(ents)
+        except Exception:
+            pass
+        return {'routes': routes, 'hosts': hosts, 'macs': macs, 'acl': acl}
+
+    def format_tcam_utilization(self, device_id: str, device_type: str = 'catalyst') -> str:
+        cap = self.TCAM_CAPACITY.get(device_type, self.TCAM_CAPACITY['catalyst'])
+        u = self._usage_counts(device_id, device_type)
+        # 各リソースに使用数を割り当て
+        used_map = {}
+        for name in cap:
+            low = name.lower()
+            if 'route' in low or 'lpm' in low or 'fib' in low:
+                used_map[name] = u['routes']
+            elif 'host' in low or 'adjacency' in low:
+                used_map[name] = u['hosts']
+            elif 'mac' in low:
+                used_map[name] = u['macs']
+            elif 'acl' in low or 'qos' in low:
+                used_map[name] = u['acl']
+            else:
+                used_map[name] = 0
+
+        if device_type == 'nexus':
+            lines = ['Hardware Capacity (TCAM) Utilization:', '',
+                     'Resource                     Used      Free      Total     %Used']
+            for name, info in cap.items():
+                used = used_map.get(name, 0)
+                total = info['max']
+                free = total - used
+                pct = (used / total * 100) if total else 0
+                lines.append(f'{name:<28} {used:<9} {free:<9} {total:<9} {pct:5.2f}%')
+            return '\n'.join(lines)
+
+        # Catalyst (IOS-XE)
+        lines = ['CAM Utilization for ASIC  [0]',
+                 '  Resource                       Used      Free      %Used',
+                 '  ------------------------------------------------------------']
+        for name, info in cap.items():
+            used = used_map.get(name, 0)
+            total = info['max']
+            free = total - used
+            pct = (used / total * 100) if total else 0
+            lines.append(f'  {name:<30} {used:<9} {free:<9} {pct:5.2f}%')
+        return '\n'.join(lines)
+
+
+    def format_forwarding_arch(self, device_id: str, device_type: str = 'catalyst') -> str:
+        """
+        入力→バックプレーン/ファブリック→出力 の転送パスを機種別に表示。
+        Catalyst（UADP + ストアアンドフォワード共有バッファ）と
+        Nexus（CLOS ファブリック + VOQ）の違いを可視化する。
+        実インターフェース数からポート負荷の概算を出す。
+        """
+        info = icmp_engine.device_ips.get(device_id, {})
+        ifaces = info.get('interfaces', {})
+        up_ports = [n for n, i in ifaces.items()
+                    if i.get('ip') or i.get('status') in ('up', 'connected')]
+        nports = max(1, len(up_ports))
+
+        if device_type == 'nexus':
+            return '\n'.join([
+                '═══ NX-OS Forwarding Architecture (CLOS Fabric + VOQ) ═══',
+                '',
+                '  [Ingress Module]      [Fabric Modules]       [Egress Module]',
+                '   ┌──────────┐   credit  ┌──────────┐  credit  ┌──────────┐',
+                '   │ Port ASIC│─────────► │ Fabric   │ ───────► │ Port ASIC│',
+                '   │  + VOQ   │ ◄───────  │ (CLOS)   │ ◄─────── │  + Egress│',
+                '   └──────────┘  grant    └──────────┘  grant   └──────────┘',
+                '',
+                ' 転送方式      : Virtual Output Queuing (VOQ) / クレジットベース',
+                ' バックプレーン: 非ブロッキング CLOS ファブリック',
+                ' HOLブロッキング: 回避（宛先ポート別VOQ）',
+                ' バッファ      : 入力分散（per-port VOQ, ingress buffered）',
+                '',
+                f' Active front-panel ports : {nports}',
+                f' Fabric utilization       : {min(99, nports * 3)}% (推定)',
+                ' VOQ drops                : 0   (no congestion)',
+                ' Fabric credit starvation : 0',
+                '',
+                ' ※ Nexusは入力側でVOQに積み、ファブリックがクレジットを発行した',
+                '   分だけ出力へ送るため、特定出力の輻輳が他フローへ波及しにくい。',
+            ])
+
+        # Catalyst (UADP ASIC, shared-buffer store-and-forward)
+        return '\n'.join([
+            '═══ Catalyst Forwarding Architecture (UADP ASIC + 共有バッファ) ═══',
+            '',
+            '   [Ingress]          [Backplane / Stack Ring]        [Egress]',
+            '   ┌──────────┐       ┌────────────────────┐       ┌──────────┐',
+            '   │ Ingress  │──────►│  UADP / Stack Ring  │──────►│  Egress  │',
+            '   │ FIFO+FIB │       │  (shared backplane) │       │  Queues  │',
+            '   └──────────┘       └────────────────────┘       └──────────┘',
+            '         │  Lookup(FIB/TCAM)         │ 共有バッファ      │ 8 queues/port',
+            '',
+            ' 転送方式      : Store-and-Forward（FIB/TCAMルックアップ後に転送）',
+            ' バックプレーン: Stack Ring / 内部クロスバー（共有）',
+            ' HOLブロッキング: 共有バッファのため輻輳時に波及しうる',
+            ' バッファ      : 出力キュー集中（egress shared buffer, 8 queue/port）',
+            '',
+            f' Active ports       : {nports}',
+            f' Backplane usage    : {min(99, nports * 4)}% (推定)',
+            ' Ingress drops      : 0',
+            ' Output queue drops : 0   (no congestion)',
+            '',
+            ' ※ Catalystは入力でFIB/TCAMを引いてからバックプレーンを介し出力キューへ。',
+            '   出力ポート輻輳時は共有バッファを介して他フローへ影響が出やすい。',
+        ])
+
+
+def _int_to_ip(n: int) -> str:
+    return f'{(n >> 24) & 0xff}.{(n >> 16) & 0xff}.{(n >> 8) & 0xff}.{n & 0xff}'
+
+
+cef_engine = CefEngine()
 
 
 # ══════════════════════════════════════════
@@ -2962,39 +3702,152 @@ class ArpEngine:
         return f'00:1b:0d:{(h>>16)&0xff:02x}:{(h>>8)&0xff:02x}:{h&0xff:02x}'
 
     def resolve(self, device_id: str, target_ip: str) -> Optional[str]:
-        """
-        target_ip のMACを解決。
-        同一セグメントに相手がいればARPテーブルに記録してMACを返す。
-        いなければNone（解決失敗）。
-        """
-        # 既にテーブルにあればそれを返す
+        """同期版resolve（キャッシュ参照のみ。ARPパケット交換なし）"""
         if target_ip in self.tables[device_id]:
             entry = self.tables[device_id][target_ip]
-            # タイムアウトチェック
             if time.time() - entry.age < self.arp_timeout:
                 return entry.mac
             else:
                 del self.tables[device_id][target_ip]
+        return None
+
+    async def resolve_with_packet(self, device_id: str, target_ip: str) -> Optional[str]:
+        """
+        ARP Request/Reply パケット交換をシミュレートしながらMACを解決する。
+        キャッシュにあればARPパケットなしで即返す（実機準拠）。
+        """
+        # キャッシュヒット → パケット不要
+        cached = self.resolve(device_id, target_ip)
+        if cached:
+            return cached
 
         # ICMPエンジンの装置IP情報を使って同一セグメント判定
         src_info = icmp_engine.device_ips.get(device_id, {})
-        # 自分のどのインタフェースと同じネットワークか
         for my_ip, prefix in src_info.get('ips', {}).items():
-            if icmp_engine._ip_in_network(target_ip, my_ip, prefix):
-                # 同一セグメント → 相手装置を探す
-                target_dev = icmp_engine._find_device_owning_ip(target_ip)
-                if target_dev:
-                    # 相手のMACを取得（相手のARPエンジン視点のMAC）
-                    mac = self._gen_mac(target_dev, target_ip)
-                else:
-                    # IPは同セグメントだが装置不明 → 仮想ホストとしてMAC生成
-                    mac = self._gen_mac('host', target_ip)
-                # ARPテーブルに記録
-                iface = self._iface_for_ip(device_id, my_ip)
+            if not icmp_engine._ip_in_network(target_ip, my_ip, prefix):
+                continue
+
+            src_mac  = self._gen_mac(device_id, my_ip)
+            iface    = self._iface_for_ip(device_id, my_ip)
+            target_dev = icmp_engine._find_device_owning_ip(target_ip)
+
+            if target_dev:
+                target_mac = self._gen_mac(target_dev, target_ip)
+            else:
+                target_mac = self._gen_mac('host', target_ip)
+
+            # ── ARP Request ブロードキャスト（送信側ログ） ──
+            await vnet.send_to(device_id, {
+                'type': 'arp_log',
+                'subtype': 'request',
+                'message': (f'ARP: sending request for {target_ip} '
+                            f'on {iface} (sender {my_ip}/{src_mac})'),
+                'src_ip': my_ip, 'src_mac': src_mac,
+                'dst_ip': target_ip, 'dst_mac': 'ff:ff:ff:ff:ff:ff',
+                'iface': iface,
+            })
+
+            # ── ARP Request を相手に届ける（ブロードキャスト） ──
+            if target_dev:
+                target_iface = self._iface_for_ip(target_dev, target_ip)
+                await vnet.send_to(target_dev, {
+                    'type': 'arp_log',
+                    'subtype': 'request_received',
+                    'message': (f'ARP: received request from {my_ip} '
+                                f'(src MAC {src_mac}) for {target_ip} on {target_iface}'),
+                    'src_ip': my_ip, 'src_mac': src_mac,
+                    'dst_ip': target_ip, 'dst_mac': 'ff:ff:ff:ff:ff:ff',
+                    'iface': target_iface,
+                })
+                # ── ARP Reply（相手 → 自分） ──
+                await vnet.send_to(target_dev, {
+                    'type': 'arp_log',
+                    'subtype': 'reply',
+                    'message': (f'ARP: sending reply to {my_ip} '
+                                f'(I am {target_ip}/{target_mac}) on {target_iface}'),
+                    'src_ip': target_ip, 'src_mac': target_mac,
+                    'dst_ip': my_ip, 'dst_mac': src_mac,
+                    'iface': target_iface,
+                })
+                # 相手のARPテーブルにも学習させる
+                self.tables[target_dev][my_ip] = ArpEntry(
+                    ip=my_ip, mac=src_mac, iface=target_iface, entry_type='dynamic')
+
+            # ── ARP Reply 受信（自分側ログ） ──
+            await vnet.send_to(device_id, {
+                'type': 'arp_log',
+                'subtype': 'reply_received',
+                'message': (f'ARP: received reply: {target_ip} is at {target_mac}'),
+                'src_ip': target_ip, 'src_mac': target_mac,
+                'dst_ip': my_ip, 'dst_mac': src_mac,
+                'iface': iface,
+            })
+
+            # 自分のARPテーブルに記録
+            self.tables[device_id][target_ip] = ArpEntry(
+                ip=target_ip, mac=target_mac, iface=iface, entry_type='dynamic')
+            return target_mac
+
+        # 同一セグメントにいない → Proxy ARP を試みる
+        proxy_mac = await self._try_proxy_arp(device_id, target_ip, src_info)
+        if proxy_mac:
+            return proxy_mac
+
+        # ARP解決不可
+        return None
+
+    async def _try_proxy_arp(self, device_id: str, target_ip: str, src_info: dict) -> Optional[str]:
+        """
+        Proxy ARP: 要求元と同一セグメントにいるルーターが、
+        別セグメント宛のARP要求に対して自分のMACで代理応答する。
+        ルーターがproxy-arp有効かつ宛先への経路を持つ場合のみ。
+        """
+        # 要求元の各セグメントについて、同居するルーターを探す
+        for my_ip, prefix in src_info.get('ips', {}).items():
+            for cand_id, cand_info in icmp_engine.device_ips.items():
+                if cand_id == device_id:
+                    continue
+                cand_type = vnet.device_types.get(cand_id, '')
+                if cand_type not in ('cisco', 'sir', 'srs', 'catalyst'):
+                    continue
+                # ルーターのインターフェースが要求元と同一セグメントか
+                router_iface_ip = None
+                for r_ip, r_prefix in cand_info.get('ips', {}).items():
+                    if icmp_engine._ip_in_network(my_ip, r_ip, r_prefix):
+                        router_iface_ip = r_ip
+                        break
+                if not router_iface_ip:
+                    continue
+                r_iface = self._iface_for_ip(cand_id, router_iface_ip)
+                if not nat_engine.proxy_arp_enabled(cand_id, r_iface, cand_type):
+                    continue
+                # 宛先への経路を持つか（別セグメントに宛先所有装置がある）
+                target_dev = (icmp_engine._find_device_owning_ip(target_ip) or
+                              icmp_engine._find_device_in_network(target_ip))
+                if not target_dev or target_dev == cand_id:
+                    # ルーター自身が宛先側にいる、または宛先不明でも代理応答（簡易）
+                    pass
+                # ルーターのMACで代理応答
+                src_mac = self._gen_mac(device_id, my_ip)
+                proxy_mac = self._gen_mac(cand_id, router_iface_ip)
+                await vnet.send_to(device_id, {
+                    'type': 'arp_log', 'subtype': 'request',
+                    'message': (f'ARP: sending request for {target_ip} on {r_iface} '
+                                f'(sender {my_ip}/{src_mac})'),
+                })
+                await vnet.send_to(cand_id, {
+                    'type': 'arp_log', 'subtype': 'proxy',
+                    'message': (f'ARP: proxy reply for {target_ip} — '
+                                f'answering with own MAC {proxy_mac} on {r_iface} (proxy ARP)'),
+                })
+                await vnet.send_to(device_id, {
+                    'type': 'arp_log', 'subtype': 'reply_received',
+                    'message': (f'ARP: received reply: {target_ip} is at {proxy_mac} (proxy)'),
+                })
                 self.tables[device_id][target_ip] = ArpEntry(
-                    ip=target_ip, mac=mac, iface=iface, entry_type='dynamic')
-                return mac
-        # 同一セグメントにいない → ARP解決不可（L3で別途ルーティング）
+                    ip=target_ip, mac=proxy_mac,
+                    iface=self._iface_for_ip(device_id, my_ip), entry_type='dynamic')
+                return proxy_mac
         return None
 
     def _iface_for_ip(self, device_id: str, ip: str) -> str:

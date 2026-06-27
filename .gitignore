@@ -31,3 +31,6 @@ desktop.ini
 # ログ・一時ファイル
 *.log
 *.tmp
+
+# サーバー自動生成ファイル
+saved_config.json

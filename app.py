@@ -29,10 +29,13 @@ from engine.rules import RuleEngine, DeviceState
 from engine.protocols import (
     vnet, rip_engine, ospf_engine, bgp_engine, stp_engine, rib_engine,
     icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
+    nat_engine, cef_engine,
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
 from engine.syslog_sender import syslog_dispatcher, snmp_dispatcher, ntp_client
+from engine.ike_engine import negotiate_ipsec
+from engine.config_importer import import_running_config, validate_config_text
 
 # ══════════════════════════════════════════
 # 設定
@@ -40,6 +43,8 @@ from engine.syslog_sender import syslog_dispatcher, snmp_dispatcher, ntp_client
 OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 USE_OLLAMA   = False   # 起動時に自動検出
+
+SAVED_CONFIG_PATH = Path(__file__).parent / "saved_config.json"
 
 rule_engine = RuleEngine()
 
@@ -54,6 +59,9 @@ DEFAULT_DEVICES = {
     "catalyst": {"type": "catalyst", "hostname": "Dist-SW",  "color": "#1e90ff"},
     "cisco":    {"type": "cisco",    "hostname": "GW-Router","color": "#e05a00"},
     "apresia":  {"type": "apresia",  "hostname": "sw1",      "color": "#c00040"},
+    "pc-1":     {"type": "pc",       "hostname": "PC-1",     "color": "#888888", "ip": "192.168.1.10", "gateway": "192.168.1.1"},
+    "pc-2":     {"type": "pc",       "hostname": "PC-2",     "color": "#555555", "ip": "192.168.1.11", "gateway": "192.168.1.1"},
+    "asa":      {"type": "asa",      "hostname": "ASA-FW",   "color": "#cc4400"},
 }
 
 # ══════════════════════════════════════════
@@ -93,6 +101,197 @@ async def query_ollama(prompt: str, system: str) -> str:
 # ══════════════════════════════════════════
 # アプリ起動
 # ══════════════════════════════════════════
+def _trigger_ike_negotiation(device_id: str):
+    """IKE ネゴシエーションを実行してログをバッファに積む"""
+    results = negotiate_ipsec(device_sessions, device_id)
+    buf = proto_log_buffer.setdefault(device_id, [])
+    for tid_str, result in results.items():
+        for log_line in result.logs:
+            buf.append({'type': 'sir_log', 'message': log_line,
+                        'hostname': device_sessions[device_id].hostname,
+                        'facility': 'IPSEC' if 'IPsec' in log_line else 'IKE',
+                        'level': 'INFO' if result.success else 'ERROR'})
+        # 対向デバイスにも結果ログを積む
+        state = device_sessions.get(device_id)
+        if state:
+            # Si-R: ipsec_tunnels から peer_ip を収集
+            peer_ips = set()
+            for _, t in getattr(state, 'ipsec_tunnels', {}).items():
+                rip = t.get('remote_ip', '')
+                if rip:
+                    peer_ips.add(rip)
+            # Cisco/Catalyst: ipsec_crypto の crypto_maps から peer を収集
+            for cmap in getattr(state, 'ipsec_crypto', {}).get('crypto_maps', {}).values():
+                for seq_data in cmap.values():
+                    if isinstance(seq_data, dict) and seq_data.get('peer'):
+                        peer_ips.add(seq_data['peer'])
+            for peer_ip in peer_ips:
+                for pid, ps in device_sessions.items():
+                    if pid == device_id:
+                        continue
+                    # Si-R peer match
+                    peer_match = any(
+                        pt.get('local_ip') == peer_ip
+                        for _, pt in getattr(ps, 'ipsec_tunnels', {}).items()
+                    )
+                    # Cisco peer match
+                    if not peer_match:
+                        for iinfo in ps.interfaces.values():
+                            if iinfo.get('ip') == peer_ip:
+                                peer_match = True
+                                break
+                    if peer_match:
+                        pbuf = proto_log_buffer.setdefault(pid, [])
+                        for log_line in result.logs:
+                            pbuf.append({'type': 'sir_log', 'message': log_line,
+                                         'hostname': ps.hostname,
+                                         'facility': 'IPSEC' if 'IPsec' in log_line else 'IKE',
+                                         'level': 'INFO' if result.success else 'ERROR'})
+
+
+def _save_config():
+    """現在のデバイス設定・リンクをJSONに保存"""
+    data = {"devices": {}, "links": []}
+    for dev_id, state in device_sessions.items():
+        dev_data = {
+            "type": state.device_type,
+            "hostname": state.hostname,
+            "interfaces": {},
+        }
+        for ifname, info in state.interfaces.items():
+            dev_data["interfaces"][ifname] = {
+                "ip":     info.get("ip", ""),
+                "prefix": info.get("prefix", 24),
+                "status": info.get("status", "up"),
+            }
+        # ルートテーブルを保存（全デバイス共通）
+        routes = getattr(state, "routes", [])
+        if routes:
+            dev_data["routes"] = routes
+        if state.device_type == "pc":
+            dev_data["gateway"] = getattr(state, "gateway", "")
+        # VLANを保存
+        vlans = getattr(state, "vlans", {})
+        if vlans:
+            dev_data["vlans"] = vlans
+        # Si-R IPsec設定を保存
+        if state.device_type in ("sir", "srs"):
+            tunnels = getattr(state, "ipsec_tunnels", {})
+            if tunnels:
+                dev_data["ipsec_tunnels"]  = tunnels
+                dev_data["ipsec_enabled"]  = getattr(state, "ipsec_enabled", False)
+                dev_data["ike_enabled"]    = getattr(state, "ike_enabled", False)
+        # Cisco/Catalyst IPsec設定を保存
+        if state.device_type in ("cisco", "catalyst"):
+            crypto = getattr(state, "ipsec_crypto", {})
+            if crypto:
+                dev_data["ipsec_crypto"] = crypto
+        data["devices"][dev_id] = dev_data
+    # vnetリンク
+    for a, neighbors in vnet.links.items():
+        for b in neighbors:
+            if {"a": a, "b": b} not in data["links"] and {"a": b, "b": a} not in data["links"]:
+                data["links"].append({"a": a, "b": b})
+    try:
+        with open(SAVED_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"[Config] 設定を保存しました: {SAVED_CONFIG_PATH}")
+    except Exception as e:
+        print(f"[Config] 保存エラー: {e}")
+
+
+async def _auto_save_loop():
+    """60秒ごとに設定を自動保存"""
+    while True:
+        await asyncio.sleep(60)
+        _save_config()
+        print("[Config] 自動保存完了")
+
+
+def _load_config():
+    """保存済みの設定をロード。存在しなければデフォルトで初期化"""
+    if not SAVED_CONFIG_PATH.exists():
+        # デフォルト初期化
+        for dev_id, dev in DEFAULT_DEVICES.items():
+            state = DeviceState(dev["type"], dev["hostname"])
+            # PCはデフォルトIP/GWを適用
+            if dev.get("type") == "pc" and dev.get("ip"):
+                state.interfaces["eth0"]["ip"] = dev["ip"]
+                if dev.get("gateway"):
+                    state.gateway = dev["gateway"]
+                    if state.routes:
+                        state.routes[0]["gw"] = dev["gateway"]
+            device_sessions[dev_id] = state
+            vnet.device_types[dev_id] = state.device_type
+            ifaces = {name: {'ip': info['ip'], 'prefix': info.get('prefix', 24)}
+                      for name, info in state.interfaces.items() if info.get('ip')}
+            icmp_engine.register_device(dev_id, state.hostname, ifaces)
+        return
+
+    try:
+        with open(SAVED_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[Config] ロードエラー: {e} — デフォルトで初期化")
+        for dev_id, dev in DEFAULT_DEVICES.items():
+            state = DeviceState(dev["type"], dev["hostname"])
+            device_sessions[dev_id] = state
+            vnet.device_types[dev_id] = dev["type"]
+        return
+
+    for dev_id, dev_data in data.get("devices", {}).items():
+        state = DeviceState(dev_data["type"], dev_data["hostname"])
+        # インタフェースIPを復元（大小文字違いの幻インターフェースをマージして除去）
+        groups = {}
+        for ifname, iinfo in dev_data.get("interfaces", {}).items():
+            groups.setdefault(ifname.lower(), []).append((ifname, iinfo))
+        for low, entries in groups.items():
+            # 既定インターフェースの正式名（大小無視）に寄せる
+            target = next((n for n in state.interfaces if n.lower() == low), entries[0][0])
+            # 非空IPを持つエントリを優先（同点は保存順の先頭）
+            _, iinfo = max(entries, key=lambda e: 1 if e[1].get("ip") else 0)
+            if target in state.interfaces:
+                state.interfaces[target].update({
+                    "ip":     iinfo.get("ip", ""),
+                    "prefix": iinfo.get("prefix", 24),
+                    "status": iinfo.get("status", "up"),
+                })
+            else:
+                state.interfaces[target] = iinfo
+        # ルートを復元（全デバイス共通）
+        if dev_data.get("routes"):
+            state.routes = dev_data["routes"]
+        # PCのゲートウェイを復元
+        if dev_data["type"] == "pc":
+            if dev_data.get("gateway"):
+                state.gateway = dev_data["gateway"]
+        # VLANを復元
+        if dev_data.get("vlans") and hasattr(state, "vlans"):
+            state.vlans = dev_data["vlans"]
+        # Si-R IPsec設定を復元
+        if dev_data["type"] in ("sir", "srs") and dev_data.get("ipsec_tunnels"):
+            state.ipsec_tunnels = dev_data["ipsec_tunnels"]
+            state.ipsec_enabled = dev_data.get("ipsec_enabled", False)
+            state.ike_enabled   = dev_data.get("ike_enabled", False)
+        # Cisco/Catalyst IPsec設定を復元
+        if dev_data["type"] in ("cisco", "catalyst") and dev_data.get("ipsec_crypto"):
+            state.ipsec_crypto = dev_data["ipsec_crypto"]
+        device_sessions[dev_id] = state
+        vnet.device_types[dev_id] = state.device_type
+        ifaces = {name: {'ip': info.get('ip',''), 'prefix': info.get('prefix',24)}
+                  for name, info in state.interfaces.items() if info.get('ip')}
+        icmp_engine.register_device(dev_id, state.hostname, ifaces)
+
+    # リンクを復元
+    for link in data.get("links", []):
+        a, b = link.get("a"), link.get("b")
+        if a and b:
+            vnet.add_link(a, b)
+
+    print(f"[Config] 設定をロードしました: {len(data.get('devices',{}))} devices, "
+          f"{len(data.get('links',[]))} links")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global USE_OLLAMA
@@ -106,18 +305,109 @@ async def lifespan(app: FastAPI):
 ║   モード: {mode:<44}║
 ╚══════════════════════════════════════════════════════════╝
 """)
-    # デフォルトセッション初期化
-    for dev_id, dev in DEFAULT_DEVICES.items():
-        state = DeviceState(dev["type"], dev["hostname"])
-        device_sessions[dev_id] = state
-        # ICMPエンジンにIP登録
-        ifaces = {name: {'ip': info['ip'], 'prefix': info.get('prefix', 24)}
-                  for name, info in state.interfaces.items() if info.get('ip')}
-        icmp_engine.register_device(dev_id, state.hostname, ifaces)
+    # 保存済み設定をロード（なければデフォルト初期化）
+    _load_config()
+    # 定期自動保存タスク（60秒ごと）
+    auto_save_task = asyncio.create_task(_auto_save_loop())
     yield
+    auto_save_task.cancel()
+    try:
+        await auto_save_task
+    except asyncio.CancelledError:
+        pass
+    # シャットダウン時にも保存
+    _save_config()
 
 app = FastAPI(title="ネットワークラボ", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# ══════════════════════════════════════════
+# セッション認証（admin/admin）
+#   NETLAB_AUTH_USER / NETLAB_AUTH_PASS で変更可
+#   NETLAB_AUTH_DISABLE=1 で無効化（自動テスト用）
+#   セッショントークン有効期限: 10分（無操作時）
+# ══════════════════════════════════════════
+import secrets as _secrets
+from fastapi import Response as _Response
+
+_AUTH_USER = os.environ.get("NETLAB_AUTH_USER", "admin")
+_AUTH_PASS = os.environ.get("NETLAB_AUTH_PASS", "admin")
+_AUTH_DISABLED = os.environ.get("NETLAB_AUTH_DISABLE") == "1"
+_SESSION_TTL = 600  # 10分（秒）
+
+# トークン -> 最終アクセス時刻
+_sessions: Dict[str, float] = {}
+
+def _new_token() -> str:
+    return _secrets.token_hex(32)
+
+def _valid_token(token: str) -> bool:
+    exp = _sessions.get(token)
+    if exp is None:
+        return False
+    if time.time() - exp > _SESSION_TTL:
+        del _sessions[token]
+        return False
+    _sessions[token] = time.time()  # タッチ（延長）
+    return True
+
+# パスホワイトリスト（認証不要）
+# ルート "/" と各種静的アセットはHTML/ログインJSを返すため公開し、
+# 認証はAPI（/api/*）とWebSocket側で行う。
+_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico",
+                  "/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
+
+@app.middleware("http")
+async def session_auth_middleware(request, call_next):
+    if _AUTH_DISABLED or request.method == "OPTIONS":
+        return await call_next(request)
+    path = request.url.path
+    # 静的ファイル・ログインAPIは通過
+    if path in _NO_AUTH_PATHS or path.startswith("/static/"):
+        return await call_next(request)
+    # WebSocket は同一オリジンから呼ばれるのでトークン検証
+    if path.startswith("/ws/"):
+        token = request.query_params.get("token", "")
+        if _AUTH_DISABLED or _valid_token(token):
+            return await call_next(request)
+        return _Response(status_code=403, content="認証が必要です")
+    # 通常APIはヘッダーまたはクエリパラメータでトークン検証
+    token = request.headers.get("X-Session-Token", "") or request.query_params.get("token", "")
+    if _valid_token(token):
+        return await call_next(request)
+    return _Response(status_code=401, content="認証が必要です")
+
+
+@app.post("/api/login")
+async def login(body: dict):
+    user = body.get("username", "")
+    pw   = body.get("password", "")
+    if (_secrets.compare_digest(user, _AUTH_USER)
+            and _secrets.compare_digest(pw, _AUTH_PASS)):
+        token = _new_token()
+        _sessions[token] = time.time()
+        return {"ok": True, "token": token, "ttl": _SESSION_TTL}
+    return JSONResponse(status_code=401, content={"ok": False, "error": "ユーザー名またはパスワードが違います"})
+
+
+@app.post("/api/logout")
+async def logout(body: dict):
+    token = body.get("token", "")
+    _sessions.pop(token, None)
+    return {"ok": True}
+
+
+@app.get("/api/session/refresh")
+async def session_refresh(token: str = ""):
+    if _valid_token(token):
+        remaining = int(_SESSION_TTL - (time.time() - _sessions.get(token, time.time())))
+        return {"ok": True, "remaining": remaining}
+    return JSONResponse(status_code=401, content={"ok": False})
+
+
+@app.get("/api/health")
+async def health():
+    return {"ok": True}
 
 # ══════════════════════════════════════════
 # API エンドポイント
@@ -181,9 +471,14 @@ async def cli_command(body: dict):
         return {"output": "\x0c", "mode": state.mode, "hostname": state.hostname}
 
     # ── ICMP: ping / traceroute（実到達性判定）──
-    icmp_out = handle_icmp(device_id, command, state)
+    icmp_out = await handle_icmp(device_id, command, state)
     if icmp_out is not None:
         return {"output": icmp_out, "mode": state.mode, "hostname": state.hostname}
+
+    # ── PC: nc / netcat（TCP到達性判定 — トポロジー考慮）──
+    nc_out = await handle_nc(device_id, command, state)
+    if nc_out is not None:
+        return {"output": nc_out, "mode": state.mode, "hostname": state.hostname}
 
     # ── プロトコル動的show（エンジンが起動していればエンジンの出力を優先）──
     proto_output = await handle_protocol_show(device_id, command, state)
@@ -195,6 +490,37 @@ async def cli_command(body: dict):
 
     # ルールベースで処理
     output = rule_engine.process(command, state)
+
+    # IPアドレス・ルート変更があればicmp_engineに再登録
+    c_low = command.lower().strip()
+    # no crypto map / shutdown → DPD detecting 状態へ遷移
+    if re.match(r'^no\s+crypto\s+map', c_low) or (
+            c_low in ('shutdown', 'shut') and state.current_if and
+            state.interfaces.get(state.current_if, {}).get('crypto_map')):
+        icmp_engine.clear_ipsec(device_id)
+
+    # shutdown / no shutdown → VirtualNetwork + OSPF/RIP エンジンに通知
+    iface_for_flap = state.current_if or ''
+    if c_low in ('shutdown', 'shut') and iface_for_flap:
+        vnet.interface_down(device_id, iface_for_flap)
+        peer_ids = vnet.get_peers_on_interface(device_id, iface_for_flap)
+        if peer_ids:
+            await ospf_engine.interface_down(device_id, peer_ids)
+            await rip_engine.interface_down(device_id, peer_ids)
+    elif c_low in ('no shutdown', 'no shut') and iface_for_flap:
+        vnet.interface_up(device_id, iface_for_flap)
+
+    if re.search(r'ip\s+addr(?:ess)?|ip\s+route|remote\s+\d+\s+ip\s+route|'
+                 r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address|'
+                 r'no\s+shutdown|no\s+shut', c_low) or (
+            re.search(r'crypto\s+map', c_low) and
+            not re.match(r'^no\s+crypto\s+map', c_low)):
+        _register_icmp(device_id)
+
+    # ── NAT / NAPT / proxy-arp 設定（Si-R / Cisco ルーター）──
+    nat_out = _handle_nat_config(device_id, command, state)
+    if nat_out is not None:
+        return {"output": nat_out, "mode": state.mode, "hostname": state.hostname}
 
     # ルールで空応答かつOllamaあり → Ollamaで補完
     if USE_OLLAMA and output == "" and command.strip():
@@ -259,6 +585,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         hn = state.hostname
         if c == 'save':
             _apresia_log(device_id, apresia_msg.sys_config_saved())
+            _save_config()
         elif re.match(r'^config\s+ports\s+(\S+)\s+state\s+enable', c):
             m_p = re.match(r'^config\s+ports\s+(\S+)', c)
             if m_p:
@@ -275,6 +602,18 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             m_v = re.match(r'^delete\s+vlan\s+(\d+)', c)
             if m_v:
                 _apresia_log(device_id, apresia_msg.vlan_deleted(int(m_v.group(1))))
+    # ── ASA: write memory / IKE negotiate ──
+    if state.device_type == 'asa':
+        if c in ('write memory', 'write', 'wr', 'copy running-config startup-config'):
+            _save_config()
+        elif re.match(r'^crypto\s+isakmp\s+enable', c):
+            _trigger_ike_negotiation(device_id)
+    # ── Cisco IOS: IKE negotiate ──
+    if state.device_type in ('cisco', 'catalyst'):
+        if (re.match(r'^crypto\s+isakmp\s+enable', c) or
+                re.match(r'^crypto\s+isakmp\s+key', c) or
+                re.match(r'^crypto\s+map\s+\S+\s+interface', c)):
+            _trigger_ike_negotiation(device_id)
     if state.device_type in ('catalyst', 'cisco', 'srs', 'nexus'):
         prev_mode = state.mode
         if c in ('configure terminal', 'conf t', 'conf terminal',
@@ -291,6 +630,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                 via='console', src='console'))
             _cisco_log(device_id, cisco_msg._fmt('SYS', 5, 'CONFIG_I',
                 'Configuration saved to NVRAM'))
+            _save_config()
         # hostname変更
         elif re.match(r'^hostname\s+(\S+)', c):
             m_hn = re.match(r'^hostname\s+(\S+)', c)
@@ -353,6 +693,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         # saveコマンド
         elif c == 'save':
             _sir_log(device_id, 'SYSTEM', 'configuration saved by admin')
+            _save_config()
         # hostnameコマンド
         elif c.startswith('hostname ') or c.startswith('sysname '):
             _sir_log(device_id, 'SYSTEM', f'hostname changed to {orig.split(None,1)[1] if " " in orig else ""}')
@@ -373,6 +714,9 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         # VRRP設定
         elif 'vrrp' in c and 'group' in c:
             _sir_log(device_id, 'VRRP', 'VRRP initialized')
+        # IPsec/IKE ネゴシエーション
+        elif c in ('ike use on', 'ipsec use on') or re.match(r'^remote\s+\d+\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key', c):
+            _trigger_ike_negotiation(device_id)
 
     # ── prefix-list ──
     # Cisco: "ip prefix-list NAME seq 5 permit 10.0.0.0/8 ge 24 le 30"
@@ -1502,11 +1846,133 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
         name = pl_show.group(1)
         return filter_engine.format_show_prefix_list(device_id, name)
 
+    # ── CEF / FIB（Catalyst / Nexus のハードウェア転送）──
+    if state.device_type in ('catalyst', 'nexus'):
+        # Catalyst: show ip cef
+        if re.match(r'^show\s+ip\s+cef', c):
+            return cef_engine.format_show_ip_cef(device_id, state.device_type)
+        # Nexus: show forwarding ipv4 route / show ip fib
+        if re.match(r'^show\s+forwarding\s+ipv4\s+route', c) or re.match(r'^show\s+ip\s+fib', c):
+            return cef_engine.format_show_ip_cef(device_id, 'nexus')
+        # 隣接テーブル: show adjacency
+        if re.match(r'^show\s+adjacency', c):
+            return cef_engine.format_show_adjacency(device_id, state.device_type)
+        # TCAM 使用量
+        if (re.match(r'^show\s+platform.*tcam', c) or
+                re.match(r'^show\s+platform\s+hardware.*tcam', c) or
+                re.match(r'^show\s+hardware\s+capacity', c) or
+                re.match(r'^show\s+tcam', c) or
+                re.match(r'^show\s+hardware\s+access-list\s+tcam', c)):
+            return cef_engine.format_tcam_utilization(device_id, state.device_type)
+        # 転送アーキテクチャ（入力→バックプレーン/ファブリック→出力）
+        if (re.match(r'^show\s+(platform\s+)?forwarding(\s+architecture)?$', c) or
+                re.match(r'^show\s+fabric(\s+utilization)?$', c) or
+                re.match(r'^show\s+(platform\s+)?backplane', c) or
+                re.match(r'^show\s+forwarding\s+path', c)):
+            return cef_engine.format_forwarding_arch(device_id, state.device_type)
+
+    # ── NAT 変換テーブル表示 ──
+    # Cisco: show ip nat translations / show ip nat statistics
+    if re.match(r'^show\s+ip\s+nat\s+translation', c):
+        return nat_engine.format_show_translations(device_id)
+    if re.match(r'^show\s+ip\s+nat\s+statistic', c):
+        return nat_engine.format_show_statistics(device_id)
+    # Si-R: show nat-table / show ip napt
+    if re.match(r'^show\s+(nat-table|ip\s+napt)', c) and state.device_type in ('sir', 'srs'):
+        return nat_engine.format_show_translations(device_id)
+
     # ── syslog / SNMP 設定確認（state反映版）──
     if re.match(r'^show\s+logging', c):
         return _format_show_logging(state)
     if re.match(r'^show\s+snmp', c):
         return _format_show_snmp(state)
+
+    # ── show crypto ipsec sa (DPD状態対応) ──
+    if re.match(r'^show\s+crypto\s+ipsec\s+sa', c) and state.device_type in ('cisco', 'catalyst', 'asa'):
+        sa_list = icmp_engine.get_ipsec_sa_status(device_id)
+        if not sa_list:
+            return 'There are no ipsec sas.'
+        import random as _rand
+        lines = []
+        cmap_if = getattr(state, 'ipsec_crypto', {}).get('crypto_map_interface', {})
+        cmap_name = cmap_if.get('name', 'CMAP')
+        applied_if = cmap_if.get('interface', 'GigabitEthernet0/2')
+        for sa in sa_list:
+            local_ip = sa['local']
+            peer_ip  = sa['peer']
+            lbl      = sa['label']
+            state_str = sa['state']
+            lines.append(f'interface: {applied_if}')
+            lines.append(f'    Crypto map tag: {cmap_name}, local addr {local_ip}')
+            lines.append('')
+            lines.append(f'   current_peer {peer_ip} port 500')
+            lines.append(f'   DPD status: {lbl}')
+            if state_str == 'established':
+                spi_in  = f'0x{_rand.randint(0, 0xffffffff):08x}'
+                spi_out = f'0x{_rand.randint(0, 0xffffffff):08x}'
+                lines += [
+                    f'   PERMIT, flags={{origin_is_acl,}}',
+                    f'   #pkts encaps: {_rand.randint(100,9999)}, #pkts encrypt: {_rand.randint(100,9999)}',
+                    f'   #pkts decaps: {_rand.randint(100,9999)}, #pkts decrypt: {_rand.randint(100,9999)}',
+                    f'   #send errors 0, #recv errors 0',
+                    f'',
+                    f'     local crypto endpt.: {local_ip}, remote crypto endpt.: {peer_ip}',
+                    f'     inbound esp sas:',
+                    f'      spi: {spi_in}(decimal: {int(spi_in,16)})',
+                    f'       Status: ACTIVE',
+                    f'     outbound esp sas:',
+                    f'      spi: {spi_out}(decimal: {int(spi_out,16)})',
+                    f'       Status: ACTIVE',
+                ]
+            elif state_str in ('detecting', 'down'):
+                lines += [
+                    f'   PERMIT, flags={{origin_is_acl,}}',
+                    f'   #pkts encaps: 0, #pkts encrypt: 0',
+                    f'   #pkts decaps: 0, #pkts decrypt: 0',
+                    f'   #dpd error timeout: {sa["elapsed"]}',
+                    f'     inbound esp sas: (none)',
+                    f'     outbound esp sas: (none)',
+                ]
+            else:  # negotiating
+                lines += [
+                    f'   (IKE Phase1/Phase2 in progress...)',
+                    f'     inbound esp sas: (pending)',
+                    f'     outbound esp sas: (pending)',
+                ]
+            lines.append('')
+        return '\n'.join(lines)
+
+    # ── show ip protocols (Cisco/Catalyst) ──
+    if re.match(r'^show\s+ip\s+protocols', c) and state.device_type in ('cisco', 'catalyst'):
+        lines = []
+        rn = rip_engine.nodes.get(device_id)
+        if rn and rn.get('enabled'):
+            lines.append('Routing Protocol is "rip"')
+            lines.append('  Sending updates every 30 seconds, next due in 15 seconds')
+            lines.append(f'  Version {rn.get("version", 2)}, receive version {rn.get("version", 2)}')
+            lines.append('  Routing for Networks:')
+            for net in rn.get('networks', []):
+                lines.append(f'    {net.split("/")[0]}')
+            lines.append('  Distance: (default is 120)')
+        on = ospf_engine.nodes.get(device_id)
+        if on and on.get('enabled'):
+            pid = on.get('process_id', 1)
+            lines.append(f'Routing Protocol is "ospf {pid}"')
+            lines.append('  Outgoing update filter list for all interfaces is not set')
+            lines.append('  Incoming update filter list for all interfaces is not set')
+            lines.append(f'  Router ID {on.get("router_id", "0.0.0.0")}')
+            lines.append('  Number of areas in this router is 1. 1 normal 0 stub 0 nssa')
+            lines.append('  Distance: (default is 110)')
+        bn = bgp_engine.nodes.get(device_id)
+        if bn and bn.get('enabled'):
+            asn = bn.get('local_as', '?')
+            lines.append(f'Routing Protocol is "bgp {asn}"')
+            lines.append('  Outgoing update filter list for all interfaces is not set')
+            lines.append('  Incoming update filter list for all interfaces is not set')
+            lines.append('  Distance: external 20 internal 200 local 200')
+        if not lines:
+            lines.append('No routing protocol is configured')
+        return '\n'.join(lines)
 
     # ── VLAN 表示 ──
     if re.match(r'^show\s+vlan\s+brief', c):
@@ -2056,7 +2522,139 @@ def _prefix_to_mask(prefix: int) -> str:
     return f'{(mask>>24)&0xff}.{(mask>>16)&0xff}.{(mask>>8)&0xff}.{mask&0xff}'
 
 
-def handle_icmp(device_id: str, command: str, state: DeviceState):
+def _handle_nat_config(device_id: str, command: str, state: DeviceState):
+    """
+    NAT / NAPT / proxy-arp の設定を解釈（Si-R / Cisco ルーターのみ）。
+    設定コマンドを処理したら "" を、対象外なら None を返す。
+    """
+    if state.device_type not in ('cisco', 'sir', 'srs'):
+        return None
+    c = command.lower().strip()
+
+    # ── Cisco: interface 'ip nat inside|outside' ──
+    m = re.match(r'^ip\s+nat\s+(inside|outside)$', c)
+    if m and state.current_if:
+        nat_engine.set_iface_role(device_id, state.current_if, m.group(1))
+        return ""
+    if re.match(r'^no\s+ip\s+nat\s+(inside|outside)$', c) and state.current_if:
+        role = c.split()[-1]
+        nat_engine.cfg[device_id][role].discard(state.current_if)
+        return ""
+
+    # ── Cisco: 'ip nat inside source list <acl> interface <if> overload' ──
+    m = re.match(r'^ip\s+nat\s+inside\s+source\s+list\s+(\S+)\s+interface\s+(\S+)(\s+overload)?', c)
+    if m:
+        nat_engine.add_pat(device_id, m.group(1), m.group(2), bool(m.group(3)))
+        return ""
+    # ── Cisco: 'ip nat inside source static <inside> <outside>' ──
+    m = re.match(r'^ip\s+nat\s+inside\s+source\s+static\s+([\d.]+)\s+([\d.]+)', c)
+    if m:
+        nat_engine.add_static(device_id, m.group(1), m.group(2))
+        return ""
+
+    # ── Cisco標準ACL（NAT用 source list）: 'access-list <n> permit <net> <wildcard>' ──
+    m = re.match(r'^access-list\s+(\S+)\s+(permit|deny)\s+([\d.]+)\s+([\d.]+)$', c)
+    if m:
+        net = m.group(3)
+        wildcard = m.group(4)
+        # ワイルドカード→プレフィックス長
+        try:
+            inv = [255 - int(o) for o in wildcard.split('.')]
+            prefix = sum(bin(o).count('1') for o in inv)
+        except Exception:
+            prefix = 24
+        nat_engine.add_acl(device_id, m.group(1), m.group(2), net, prefix)
+        # access-list は filter_engine 用にも別途処理されるため None を返さず継続させる
+        # （NATのACLとして登録だけして、応答は既存処理に委ねるため "" は返さない）
+        return None
+    m = re.match(r'^access-list\s+(\S+)\s+(permit|deny)\s+host\s+([\d.]+)$', c)
+    if m:
+        nat_engine.add_acl(device_id, m.group(1), m.group(2), m.group(3), 32)
+        return None
+
+    # ── Cisco: 'ip proxy-arp' / 'no ip proxy-arp' ──
+    if c == 'ip proxy-arp' and state.current_if:
+        nat_engine.set_proxy_arp(device_id, state.current_if, True)
+        return ""
+    if c == 'no ip proxy-arp' and state.current_if:
+        nat_engine.set_proxy_arp(device_id, state.current_if, False)
+        return ""
+
+    # ── Si-R: 'lan N ip napt use use' / 'wan N ip napt use use' ──
+    m = re.match(r'^(lan|wan)\s+(\d+)\s+ip\s+napt\s+', c)
+    if m and state.device_type in ('sir', 'srs'):
+        iface = f'{m.group(1)}{m.group(2)}'
+        nat_engine.enable_napt(device_id, iface)
+        return ""
+    # ── Si-R: 'lan N ip proxyarp use on|off' ──
+    m = re.match(r'^(lan|wan)\s+(\d+)\s+ip\s+proxyarp\s+use\s+(on|off)', c)
+    if m and state.device_type in ('sir', 'srs'):
+        iface = f'{m.group(1)}{m.group(2)}'
+        nat_engine.set_proxy_arp(device_id, iface, m.group(3) == 'on')
+        return ""
+
+    return None
+
+
+def _find_gateway_ip(state: DeviceState) -> str:
+    """デバイスのデフォルトゲートウェイIPを取得（device_type非依存）"""
+    # PC等が持つ明示的gateway属性
+    gw = getattr(state, 'gateway', '') or ''
+    if gw and gw not in ('0.0.0.0', 'directly'):
+        return gw
+    # routesテーブルから 0.0.0.0/0（デフォルトルート）のgwを探す
+    for r in getattr(state, 'routes', []) or []:
+        dest = r.get('dest') or r.get('net') or ''
+        if dest in ('0.0.0.0/0', '0.0.0.0', 'default'):
+            g = r.get('gw', '')
+            if g and g not in ('0.0.0.0', 'directly'):
+                return g
+    return ''
+
+
+async def _arp_before_send(device_id: str, dest: str, state: DeviceState):
+    """
+    パケット送出前のARP解決。
+    - 宛先が同一セグメント → 宛先IPを直接ARP
+    - 別セグメント → デフォルトゲートウェイのMACをARP（実機準拠）
+    """
+    info = icmp_engine.device_ips.get(device_id, {})
+    # 宛先が自分のいずれかのインターフェースと同一セグメントか判定
+    same_seg = any(icmp_engine._ip_in_network(dest, my_ip, prefix)
+                   for my_ip, prefix in info.get('ips', {}).items())
+    if same_seg:
+        await arp_engine.resolve_with_packet(device_id, dest)
+    else:
+        # 別セグメント → デフォゲのMACを解決してそこ宛に送出
+        gw = _find_gateway_ip(state)
+        if gw:
+            await arp_engine.resolve_with_packet(device_id, gw)
+
+
+def _apply_nat_on_path(src_id: str, dest_ip: str, ping_result: dict, proto: str = 'icmp'):
+    """
+    ping/通信の経路上にあるNATルーターで送信元IP変換を適用する。
+    変換テーブルにエントリを記録（show ip nat translations で確認可能）。
+    """
+    if not ping_result.get('reachable'):
+        return
+    src_info = icmp_engine.device_ips.get(src_id, {})
+    src_ips = list(src_info.get('ips', {}).keys())
+    if not src_ips:
+        return
+    src_ip = src_ips[0]
+    # 宛先が自分と同一セグメントなら変換不要（NAT対象外）
+    for my_ip, prefix in src_info.get('ips', {}).items():
+        if icmp_engine._ip_in_network(dest_ip, my_ip, prefix):
+            return
+    # 経路上の各ホップ（ルーター）でNAT設定があれば変換を試みる
+    for hop in ping_result.get('hops', []):
+        hop_dev = hop.get('device')
+        if hop_dev and nat_engine.has_nat(hop_dev):
+            nat_engine.translate(hop_dev, src_ip, dest_ip, proto=proto)
+
+
+async def handle_icmp(device_id: str, command: str, state: DeviceState):
     """ping / traceroute を実到達性判定で処理"""
     c = command.lower().strip()
 
@@ -2065,9 +2663,11 @@ def handle_icmp(device_id: str, command: str, state: DeviceState):
     if m:
         dest = m.group(1)
         _register_icmp(device_id)
-        # ARP解決を試みる（同一セグメントならARPテーブルに記録）
-        arp_engine.resolve(device_id, dest)
+        # 送出前ARP（同一セグメントは宛先、別セグメントはデフォゲ）
+        await _arp_before_send(device_id, dest, state)
         result = icmp_engine.ping(device_id, dest, count=5)
+        # 経路上のNATルーターで送信元アドレス変換を適用
+        _apply_nat_on_path(device_id, dest, result, proto='icmp')
         return _format_ping(dest, result, state.device_type)
 
     # traceroute / tracert
@@ -2075,10 +2675,95 @@ def handle_icmp(device_id: str, command: str, state: DeviceState):
     if m:
         dest = m.group(1)
         _register_icmp(device_id)
+        # 送出前ARP（同一セグメントは宛先、別セグメントはデフォゲ）
+        await _arp_before_send(device_id, dest, state)
         result = icmp_engine.traceroute(device_id, dest)
         return _format_traceroute(dest, result)
 
     return None
+
+
+async def handle_nc(device_id: str, command: str, state: DeviceState):
+    """nc / telnet のTCPポート到達性チェック（icmp_engineで経路確認）"""
+    if state.device_type != 'pc':
+        return None
+    c = command.strip()
+    import re as _re
+    import random as _random
+
+    # nc -zv <host> <port1>-<port2>  または  nc <host> <port1>-<port2>
+    m_range  = _re.match(r'^nc\s+(?:-\S+\s+)*([\d.]+)\s+(\d+)-(\d+)', c, _re.I)
+    # nc -zv <host> <port>
+    m_single = _re.match(r'^nc\s+(?:-\S+\s+)*([\d.]+)\s+(\d+)', c, _re.I)
+
+    if not m_range and not m_single:
+        return None  # ncコマンドではない
+
+    host = (m_range or m_single).group(1)
+
+    # icmp_engineで経路チェック
+    _register_icmp(device_id)
+    # TCP通信開始前のARP解決（同一セグメントは宛先、別セグメントはデフォゲ）
+    await _arp_before_send(device_id, host, state)
+    reach = icmp_engine.ping(device_id, host, count=1)
+    reachable = reach.get('reachable', False)
+
+    my_ip = ''
+    for iface in state.interfaces.values():
+        if iface.get('ip'):
+            my_ip = iface['ip']
+            break
+
+    if m_range:
+        p_lo = int(m_range.group(2))
+        p_hi = int(m_range.group(3))
+        total = p_hi - p_lo + 1
+        if not reachable:
+            lines = [f"nc: connect to {host} port {p_lo} (tcp) failed: No route to host"]
+            if total > 1:
+                lines.append(f"  (ports {p_lo}-{p_hi}: all {total} ports unreachable — no route)")
+            return "\n".join(lines)
+        # 到達可能: 100以下は全件、それ以上はサマリー
+        if total <= 100:
+            lines = []
+            for port in range(p_lo, p_hi + 1):
+                rtt = round(_random.uniform(0.3, 5.0), 2)
+                lines.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
+            return "\n".join(lines)
+        else:
+            head = [f"Connection to {host} {p} port [tcp/*] succeeded!  ({round(_random.uniform(0.3,5.0),2)} ms)"
+                    for p in range(p_lo, p_lo + 10)]
+            tail = [f"Connection to {host} {p} port [tcp/*] succeeded!  ({round(_random.uniform(0.3,5.0),2)} ms)"
+                    for p in range(p_hi - 9, p_hi + 1)]
+            avg_rtt = round(_random.uniform(1.5, 3.5), 2)
+            summary = [
+                "",
+                f"  ... (ports {p_lo + 10} - {p_hi - 10} tested, all succeeded) ...",
+                "",
+            ]
+            return "\n".join(head + summary + tail + [
+                "",
+                "--- nc scan summary ---",
+                f"Host   : {host}",
+                f"Range  : {p_lo} - {p_hi}",
+                f"Total  : {total} ports scanned",
+                f"Open   : {total} ports",
+                f"Closed : 0 ports",
+                f"Avg RTT: {avg_rtt} ms",
+            ])
+    else:
+        port = int(m_single.group(2))
+        if not reachable:
+            return f"nc: connect to {host} port {port} (tcp) failed: No route to host"
+        rtt = round(_random.uniform(0.3, 5.0), 2)
+        return "\n".join([
+            f"Connection to {host} {port} port [tcp/*] succeeded!",
+            f"  Local:  {my_ip}:{_random.randint(40000,60000)}",
+            f"  Remote: {host}:{port}",
+            f"  RTT:    {rtt} ms",
+            f"  State:  ESTABLISHED",
+        ])
+
 
 
 def _format_ping(dest: str, result: dict, device_type: str) -> str:
@@ -2213,20 +2898,50 @@ def _format_ospf_route_sir(device_id: str) -> str:
 
 @app.post("/api/device")
 async def add_device(body: dict):
-    """装置を追加"""
+    """装置を追加。PCの場合は ip / prefix / gateway を指定可能"""
     dev_id   = body.get("id")
     dev_type = body.get("type", "cisco")
     hostname = body.get("hostname", dev_id)
     if dev_id and dev_id not in device_sessions:
-        device_sessions[dev_id] = DeviceState(dev_type, hostname)
+        state = DeviceState(dev_type, hostname)
+        # PCの場合、オプションパラメータでIP/GWを上書き
+        if dev_type == "pc":
+            ip      = body.get("ip")
+            prefix  = body.get("prefix", 24)
+            gateway = body.get("gateway")
+            if ip:
+                state.interfaces["eth0"]["ip"]     = ip
+                state.interfaces["eth0"]["prefix"] = int(prefix)
+                # ルーティングテーブルのdirectルートも更新
+                net_int = 0
+                try:
+                    o = [int(x) for x in ip.split('.')]
+                    ip_int = (o[0]<<24)|(o[1]<<16)|(o[2]<<8)|o[3]
+                    mask   = (0xffffffff << (32 - int(prefix))) & 0xffffffff
+                    net_int = ip_int & mask
+                except Exception:
+                    pass
+                net_str = (f'{(net_int>>24)&0xff}.{(net_int>>16)&0xff}.'
+                           f'{(net_int>>8)&0xff}.{net_int&0xff}/{prefix}')
+                state.routes = [r for r in state.routes if r['dest'] not in (
+                    state.routes[1]['dest'], '192.168.1.0/24')]
+                state.routes = [
+                    {"dest": "0.0.0.0/0", "gw": gateway or state.gateway, "iface": "eth0", "metric": 0},
+                    {"dest": net_str,      "gw": "0.0.0.0",               "iface": "eth0", "metric": 100},
+                    {"dest": "127.0.0.0/8","gw": "0.0.0.0",              "iface": "lo",   "metric": 0},
+                ]
+            if gateway:
+                state.gateway = gateway
+        device_sessions[dev_id] = state
     if dev_id:
+        vnet.device_types[dev_id] = device_sessions[dev_id].device_type
         _register_stub(dev_id)
         _register_icmp(dev_id)
     return {"ok": True, "id": dev_id}
 
 
 def _register_icmp(device_id: str):
-    """ICMPエンジンに装置のIP情報を登録"""
+    """ICMPエンジンに装置のIP情報を登録。全デバイスで直結ネット・静的ルートをrib_engineに登録"""
     state = device_sessions.get(device_id)
     if not state:
         return
@@ -2237,12 +2952,146 @@ def _register_icmp(device_id: str):
                                   'prefix': info.get('prefix', 24)}
     icmp_engine.register_device(device_id, state.hostname, interfaces)
 
+    def _net_addr(ip, prefix):
+        try:
+            octets = [int(x) for x in ip.split('.')]
+            ip_int = (octets[0]<<24)|(octets[1]<<16)|(octets[2]<<8)|octets[3]
+            mask_bits = (0xffffffff << (32 - prefix)) & 0xffffffff
+            net_int = ip_int & mask_bits
+            return (f'{(net_int>>24)&0xff}.{(net_int>>16)&0xff}.'
+                    f'{(net_int>>8)&0xff}.{net_int&0xff}')
+        except Exception:
+            return None
+
+    # 全デバイス: インタフェース直結ネットワークをrib_engineに登録
+    for ifname, info in state.interfaces.items():
+        ip = info.get('ip', '')
+        prefix = info.get('prefix', 24)
+        if ip and ip != '127.0.0.1':
+            net = _net_addr(ip, prefix)
+            if net:
+                rib_engine.add_static_route(device_id, state.hostname,
+                                            net, prefix, '0.0.0.0', 0)
+
+    # PC: デフォルトゲートウェイをrib_engineに登録
+    if state.device_type == 'pc':
+        gw = getattr(state, 'gateway', '')
+        if gw:
+            rib_engine.add_static_route(device_id, state.hostname,
+                                        '0.0.0.0', 0, gw, 1)
+
+    # ルーター系: 静的ルート（remote N ip route / ip route）をrib_engineに登録
+    for route in getattr(state, 'static_routes', []):
+        dest   = route.get('dest', '')
+        prefix = route.get('prefix', 0)
+        gw     = route.get('gw', '0.0.0.0')
+        if dest:
+            rib_engine.add_static_route(device_id, state.hostname,
+                                        dest, prefix, gw, 1)
+
+    # IPsecトンネル: ipsec_crypto の crypto_maps / crypto_map_interface からpeer登録
+    icmp_engine.clear_ipsec(device_id)
+    ipsec_crypto = getattr(state, 'ipsec_crypto', {})
+    if ipsec_crypto:
+        crypto_maps   = ipsec_crypto.get('crypto_maps', {})
+        cmap_if       = ipsec_crypto.get('crypto_map_interface', {})
+        applied_name  = cmap_if.get('name', '')
+        applied_if    = cmap_if.get('interface', '')
+        # WAN側インターフェースのIPを取得
+        local_ip = ''
+        for ifname, info in state.interfaces.items():
+            if applied_if and applied_if.lower() in ifname.lower():
+                local_ip = info.get('ip', '')
+                break
+        if not local_ip and applied_if == '':
+            # interface に直接 crypto map が書かれているパターン
+            for ifname, info in state.interfaces.items():
+                if info.get('crypto_map') == applied_name:
+                    local_ip = info.get('ip', '')
+                    break
+        if local_ip and applied_name and applied_name in crypto_maps:
+            # DPDタイマー設定をicmp_engineに反映
+            dpd_cfg = ipsec_crypto.get('dpd', {})
+            if dpd_cfg.get('interval'):
+                icmp_engine.DPD_DETECT_SEC = dpd_cfg['interval'] * dpd_cfg.get('retry', 2)
+                icmp_engine.IKE_NEGO_SEC   = max(2, dpd_cfg['interval'] // 5)
+            for seq, seq_data in crypto_maps[applied_name].items():
+                peer = seq_data.get('peer', '') if isinstance(seq_data, dict) else ''
+                if peer:
+                    icmp_engine.register_ipsec(device_id, local_ip, peer)
+
+@app.post("/api/save")
+async def api_save():
+    """全デバイス設定をファイルに保存"""
+    _save_config()
+    return {"ok": True, "path": str(SAVED_CONFIG_PATH)}
+
+@app.post("/api/load")
+async def api_load():
+    """保存済み設定をロード（サーバー再起動不要）"""
+    device_sessions.clear()
+    _load_config()
+    return {"ok": True, "devices": list(device_sessions.keys())}
+
 @app.delete("/api/device/{dev_id}")
 async def remove_device(dev_id: str):
     """装置を削除"""
     if dev_id in device_sessions:
         del device_sessions[dev_id]
     return {"ok": True}
+
+@app.post("/api/config/validate")
+async def api_validate_config(body: dict):
+    """
+    コンフィグテキストの事前チェック（インポート前の検証）。
+    body: {"config": "<running-config text>"}
+
+    チェック項目:
+      - 存在確認（空でないか）
+      - 2バイト文字（日本語等）が含まれていないか
+      - 行数が1万行を超えていないか
+      - 空白行が30%超で不要スペースが多くないか
+    """
+    config_text = body.get("config", "")
+    result = validate_config_text(config_text)
+    return result
+
+
+@app.post("/api/device/{dev_id}/import")
+async def import_device_config(dev_id: str, body: dict):
+    """
+    running-configテキストを受け取りデバイス状態に反映する。
+    body: {"config": "<running-config text>", "type": "cisco", "reset": true}
+      - type: デバイスタイプ上書き（省略時は既存デバイスのタイプを使用）
+      - reset: true にすると状態をリセットしてからインポート
+    """
+    config_text = body.get("config", "")
+    if not config_text:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "config is required"})
+
+    # 既存セッションを取得、なければ作成
+    if dev_id not in device_sessions:
+        dev = DEFAULT_DEVICES.get(dev_id, {"type": body.get("type", "cisco"), "hostname": dev_id})
+        device_sessions[dev_id] = DeviceState(dev["type"], dev["hostname"])
+
+    state = device_sessions[dev_id]
+
+    # デバイスタイプの決定（bodyで上書き可能）
+    dev_type = body.get("type") or state.device_type
+
+    # reset=true の場合、同タイプ・同ホスト名で状態をリセット
+    if body.get("reset"):
+        state = DeviceState(dev_type, state.hostname)
+        device_sessions[dev_id] = state
+
+    # running-config をインポート
+    result = import_running_config(dev_type, config_text, rule_engine, state)
+
+    # ICMPエンジンに再登録
+    _register_icmp(dev_id)
+
+    return {**result, "dev_id": dev_id, "device_type": dev_type, "hostname": state.hostname}
+
 
 @app.patch("/api/device/{dev_id}/hostname")
 async def update_hostname(dev_id: str, body: dict):
@@ -2252,15 +3101,115 @@ async def update_hostname(dev_id: str, body: dict):
     return {"ok": True}
 
 # ── リンク管理（vnetに反映）──
+
+# デバイスタイプ別MACプレフィックス（CDP/LLDPのChassis ID用）
+_MAC_BASE = {
+    'sir':      '00:0e:0e:f1:41:',
+    'srs':      '00:0e:0e:f1:42:',
+    'catalyst': '00:0e:0e:f1:43:',
+    'cisco':    '00:0e:0e:f1:44:',
+    'nexus':    '00:0e:0e:f1:45:',
+    'apresia':  '00:0e:0e:f1:46:',
+    'pc':       '00:0e:0e:f1:47:',
+}
+
+def _device_mac(dev_id: str, dev_type: str) -> str:
+    prefix = _MAC_BASE.get(dev_type, '00:0e:0e:f1:ff:')
+    suffix = format(abs(hash(dev_id)) % 256, '02x')
+    return prefix + suffix
+
+def _first_if(state) -> str:
+    """デバイスの最初の物理インターフェース名を返す"""
+    for name in state.interfaces:
+        if not name.lower().startswith(('vlan', 'lo', 'mgmt', 'port-channel')):
+            return name
+    return list(state.interfaces.keys())[0] if state.interfaces else ''
+
+def _cap_code(dev_type: str) -> str:
+    return 'R' if dev_type in ('sir', 'srs', 'cisco') else 'S'
+
+def _update_neighbors(a_id: str, b_id: str, add: bool):
+    """リンク追加/削除時にCDP・LLDPネイバーテーブルを更新する"""
+    a_state = device_sessions.get(a_id)
+    b_state = device_sessions.get(b_id)
+    if not a_state or not b_state:
+        return
+
+    pairs = [(a_state, a_id, b_state, b_id), (b_state, b_id, a_state, a_id)]
+    for local_st, local_id, peer_st, peer_id in pairs:
+        local_if = _first_if(local_st)
+        peer_if  = _first_if(peer_st)
+        mac      = _device_mac(peer_id, peer_st.device_type)
+        cap      = _cap_code(peer_st.device_type)
+
+        # ── CDP (Cisco同士のみ) ──
+        if local_st.device_type in ('catalyst', 'cisco', 'srs') and \
+           peer_st.device_type  in ('catalyst', 'cisco', 'srs'):
+            neighbors = getattr(local_st, 'cdp_neighbors', [])
+            # 既存エントリ削除（device名で識別）
+            neighbors = [n for n in neighbors if n.get('device') != peer_st.hostname]
+            if add:
+                neighbors.append({
+                    'device':    peer_st.hostname,
+                    'local_if':  local_if,
+                    'hold':      150,
+                    'cap':       cap,
+                    'platform':  peer_st.device_type.upper(),
+                    'port':      peer_if,
+                })
+            local_st.cdp_neighbors = neighbors
+
+        # ── LLDP (全機器) ──
+        lldp = getattr(local_st, 'lldp_neighbors', [])
+        lldp = [n for n in lldp
+                if n.get('system_name') != peer_st.hostname
+                and n.get('device') != peer_st.hostname]
+        if add:
+            lldp.append({
+                'local_if':    local_if,
+                'port':        local_if,
+                'chassis_id':  mac,
+                'system_name': peer_st.hostname,
+                'port_id':     peer_if,
+                'ttl':         120,
+                'cap':         cap,
+                'platform':    peer_st.device_type.upper(),
+            })
+        local_st.lldp_neighbors = lldp
+
+def _rebuild_all_neighbors():
+    """sync_links後に全デバイスのCDP/LLDPテーブルをvnetから再構築"""
+    # まず全デバイスのネイバーテーブルをクリア（動的エントリのみ）
+    for dev_id, state in device_sessions.items():
+        state.cdp_neighbors  = []
+        state.lldp_neighbors = []
+    # vnetのリンクをもとに再構築
+    seen = set()
+    for a_id, peers in vnet.links.items():
+        for b_id in peers:
+            key = tuple(sorted([a_id, b_id]))
+            if key not in seen:
+                seen.add(key)
+                _update_neighbors(a_id, b_id, add=True)
+
 @app.post("/api/link")
 async def add_link(body: dict):
     """装置間リンクを作成（プロトコルパケットが流れるようになる）"""
-    a = body.get("a")
-    b = body.get("b")
+    a = body.get("a") or body.get("device_a")
+    b = body.get("b") or body.get("device_b")
+    iface_a = body.get("iface_a") or body.get("interface_a")
+    iface_b = body.get("iface_b") or body.get("interface_b")
     if a and b:
-        vnet.add_link(a, b)
+        vnet.add_link(a, b, iface_a, iface_b)
+        _update_neighbors(a, b, add=True)
+        _save_config()
     return {"ok": True, "neighbors": {a: list(vnet.get_neighbors(a)),
                                        b: list(vnet.get_neighbors(b))}}
+
+@app.post("/api/topology/link")
+async def topology_link(body: dict):
+    """インターフェース名付きリンク作成（device_a/interface_a/device_b/interface_b形式）"""
+    return await add_link(body)
 
 @app.delete("/api/link")
 async def remove_link(body: dict):
@@ -2269,6 +3218,8 @@ async def remove_link(body: dict):
     b = body.get("b")
     if a and b:
         vnet.remove_link(a, b)
+        _update_neighbors(a, b, add=False)
+        _save_config()
     return {"ok": True}
 
 @app.post("/api/route/nexthop")
@@ -2291,19 +3242,32 @@ async def set_nexthop(body: dict):
 async def sync_links(body: dict):
     """フロントエンドの全リンクをvnetに同期"""
     links = body.get("links", [])
-    # 既存リンクをクリアして再構築
+    # 入力ガード: links はリストであること。不正なら 400 を返す（500クラッシュ防止）
+    if not isinstance(links, list):
+        return JSONResponse(status_code=400,
+                            content={"ok": False, "error": "links must be a list"})
+    # 既存リンクをクリアして再構築（interface_linksも同時クリア）
     for dev_id in list(vnet.links.keys()):
         vnet.links[dev_id] = set()
+    vnet.interface_links.clear()
+    applied = 0
     for l in links:
+        if not isinstance(l, dict):
+            continue  # 不正なエントリはスキップ
         a, b = l.get("a"), l.get("b")
-        if a and b:
-            vnet.add_link(a, b)
+        iface_a = l.get("iface_a") or l.get("pa")
+        iface_b = l.get("iface_b") or l.get("pb")
+        if a and b and a != b:  # 自己ループも除外
+            vnet.add_link(a, b, iface_a, iface_b)
+            applied += 1
     # WebSocket未接続の装置にもスタブコールバックを登録
     # （これがないとプロトコルパケットが転送先で処理されない）
     for dev_id in device_sessions:
         if dev_id not in vnet.ws_send_callbacks:
             _register_stub(dev_id)
-    return {"ok": True, "count": len(links)}
+    _rebuild_all_neighbors()
+    _save_config()
+    return {"ok": True, "count": applied}
 
 
 # CLIコマンドでプロトコルが起動したとき、表示用ログを溜めるバッファ
@@ -2462,6 +3426,12 @@ def _register_stub(device_id: str):
 
     async def stub_send(msg: dict):
         mt = msg.get('type', '')
+        if mt == 'arp_log':
+            buf = proto_log_buffer.setdefault(device_id, [])
+            buf.append(msg)
+            if len(buf) > 100:
+                buf.pop(0)
+            return
         if mt in ('rip_log', 'ospf_log', 'bgp_log', 'stp_log',
                   'vrrp_log', 'hsrp_log', 'vpc_log',
                   'rip_table', 'bgp_state', 'stp_topology_change'):
