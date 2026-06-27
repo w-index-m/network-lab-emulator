@@ -1229,6 +1229,21 @@ async function runCmd(id, cmd) {
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({device_id:id, command:cmd})
     });
+    if (res.status === 401) {
+      // 認証切れ: 行ごとにエラーを連発せず、1度だけ案内（fetchラッパーが再ログイン誘導）
+      print(id, '% 認証が切れています。再ログインしてください。', 'col-r');
+      t.busy=false;
+      document.getElementById('think-'+id).style.display='none';
+      renderInput(id);
+      return;
+    }
+    if (!res.ok) {
+      print(id, `% サーバーエラー (HTTP ${res.status})`, 'col-r');
+      t.busy=false;
+      document.getElementById('think-'+id).style.display='none';
+      renderInput(id);
+      return;
+    }
     const data = await res.json();
 
     // ホスト名・モード更新
