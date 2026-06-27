@@ -527,6 +527,31 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
   </div>
 </div>
 
+<!-- PC IP/ゲートウェイ設定モーダル -->
+<div id="pcip-overlay" style="position:fixed;inset:0;z-index:9200;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.7)">
+  <div style="background:#0d1a2a;border:1px solid #2a5a8a;border-radius:5px;width:380px;max-width:94vw;font-family:'Courier New',monospace;overflow:hidden">
+    <div style="background:linear-gradient(to bottom,#1a3a6a,#0d2040);padding:8px 14px;font-size:12px;color:#80c8ff">🖧 PC ネットワーク設定 — <span id="pcip-name"></span></div>
+    <div style="padding:14px 16px;display:flex;flex-direction:column;gap:10px">
+      <div>
+        <label style="font-size:10px;color:#7090b0">IPアドレス</label>
+        <input id="pcip-ip" type="text" placeholder="192.168.1.10" style="width:100%;background:#060e18;border:1px solid #1a3a5a;color:#c0c0c0;padding:5px 8px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px">
+      </div>
+      <div>
+        <label style="font-size:10px;color:#7090b0">サブネット (プレフィックス長)</label>
+        <input id="pcip-prefix" type="number" min="1" max="32" value="24" style="width:100%;background:#060e18;border:1px solid #1a3a5a;color:#c0c0c0;padding:5px 8px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px">
+      </div>
+      <div>
+        <label style="font-size:10px;color:#7090b0">デフォルトゲートウェイ</label>
+        <input id="pcip-gw" type="text" placeholder="192.168.1.1" style="width:100%;background:#060e18;border:1px solid #1a3a5a;color:#c0c0c0;padding:5px 8px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px" onkeydown="if(event.key==='Enter')applyPcIp()">
+      </div>
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button onclick="applyPcIp()" style="flex:1;padding:7px;background:#0a3a0a;border:1px solid #00c800;color:#00c800;font-size:12px;cursor:pointer;border-radius:4px;font-family:'Courier New',monospace">適用</button>
+        <button onclick="document.getElementById('pcip-overlay').style.display='none'" style="padding:7px 14px;background:#1a1a1a;border:1px solid #555;color:#aaa;font-size:12px;cursor:pointer;border-radius:4px;font-family:'Courier New',monospace">キャンセル</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- 流し込みモーダル -->
 <div id="flow-overlay">
   <div id="flow-box">
@@ -1571,13 +1596,17 @@ function onCR(e){
   const r=CVS.cvs.getBoundingClientRect(),{x:wx,y:wy}=s2w(e.clientX-r.left,e.clientY-r.top);
   const hitId=hitNode(wx,wy),hitLid=hitId?null:hitLink(wx,wy);
   if(hitId){
-    showCtxMenu(e.clientX,e.clientY,[
+    const menuItems=[
       {action:'link_from',icon:'🔗',label:'ここからリンク接続'},
       '---',
       {action:'rename',icon:'✏',label:'名前変更'},
-      '---',
-      {action:'del_node',icon:'🗑',label:'装置を削除',color:'var(--red)'},
-    ],{nodeId:hitId});
+    ];
+    if(DEVICES[hitId] && DEVICES[hitId].type==='pc'){
+      menuItems.push({action:'pc_ip',icon:'🖧',label:'IP/ゲートウェイ設定'});
+    }
+    menuItems.push('---',
+      {action:'del_node',icon:'🗑',label:'装置を削除',color:'var(--red)'});
+    showCtxMenu(e.clientX,e.clientY,menuItems,{nodeId:hitId});
   }else if(hitLid){
     showCtxMenu(e.clientX,e.clientY,[{action:'del_link',icon:'✕',label:'リンクを削除',color:'var(--red)'}],{linkId:hitLid});
   }
@@ -1646,6 +1675,49 @@ function confirmLinkIface(){
   saveLabState();
 }
 function cancelLinkIface(){ document.getElementById('lif-overlay').style.display='none'; }
+
+// ════════════════════════════════════════════
+// PC IP/ゲートウェイ設定（GUI）
+// ════════════════════════════════════════════
+function openPcIpModal(id){
+  const d=DEVICES[id]; if(!d||d.type!=='pc')return;
+  document.getElementById('pcip-name').textContent=d.hostname||id;
+  document.getElementById('pcip-ip').value=d.ip||'';
+  document.getElementById('pcip-prefix').value=d.prefix||24;
+  document.getElementById('pcip-gw').value=d.gateway||'';
+  const ov=document.getElementById('pcip-overlay');
+  ov.dataset.pcId=id;
+  ov.style.display='flex';
+  setTimeout(()=>document.getElementById('pcip-ip').focus(),50);
+}
+async function applyPcIp(){
+  const ov=document.getElementById('pcip-overlay');
+  const id=ov.dataset.pcId;
+  const ip=(document.getElementById('pcip-ip').value||'').trim();
+  const prefix=parseInt(document.getElementById('pcip-prefix').value)||24;
+  const gw=(document.getElementById('pcip-gw').value||'').trim();
+  const ipRe=/^(\d{1,3}\.){3}\d{1,3}$/;
+  if(!ipRe.test(ip)){ alert('IPアドレスの形式が正しくありません'); return; }
+  if(gw && !ipRe.test(gw)){ alert('ゲートウェイの形式が正しくありません'); return; }
+  ov.style.display='none';
+  // フロント側の状態更新
+  DEVICES[id].ip=ip; DEVICES[id].prefix=prefix; DEVICES[id].gateway=gw;
+  // バックエンドに反映（PCのLinuxコマンドを発行）
+  try {
+    await fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({device_id:id,command:`ip addr add ${ip}/${prefix} dev eth0`})});
+    if(gw){
+      await fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({device_id:id,command:`ip route add default via ${gw}`})});
+    }
+  } catch(e){}
+  print(id,'');
+  print(id,`[GUI設定] IP=${ip}/${prefix}${gw?(' GW='+gw):''} を適用しました`,'col-g');
+  renderInput(id);
+  renderTopoDisplay(); drawCanvas(); saveLabState();
+  // 左ペインのノード詳細が開いていれば更新
+  try { if(document.getElementById('node-detail-box').style.display!=='none') showNodeDetail(id); } catch(e){}
+}
 function syncLinksToBackend(){
   // vnetにリンクを同期（インターフェース名込みでプロトコルパケットが流れる）
   fetch('/api/links/sync',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1737,6 +1809,12 @@ function showNodeDetail(id){
           value="${d.hostname}" onchange="DEVICES['${id}'].hostname=this.value;renderInput('${id}');renderTopoDisplay();drawCanvas();saveLabState();fetch('/api/device/${id}/hostname',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({hostname:this.value})})">
       </div>
     </div>
+    ${d.type==='pc'?`
+    <div style="margin-bottom:6px;padding:6px;border:1px solid #1a3a2a;border-radius:3px;background:#06120a">
+      <div style="font-size:9px;color:var(--text2);margin-bottom:3px">PC ネットワーク設定</div>
+      <div style="font-size:10px;color:#80c8a0">IP: ${d.ip||'(未設定)'}${d.ip?('/'+(d.prefix||24)):''}　GW: ${d.gateway||'(未設定)'}</div>
+      <button class="lab-btn" style="margin-top:4px;width:100%" onclick="openPcIpModal('${id}')">🖧 IP/ゲートウェイを設定</button>
+    </div>`:''}
     <div style="display:flex;gap:6px">
       <button class="lab-btn" onclick="enterLinkMode('${id}')">🔗 リンク</button>
       <button class="lab-btn dang" onclick="CVS.selected='${id}';deleteSelectedNode()">🗑 削除</button>
@@ -1931,6 +2009,7 @@ function showCtxMenu(x,y,items,ctx={}){
       else if(a==='flow')openFlowModal(ctx.nodeId||focusedId,'');
       else if(a==='link_from')enterLinkMode(ctx.nodeId);
       else if(a==='del_node'){CVS.selected=ctx.nodeId;deleteSelectedNode();}
+      else if(a==='pc_ip')openPcIpModal(ctx.nodeId);
       else if(a==='del_link')deleteLink(ctx.linkId);
       else if(a==='clear')clearBuf(ctx.nodeId||focusedId);
     });
