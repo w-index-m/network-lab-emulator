@@ -665,7 +665,8 @@ class RuleEngine:
 
         # 設定コマンド
         if state.mode in ("config", "config-if", "config-router", "config-vlan",
-                          "config-crypto", "config-monitor"):
+                          "config-crypto", "config-monitor",
+                          "config-cmap", "config-pmap", "config-pmap-c"):
             return self._cmd_config(cmd, state)
 
         # 運用コマンド
@@ -697,11 +698,18 @@ class RuleEngine:
     def _cmd_exit(self, cmd, state):
         if state.mode == "config-if":
             state.mode = "config"
+        elif state.mode == "config-pmap-c":
+            # policy-map class サブモード → policy-map サブモードへ戻る
+            state.mode = "config-pmap"
+            if hasattr(state, '_qos_class'):
+                delattr(state, '_qos_class')
         elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
-                             "config-crypto", "config-monitor"):
+                             "config-crypto", "config-monitor",
+                             "config-cmap", "config-pmap"):
             state.mode = "config"
-            # Clear crypto sub-context pointers
-            for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid'):
+            # Clear sub-context pointers
+            for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
+                         '_qos_cmap', '_qos_pmap', '_qos_class'):
                 if hasattr(state, attr):
                     delattr(state, attr)
         elif state.mode == "config":
@@ -871,6 +879,21 @@ class RuleEngine:
         if m and state.device_type in ('cisco', 'catalyst', 'srs', 'nexus', 'apresia'):
             sid = int(m.group(1)) if m.group(1) else None
             return self._format_show_monitor(state, sid)
+
+        # ── show QoS（MQC / 各社固有）──
+        if re.match(r'^show\s+class-map', c):
+            return self._format_show_class_map(state)
+        if re.match(r'^show\s+policy-map\s+interface', c):
+            return self._format_show_policy_map_interface(state)
+        m = re.match(r'^show\s+policy-map(?:\s+type\s+\S+)?(?:\s+(\S+))?$', c)
+        if m and not (m.group(1) and m.group(1) == 'interface'):
+            return self._format_show_policy_map(state, m.group(1))
+        # APRESIA / Si-R: show qos / show mls qos
+        if re.match(r'^show\s+(mls\s+qos|qos)', c):
+            if state.device_type in ('apresia', 'sir'):
+                return self._format_show_qos_simple(state)
+            # Catalyst の show mls qos
+            return 'QoS is enabled globally\n(MQCポリシーは show policy-map interface を参照)'
 
         # ── show vlan ──
         if re.match(r'^show\s+vlan', c):
@@ -2510,6 +2533,199 @@ Configuration Revision            : 5"""
             out.append('')
         return '\n'.join(out).rstrip()
 
+    def _qos_store(self, state):
+        """QoS設定の保存領域をstateに用意して返す"""
+        if not hasattr(state, 'qos_cmaps'):
+            state.qos_cmaps = {}   # {name: {'match_type','matches':[]}}
+        if not hasattr(state, 'qos_pmaps'):
+            state.qos_pmaps = {}   # {name: {'type','classes': {cname: [actions]}}}
+        return state.qos_cmaps, state.qos_pmaps
+
+    def _cmd_qos(self, cmd, state):
+        """
+        QoS設定（Modular QoS CLI と各社固有）。
+        - Cisco/Catalyst/Nexus/SR-S: class-map / policy-map / class / match / set /
+          bandwidth / priority / police / shape / service-policy
+        - APRESIA: mls qos / qos cos-queue 等（受理 + show qos）
+        - Si-R: qos / shaping（受理 + show qos）
+        対象外や非該当は None を返す。
+        """
+        dt = state.device_type
+        if dt not in ('cisco', 'catalyst', 'nexus', 'srs', 'apresia', 'sir'):
+            return None
+        c = cmd.lower().strip()
+        cmaps, pmaps = self._qos_store(state)
+
+        # ── APRESIA / Si-R 固有のシンプルなqos行（受理して記録）──
+        if dt in ('apresia', 'sir') and state.mode == 'config':
+            m = re.match(r'^(mls\s+qos|qos|traffic-shape|shaping|priority-queue)\b', c)
+            if m:
+                if not hasattr(state, 'qos_simple'):
+                    state.qos_simple = []
+                state.qos_simple.append(cmd.strip())
+                state.qos_enabled = True
+                return ""
+
+        # ── MQC: class-map [type qos] [match-any|match-all] NAME ──
+        m = re.match(r'^class-map(?:\s+type\s+\S+)?(?:\s+(match-any|match-all))?\s+(\S+)$', c)
+        if m and state.mode == 'config' and dt in ('cisco', 'catalyst', 'nexus', 'srs'):
+            mt = m.group(1) or 'match-all'
+            # 元のケースで名前取得
+            m2 = re.match(r'^class-map(?:\s+type\s+\S+)?(?:\s+(?:match-any|match-all))?\s+(\S+)$',
+                          cmd.strip(), re.I)
+            name = m2.group(1) if m2 else m.group(2)
+            cmaps.setdefault(name, {'match_type': mt, 'matches': []})
+            cmaps[name]['match_type'] = mt
+            state._qos_cmap = name
+            state.mode = 'config-cmap'
+            return ""
+
+        # config-cmap 内: match ...
+        if state.mode == 'config-cmap':
+            name = getattr(state, '_qos_cmap', None)
+            if name is None:
+                return ""
+            m = re.match(r'^match\s+(.+)', cmd.strip(), re.I)
+            if m:
+                cmaps.setdefault(name, {'match_type': 'match-all', 'matches': []})
+                cmaps[name]['matches'].append(m.group(1).strip())
+                return ""
+            # サブモード内の他コマンドは config に戻して継続処理させない
+            return None
+
+        # ── MQC: policy-map [type qos] NAME ──
+        m = re.match(r'^policy-map(?:\s+type\s+(\S+))?\s+(\S+)$', c)
+        if m and state.mode == 'config' and dt in ('cisco', 'catalyst', 'nexus', 'srs'):
+            ptype = m.group(1) or 'qos'
+            m2 = re.match(r'^policy-map(?:\s+type\s+\S+)?\s+(\S+)$', cmd.strip(), re.I)
+            name = m2.group(1) if m2 else m.group(2)
+            pmaps.setdefault(name, {'type': ptype, 'classes': {}})
+            state._qos_pmap = name
+            state.mode = 'config-pmap'
+            return ""
+
+        # config-pmap 内: class NAME → config-pmap-c
+        if state.mode == 'config-pmap':
+            pname = getattr(state, '_qos_pmap', None)
+            m = re.match(r'^class\s+(\S+)', cmd.strip(), re.I)
+            if m and pname is not None:
+                cname = m.group(1)
+                pmaps[pname]['classes'].setdefault(cname, [])
+                state._qos_class = cname
+                state.mode = 'config-pmap-c'
+                return ""
+            return None
+
+        # config-pmap-c 内: set / bandwidth / priority / police / shape
+        if state.mode == 'config-pmap-c':
+            pname = getattr(state, '_qos_pmap', None)
+            cname = getattr(state, '_qos_class', None)
+            if pname is None or cname is None:
+                return ""
+            # 別class に切り替え
+            m = re.match(r'^class\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                cname = m.group(1)
+                pmaps[pname]['classes'].setdefault(cname, [])
+                state._qos_class = cname
+                return ""
+            m = re.match(r'^(set\s+.+|bandwidth\s+.+|priority(\s+.+)?|police\s+.+|'
+                         r'shape\s+.+|queue-limit\s+.+|random-detect.*|fair-queue.*|'
+                         r'bandwidth\s+remaining.*)$', cmd.strip(), re.I)
+            if m:
+                pmaps[pname]['classes'][cname].append(cmd.strip())
+                return ""
+            return None
+
+        # ── interface: service-policy {input|output} NAME ──
+        m = re.match(r'^service-policy\s+(input|output)\s+(\S+)', c)
+        if m and state.current_if and dt in ('cisco', 'catalyst', 'nexus', 'srs'):
+            m2 = re.match(r'^service-policy\s+(?:input|output)\s+(\S+)', cmd.strip(), re.I)
+            pname = m2.group(1) if m2 else m.group(2)
+            sp = state.interfaces.setdefault(state.current_if, {}).setdefault('service_policy', {})
+            sp[m.group(1)] = pname
+            return ""
+
+        return None
+
+    def _format_show_class_map(self, state):
+        cmaps = getattr(state, 'qos_cmaps', {}) or {}
+        if not cmaps:
+            return '% No class-maps configured.'
+        out = []
+        for name, info in cmaps.items():
+            out.append(f' Class Map {info["match_type"]} {name} (id 0)')
+            if info['matches']:
+                for mt in info['matches']:
+                    out.append(f'   Match {mt}')
+            else:
+                out.append('   (no match criteria)')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
+    def _format_show_policy_map(self, state, name=None):
+        pmaps = getattr(state, 'qos_pmaps', {}) or {}
+        if not pmaps:
+            return '% No policy-maps configured.'
+        out = []
+        for pname, pinfo in pmaps.items():
+            if name and pname != name:
+                continue
+            tstr = f' type {pinfo["type"]}' if pinfo.get('type') and pinfo['type'] != 'qos' else ''
+            out.append(f'  Policy Map{tstr} {pname}')
+            for cname, actions in pinfo['classes'].items():
+                out.append(f'    Class {cname}')
+                if actions:
+                    for a in actions:
+                        out.append(f'      {a}')
+                else:
+                    out.append('      (no action)')
+            out.append('')
+        return '\n'.join(out).rstrip() or f'% policy-map {name} not found.'
+
+    def _format_show_policy_map_interface(self, state):
+        pmaps = getattr(state, 'qos_pmaps', {}) or {}
+        out = []
+        for ifname, iinfo in state.interfaces.items():
+            sp = iinfo.get('service_policy')
+            if not sp:
+                continue
+            out.append(f' {ifname}')
+            out.append('')
+            for direction in ('input', 'output'):
+                pname = sp.get(direction)
+                if not pname:
+                    continue
+                out.append(f'  Service-policy {direction}: {pname}')
+                pinfo = pmaps.get(pname, {})
+                for cname, actions in pinfo.get('classes', {}).items():
+                    out.append(f'    Class-map: {cname}')
+                    out.append(f'      0 packets, 0 bytes')
+                    out.append(f'      5 minute offered rate 0000 bps, drop rate 0000 bps')
+                    for a in actions:
+                        out.append(f'      {a}')
+                out.append('')
+        if not out:
+            return ' (no service-policy applied to any interface)'
+        return '\n'.join(out).rstrip()
+
+    def _format_show_qos_simple(self, state):
+        """APRESIA / Si-R 用の簡易QoS表示"""
+        enabled = getattr(state, 'qos_enabled', False)
+        lines = [f'QoS: {"Enabled" if enabled else "Disabled"}']
+        simple = getattr(state, 'qos_simple', [])
+        if simple:
+            lines.append('Configured QoS commands:')
+            for s in simple:
+                lines.append(f'  {s}')
+        # MQC由来のpolicyがあれば併記
+        pmaps = getattr(state, 'qos_pmaps', {}) or {}
+        if pmaps:
+            lines.append('Policy maps:')
+            for pname in pmaps:
+                lines.append(f'  {pname}')
+        return '\n'.join(lines)
+
     def _cmd_config(self, cmd, state):
         c = cmd.lower().strip()
 
@@ -2527,6 +2743,11 @@ Configuration Revision            : 5"""
             out = self._cmd_monitor(cmd, state)
             if out is not None:
                 return out
+
+        # ── QoS（MQC / 各社固有）──
+        qos_out = self._cmd_qos(cmd, state)
+        if qos_out is not None:
+            return qos_out
 
         # interface ip address (CIDR notation: ip address X.X.X.X/prefix)
         m_cidr = re.match(r'^ip\s+address\s+([\d.]+)/(\d+)', c)
@@ -4430,6 +4651,20 @@ Key Version         : A
                 vid = itype.replace('vlan', '').strip()
                 state.current_if = f'Vlan{vid}'
             return ''
+
+        # ── QoS（APRESIA 固有）──
+        # qos enable / qos cos-queue / qos dscp / traffic-shape / mls qos 等
+        if state.mode in ('config', 'config-if'):
+            m = re.match(r'^(qos|mls\s+qos|traffic-shape|cos-queue|qos-queue|'
+                         r'priority-queue|scheduling)\b', c)
+            if m:
+                if not hasattr(state, 'qos_simple'):
+                    state.qos_simple = []
+                state.qos_simple.append(cmd.strip())
+                state.qos_enabled = True
+                return ''
+        if re.match(r'^show\s+(mls\s+)?qos', c):
+            return self._format_show_qos_simple(state)
 
         # ── show コマンド群 ──
         if re.match(r'^show\s+version', c):
