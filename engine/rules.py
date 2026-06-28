@@ -2172,6 +2172,56 @@ Configuration Revision            : 5"""
                     '  Version : 2\n'
                     '  Status  : enabled\n'
                     '  (use show ip route for learned routes)')
+        # show nat / show napt / show nat-table
+        if re.match(r'^show\s+(nat|napt|nat-table)', c):
+            return ('NAT/NAPT Translation Table\n'
+                    '  Proto  Inside Local        Inside Global       Outside\n'
+                    '  -----  ------------------  ------------------  ------------------\n'
+                    '  (no active translations)')
+        # show bridge
+        if re.match(r'^show\s+bridge', c):
+            return ('Bridge Information\n'
+                    '  Bridge Group : 0   Status : disabled\n'
+                    '  (no bridge members)')
+        # show schedule
+        if re.match(r'^show\s+schedule', c):
+            return ('Schedule Information\n'
+                    '  No.  Time      Action\n'
+                    '  ---  --------  ------\n'
+                    '  (no schedule configured)')
+        # show ppp
+        if re.match(r'^show\s+ppp', c):
+            return ('PPP Status (wan1)\n'
+                    '  Phase        : Network\n'
+                    '  LCP          : Opened\n'
+                    '  IPCP         : Opened\n'
+                    '  Local IP     : 203.0.113.1\n'
+                    '  Remote IP    : 203.0.113.2\n'
+                    '  Uptime       : 01:23:45')
+        # show route（show ip route のエイリアス）
+        if re.match(r'^show\s+route$', c):
+            return self._show_ip_route(state) if hasattr(self, '_show_ip_route') else None
+        # show ip filter / show ip acl
+        if re.match(r'^show\s+ip\s+(filter|acl)', c):
+            return ('IP Filter Table\n'
+                    '  No.  Dir  Action  Source           Destination      Proto  Port\n'
+                    '  ---  ---  ------  ---------------  ---------------  -----  ----\n'
+                    '  (no filter configured)')
+        # show sntp
+        if re.match(r'^show\s+sntp', c):
+            return 'SNTP Client : enabled\n  Server : ntp.nict.jp\n  Status : synchronized'
+        # show users / show telnet / show ssh
+        if re.match(r'^show\s+(users|telnet|ssh)', c):
+            return ('Connected Users\n'
+                    '  Line     User      From             Idle\n'
+                    '  -------  --------  ---------------  ------\n'
+                    '  console  admin     -                00:00')
+        # show history
+        if re.match(r'^show\s+history', c):
+            return ('  show system\n  show ip route\n  configure\n  show history')
+        # show dns
+        if re.match(r'^show\s+(ip\s+)?dns', c):
+            return 'DNS Server : 8.8.8.8, 8.8.4.4\nDomain : example.local'
         # show tech-support / show config-info
         if re.match(r'^show\s+tech-support', c):
             return ('===== show tech-support =====\n'
