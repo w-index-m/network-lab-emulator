@@ -676,7 +676,7 @@ class RuleEngine:
         if state.mode in ("config", "config-if", "config-router", "config-vlan",
                           "config-crypto", "config-monitor",
                           "config-cmap", "config-pmap", "config-pmap-c",
-                          "config-vs-domain"):
+                          "config-vs-domain", "config-dhcp"):
             return self._cmd_config(cmd, state)
 
         # ── ISSU / ソフトウェアアップグレード（Catalyst / Nexus）──
@@ -720,11 +720,12 @@ class RuleEngine:
                 delattr(state, '_qos_class')
         elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
                              "config-crypto", "config-monitor",
-                             "config-cmap", "config-pmap", "config-vs-domain"):
+                             "config-cmap", "config-pmap", "config-vs-domain",
+                             "config-dhcp"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
-                         '_qos_cmap', '_qos_pmap', '_qos_class'):
+                         '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool'):
                 if hasattr(state, attr):
                     delattr(state, attr)
         elif state.mode == "config":
@@ -904,6 +905,15 @@ class RuleEngine:
         if m and state.device_type in ('cisco', 'catalyst', 'srs', 'nexus', 'apresia'):
             sid = int(m.group(1)) if m.group(1) else None
             return self._format_show_monitor(state, sid)
+
+        # ── show DHCP（pool/binding は新規。snooping/port-security/arp-inspection は既存ハンドラ）──
+        if re.match(r'^show\s+ip\s+dhcp\s+pool', c):
+            return self._format_show_dhcp_pool(state)
+        if re.match(r'^show\s+ip\s+dhcp\s+binding', c):
+            return self._format_show_dhcp_binding(state)
+        # ── show ip verify source（IP Source Guard）──
+        if re.match(r'^show\s+ip\s+verify\s+source', c):
+            return self._format_show_ip_verify(state)
 
         # ── show QoS（MQC / 各社固有）──
         if re.match(r'^show\s+class-map', c):
@@ -3063,6 +3073,233 @@ Configuration Revision            : 5"""
 
         return None
 
+    # ════════════════════════════════════════════
+    # DHCP（server / snooping）
+    # ════════════════════════════════════════════
+    def _cmd_dhcp(self, cmd, state):
+        if state.device_type not in ('cisco', 'catalyst', 'srs'):
+            return None
+        c = cmd.lower().strip()
+        if not hasattr(state, 'dhcp_pools'): state.dhcp_pools = {}
+        if not hasattr(state, 'dhcp_excluded'): state.dhcp_excluded = []
+        if not hasattr(state, 'dhcp_snoop'): state.dhcp_snoop = {'enabled': False, 'vlans': '', 'trust': []}
+
+        # ip dhcp excluded-address <lo> [hi]
+        m = re.match(r'^ip\s+dhcp\s+excluded-address\s+([\d.]+)(?:\s+([\d.]+))?', c)
+        if m:
+            state.dhcp_excluded.append((m.group(1), m.group(2) or m.group(1)))
+            return ""
+        # ip dhcp pool <name> → submode
+        m = re.match(r'^ip\s+dhcp\s+pool\s+(\S+)', cmd.strip(), re.I)
+        if m and state.mode == 'config':
+            name = m.group(1)
+            state.dhcp_pools.setdefault(name, {'network': '', 'mask': '', 'router': '',
+                                               'dns': '', 'lease': '1 0 0', 'domain': ''})
+            state._dhcp_pool = name
+            state.mode = 'config-dhcp'
+            return ""
+        # ip dhcp snooping [vlan X]
+        if re.match(r'^ip\s+dhcp\s+snooping$', c):
+            state.dhcp_snoop['enabled'] = True
+            return ""
+        m = re.match(r'^ip\s+dhcp\s+snooping\s+vlan\s+(\S+)', c)
+        if m:
+            state.dhcp_snoop['enabled'] = True
+            state.dhcp_snoop['vlans'] = m.group(1)
+            return ""
+        if re.match(r'^no\s+ip\s+dhcp\s+snooping', c):
+            state.dhcp_snoop['enabled'] = False
+            return ""
+        # interface: ip dhcp snooping trust
+        if re.match(r'^ip\s+dhcp\s+snooping\s+trust', c) and state.current_if:
+            if state.current_if not in state.dhcp_snoop['trust']:
+                state.dhcp_snoop['trust'].append(state.current_if)
+            return ""
+
+        # config-dhcp サブモード
+        if state.mode == 'config-dhcp':
+            p = state.dhcp_pools.get(getattr(state, '_dhcp_pool', ''), None)
+            if p is None:
+                return ""
+            m = re.match(r'^network\s+([\d.]+)\s+([\d.]+)', c)
+            if m: p['network'], p['mask'] = m.group(1), m.group(2); return ""
+            m = re.match(r'^network\s+([\d.]+)/(\d+)', c)
+            if m:
+                p['network'] = m.group(1)
+                p['mask'] = _prefix_to_mask(int(m.group(2)))
+                return ""
+            m = re.match(r'^default-router\s+([\d.]+)', c)
+            if m: p['router'] = m.group(1); return ""
+            m = re.match(r'^dns-server\s+(.+)', c)
+            if m: p['dns'] = m.group(1).strip(); return ""
+            m = re.match(r'^domain-name\s+(\S+)', cmd.strip(), re.I)
+            if m: p['domain'] = m.group(1); return ""
+            m = re.match(r'^lease\s+(.+)', c)
+            if m: p['lease'] = m.group(1).strip(); return ""
+            return None
+        return None
+
+    def _format_show_dhcp_pool(self, state):
+        pools = getattr(state, 'dhcp_pools', {})
+        if not pools:
+            return '% No DHCP pools configured.'
+        out = []
+        for name, p in pools.items():
+            out.append(f'Pool {name} :')
+            out.append(f' Utilization mark (high/low)    : 100 / 0')
+            out.append(f' Subnet size (first/next)       : 0 / 0')
+            out.append(f' Total addresses                : 254')
+            out.append(f' Leased addresses               : 0')
+            net = f'{p["network"]} / {p["mask"]}' if p['network'] else '(未設定)'
+            out.append(f' Subnet: {net}')
+            out.append(f' Default router: {p["router"] or "-"}   DNS: {p["dns"] or "-"}')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
+    def _format_show_dhcp_binding(self, state):
+        # 簡易: バインディングは動的取得していないため空表示
+        return ('Bindings from all pools not associated with VRF:\n'
+                'IP address          Client-ID/              Lease expiration        Type\n'
+                '                    Hardware address/\n'
+                '                    User name\n'
+                '(現在アクティブなDHCPバインディングはありません)')
+
+    def _format_show_dhcp_snooping(self, state):
+        s = getattr(state, 'dhcp_snoop', {'enabled': False, 'vlans': '', 'trust': []})
+        out = [f'Switch DHCP snooping is {"enabled" if s["enabled"] else "disabled"}']
+        out.append(f'DHCP snooping is configured on following VLANs:')
+        out.append(f'  {s["vlans"] or "none"}')
+        out.append('')
+        out.append('Interface                  Trusted    Rate limit (pps)')
+        out.append('------------------------   -------    ----------------')
+        for ifn in s.get('trust', []):
+            out.append(f'{ifn:<26} yes        unlimited')
+        if not s.get('trust'):
+            out.append('(trust設定インターフェースなし — 全て untrusted)')
+        return '\n'.join(out)
+
+    # ════════════════════════════════════════════
+    # port-security 詳細
+    # ════════════════════════════════════════════
+    def _cmd_port_security(self, cmd, state):
+        if state.device_type not in ('catalyst', 'srs', 'cisco'):
+            return None
+        c = cmd.lower().strip()
+        if not state.current_if:
+            return None
+        ps = state.interfaces.setdefault(state.current_if, {}).setdefault(
+            'port_security', {'enabled': False, 'max': 1, 'violation': 'shutdown',
+                              'sticky': False, 'macs': []})
+        if c == 'switchport port-security':
+            ps['enabled'] = True
+            return ""
+        if c == 'no switchport port-security':
+            ps['enabled'] = False
+            return ""
+        m = re.match(r'^switchport\s+port-security\s+maximum\s+(\d+)', c)
+        if m: ps['max'] = int(m.group(1)); return ""
+        m = re.match(r'^switchport\s+port-security\s+violation\s+(protect|restrict|shutdown)', c)
+        if m: ps['violation'] = m.group(1); return ""
+        if re.match(r'^switchport\s+port-security\s+mac-address\s+sticky', c):
+            ps['sticky'] = True
+            return ""
+        m = re.match(r'^switchport\s+port-security\s+mac-address\s+([0-9a-f.:]+)', c)
+        if m:
+            if m.group(1) not in ps['macs']: ps['macs'].append(m.group(1))
+            return ""
+        return None
+
+    def _format_show_port_security(self, state, iface=None):
+        rows = []
+        for ifn, info in state.interfaces.items():
+            ps = info.get('port_security')
+            if not ps or not ps.get('enabled'):
+                continue
+            if iface and ifn != iface:
+                continue
+            rows.append((ifn, ps))
+        if not rows:
+            return ('Secure Port  MaxSecureAddr  CurrentAddr  SecurityViolation  Security Action\n'
+                    '(port-security 有効なインターフェースなし)')
+        if iface and rows:
+            ifn, ps = rows[0]
+            return '\n'.join([
+                f'Port Security              : {"Enabled" if ps["enabled"] else "Disabled"}',
+                f'Port Status                : Secure-up',
+                f'Violation Mode             : {ps["violation"].capitalize()}',
+                f'Maximum MAC Addresses      : {ps["max"]}',
+                f'Total MAC Addresses        : {len(ps["macs"])}',
+                f'Sticky MAC Addresses       : {"Enabled" if ps["sticky"] else "Disabled"}',
+                f'Configured MAC Addresses   : {", ".join(ps["macs"]) or "-"}',
+                f'Security Violation Count   : 0',
+            ])
+        lines = ['Secure Port  MaxSecureAddr  CurrentAddr  SecurityViolation  Security Action',
+                 '                (Count)       (Count)          (Count)',
+                 '---------------------------------------------------------------------------']
+        for ifn, ps in rows:
+            act = {'shutdown': 'Shutdown', 'restrict': 'Restrict', 'protect': 'Protect'}[ps['violation']]
+            lines.append(f'{ifn:<13}{ps["max"]:<15}{len(ps["macs"]):<13}{0:<19}{act}')
+        return '\n'.join(lines)
+
+    # ════════════════════════════════════════════
+    # DAI / IP Source Guard
+    # ════════════════════════════════════════════
+    def _cmd_l2security(self, cmd, state):
+        if state.device_type not in ('catalyst', 'srs', 'cisco'):
+            return None
+        c = cmd.lower().strip()
+        if not hasattr(state, 'dai'): state.dai = {'vlans': '', 'trust': []}
+        if not hasattr(state, 'ipsg'): state.ipsg = []
+        # ip arp inspection vlan <X>
+        m = re.match(r'^ip\s+arp\s+inspection\s+vlan\s+(\S+)', c)
+        if m: state.dai['vlans'] = m.group(1); return ""
+        # interface: ip arp inspection trust
+        if re.match(r'^ip\s+arp\s+inspection\s+trust', c) and state.current_if:
+            if state.current_if not in state.dai['trust']:
+                state.dai['trust'].append(state.current_if)
+            return ""
+        # interface: ip verify source (IP Source Guard)
+        if re.match(r'^ip\s+verify\s+source', c) and state.current_if:
+            if state.current_if not in state.ipsg:
+                state.ipsg.append(state.current_if)
+            return ""
+        if re.match(r'^no\s+ip\s+verify\s+source', c) and state.current_if:
+            if state.current_if in state.ipsg:
+                state.ipsg.remove(state.current_if)
+            return ""
+        return None
+
+    def _format_show_arp_inspection(self, state):
+        d = getattr(state, 'dai', {'vlans': '', 'trust': []})
+        out = ['Source Mac Validation      : Disabled',
+               'Destination Mac Validation : Disabled',
+               'IP Address Validation      : Disabled', '',
+               ' Vlan     Configuration    Operation   ACL Match          Static ACL',
+               ' ----     -------------    ---------   ---------          ----------']
+        vlans = d.get('vlans', '')
+        if vlans:
+            out.append(f' {vlans:<9}Enabled          Active')
+        else:
+            out.append(' (DAI未設定)')
+        out.append('')
+        out.append(' Interface               Trust State')
+        out.append(' ---------               -----------')
+        for ifn in d.get('trust', []):
+            out.append(f' {ifn:<24}Trusted')
+        if not d.get('trust'):
+            out.append(' (trust設定なし — 全てUntrusted)')
+        return '\n'.join(out)
+
+    def _format_show_ip_verify(self, state):
+        sg = getattr(state, 'ipsg', [])
+        out = ['Interface  Filter-type  Filter-mode  IP-address       Mac-address      Vlan',
+               '---------  -----------  -----------  ---------------  ---------------  ----']
+        for ifn in sg:
+            out.append(f'{ifn:<11}ip           active       deny-all')
+        if not sg:
+            out.append('(IP Source Guard未設定)')
+        return '\n'.join(out)
+
     def _cmd_config(self, cmd, state):
         c = cmd.lower().strip()
 
@@ -3085,6 +3322,21 @@ Configuration Revision            : 5"""
         qos_out = self._cmd_qos(cmd, state)
         if qos_out is not None:
             return qos_out
+
+        # ── DHCP（server / snooping）──
+        dhcp_out = self._cmd_dhcp(cmd, state)
+        if dhcp_out is not None:
+            return dhcp_out
+
+        # ── port-security 詳細 ──
+        ps_out = self._cmd_port_security(cmd, state)
+        if ps_out is not None:
+            return ps_out
+
+        # ── DAI / IP Source Guard ──
+        sec_out = self._cmd_l2security(cmd, state)
+        if sec_out is not None:
+            return sec_out
 
         # ── VSS / デュアルアクティブ検知（Catalyst）──
         vss_out = self._cmd_vss(cmd, state)
@@ -5498,76 +5750,104 @@ Key Version         : A
 
     # ─── Security（3.5章）────────────────────
     def _show_port_security(self, state):
-        """show port-security"""
+        """show port-security（実設定を優先、無ければ接続ポートのサンプル）"""
         lines = [
             "Secure Port  MaxSecureAddr  CurrentAddr  SecurityViolation  Security Action",
             "               (Count)       (Count)          (Count)",
             "---------------------------------------------------------------------------",
         ]
-        for name, iface in state.interfaces.items():
-            if name.startswith("GigabitEthernet") and iface.get("status") == "connected":
-                short = name.replace("GigabitEthernet","Gi")
-                lines.append(f"{short:<13}{'1':<15}{'1':<13}{'0':<19}Restrict")
+        configured = [(n, i['port_security']) for n, i in state.interfaces.items()
+                      if i.get('port_security', {}).get('enabled')]
+        if configured:
+            actmap = {'shutdown': 'Shutdown', 'restrict': 'Restrict', 'protect': 'Protect'}
+            for name, ps in configured:
+                short = name.replace("GigabitEthernet", "Gi")
+                cur = len(ps.get('macs', []))
+                lines.append(f"{short:<13}{ps['max']:<15}{cur:<13}{'0':<19}{actmap.get(ps['violation'],'Shutdown')}")
+        else:
+            for name, iface in state.interfaces.items():
+                if name.startswith("GigabitEthernet") and iface.get("status") == "connected":
+                    short = name.replace("GigabitEthernet","Gi")
+                    lines.append(f"{short:<13}{'1':<15}{'1':<13}{'0':<19}Restrict")
         lines.append("---------------------------------------------------------------------------")
         lines.append(f"Total Addresses in System (excluding one mac per port)     : 0")
         lines.append(f"Max Addresses limit in System (excluding one mac per port) : 4096")
         return "\n".join(lines)
 
     def _show_port_security_interface(self, ifname, state):
-        """show port-security interface Gi1/0/1"""
-        return (f"Port Security              : Enabled\n"
-                f"Port Status                : Secure-up\n"
-                f"Violation Mode             : Restrict\n"
-                f"Aging Time                 : 0 mins\n"
-                f"Aging Type                 : Absolute\n"
-                f"SecureStatic Address Aging : Disabled\n"
-                f"Maximum MAC Addresses      : 1\n"
-                f"Total MAC Addresses        : 1\n"
-                f"Configured MAC Addresses   : 0\n"
-                f"Sticky MAC Addresses       : 0\n"
-                f"Last Source Address:Vlan   : 00:1a:2b:3c:4d:5e:10\n"
-                f"Security Violation Count   : 0")
+        """show port-security interface Gi1/0/1（実設定を反映）"""
+        rn = self._resolve_ifname(ifname, state)
+        ps = state.interfaces.get(rn, {}).get('port_security')
+        if ps and ps.get('enabled'):
+            actmap = {'shutdown': 'Shutdown', 'restrict': 'Restrict', 'protect': 'Protect'}
+            return (f"Port Security              : Enabled\n"
+                    f"Port Status                : Secure-up\n"
+                    f"Violation Mode             : {actmap.get(ps['violation'],'Shutdown')}\n"
+                    f"Aging Time                 : 0 mins\n"
+                    f"Aging Type                 : Absolute\n"
+                    f"SecureStatic Address Aging : Disabled\n"
+                    f"Maximum MAC Addresses      : {ps['max']}\n"
+                    f"Total MAC Addresses        : {len(ps.get('macs',[]))}\n"
+                    f"Configured MAC Addresses   : {len(ps.get('macs',[]))}\n"
+                    f"Sticky MAC Addresses       : {'Enabled' if ps.get('sticky') else 'Disabled'}\n"
+                    f"Security Violation Count   : 0")
+        return (f"Port Security              : Disabled\n"
+                f"(このインターフェースでは port-security が無効です)")
 
     def _show_dhcp_snooping(self, state):
-        """show ip dhcp snooping"""
+        """show ip dhcp snooping（実設定を反映）"""
+        s = getattr(state, 'dhcp_snoop', None)
+        enabled = s['enabled'] if s else True
+        vlans = (s['vlans'] if s and s['vlans'] else '10')
+        trust = s['trust'] if s else ['GigabitEthernet1/0/24']
         lines = [
-            "Switch DHCP snooping is enabled",
+            f"Switch DHCP snooping is {'enabled' if enabled else 'disabled'}",
             "Switch DHCP gleaning is disabled",
             "DHCP snooping is configured on following VLANs:",
-            "10",
+            f"{vlans}",
             "DHCP snooping is operational on following VLANs:",
-            "10",
+            f"{vlans}",
             "DHCP snooping is configured on the following L3 Interfaces:",
             "",
             "Insertion of option 82 is enabled",
-            "   circuit-id default format: vlan-mod-port",
-            "   remote-id: 0057.d2d4.4d00 (MAC)",
             "Option 82 on untrusted port is not allowed",
             "Verification of hwaddr field is enabled",
-            "Verification of giaddr field is enabled",
             "DHCP snooping trust/rate is configured on the following Interfaces:",
             "",
-            "Interface          Trusted    Allow option    Rate limit (pps)",
-            "-----------  -------  ------------    ----------------",
-            "Gi1/0/24      yes        yes             unlimited",
+            "Interface                  Trusted    Allow option    Rate limit (pps)",
+            "------------------------   -------    ------------    ----------------",
         ]
+        for ifn in trust:
+            short = ifn.replace("GigabitEthernet", "Gi")
+            lines.append(f"{short:<26} yes        yes             unlimited")
+        if not trust:
+            lines.append("(trust設定インターフェースなし)")
         return "\n".join(lines)
 
     def _show_dai(self, state):
-        """show ip arp inspection — Dynamic ARP Inspection"""
+        """show ip arp inspection — Dynamic ARP Inspection（実設定を反映）"""
+        d = getattr(state, 'dai', None)
+        vlans = (d['vlans'] if d and d.get('vlans') else '10')
+        trust = d['trust'] if d else []
         lines = [
             " Vlan        Configuration    Operation   ACL Match          Static ACL",
             " ----        -------------    ---------   ---------          ----------",
-            "   10        Enabled          Active      Implicit Deny      No",
+            f"   {vlans:<9}Enabled          Active      Implicit Deny      No",
             "",
             " Vlan        ACL Logging      DHCP Logging      Probe Logging",
             " ----        -----------      ------------      -------------",
-            "   10        Deny             Deny              Off",
+            f"   {vlans:<9}Deny             Deny              Off",
             "",
             " Vlan      Forwarded        Dropped     DHCP Drops      ACL Drops",
             " ----      ---------        -------     ----------      ---------",
-            "   10              0              0              0              0",
+            f"   {vlans:<7}0              0              0              0",
         ]
+        if trust:
+            lines.append("")
+            lines.append(" Interface               Trust State")
+            lines.append(" ---------               -----------")
+            for ifn in trust:
+                lines.append(f" {ifn:<24}Trusted")
         return "\n".join(lines)
 
     def _validate_command(self, cmd: str, c: str, state) -> str:
