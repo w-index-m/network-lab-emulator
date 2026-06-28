@@ -807,6 +807,12 @@ class RuleEngine:
         c = cmd.lower().strip()
         dt = state.device_type
 
+        # ── Si-R 固有の show コマンド群（最優先で処理）──
+        if dt in ('sir', 'srs'):
+            sir_out = self._sir_show(cmd, c, state)
+            if sir_out is not None:
+                return sir_out
+
         # ── show version ──
         if re.match(r'^show\s+version$', c):
             return self._show_version(state)
@@ -2031,6 +2037,148 @@ Number of existing VLANs          : {len(state.vlans)}
 Configuration Revision            : 5"""
 
     # ─── Si-R IPsec show コマンド ─────────────
+    def _sir_show(self, cmd, c, state):
+        """
+        Si-R（富士通）固有の show コマンド群。
+        対応外は None を返し、汎用ハンドラに委譲する。
+        （動作は非優先。コマンド受理と実機風の出力を提供）
+        """
+        import random as _rnd
+        host = state.hostname
+
+        def _ifaces():
+            return state.interfaces
+
+        # show system / show system information
+        if re.match(r'^show\s+system(\s+information)?$', c):
+            return '\n'.join([
+                'System Information',
+                '  Product             : Si-R G120',
+                f'  Hostname            : {host}',
+                '  Firmware Version    : V40.00',
+                '  Serial Number       : SR000000001',
+                f'  System Up Time      : 1 days 02:34:56',
+                '  Current Time        : 2026/06/28 12:00:00',
+                '  Boot Mode           : normal',
+            ])
+        # show environment
+        if re.match(r'^show\s+environment', c):
+            return ('Temperature : Normal (38 C)\n'
+                    'Fan         : Normal\n'
+                    'Power       : Normal')
+        # show memory
+        if re.match(r'^show\s+memory', c):
+            return ('Memory Information\n'
+                    '  Total  : 512 MB\n'
+                    f'  Used   : {_rnd.randint(120,180)} MB\n'
+                    f'  Free   : {_rnd.randint(330,390)} MB')
+        # show cpu
+        if re.match(r'^show\s+cpu', c):
+            return (f'CPU Utilization\n'
+                    f'  5sec : {_rnd.randint(2,12)}%   '
+                    f'1min : {_rnd.randint(3,10)}%   '
+                    f'5min : {_rnd.randint(3,8)}%')
+        # show flash / show storage
+        if re.match(r'^show\s+(flash|storage)', c):
+            return ('Flash Information\n'
+                    '  Total : 256 MB   Used : 48 MB   Free : 208 MB\n'
+                    '  config.txt   12 KB\n'
+                    '  firmware.bin 40 MB')
+        # show clock / show time
+        if re.match(r'^show\s+(clock|time)', c):
+            return '2026/06/28 (Sun) 12:00:00 JST'
+        # show ether [N] — イーサネットポート状態
+        if re.match(r'^show\s+ether', c):
+            lines = ['Port  Link    Speed/Duplex   MAC Address']
+            for i in range(0, 4):
+                lines.append(f'ether{i}  {"up" if i==0 else "down":<6}  '
+                             f'{"1000M/Full" if i==0 else "-":<13}  '
+                             f'00:0e:0e:f1:41:{i:02d}')
+            return '\n'.join(lines)
+        # show lan [N]
+        if re.match(r'^show\s+lan', c):
+            lines = ['LAN Interface Status']
+            for name, ii in _ifaces().items():
+                if name.startswith('lan'):
+                    lines.append(f'  {name}: ip {ii.get("ip","-")}/{ii.get("prefix",24)} '
+                                 f'status {ii.get("status","up")}')
+            return '\n'.join(lines) if len(lines) > 1 else 'No LAN interface configured.'
+        # show wan [N]
+        if re.match(r'^show\s+wan', c):
+            lines = ['WAN Interface Status']
+            for name, ii in _ifaces().items():
+                if name.startswith('wan'):
+                    lines.append(f'  {name}: ip {ii.get("ip","-")}/{ii.get("prefix",30)} '
+                                 f'status {ii.get("status","up")}')
+            if len(lines) == 1:
+                lines.append('  wan1: ppp, status up')
+            return '\n'.join(lines)
+        # show dhcp / show dhcp-server / show ip dhcp
+        if re.match(r'^show\s+(ip\s+)?dhcp(-server)?', c):
+            return ('DHCP Server Information\n'
+                    '  Interface : lan0\n'
+                    '  Pool      : 192.168.1.100 - 192.168.1.200\n'
+                    '  Lease     : 24:00:00\n'
+                    '  DNS       : 8.8.8.8 8.8.4.4\n'
+                    '  Assigned  : 0 addresses')
+        # show vrrp（Si-R形式）
+        if re.match(r'^show\s+vrrp', c):
+            v = getattr(state, 'vrrp', {})
+            return '\n'.join([
+                'VRRP Status',
+                f'  Interface : lan0',
+                f'  Group(VRID) : {v.get("vrid",10)}',
+                f'  State       : {v.get("state","Master")}',
+                f'  Priority    : {v.get("priority",254)}',
+                f'  Virtual IP  : {v.get("vip","192.168.1.254")}',
+            ])
+        # show qos
+        if re.match(r'^show\s+qos', c):
+            return self._format_show_qos_simple(state)
+        # show ntp
+        if re.match(r'^show\s+ntp', c):
+            servers = getattr(state, 'ntp_servers', []) or ['ntp.nict.jp']
+            return 'NTP Server : ' + ', '.join(str(s) for s in servers) + '\nStatus : synchronized'
+        # show snmp
+        if re.match(r'^show\s+snmp', c):
+            return ('SNMP Agent : enabled\n'
+                    f'  Community : {", ".join(getattr(state,"snmp_community",[]) or ["public"])}\n'
+                    f'  Location  : {getattr(state,"snmp_location","")}\n'
+                    f'  Contact   : {getattr(state,"snmp_contact","")}')
+        # show syslog / show logging
+        if re.match(r'^show\s+(syslog|logging)', c):
+            servers = getattr(state, 'syslog_servers', [])
+            lines = ['Syslog Configuration']
+            if servers:
+                for s in servers:
+                    lines.append(f'  Server : {s.get("host","")} '
+                                 f'facility {s.get("facility","local0")} '
+                                 f'level {s.get("level","info")}')
+            else:
+                lines.append('  (no syslog server configured)')
+            lines.append('')
+            lines.append('--- Recent Log ---')
+            lines.append('2026/06/28 12:00:00 SYS: system started')
+            return '\n'.join(lines)
+        # show filter / show acl（Si-R）
+        if re.match(r'^show\s+(filter|acl)', c):
+            return ('IP Filter Information\n'
+                    '  No.  Action  Source           Destination      Proto\n'
+                    '  ---  ------  ---------------  ---------------  -----\n'
+                    '  (no filter configured)')
+        # show rip（Si-R）
+        if re.match(r'^show\s+(ip\s+)?rip', c):
+            return ('RIP Information\n'
+                    '  Version : 2\n'
+                    '  Status  : enabled\n'
+                    '  (use show ip route for learned routes)')
+        # show tech-support / show config-info
+        if re.match(r'^show\s+tech-support', c):
+            return ('===== show tech-support =====\n'
+                    '--- system ---\n' + self._sir_show(cmd, 'show system', state) +
+                    '\n--- memory ---\n' + self._sir_show(cmd, 'show memory', state))
+        return None
+
     def _sir_show_ipsec_sa(self, state: DeviceState) -> str:
         tunnels = getattr(state, 'ipsec_tunnels', {})
         if not tunnels:
