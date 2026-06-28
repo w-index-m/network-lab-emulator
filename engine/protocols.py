@@ -3916,6 +3916,96 @@ arp_engine = ArpEngine()
 
 
 # ══════════════════════════════════════════
+# データプレーン エンジン
+#   動的MAC学習 / インターフェースカウンタ
+# ══════════════════════════════════════════
+@dataclass
+class MacEntry:
+    vlan: int
+    mac: str
+    port: str
+    entry_type: str = 'DYNAMIC'   # DYNAMIC | STATIC
+    age: float = field(default_factory=time.time)
+
+
+class DataPlaneEngine:
+    """
+    通信（ping等）に応じてスイッチのMACアドレステーブルを動的学習し、
+    インターフェースの送受信パケットカウンタを更新する。
+    """
+    def __init__(self):
+        # device_id -> {(vlan, mac): MacEntry}
+        self.mac_tables: Dict[str, Dict[tuple, MacEntry]] = defaultdict(dict)
+        # device_id -> {iface: {'in_pkts','out_pkts','in_bytes','out_bytes'}}
+        self.counters: Dict[str, Dict[str, dict]] = defaultdict(dict)
+
+    # ── MAC学習 ──
+    def learn(self, device_id: str, mac: str, port: str, vlan: int = 1):
+        key = (vlan, mac)
+        e = self.mac_tables[device_id].get(key)
+        if e:
+            e.port = port
+            e.age = time.time()
+        else:
+            self.mac_tables[device_id][key] = MacEntry(
+                vlan=vlan, mac=mac, port=port)
+        # テーブル肥大化防止
+        if len(self.mac_tables[device_id]) > 256:
+            oldest = min(self.mac_tables[device_id].items(),
+                         key=lambda kv: kv[1].age)[0]
+            del self.mac_tables[device_id][oldest]
+
+    def clear_mac_dynamic(self, device_id: str):
+        self.mac_tables[device_id] = {
+            k: v for k, v in self.mac_tables[device_id].items()
+            if v.entry_type != 'DYNAMIC'}
+
+    def format_mac_table(self, device_id: str) -> str:
+        entries = list(self.mac_tables.get(device_id, {}).values())
+        lines = ["          Mac Address Table",
+                 "-------------------------------------------",
+                 "",
+                 "Vlan    Mac Address       Type        Ports",
+                 "----    -----------       --------    -----"]
+        if not entries:
+            lines.append("(動的に学習されたエントリはありません — pingやトラフィックで学習されます)")
+        for e in sorted(entries, key=lambda x: (x.vlan, x.port)):
+            lines.append(f" {e.vlan:<8}{e.mac:<20}{e.entry_type:<12}{e.port}")
+        lines.append(f"Total Mac Addresses for this criterion: {len(entries)}")
+        return "\n".join(lines)
+
+    # ── インターフェースカウンタ ──
+    def _ctr(self, device_id: str, iface: str) -> dict:
+        c = self.counters[device_id].get(iface)
+        if c is None:
+            c = {'in_pkts': 0, 'out_pkts': 0, 'in_bytes': 0, 'out_bytes': 0}
+            self.counters[device_id][iface] = c
+        return c
+
+    def bump(self, device_id: str, iface: str, direction: str,
+             pkts: int = 1, size: int = 100):
+        if not iface:
+            return
+        c = self._ctr(device_id, iface)
+        if direction == 'in':
+            c['in_pkts'] += pkts
+            c['in_bytes'] += pkts * size
+        else:
+            c['out_pkts'] += pkts
+            c['out_bytes'] += pkts * size
+
+    def get_counter(self, device_id: str, iface: str) -> dict:
+        return self.counters.get(device_id, {}).get(
+            iface, {'in_pkts': 0, 'out_pkts': 0, 'in_bytes': 0, 'out_bytes': 0})
+
+    def clear_counters(self, device_id: str):
+        self.counters[device_id] = {}
+
+
+dp_engine = DataPlaneEngine()
+
+
+# ══════════════════════════════════════════
 # IPフィルタ / ACL エンジン（パケットフィルタ）
 # ══════════════════════════════════════════
 @dataclass

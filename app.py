@@ -29,7 +29,7 @@ from engine.rules import RuleEngine, DeviceState
 from engine.protocols import (
     vnet, rip_engine, ospf_engine, bgp_engine, stp_engine, rib_engine,
     icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
-    nat_engine, cef_engine,
+    nat_engine, cef_engine, dp_engine,
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
@@ -489,6 +489,7 @@ async def cli_command(body: dict):
         device_sessions[device_id] = DeviceState(dev["type"], dev["hostname"])
 
     state = device_sessions[device_id]
+    state._device_id = device_id   # rules.py からデータプレーン参照用
 
     # クリアコマンドはフロントエンドで処理
     if command.lower() in ("cls", "clear screen"):
@@ -525,6 +526,24 @@ async def cli_command(body: dict):
     if re.match(r'^(undebug\s+all|no\s+debug\s+all)', c_low):
         arp_engine.debug_off(device_id)
         return {"output": "All possible debugging has been turned off", "mode": state.mode, "hostname": state.hostname}
+
+    # ── データプレーン: 動的MACテーブル表示（スイッチのみ）──
+    if (re.match(r'^show\s+mac\s+(address-table|address\s+table)', c_low)
+            and state.device_type in ('catalyst', 'srs', 'nexus')):
+        return {"output": dp_engine.format_mac_table(device_id),
+                "mode": state.mode, "hostname": state.hostname}
+
+    # ── clear 系（データプレーン）──
+    if re.match(r'^clear\s+mac\s+address-table', c_low):
+        dp_engine.clear_mac_dynamic(device_id)
+        return {"output": "", "mode": state.mode, "hostname": state.hostname}
+    if re.match(r'^clear\s+counters', c_low):
+        dp_engine.clear_counters(device_id)
+        return {"output": "Clear \"show interface\" counters on all interfaces [confirm] y",
+                "mode": state.mode, "hostname": state.hostname}
+    if re.match(r'^clear\s+(ip\s+)?arp(-cache)?', c_low):
+        arp_engine.clear(device_id)
+        return {"output": "", "mode": state.mode, "hostname": state.hostname}
 
     output = rule_engine.process(command, state)
 
@@ -2647,6 +2666,54 @@ def _handle_nat_config(device_id: str, command: str, state: DeviceState):
     return None
 
 
+def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict):
+    """
+    通信成立時、経路上のスイッチがMACを学習し、各IFのカウンタを更新する。
+    （実データプレーンの簡易モデル）
+    """
+    src_info = icmp_engine.device_ips.get(src_id, {})
+    src_ips = list(src_info.get('ips', {}).keys())
+    if not src_ips:
+        return
+    src_ip = src_ips[0]
+    src_mac = arp_engine._gen_mac(src_id, src_ip)
+    switch_types = ('catalyst', 'srs', 'nexus', 'apresia')
+
+    def _port_vlan(dev_id, port):
+        st = device_sessions.get(dev_id)
+        if st and port in st.interfaces:
+            v = st.interfaces[port].get('vlan', '1')
+            try:
+                return int(v) if str(v).isdigit() else 1
+            except Exception:
+                return 1
+        return 1
+
+    # 直結スイッチに src の MAC を学習させ、カウンタを更新
+    for peer in list(vnet.links.get(src_id, set())):
+        # src 側の送信カウンタ
+        src_port = vnet.interface_links.get(src_id, {}).get(peer)
+        if src_port:
+            dp_engine.bump(src_id, src_port, 'out', pkts=5)
+        peer_type = vnet.device_types.get(peer, '')
+        peer_port = vnet.interface_links.get(peer, {}).get(src_id)
+        if peer_port:
+            dp_engine.bump(peer, peer_port, 'in', pkts=5)
+            if peer_type in switch_types:
+                dp_engine.learn(peer, src_mac, peer_port, _port_vlan(peer, peer_port))
+
+    # 応答が返る場合、宛先デバイスのMACも経路スイッチが学習
+    if ping_result.get('reachable'):
+        dest_dev = icmp_engine._find_device_owning_ip(dest_ip)
+        if dest_dev:
+            dmac = arp_engine._gen_mac(dest_dev, dest_ip)
+            for peer in list(vnet.links.get(dest_dev, set())):
+                peer_type = vnet.device_types.get(peer, '')
+                peer_port = vnet.interface_links.get(peer, {}).get(dest_dev)
+                if peer_port and peer_type in switch_types:
+                    dp_engine.learn(peer, dmac, peer_port, _port_vlan(peer, peer_port))
+
+
 def _find_gateway_ip(state: DeviceState) -> str:
     """デバイスのデフォルトゲートウェイIPを取得（device_type非依存）"""
     # PC等が持つ明示的gateway属性
@@ -2719,6 +2786,8 @@ async def handle_icmp(device_id: str, command: str, state: DeviceState):
         result = icmp_engine.ping(device_id, dest, count=5)
         # 経路上のNATルーターで送信元アドレス変換を適用
         _apply_nat_on_path(device_id, dest, result, proto='icmp')
+        # データプレーン: MAC学習 + カウンタ更新
+        _learn_dataplane(device_id, dest, result)
         return _format_ping(dest, result, state.device_type)
 
     # traceroute / tracert

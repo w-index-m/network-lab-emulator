@@ -1353,15 +1353,26 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         L.append("  Input queue: 0/75/0/0 (size/max/drops/flushes); Total output drops: 0")
         L.append("  Queueing strategy: fifo")
         L.append("  Output queue: 0/40 (size/max)")
+        # データプレーンの実カウンタを反映（無ければ0）
+        _inp = _outp = _inb = _outb = 0
+        try:
+            from engine.protocols import dp_engine as _dp
+            _did = getattr(state, '_device_id', None)
+            if _did:
+                _c = _dp.get_counter(_did, name)
+                _inp, _outp = _c['in_pkts'], _c['out_pkts']
+                _inb, _outb = _c['in_bytes'], _c['out_bytes']
+        except Exception:
+            pass
         L.append("  5 minute input rate 0 bits/sec, 0 packets/sec")
         L.append("  5 minute output rate 0 bits/sec, 0 packets/sec")
-        L.append("     5 packets input, 1568 bytes, 0 no buffer")
-        L.append("     Received 5 broadcasts (5 multicasts)")
+        L.append(f"     {_inp} packets input, {_inb} bytes, 0 no buffer")
+        L.append(f"     Received {_inp} broadcasts ({_inp} multicasts)")
         L.append("     0 runts, 0 giants, 0 throttles")
         L.append("     0 input errors, 0 CRC, 0 frame, 0 overrun, 0 ignored")
-        L.append("     0 watchdog, 5 multicast, 0 pause input")
+        L.append("     0 watchdog, 0 multicast, 0 pause input")
         L.append("     0 input packets with dribble condition detected")
-        L.append("     1781 packets output, 163390 bytes, 0 underruns")
+        L.append(f"     {_outp} packets output, {_outb} bytes, 0 underruns")
         L.append("     0 output errors, 0 collisions, 1 interface resets")
         L.append("     0 unknown protocol drops")
         L.append("     0 babbles, 0 late collision, 0 deferred")
