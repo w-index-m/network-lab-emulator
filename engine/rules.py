@@ -5528,6 +5528,72 @@ Key Version         : A
             return ('Current firmware image  : image1 (active)\n'
                     'Next boot firmware image: image1\n'
                     'Configuration file      : primary-config')
+        # ── 追加 show コマンド群（APRESIA AEOS 準拠）──
+        if re.match(r'^show\s+system', c):
+            return ('System Information\n'
+                    '  Device Type        : ApresiaLightGM200\n'
+                    f'  System Name        : {state.hostname}\n'
+                    '  Firmware Version   : 4.18.01\n'
+                    '  System Up Time     : 1 days 02:34:56\n'
+                    '  System Temperature : Normal (37 C)')
+        if re.match(r'^show\s+memory', c):
+            import random as _r
+            return f'Memory: Total 256MB  Used {_r.randint(80,120)}MB  Free {_r.randint(130,170)}MB'
+        if re.match(r'^show\s+flash', c):
+            return 'Flash: Total 128MB  Used 32MB  Free 96MB\n  image1  config'
+        if re.match(r'^show\s+(clock|time)', c):
+            return '2026/06/28 12:00:00'
+        if re.match(r'^show\s+(logging|log)', c):
+            return ('Logging Buffer (latest):\n'
+                    '2026/06/28 12:00:00 INFO  System started\n'
+                    '2026/06/28 12:00:05 INFO  Port1/0/1 link up')
+        if re.match(r'^show\s+ntp', c):
+            return 'NTP Status: synchronized\n  Server: ntp.nict.jp  Stratum: 2'
+        if re.match(r'^show\s+snmp', c):
+            return ('SNMP Agent: enabled\n'
+                    '  Community (RO): public\n  Community (RW): private')
+        if re.match(r'^show\s+ip\s+route', c):
+            return ('IP Route Table\n'
+                    'Code: C - connected, S - static, R - RIP, O - OSPF\n'
+                    'C   192.168.10.0/24  is directly connected, Vlan10')
+        if re.match(r'^show\s+ip\s+ospf', c):
+            return 'OSPF Process: enabled\n  Router-ID: 10.0.0.1  Area: 0.0.0.0'
+        if re.match(r'^show\s+ip\s+rip', c):
+            return 'RIP: enabled  Version: 2'
+        if re.match(r'^show\s+ip\s+interface', c):
+            lines = ['Interface     IP Address        Status']
+            for n, ii in state.interfaces.items():
+                if ii.get('ip'):
+                    lines.append(f'{n:<14}{ii["ip"]}/{ii.get("prefix",24):<6}{ii.get("status","up")}')
+            return '\n'.join(lines)
+        if re.match(r'^show\s+dhcp', c):
+            return ('DHCP Snooping: disabled\n'
+                    'DHCP Server: disabled')
+        if re.match(r'^show\s+igmp\s+snooping', c):
+            return ('IGMP Snooping: disabled (global)\n'
+                    '  VLAN 1: disabled')
+        if re.match(r'^show\s+storm-control', c):
+            return ('Port        Broadcast  Multicast  Unicast    Action\n'
+                    '----------  ---------  ---------  ---------  ------\n'
+                    'Port1/0/1   -          -          -          none')
+        if re.match(r'^show\s+errdisable', c):
+            return ('ErrDisable Recovery Timer: 300 sec\n'
+                    'Recovery reason       Status\n'
+                    'loopdetect            Enabled\n'
+                    'storm-control         Enabled')
+        if re.match(r'^show\s+port-security', c):
+            return ('Port        MaxAddr  CurrentAddr  Violation  Action\n'
+                    '----------  -------  -----------  ---------  --------\n'
+                    '(no port-security configured)')
+        if re.match(r'^show\s+(users|telnet|ssh|session)', c):
+            return ('Line     User      From             Idle\n'
+                    'console  admin     -                00:00')
+        if re.match(r'^show\s+tech-support', c):
+            return ('===== show tech-support =====\n'
+                    + self._apresia_show_version(state) + '\n'
+                    + self._apresia_show_port('all', state))
+        if re.match(r'^show\s+mac-?address-table\s+aging-time', c) or re.match(r'^show\s+fdb\s+aging', c):
+            return 'MAC Address Aging Time: 300 seconds'
 
         # ── ping / traceroute ──
         if c.startswith('ping '):
