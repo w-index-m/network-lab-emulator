@@ -813,6 +813,12 @@ class RuleEngine:
             if sir_out is not None:
                 return sir_out
 
+        # ── Nexus(NX-OS) 固有の show コマンド群 ──
+        if dt == 'nexus':
+            nx_out = self._nexus_show(cmd, c, state)
+            if nx_out is not None:
+                return nx_out
+
         # ── show version ──
         if re.match(r'^show\s+version$', c):
             return self._show_version(state)
@@ -1685,7 +1691,9 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
 
     # ─── show spanning-tree ───────────────────
     def _show_spanning_tree(self, state):
-        stp = state.stp
+        stp = getattr(state, 'stp', None) or {
+            'mode': 'rapid-pvst', 'root': '00:0e:0e:f1:00:01',
+            'priority': 32768, 'root_port': ''}
         return f"""VLAN0010
   Spanning tree enabled protocol {stp['mode']}
   Root ID    Priority    {state.vlans.get(10,{}).get('name','')and 32768}
@@ -2037,6 +2045,106 @@ Number of existing VLANs          : {len(state.vlans)}
 Configuration Revision            : 5"""
 
     # ─── Si-R IPsec show コマンド ─────────────
+    def _nexus_show(self, cmd, c, state):
+        """
+        Nexus(NX-OS)固有の show コマンド群。Cisco NX-OS仕様準拠。
+        対象外は None を返し汎用ハンドラへ委譲。
+        """
+        import random as _rnd
+        host = state.hostname
+
+        # show module
+        if re.match(r'^show\s+module', c):
+            return '\n'.join([
+                'Mod Ports             Module-Type                      Model           Status',
+                '--- ----- ------------------------------------- --------------------- ---------',
+                '1   54    48x10G/25G + 6x40G/100G Ethernet Module N9K-C93180YC-EX     active *',
+                '',
+                'Mod  Sw                       Hw      Slot',
+                '---  ----------------------- ------- ----',
+                '1    9.3(10)                  1.0     NA',
+                '',
+                'Mod  MAC-Address(es)                         Serial-Num',
+                '---  --------------------------------------- ----------',
+                '1    00-2a-6a-11-22-33 to 00-2a-6a-11-22-66  FDO00000001',
+            ])
+        # show inventory
+        if re.match(r'^show\s+inventory', c):
+            return ('NAME: "Chassis", DESCR: "Nexus9000 C93180YC-EX chassis"\n'
+                    'PID: N9K-C93180YC-EX, VID: V01, SN: FDO00000001\n\n'
+                    'NAME: "Slot 1", DESCR: "48x10/25G + 6x40/100G Ethernet Module"\n'
+                    'PID: N9K-C93180YC-EX, VID: V01, SN: FDO00000001')
+        # show feature
+        if re.match(r'^show\s+feature', c):
+            feats = getattr(state, 'nx_features', set())
+            base = [('lacp', 'lacp' in feats), ('vpc', 'vpc' in feats),
+                    ('interface-vlan', 'interface-vlan' in feats),
+                    ('hsrp', 'hsrp' in feats), ('ospf', 'ospf' in feats),
+                    ('bgp', 'bgp' in feats), ('pim', 'pim' in feats),
+                    ('eigrp', 'eigrp' in feats), ('dhcp', 'dhcp' in feats)]
+            lines = ['Feature Name          Instance  State', '-------------------- -------- --------']
+            for f, en in base:
+                lines.append(f'{f:<21}1        {"enabled" if en else "disabled"}')
+            return '\n'.join(lines)
+        # show vrf
+        if re.match(r'^show\s+vrf', c):
+            return ('VRF-Name                           VRF-ID State   Reason\n'
+                    'default                                 1 Up      --\n'
+                    'management                              2 Up      --')
+        # show system resources
+        if re.match(r'^show\s+system\s+resources', c):
+            return ('Load average:   1 minute: 0.20   5 minutes: 0.15   15 minutes: 0.10\n'
+                    f'Processes   :   320 total, 1 running\n'
+                    f'CPU states  :   {_rnd.randint(2,8)}.0% user, {_rnd.randint(1,4)}.0% kernel, '
+                    f'{90+_rnd.randint(0,5)}.0% idle\n'
+                    'Memory usage:   8138752K total, 3251200K used, 4887552K free')
+        # show processes cpu
+        if re.match(r'^show\s+processes\s+cpu', c):
+            return (f'CPU utilization for five seconds: {_rnd.randint(2,8)}%/0%; '
+                    f'one minute: {_rnd.randint(3,7)}%; five minutes: {_rnd.randint(3,6)}%')
+        # show environment
+        if re.match(r'^show\s+environment', c):
+            return ('Fan:\n  Fan1(sys_fan1)   Ok\n  Fan2(sys_fan2)   Ok\n'
+                    'Temperature:\n  Module 1   Sensor 1   38 C   Ok\n'
+                    'Power Supply:\n  PS1   ok   650W')
+        # show ntp peers / peer-status
+        if re.match(r'^show\s+ntp\s+(peers|peer-status)', c):
+            return ('  Peer IP Address          Serv/Peer\n'
+                    '  ntp.nict.jp              Server (configured)')
+        # show fex
+        if re.match(r'^show\s+fex', c):
+            return ('  FEX         FEX           FEX                       FEX\n'
+                    'Number    Description      State            Model            Serial\n'
+                    '--------------------------------------------------------------------\n'
+                    '(no FEX attached)')
+        # show interface status
+        if re.match(r'^show\s+interface\s+status', c):
+            lines = ['Port          Name               Status    Vlan      Duplex  Speed   Type']
+            for n, ii in state.interfaces.items():
+                if n.startswith('Ethernet'):
+                    st = ii.get('status', 'connected')
+                    lines.append(f'{n:<14}{ii.get("desc","")[:18]:<19}{st:<10}'
+                                 f'{ii.get("vlan","1"):<10}{ii.get("duplex","full"):<8}'
+                                 f'{ii.get("speed","10G"):<8}{ii.get("type","10Gbase-SR")}')
+            return '\n'.join(lines[:20])
+        # show ip pim neighbor
+        if re.match(r'^show\s+ip\s+pim\s+neighbor', c):
+            return ('PIM Neighbor Status for VRF "default"\n'
+                    'Neighbor        Interface            Uptime    Expires   DR\n'
+                    '(no PIM neighbors)')
+        # show ip eigrp neighbors
+        if re.match(r'^show\s+ip\s+eigrp\s+neighbor', c):
+            return ('EIGRP neighbors for process 100 VRF default\n'
+                    'H   Address      Interface   Hold Uptime   SRTT   RTO  Q  Seq\n'
+                    '(no EIGRP neighbors)')
+        # show hsrp
+        if re.match(r'^show\s+hsrp', c):
+            return ('(no HSRP groups configured — Nexusではfeature hsrp + interface設定が必要)')
+        # show flow exporter / record / monitor (NetFlow)
+        if re.match(r'^show\s+flow\s+(exporter|record|monitor)', c):
+            return 'Flow exporter is not configured.'
+        return None
+
     def _sir_show(self, cmd, c, state):
         """
         Si-R（富士通）固有の show コマンド群。
@@ -3501,11 +3609,23 @@ Configuration Revision            : 5"""
     def _cmd_config(self, cmd, state):
         c = cmd.lower().strip()
 
-        # hostname / sysname
-        m = re.match(r'^(?:hostname|sysname)\s+(\S+)', cmd, re.I)
+        # hostname / sysname / switchname(NX-OS)
+        m = re.match(r'^(?:hostname|sysname|switchname)\s+(\S+)', cmd, re.I)
         if m:
             state.hostname = m.group(1)
             return ""
+
+        # NX-OS: feature <name> / no feature <name>（show feature に反映）
+        if state.device_type == 'nexus':
+            mf = re.match(r'^(no\s+)?feature\s+(\S+)', c)
+            if mf:
+                if not hasattr(state, 'nx_features'):
+                    state.nx_features = set()
+                if mf.group(1):
+                    state.nx_features.discard(mf.group(2))
+                else:
+                    state.nx_features.add(mf.group(2))
+                return ""
 
         # ── SPAN / ポートミラーリング ──
         if (re.match(r'^(no\s+)?monitor\s+session', c) or
