@@ -2280,6 +2280,14 @@ Configuration Revision            : 5"""
                     '  Version : 2\n'
                     '  Status  : enabled\n'
                     '  (use show ip route for learned routes)')
+        # show fdb（MACアドレステーブルの別名）/ show stp（spanning-treeの別名）
+        if re.match(r'^show\s+fdb', c):
+            return self._show_mac_table(state) if hasattr(self, '_show_mac_table') else None
+        if re.match(r'^show\s+stp$', c):
+            try:
+                return self._show_spanning_tree(state)
+            except Exception:
+                return 'Spanning Tree: rapid-pvst, enabled'
         # show nat / show napt / show nat-table
         if re.match(r'^show\s+(nat|napt|nat-table)', c):
             return ('NAT/NAPT Translation Table\n'
