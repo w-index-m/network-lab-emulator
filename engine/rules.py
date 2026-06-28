@@ -4180,6 +4180,13 @@ Configuration Revision            : 5"""
         if c == 'show version' or c == 'sh ver':
             return self._asa_show_version(state)
 
+        if re.match(r'^show\s+interface\s+ip\s+brief', c):
+            lines = ['Interface                IP-Address      OK? Method Status                Protocol']
+            for n, ii in state.interfaces.items():
+                ip = ii.get('ip', '') or 'unassigned'
+                st = ii.get('status', 'up')
+                lines.append(f'{n:<25}{ip:<16}YES manual {st:<22}{"up" if st=="up" else "down"}')
+            return '\n'.join(lines)
         if re.match(r'^show\s+interface', c):
             m = re.match(r'^show\s+interface\s+(\S+)', c)
             target = m.group(1) if m else None
@@ -4236,6 +4243,72 @@ Configuration Revision            : 5"""
                     '    Trap logging: level informational, facility 20\n'
                     + (''.join(f'    Logging to {s["host"]} port {s["port"]}\n'
                                for s in state.syslog_servers)))
+        # ── 追加 show コマンド群（Cisco ASA 準拠）──
+        if re.match(r'^show\s+nameif', c):
+            lines = ['Interface                Name                     Security']
+            for n, ii in state.interfaces.items():
+                nameif = ii.get('nameif', '')
+                if nameif:
+                    lines.append(f'{n:<25}{nameif:<25}{ii.get("security_level",0)}')
+            return '\n'.join(lines) if len(lines) > 1 else 'No nameif configured.'
+        if re.match(r'^show\s+(interface\s+ip\s+brief|ip\s+address)', c):
+            lines = ['Interface                IP-Address      OK? Method Status                Protocol']
+            for n, ii in state.interfaces.items():
+                ip = ii.get('ip', '') or 'unassigned'
+                st = ii.get('status', 'up')
+                lines.append(f'{n:<25}{ip:<16}YES manual {st:<22}{"up" if st=="up" else "down"}')
+            return '\n'.join(lines)
+        if re.match(r'^show\s+cpu', c):
+            import random as _r
+            return f'CPU utilization for 5 seconds = {_r.randint(2,9)}%; 1 minute: {_r.randint(3,8)}%; 5 minutes: {_r.randint(3,7)}%'
+        if re.match(r'^show\s+memory', c):
+            return ('Free memory:        1610612736 bytes (75%)\n'
+                    'Used memory:         536870912 bytes (25%)\n'
+                    'Total memory:       2147483648 bytes (100%)')
+        if re.match(r'^show\s+failover', c):
+            return ('Failover Off\n'
+                    'Failover unit Secondary\n'
+                    'Failover LAN Interface: not configured\n'
+                    'This host: Secondary - Disabled')
+        if re.match(r'^show\s+(clock|ntp)', c):
+            if 'ntp' in c:
+                return 'NTP server: ntp.nict.jp  status: synchronized, stratum 2'
+            return '12:00:00.000 JST Sun Jun 28 2026'
+        if re.match(r'^show\s+arp', c):
+            return ('        inside 192.168.1.100 0011.2233.4455\n'
+                    '        outside 203.0.113.2 00aa.bbcc.ddee')
+        if re.match(r'^show\s+mac-address-table', c):
+            return ('interface              mac address        type      Age\n'
+                    'inside                 0011.2233.4455     dynamic   5')
+        if re.match(r'^show\s+vpn-sessiondb', c):
+            return ('VPN Session Summary\n'
+                    '  IKEv2 IPsec  : 0\n  AnyConnect   : 0\n  Total Active : 0')
+        if re.match(r'^show\s+local-host', c):
+            return ('Interface inside: 0 active, 0 maximum active, 0 denied\n'
+                    'Interface outside: 0 active, 0 maximum active, 0 denied')
+        if re.match(r'^show\s+traffic', c):
+            return ('inside:\n  received (in 123.0 secs): 0 packets  0 bytes\n'
+                    '  transmitted (in 123.0 secs): 0 packets  0 bytes')
+        if re.match(r'^show\s+blocks', c):
+            return ('SIZE    MAX    LOW    CNT\n'
+                    '0       400    400    400\n'
+                    '1550    1444   1300   1444')
+        if re.match(r'^show\s+resource\s+usage', c):
+            return ('Resource              Current  Peak  Limit  Denied  Context\n'
+                    'Conns                 0        0     -      0       System')
+        if re.match(r'^show\s+inventory', c):
+            return ('Name: "Chassis", DESCR: "ASA 5506-X"\n'
+                    'PID: ASA5506  , VID: V01 , SN: JAD00000001')
+        if re.match(r'^show\s+firewall', c):
+            return 'Firewall mode: Router'
+        if re.match(r'^show\s+mode', c):
+            return 'Security context mode: single'
+        if re.match(r'^show\s+curpriv', c):
+            return 'Username : enable_15\nCurrent privilege level : 15'
+        if re.match(r'^show\s+flash|^show\s+disk0', c):
+            return ('--#--  --length--  -----date/time------  path\n'
+                    '  1    52428800    Jun 28 2026 12:00:00  asa.bin\n'
+                    '8589934592 bytes total (8000000000 bytes free)')
 
         # ── インタフェース設定 ──
         m_if = re.match(r'^interface\s+(\S+)', c)
