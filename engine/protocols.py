@@ -1063,9 +1063,23 @@ class OspfEngine:
                 return abs(hash(rid))
         candidates.sort(key=lambda c: (c['priority'], _rid_to_int(c['router_id'])),
                         reverse=True)
-        dr_candidate = candidates[0]
-        bdr_candidate = candidates[1] if len(candidates) > 1 else None
         prev_dr = n.get('dr')
+        prev_bdr = n.get('bdr')
+        cand_ids = {c['device_id'] for c in candidates}
+
+        # RFC 2328 §9.4: DR/BDR選出は非プリエンプティブ。
+        # 既存のDRがまだ候補に存在すればそのまま維持し、
+        # より高優先度のルータが後から現れても交代しない。
+        if prev_dr in cand_ids:
+            dr_candidate = next(c for c in candidates if c['device_id'] == prev_dr)
+        else:
+            dr_candidate = candidates[0]
+        # BDR: 既存BDRがDRでなく候補にいれば維持、なければDR以外の最上位
+        remaining = [c for c in candidates if c['device_id'] != dr_candidate['device_id']]
+        if prev_bdr in cand_ids and prev_bdr != dr_candidate['device_id']:
+            bdr_candidate = next(c for c in remaining if c['device_id'] == prev_bdr)
+        else:
+            bdr_candidate = remaining[0] if remaining else None
         n['dr'] = dr_candidate['device_id']
         n['bdr'] = bdr_candidate['device_id'] if bdr_candidate else None
         if prev_dr != n['dr']:
