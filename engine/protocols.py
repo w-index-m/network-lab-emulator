@@ -4006,6 +4006,167 @@ dp_engine = DataPlaneEngine()
 
 
 # ══════════════════════════════════════════
+# SNMP エージェント（polling応答 / MIB-II）
+#   仮想SNMPポーリングマシンからの snmpget/snmpwalk に応答する
+# ══════════════════════════════════════════
+class SnmpAgent:
+    """
+    各装置の状態から標準MIB-II（system / interfaces / ip グループ）を生成し、
+    SNMP GET / WALK に応答する。RFC1213 (MIB-II) 準拠のOIDを返す。
+    """
+    SYS_DESCR = {
+        'cisco':    'Cisco IOS Software, ISR Software, Version 15.7(3)M',
+        'catalyst': 'Cisco IOS XE Software, Catalyst L3 Switch, Version 17.09.01',
+        'nexus':    'Cisco NX-OS Software, Nexus9000, Version 9.3(10)',
+        'asa':      'Cisco Adaptive Security Appliance Version 9.16(1)',
+        'sir':      'FUJITSU Si-R G120 Router, Firmware V40.00',
+        'srs':      'FUJITSU SR-S Switch, Firmware V40.00',
+        'apresia':  'APRESIA ApresiaLightGM200, Firmware 4.18.01',
+        'pc':       'Linux host 5.15.0 x86_64',
+    }
+    SYS_OBJECTID = {
+        'cisco':    '1.3.6.1.4.1.9.1.1',
+        'catalyst': '1.3.6.1.4.1.9.1.2494',
+        'nexus':    '1.3.6.1.4.1.9.12.3.1.3.1084',
+        'asa':      '1.3.6.1.4.1.9.1.1408',
+        'sir':      '1.3.6.1.4.1.211.1.127',
+        'srs':      '1.3.6.1.4.1.211.1.127',
+        'apresia':  '1.3.6.1.4.1.2544',
+        'pc':       '1.3.6.1.4.1.8072.3.2.10',
+    }
+
+    def __init__(self):
+        self._start = time.time()
+        # device_id -> hostname/type/contact/location/community を保持
+        self.devices: Dict[str, dict] = {}
+
+    def register(self, device_id: str, device_type: str, hostname: str,
+                 contact: str = '', location: str = '',
+                 community: str = 'public'):
+        self.devices[device_id] = {
+            'type': device_type, 'hostname': hostname,
+            'contact': contact, 'location': location, 'community': community,
+        }
+
+    def _uptime_ticks(self) -> int:
+        # sysUpTime は 1/100秒単位（TimeTicks）
+        return int((time.time() - self._start) * 100)
+
+    def _build_mib(self, device_id: str) -> list:
+        """(oid, type, value) のリストを OID昇順で返す"""
+        d = self.devices.get(device_id, {})
+        dtype = d.get('type', 'cisco')
+        host = d.get('hostname', device_id)
+        mib = []
+        # ── system group (1.3.6.1.2.1.1) ──
+        mib.append(('1.3.6.1.2.1.1.1.0', 'STRING', self.SYS_DESCR.get(dtype, 'Network Device')))
+        mib.append(('1.3.6.1.2.1.1.2.0', 'OID', self.SYS_OBJECTID.get(dtype, '1.3.6.1.4.1.0')))
+        mib.append(('1.3.6.1.2.1.1.3.0', 'Timeticks', str(self._uptime_ticks())))
+        mib.append(('1.3.6.1.2.1.1.4.0', 'STRING', d.get('contact', '') or 'admin@example.com'))
+        mib.append(('1.3.6.1.2.1.1.5.0', 'STRING', host))
+        mib.append(('1.3.6.1.2.1.1.6.0', 'STRING', d.get('location', '') or 'Lab'))
+        mib.append(('1.3.6.1.2.1.1.7.0', 'INTEGER', '78'))  # sysServices
+        # ── interfaces group (1.3.6.1.2.1.2) ──
+        info = icmp_engine.device_ips.get(device_id, {})
+        ifaces = list(info.get('interfaces', {}).items())
+        if not ifaces:
+            # device_ips未登録ならインターフェース無し（最低1つlo相当）
+            ifaces = [('lo0', {'ip': '127.0.0.1', 'prefix': 8})]
+        mib.append(('1.3.6.1.2.1.2.1.0', 'INTEGER', str(len(ifaces))))  # ifNumber
+        for i, (ifn, ii) in enumerate(ifaces, 1):
+            mib.append((f'1.3.6.1.2.1.2.2.1.1.{i}', 'INTEGER', str(i)))            # ifIndex
+            mib.append((f'1.3.6.1.2.1.2.2.1.2.{i}', 'STRING', ifn))                # ifDescr
+            mib.append((f'1.3.6.1.2.1.2.2.1.3.{i}', 'INTEGER', '6'))               # ifType ethernetCsmacd
+            mib.append((f'1.3.6.1.2.1.2.2.1.5.{i}', 'Gauge32', '1000000000'))      # ifSpeed 1G
+            status = '1' if ii.get('ip') else '2'                                  # up/down
+            mib.append((f'1.3.6.1.2.1.2.2.1.7.{i}', 'INTEGER', '1'))               # ifAdminStatus
+            mib.append((f'1.3.6.1.2.1.2.2.1.8.{i}', 'INTEGER', status))            # ifOperStatus
+            # ifInOctets / ifOutOctets（データプレーンカウンタ由来）
+            c = dp_engine.get_counter(device_id, ifn)
+            mib.append((f'1.3.6.1.2.1.2.2.1.10.{i}', 'Counter32', str(c['in_bytes'])))
+            mib.append((f'1.3.6.1.2.1.2.2.1.16.{i}', 'Counter32', str(c['out_bytes'])))
+        # ── ip group: ipAdEntAddr (1.3.6.1.2.1.4.20.1.1.<ip>) ──
+        for ip in info.get('ips', {}):
+            mib.append((f'1.3.6.1.2.1.4.20.1.1.{ip}', 'IpAddress', ip))
+        # OID を数値順にソート
+        def _key(entry):
+            return [int(x) if x.isdigit() else 0 for x in entry[0].split('.')]
+        mib.sort(key=_key)
+        return mib
+
+    def get(self, device_id: str, oid: str, community: str = 'public'):
+        """SNMP GET。(oid, type, value) または None（NoSuchObject）"""
+        if device_id not in self.devices:
+            return None
+        if not self._auth(device_id, community):
+            return 'AUTH_FAIL'
+        oid = oid.lstrip('.')
+        for o, t, v in self._build_mib(device_id):
+            if o == oid:
+                return (o, t, v)
+        return None
+
+    def getnext(self, device_id: str, oid: str):
+        oid = oid.lstrip('.')
+        mib = self._build_mib(device_id)
+        for o, t, v in mib:
+            if self._oid_gt(o, oid):
+                return (o, t, v)
+        return None
+
+    def walk(self, device_id: str, base_oid: str = '1.3.6.1.2.1',
+             community: str = 'public'):
+        """SNMP WALK。base_oid配下の全(oid,type,value)を返す"""
+        if device_id not in self.devices:
+            return None
+        if not self._auth(device_id, community):
+            return 'AUTH_FAIL'
+        base = base_oid.lstrip('.')
+        result = []
+        for o, t, v in self._build_mib(device_id):
+            if o == base or o.startswith(base + '.'):
+                result.append((o, t, v))
+        return result
+
+    def _auth(self, device_id: str, community: str) -> bool:
+        # コミュニティ名チェック（デフォルトpublicは常に許可）
+        cfg = self.devices.get(device_id, {}).get('community', 'public')
+        return community in ('public', cfg) or community == cfg
+
+    @staticmethod
+    def _oid_gt(a: str, b: str) -> bool:
+        aa = [int(x) for x in a.split('.') if x.isdigit()]
+        bb = [int(x) for x in b.split('.') if x.isdigit()]
+        return aa > bb
+
+    # OID名 → 数値OID の簡易マッピング（snmpwalk system 等の名前指定用）
+    NAME_TO_OID = {
+        'system': '1.3.6.1.2.1.1', 'sysdescr': '1.3.6.1.2.1.1.1',
+        'sysname': '1.3.6.1.2.1.1.5', 'sysuptime': '1.3.6.1.2.1.1.3',
+        'syscontact': '1.3.6.1.2.1.1.4', 'syslocation': '1.3.6.1.2.1.1.6',
+        'sysobjectid': '1.3.6.1.2.1.1.2',
+        'interfaces': '1.3.6.1.2.1.2', 'ifdescr': '1.3.6.1.2.1.2.2.1.2',
+        'ifoperstatus': '1.3.6.1.2.1.2.2.1.8', 'ifnumber': '1.3.6.1.2.1.2.1',
+        'ip': '1.3.6.1.2.1.4', 'ipaddrtable': '1.3.6.1.2.1.4.20',
+        'mib-2': '1.3.6.1.2.1', 'mib2': '1.3.6.1.2.1',
+    }
+
+    def resolve_oid(self, name: str) -> str:
+        n = name.lower().lstrip('.')
+        if n in self.NAME_TO_OID:
+            return self.NAME_TO_OID[n]
+        # "sysName.0" のような形式
+        base = n.split('.')[0]
+        if base in self.NAME_TO_OID:
+            rest = n[len(base):]
+            return self.NAME_TO_OID[base] + rest
+        return name.lstrip('.')
+
+
+snmp_agent = SnmpAgent()
+
+
+# ══════════════════════════════════════════
 # IPフィルタ / ACL エンジン（パケットフィルタ）
 # ══════════════════════════════════════════
 @dataclass
