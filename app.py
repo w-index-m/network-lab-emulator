@@ -29,7 +29,7 @@ from engine.rules import RuleEngine, DeviceState
 from engine.protocols import (
     vnet, rip_engine, ospf_engine, bgp_engine, stp_engine, rib_engine,
     icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
-    nat_engine, cef_engine, dp_engine,
+    nat_engine, cef_engine, dp_engine, snmp_agent,
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
@@ -504,6 +504,11 @@ async def cli_command(body: dict):
     nc_out = await handle_nc(device_id, command, state)
     if nc_out is not None:
         return {"output": nc_out, "mode": state.mode, "hostname": state.hostname}
+
+    # ── PC: snmpget / snmpwalk（仮想SNMPポーリング）──
+    snmp_out = await handle_snmp(device_id, command, state)
+    if snmp_out is not None:
+        return {"output": snmp_out, "mode": state.mode, "hostname": state.hostname}
 
     # ── プロトコル動的show（エンジンが起動していればエンジンの出力を優先）──
     proto_output = await handle_protocol_show(device_id, command, state)
@@ -2714,6 +2719,78 @@ def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict):
                     dp_engine.learn(peer, dmac, peer_port, _port_vlan(peer, peer_port))
 
 
+async def handle_snmp(device_id: str, command: str, state: DeviceState):
+    """
+    仮想SNMPポーリング: snmpget / snmpwalk を処理。
+    対象ホストIPから装置を特定し、SNMPエージェントのMIBを返す。
+    例:
+      snmpget -v2c -c public 192.168.1.1 sysName.0
+      snmpwalk -v2c -c public 192.168.1.1 system
+      snmpwalk -c public 192.168.1.1
+    """
+    c = command.strip()
+    m = re.match(r'^(snmpget|snmpwalk|snmpbulkwalk)\b(.*)', c, re.I)
+    if not m:
+        return None
+    op = m.group(1).lower()
+    rest = m.group(2)
+    # オプション除去（-v2c, -c <community>, -On 等）
+    community = 'public'
+    mc = re.search(r'-c\s+(\S+)', rest)
+    if mc:
+        community = mc.group(1)
+    # オプションを取り除いてホストとOIDを抽出
+    tokens = [t for t in rest.split() if not t.startswith('-')]
+    # -c <community> の community トークンを除去
+    if mc and mc.group(1) in tokens:
+        tokens.remove(mc.group(1))
+    if not tokens:
+        return f'Usage: {op} [-v2c] [-c community] <host> [OID]'
+    host = tokens[0]
+    oid_arg = tokens[1] if len(tokens) > 1 else None
+
+    # 到達性チェック（ポーリングマシンから対象へ）
+    _register_icmp(device_id)
+    reach = icmp_engine.ping(device_id, host, count=1)
+    if not reach.get('reachable'):
+        return (f'Timeout: No Response from {host}\n'
+                f'(対象ホストに到達できません。リンク/IP設定/疎通を確認してください)')
+
+    # ホストIPから装置を特定
+    target = icmp_engine._find_device_owning_ip(host)
+    if not target or target not in snmp_agent.devices:
+        return (f'Timeout: No Response from {host}\n'
+                f'(その装置はSNMPエージェント未登録です)')
+
+    def _fmt(o, t, v):
+        # net-snmp 風: OID = TYPE: VALUE
+        if t == 'STRING':
+            return f'.{o} = STRING: "{v}"'
+        if t == 'Timeticks':
+            secs = int(v) // 100
+            return f'.{o} = Timeticks: ({v}) {secs//86400} days, {(secs%86400)//3600:02d}:{(secs%3600)//60:02d}:{secs%60:02d}'
+        return f'.{o} = {t}: {v}'
+
+    if op == 'snmpget':
+        if not oid_arg:
+            return 'snmpget: missing OID'
+        oid = snmp_agent.resolve_oid(oid_arg)
+        res = snmp_agent.get(target, oid, community)
+        if res == 'AUTH_FAIL':
+            return f'Authentication failure (community "{community}" rejected)'
+        if not res:
+            return f'.{oid} = No Such Object available on this agent at this OID'
+        return _fmt(*res)
+    else:  # snmpwalk / snmpbulkwalk
+        base = snmp_agent.resolve_oid(oid_arg) if oid_arg else '1.3.6.1.2.1'
+        res = snmp_agent.walk(target, base, community)
+        if res == 'AUTH_FAIL':
+            return f'Authentication failure (community "{community}" rejected)'
+        if not res:
+            return f'.{base} = No more variables left in this MIB View'
+        return '\n'.join(_fmt(o, t, v) for o, t, v in res)
+
+
 def _find_gateway_ip(state: DeviceState) -> str:
     """デバイスのデフォルトゲートウェイIPを取得（device_type非依存）"""
     # PC等が持つ明示的gateway属性
@@ -3071,6 +3148,16 @@ def _register_icmp(device_id: str):
             interfaces[ifname] = {'ip': info['ip'],
                                   'prefix': info.get('prefix', 24)}
     icmp_engine.register_device(device_id, state.hostname, interfaces)
+    # SNMPエージェントにも登録（polling応答用）
+    _comm = 'public'
+    _sc = getattr(state, 'snmp_community', [])
+    if isinstance(_sc, list) and _sc:
+        _first = _sc[0]
+        _comm = _first.get('name', 'public') if isinstance(_first, dict) else str(_first)
+    snmp_agent.register(device_id, state.device_type, state.hostname,
+                        contact=getattr(state, 'snmp_contact', ''),
+                        location=getattr(state, 'snmp_location', ''),
+                        community=_comm)
 
     def _net_addr(ip, prefix):
         try:
