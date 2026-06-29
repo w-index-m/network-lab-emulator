@@ -18,8 +18,10 @@ _background_tasks: set = set()
 # タイマー間隔（テスト時に短縮可能）。環境変数 NETLAB_FAST_TIMERS=1 で高速化
 import os as _os
 _FAST = _os.environ.get('NETLAB_FAST_TIMERS') == '1'
-RIP_UPDATE_INTERVAL = 2 if _FAST else 30      # RIP定期更新
+RIP_UPDATE_INTERVAL = 2 if _FAST else 30      # RIP定期更新（RFC2453 update timer）
 RIP_JITTER_MAX      = 1 if _FAST else 8       # RIP起動ジッター上限
+RIP_TIMEOUT         = 4 if _FAST else 180      # RFC2453 timeout（無応答でmetric16へ）
+RIP_GARBAGE         = 3 if _FAST else 120      # RFC2453 garbage-collection（保持後削除）
 OSPF_HELLO_INTERVAL = 1 if _FAST else 10      # OSPF Hello間隔
 
 def _spawn(coro):
@@ -611,19 +613,36 @@ class RipEngine:
         if old:
             old.cancel()
         async def expire():
-            await asyncio.sleep(180)
+            # RFC 2453 §3.8: timeout(180s) → メトリック16にして保持 →
+            # garbage-collection(120s) 経過後に削除
+            await asyncio.sleep(RIP_TIMEOUT)
             nd = self.nodes.get(device_id)
             if not nd:
                 return
-            idx = next((i for i, r in enumerate(nd['table'])
-                        if r.network == network and r.prefix == prefix), -1)
-            if idx >= 0:
-                nd['table'].pop(idx)
+            r = next((r for r in nd['table']
+                      if r.network == network and r.prefix == prefix), None)
+            if r is not None and r.metric < 16:
+                # timeout: メトリックを無限大(16)に設定し、削除はまだしない
+                r.metric = 16
+                r.state = 'garbage'
                 await vnet.send_to(device_id, {
                     'type': 'rip_log',
-                    'message': vendor_log.rip_route_expired(vnet.ws_send_callbacks.get(f'_type_{receiver_id}','cisco'), n['hostname'], network, prefix)
+                    'message': vendor_log.rip_route_expired(
+                        vnet.ws_send_callbacks.get(f'_type_{device_id}', 'cisco'),
+                        n['hostname'], network, prefix)
                 })
                 await self._push_table(device_id)
+                # timeout時はトリガードアップデート（metric16を周知）
+                await self._send_update(device_id)
+                # garbage-collection タイマー(120s)
+                await asyncio.sleep(RIP_GARBAGE)
+                nd2 = self.nodes.get(device_id)
+                if nd2:
+                    idx = next((i for i, rr in enumerate(nd2['table'])
+                                if rr.network == network and rr.prefix == prefix), -1)
+                    if idx >= 0:
+                        nd2['table'].pop(idx)
+                        await self._push_table(device_id)
             nd['expire_tasks'].pop(key, None)
         n['expire_tasks'][key] = _spawn(expire())
 
