@@ -1681,13 +1681,14 @@ class BgpEngine:
             session.state = 'Active'
             return
 
-        session.state = 'OpenSent'
+        # RFC 4271 §8.2.2 FSM: Idle → Connect → OpenSent → OpenConfirm → Established
+        for st in ('Connect', 'OpenSent', 'OpenConfirm'):
+            session.state = st
+            await asyncio.sleep(0.5)
         await vnet.send_to(device_id, {
             'type': 'bgp_log',
             'message': vendor_log.bgp_neighbor_change(vnet.ws_send_callbacks.get(f'_type_{device_id}','cisco'), n['hostname'], session.hostname, session.remote_as, 'Established')
         })
-
-        await asyncio.sleep(1.5)
 
         session.state = 'Established'
         session.uptime = time.time()
@@ -5012,8 +5013,12 @@ class VrrpEngine:
             return
         if g.dead_task:
             g.dead_task.cancel()
+        # RFC 3768 §3.1: Master_Down_Interval = 3 * Advertisement_Interval + Skew_Time
+        #   Skew_Time = (256 - Priority) / 256  （優先度が高いほど早く昇格）
+        skew = (256 - g.priority) / 256.0
+        master_down = 3 * g.hello_interval + skew
         async def dead():
-            await asyncio.sleep(g.dead_interval)
+            await asyncio.sleep(master_down)
             gd = self.vrrp.get(device_id, {}).get(group_id)
             if gd and gd.state == 'Backup':
                 gd.state = 'Master'
