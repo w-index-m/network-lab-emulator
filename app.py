@@ -226,6 +226,7 @@ def _load_config():
             ifaces = {name: {'ip': info['ip'], 'prefix': info.get('prefix', 24)}
                       for name, info in state.interfaces.items() if info.get('ip')}
             icmp_engine.register_device(dev_id, state.hostname, ifaces)
+            snmp_agent.register(dev_id, state.device_type, state.hostname)
         return
 
     try:
@@ -281,6 +282,7 @@ def _load_config():
         ifaces = {name: {'ip': info.get('ip',''), 'prefix': info.get('prefix',24)}
                   for name, info in state.interfaces.items() if info.get('ip')}
         icmp_engine.register_device(dev_id, state.hostname, ifaces)
+        snmp_agent.register(dev_id, state.device_type, state.hostname)
 
     # リンクを復元
     for link in data.get("links", []):
@@ -2729,7 +2731,7 @@ async def handle_snmp(device_id: str, command: str, state: DeviceState):
       snmpwalk -c public 192.168.1.1
     """
     c = command.strip()
-    m = re.match(r'^(snmpget|snmpwalk|snmpbulkwalk)\b(.*)', c, re.I)
+    m = re.match(r'^(snmpget|snmpwalk|snmpbulkwalk|snmpset)\b(.*)', c, re.I)
     if not m:
         return None
     op = m.group(1).lower()
@@ -2770,6 +2772,31 @@ async def handle_snmp(device_id: str, command: str, state: DeviceState):
             secs = int(v) // 100
             return f'.{o} = Timeticks: ({v}) {secs//86400} days, {(secs%86400)//3600:02d}:{(secs%3600)//60:02d}:{secs%60:02d}'
         return f'.{o} = {t}: {v}'
+
+    if op == 'snmpset':
+        # snmpset -c private <host> <oid> <type s|i> <value...>
+        if len(tokens) < 3:
+            return 'Usage: snmpset -c <rw-community> <host> <OID> <type s|i> <value>'
+        oid = snmp_agent.resolve_oid(oid_arg)
+        # tokens: [host, oid, type, value...]
+        rest_tokens = tokens[2:]
+        # type指定(s/i/a/...)があればスキップ
+        if rest_tokens and rest_tokens[0].lower() in ('s', 'i', 'a', 'x', 'o', 't', 'u'):
+            value = ' '.join(rest_tokens[1:])
+        else:
+            value = ' '.join(rest_tokens)
+        value = value.strip('"')
+        # snmpsetは書込なのでRW community既定private
+        set_comm = community if mc else 'private'
+        res = snmp_agent.set(target, oid, value, set_comm)
+        if res == 'AUTH_FAIL':
+            return f'Error: authorizationError (community "{set_comm}" は書込不可)'
+        if res == 'READONLY':
+            return f'Error: notWritable (.{oid} は書込不可のOIDです)'
+        if not res:
+            return f'.{oid} = noSuchObject'
+        # 反映後の値を返す（net-snmp風）
+        return _fmt(*res)
 
     if op == 'snmpget':
         if not oid_arg:

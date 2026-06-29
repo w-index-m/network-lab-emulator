@@ -4077,10 +4077,45 @@ class SnmpAgent:
     def register(self, device_id: str, device_type: str, hostname: str,
                  contact: str = '', location: str = '',
                  community: str = 'public'):
+        # 既存の書込済み値（snmpset）があれば保持
+        prev = self.devices.get(device_id, {})
         self.devices[device_id] = {
             'type': device_type, 'hostname': hostname,
-            'contact': contact, 'location': location, 'community': community,
+            'contact': prev.get('contact') or contact,
+            'location': prev.get('location') or location,
+            'community': community,
+            'rw_community': prev.get('rw_community', 'private'),
+            'overrides': prev.get('overrides', {}),  # snmpsetで書込んだOID値
+            'if_admin': prev.get('if_admin', {}),    # ifAdminStatus上書き
         }
+
+    # ── SNMP SET（RFC3512: SNMPによる機器設定）──
+    WRITABLE = {
+        '1.3.6.1.2.1.1.4.0': 'contact',    # sysContact
+        '1.3.6.1.2.1.1.5.0': 'hostname',   # sysName
+        '1.3.6.1.2.1.1.6.0': 'location',   # sysLocation
+    }
+
+    def set(self, device_id: str, oid: str, value: str,
+            community: str = 'private'):
+        """SNMP SET。書込可能OIDのみ更新。成功時(oid,type,value)、失敗時エラー文字列"""
+        if device_id not in self.devices:
+            return None
+        d = self.devices[device_id]
+        # 書込はRW community（既定private）が必要
+        if community not in (d.get('rw_community', 'private'),):
+            return 'AUTH_FAIL'
+        oid = oid.lstrip('.')
+        if oid in self.WRITABLE:
+            field = self.WRITABLE[oid]
+            d[field] = value
+            return (oid, 'STRING', value)
+        # ifAdminStatus (1.3.6.1.2.1.2.2.1.7.<i>) = 1(up)/2(down)
+        prefix = '1.3.6.1.2.1.2.2.1.7.'
+        if oid.startswith(prefix) and oid[len(prefix):].isdigit():
+            d.setdefault('if_admin', {})[int(oid[len(prefix):])] = value
+            return (oid, 'INTEGER', value)
+        return 'READONLY'
 
     def _uptime_ticks(self) -> int:
         # sysUpTime は 1/100秒単位（TimeTicks）
@@ -4113,7 +4148,8 @@ class SnmpAgent:
             mib.append((f'1.3.6.1.2.1.2.2.1.3.{i}', 'INTEGER', '6'))               # ifType ethernetCsmacd
             mib.append((f'1.3.6.1.2.1.2.2.1.5.{i}', 'Gauge32', '1000000000'))      # ifSpeed 1G
             status = '1' if ii.get('ip') else '2'                                  # up/down
-            mib.append((f'1.3.6.1.2.1.2.2.1.7.{i}', 'INTEGER', '1'))               # ifAdminStatus
+            admin = d.get('if_admin', {}).get(i, '1')                              # snmpset上書き反映
+            mib.append((f'1.3.6.1.2.1.2.2.1.7.{i}', 'INTEGER', str(admin)))        # ifAdminStatus
             mib.append((f'1.3.6.1.2.1.2.2.1.8.{i}', 'INTEGER', status))            # ifOperStatus
             # ifInOctets / ifOutOctets（データプレーンカウンタ由来）
             c = dp_engine.get_counter(device_id, ifn)
