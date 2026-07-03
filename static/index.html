@@ -2,8 +2,16 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>ネットワークラボ エミュレーター</title>
+<!-- PWA / ホーム画面追加 -->
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#0d2040">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NetLab">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -799,7 +807,7 @@ function launchLab() {
 
   // グリッド列数を自動調整
   const count = selected.length;
-  const cols = count <= 1 ? 1 : count <= 2 ? 2 : count <= 4 ? 2 : 3;
+  const cols = _gridCols(count);
   document.getElementById('terminal-grid').style.gridTemplateColumns = `repeat(${cols},1fr)`;
 
   // ランチャーで設定したリンクをLINKSに反映
@@ -922,7 +930,7 @@ function restoreLabState() {
 
   // グリッド列数を設定
   const count = Object.keys(DEVICES).length;
-  const cols = count <= 1 ? 1 : count <= 2 ? 2 : count <= 4 ? 2 : 3;
+  const cols = _gridCols(count);
   document.getElementById('terminal-grid').style.gridTemplateColumns = `repeat(${cols},1fr)`;
 
   // バックエンドにデバイス登録 & リンク同期（認証済みのときだけ）
@@ -1546,7 +1554,61 @@ function initCanvas(){
   CVS.cvs.addEventListener('contextmenu',onCR);
   CVS.cvs.addEventListener('dblclick', onDC);
   CVS.cvs.addEventListener('mouseleave',()=>{const h=document.getElementById('topo-hint');if(h)h.style.display='none';});
+  // ── タッチ操作（タブレット）: 1本指=移動/パン、2本指=ピンチズーム ──
+  CVS.cvs.addEventListener('touchstart', onTS, {passive:false});
+  CVS.cvs.addEventListener('touchmove',  onTM, {passive:false});
+  CVS.cvs.addEventListener('touchend',   onTE, {passive:false});
   document.addEventListener('keydown', onKey);
+}
+
+// タッチ状態
+CVS.touch = { mode:null, lastDist:0, lastX:0, lastY:0 };
+function _touchXY(t){const r=CVS.cvs.getBoundingClientRect();return {x:t.clientX-r.left, y:t.clientY-r.top};}
+function onTS(e){
+  if(e.touches.length===1){
+    e.preventDefault();
+    const p=_touchXY(e.touches[0]);
+    // 1本指: マウスダウン相当（ノード掴み or パン）
+    onMD({clientX:e.touches[0].clientX,clientY:e.touches[0].clientY,button:0,preventDefault(){}});
+    CVS.touch.mode='single'; CVS.touch.lastX=p.x; CVS.touch.lastY=p.y;
+  } else if(e.touches.length===2){
+    e.preventDefault();
+    CVS.touch.mode='pinch';
+    const a=_touchXY(e.touches[0]),b=_touchXY(e.touches[1]);
+    CVS.touch.lastDist=Math.hypot(a.x-b.x,a.y-b.y);
+  }
+}
+function onTM(e){
+  if(CVS.touch.mode==='single' && e.touches.length===1){
+    e.preventDefault();
+    onMM({clientX:e.touches[0].clientX,clientY:e.touches[0].clientY,preventDefault(){}});
+  } else if(CVS.touch.mode==='pinch' && e.touches.length===2){
+    e.preventDefault();
+    const a=_touchXY(e.touches[0]),b=_touchXY(e.touches[1]);
+    const dist=Math.hypot(a.x-b.x,a.y-b.y);
+    const cx=(a.x+b.x)/2, cy=(a.y+b.y)/2;
+    if(CVS.touch.lastDist>0){
+      const f=dist/CVS.touch.lastDist;
+      const ns=Math.max(0.2,Math.min(4,CVS.scale*f));
+      CVS.offsetX=cx-(cx-CVS.offsetX)*(ns/CVS.scale);
+      CVS.offsetY=cy-(cy-CVS.offsetY)*(ns/CVS.scale);
+      CVS.scale=ns; drawCanvas();
+    }
+    CVS.touch.lastDist=dist;
+  }
+}
+function onTE(e){
+  if(CVS.touch.mode==='single'){ onMU({preventDefault(){}}); }
+  CVS.touch.mode=null; CVS.touch.lastDist=0;
+}
+
+// タブレット横向きは装置3台以上でも2列を基本にする（詰まり防止）
+function _gridCols(count){
+  const tablet = window.innerWidth >= 601 && window.innerWidth <= 1200;
+  if(count <= 1) return 1;
+  if(count <= 2) return 2;
+  if(tablet) return 2;          // タブレットは最大2列
+  return count <= 4 ? 2 : 3;
 }
 function s2w(sx,sy){return{x:(sx-CVS.offsetX)/CVS.scale,y:(sy-CVS.offsetY)/CVS.scale};}
 function hitNode(wx,wy){
@@ -2213,7 +2275,7 @@ async function _importMultipleConfigs(files){
       body:JSON.stringify({id,type,hostname})});
   }
   // グリッド再構築
-  const cols=created.length<=1?1:created.length<=4?2:3;
+  const cols=_gridCols(created.length);
   document.getElementById('terminal-grid').style.gridTemplateColumns=`repeat(${cols},1fr)`;
   initTerminals();
   saveLabState();
@@ -2659,6 +2721,13 @@ async function _initSession() {
   }
   showLoginScreen('', false);
   return false;
+}
+
+// PWA: Service Worker 登録（オフラインでUIシェルを提供）
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function(){
+    navigator.serviceWorker.register('/static/sw.js').catch(function(){});
+  });
 }
 
 document.addEventListener('DOMContentLoaded', async function() {
