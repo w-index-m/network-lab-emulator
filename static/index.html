@@ -201,6 +201,44 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
   /* タブ操作しやすくする */
   .tab-btn{padding:5px 10px;font-size:11px}
 }
+
+/* ══════ タブレット横向き（iPad mini 等 601〜1200px）最適化 ══════ */
+@media (min-width: 601px) and (max-width: 1200px) {
+  /* メニュー・タイトルのタッチ領域を拡大 */
+  .mitem{padding:5px 12px;font-size:12px}
+  #titlebar{padding:5px 10px}
+  #titlebar .title{font-size:12px}
+  #session-timer{font-size:11px}
+  .tab{padding:6px 16px;font-size:12px}
+
+  /* ターミナル: 読みやすいフォント・入力しやすい行高 */
+  .tw-buf{font-size:13px;line-height:1.45}
+  .tw-inp{font-size:13px}
+  .tw-title{font-size:12px}
+  .tw-title .tbtn,.tw-title span[onclick]{padding:3px 8px;font-size:11px}
+
+  /* 左パネル（トポロジー/コンフィグ）は横幅を抑えてキャンバスを広く */
+  .topo-left{width:240px}
+  .cfg-left{width:260px}
+
+  /* ボタン類のタッチターゲット拡大（44px目安） */
+  .lab-btn{padding:8px 12px;font-size:12px;min-height:36px}
+  .launcher-add-btn{padding:6px 12px;font-size:11px}
+  .dev-sel-row{min-height:40px}
+  .dev-sel-row input[type=checkbox]{width:18px;height:18px}
+
+  /* モーダルの入力・ボタンを大きめに */
+  #flow-text{font-size:13px}
+  #lif-a-input,#lif-b-input,#pcip-ip,#pcip-prefix,#pcip-gw{padding:7px 9px;font-size:13px}
+
+  /* リンク一覧の編集/削除アイコンをタップしやすく */
+  .lr-edit,.lr-del{padding:2px 8px;font-size:13px}
+}
+
+/* 横向き（landscape）タブレット時: 端末グリッドは2列を基本に見やすく */
+@media (min-width: 601px) and (max-width: 1200px) and (orientation: landscape) {
+  #terminal-grid{gap:4px;padding:4px}
+}
 </style>
 </head>
 <body>
