@@ -104,6 +104,45 @@ class VirtualNetwork:
                 'message': f'%SPANTREE-2-LOOPGUARD_BLOCK: Loop guard blocking port {port2} on vlan 1'
             })
 
+    async def _notify_broadcast_storm(self, loop_nodes: set):
+        """
+        ループ検出時のブロードキャストストーム擬似再現。
+        ・ループ内スイッチの受信カウンタを急増（増殖するブロードキャスト）
+        ・ストーム検知ログを出力
+        ・storm-control設定ポートは err-disable（実機準拠）
+        """
+        try:
+            from engine.protocols import dp_engine as _dp
+        except Exception:
+            _dp = None
+        for dev_id in loop_nodes:
+            dtype = self.device_types.get(dev_id, '')
+            if dtype not in self._SWITCH_TYPES:
+                continue
+            nbrs = list(self.links.get(dev_id, set()) & loop_nodes - {dev_id})
+            for peer in nbrs:
+                port = self.interface_links.get(dev_id, {}).get(peer, peer)
+                # ブロードキャストフレーム増殖: 入力カウンタを大量に加算
+                if _dp:
+                    _dp.bump(dev_id, port, 'in', pkts=100000, size=64)
+                # ストーム検知ログ（レートが閾値超過）
+                await self.send_to(dev_id, {
+                    'type': 'stp_log',
+                    'message': (f'%STORM_CONTROL-3-FILTERED: A Broadcast storm detected '
+                                f'on {port}. A packet filter action has been applied on the interface.')
+                })
+                await self.send_to(dev_id, {
+                    'type': 'stp_log',
+                    'message': (f'%PM-4-ERR_DISABLE: storm-control error detected on {port}, '
+                                f'putting {port} in err-disable state')
+                })
+
+    def _notify_loop_events(self, a, b, iface_a, iface_b, loop_path):
+        """ループ検出時: MACフラップ + ブロードキャストストームを擬似再現"""
+        loop_nodes = set(loop_path) | {a, b}
+        _spawn(self._notify_mac_flap(a, b, iface_a, iface_b, loop_path))
+        _spawn(self._notify_broadcast_storm(loop_nodes))
+
     def add_link(self, a: str, b: str, iface_a: str = None, iface_b: str = None):
         # リンク追加前にループ（既存パス）を検出
         loop_path = self._has_path(a, b) if b not in self.links.get(a, set()) else []
@@ -114,7 +153,7 @@ class VirtualNetwork:
         if iface_b:
             self.interface_links[b][a] = iface_b
         if loop_path:
-            _spawn(self._notify_mac_flap(a, b, iface_a or a, iface_b or b, loop_path))
+            self._notify_loop_events(a, b, iface_a or a, iface_b or b, loop_path)
 
     def interface_down(self, device_id: str, iface: str):
         """インターフェースをshutdown状態にする（broadcast_to_neighborsがスキップする）"""
