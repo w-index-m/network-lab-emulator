@@ -181,12 +181,95 @@ def scenario_rip_chain():
     check("RP3->RP1 LAN ping 成功", "Success rate is 100" in p31, p31)
 
 
+def scenario_bgp_aws():
+    print("== シナリオ4: 擬似AWS eBGP (cgw AS65000 <-> aws VGW AS64512) ==")
+    for d in ("cgw", "aws"):
+        device(d, "cisco")
+    link("cgw", "aws", "GigabitEthernet0/0/1", "GigabitEthernet0/0/1")
+    conf("cgw",
+         "interface GigabitEthernet0/0/1", "ip address 169.254.1.1 255.255.255.252", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.100.1 255.255.255.0", "no shutdown", "exit",
+         "router bgp 65000", "neighbor 169.254.1.2 remote-as 64512",
+         "network 192.168.100.0 mask 255.255.255.0", "exit")
+    conf("aws",
+         "interface GigabitEthernet0/0/1", "ip address 169.254.1.2 255.255.255.252", "no shutdown", "exit",
+         "interface Loopback0", "ip address 10.100.0.1 255.255.0.0", "no shutdown", "exit",
+         "router bgp 64512", "neighbor 169.254.1.1 remote-as 65000",
+         "network 10.100.0.0 mask 255.255.0.0", "exit")
+    time.sleep(5)
+    cgw = cli("cgw", "show ip bgp")
+    aws = cli("aws", "show ip bgp")
+    summ = cli("cgw", "show ip bgp summary")
+    # CGWはAWSのVPC 10.100.0.0/16 を AS64512 経由で学習
+    check("CGWがVPC 10.100.0.0/16 を学習(マスク維持)", "10.100.0.0/16" in cgw, cgw)
+    check("学習経路にAS-path 64512 が付く", "64512" in cgw, cgw)
+    check("AWSが顧客 192.168.100.0/24 を学習", "192.168.100.0/24" in aws, aws)
+    check("BGPネイバーが確立(summary)", "64512" in summ, summ)
+
+
+def scenario_rip_distribute_list():
+    print("== シナリオ5: RIP + distribute-list (prefix-list / 標準ACL) ==")
+    # dl1-dl2-dl3。dl2がdl3のLANを2種のdistribute-listで抑制
+    for d in ("dla", "dlb", "dlc"):
+        device(d, "cisco")
+    link("dla", "dlb", "GigabitEthernet0/0/1", "GigabitEthernet0/0/1")
+    link("dlb", "dlc", "GigabitEthernet0/0/0", "GigabitEthernet0/0/0")
+    conf("dla",
+         "interface GigabitEthernet0/0/1", "ip address 10.5.12.1 255.255.255.0", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.81.1 255.255.255.0", "no shutdown", "exit",
+         "router rip", "version 2", "network 10.0.0.0", "network 192.168.81.0", "exit")
+    conf("dlc",
+         "interface GigabitEthernet0/0/0", "ip address 10.5.23.3 255.255.255.0", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.83.1 255.255.255.0", "no shutdown", "exit",
+         "router rip", "version 2", "network 10.0.0.0", "network 192.168.83.0", "exit")
+    # (a) prefix-list ベース
+    conf("dlb",
+         "interface GigabitEthernet0/0/1", "ip address 10.5.12.2 255.255.255.0", "no shutdown", "exit",
+         "interface GigabitEthernet0/0/0", "ip address 10.5.23.2 255.255.255.0", "no shutdown", "exit",
+         "ip prefix-list BLK83 seq 5 deny 192.168.83.0/24",
+         "ip prefix-list BLK83 seq 10 permit 0.0.0.0/0 le 32",
+         "router rip", "version 2", "network 10.0.0.0", "distribute-list BLK83 out", "exit")
+    time.sleep(7)
+    r_pl = cli("dla", "show ip route rip")
+    dlb_has = cli("dlb", "show ip route rip")
+    check("DLB自身は192.168.83.0を保持", "192.168.83.0" in dlb_has, dlb_has)
+    check("prefix-list distribute-listでDLAに192.168.83.0が来ない",
+          "192.168.83.0" not in r_pl, r_pl)
+    check("抑制対象外の10.5.23.0はDLAに届く", "10.5.23.0" in r_pl, r_pl)
+
+    # (b) 標準ACL番号ベース: 別トポロジーで検証
+    for d in ("ala", "alb", "alc"):
+        device(d, "cisco")
+    link("ala", "alb", "GigabitEthernet0/0/1", "GigabitEthernet0/0/1")
+    link("alb", "alc", "GigabitEthernet0/0/0", "GigabitEthernet0/0/0")
+    conf("ala",
+         "interface GigabitEthernet0/0/1", "ip address 10.6.12.1 255.255.255.0", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.91.1 255.255.255.0", "no shutdown", "exit",
+         "router rip", "version 2", "network 10.0.0.0", "network 192.168.91.0", "exit")
+    conf("alc",
+         "interface GigabitEthernet0/0/0", "ip address 10.6.23.3 255.255.255.0", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.93.1 255.255.255.0", "no shutdown", "exit",
+         "router rip", "version 2", "network 10.0.0.0", "network 192.168.93.0", "exit")
+    conf("alb",
+         "interface GigabitEthernet0/0/1", "ip address 10.6.12.2 255.255.255.0", "no shutdown", "exit",
+         "interface GigabitEthernet0/0/0", "ip address 10.6.23.2 255.255.255.0", "no shutdown", "exit",
+         "access-list 20 deny 192.168.93.0 0.0.0.255", "access-list 20 permit any",
+         "router rip", "version 2", "network 10.0.0.0", "distribute-list 20 out", "exit")
+    time.sleep(7)
+    r_acl = cli("ala", "show ip route rip")
+    check("標準ACL distribute-listでALAに192.168.93.0が来ない",
+          "192.168.93.0" not in r_acl, r_acl)
+    check("抑制対象外の10.6.23.0はALAに届く", "10.6.23.0" in r_acl, r_acl)
+
+
 def main():
     print(f"リグレッション実行 → {BASE}\n")
     scenario_ospf_chain()
     scenario_rip_chain()
     scenario_stp_triangle()
     scenario_etherchannel()
+    scenario_bgp_aws()
+    scenario_rip_distribute_list()
     print()
     if _fails:
         print(f"結果: FAIL ({len(_fails)}件) -> {_fails}")

@@ -1255,6 +1255,18 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         else:  # any
             src = 'any'
         ipfilter_engine.add_rule(device_id, num, action, 'ip', src, 'any')
+        # 標準ACLを経路フィルタ(filter_engine)にもprefix-listとして登録し、
+        # distribute-list <ACL番号> in/out で使えるようにする（Cisco実機準拠）。
+        # 標準ACLは経路のネットワークアドレスで照合するため le=32 とし、
+        # プレフィックス長に依らずネットワーク部一致で判定させる。
+        if std_acl.group(3):        # host X
+            _plnet, _plpfx = std_acl.group(4), 32
+        elif std_acl.group(5):      # X wildcard
+            _cidr = _wildcard_to_cidr(std_acl.group(5), std_acl.group(6))
+            _plnet, _plpfx = _cidr.split('/')[0], int(_cidr.split('/')[1])
+        else:                       # any
+            _plnet, _plpfx = '0.0.0.0', 0
+        filter_engine.add_prefix_list(device_id, num, action, _plnet, _plpfx, le=32)
         buf = proto_log_buffer.setdefault(device_id, [])
         buf.append({'type': 'acl_log',
                     'message': f'access-list {num}: {action} {src}'})
@@ -1744,11 +1756,20 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         await bgp_engine.advertise_network(device_id, net)
         return
     # "network 192.168.1.0 mask 255.255.255.0" (Cisco IOS形式)
-    bgp_net = re.match(r'^network\s+([\d.]+)(?:\s+mask\s+[\d.]+)?', c)
+    bgp_net = re.match(r'^network\s+([\d.]+)(?:\s+mask\s+([\d.]+))?', c)
     if bgp_net and getattr(state, '_routing_mode', '') == 'bgp':
         net = bgp_net.group(1)
+        mask = bgp_net.group(2)
         if '/' not in net:
-            net += '/24'
+            if mask:
+                # サブネットマスク（255.255.0.0等）をプレフィックス長へ変換
+                try:
+                    pfx = sum(bin(int(o)).count('1') for o in mask.split('.'))
+                except Exception:
+                    pfx = 24
+                net += f'/{pfx}'
+            else:
+                net += '/24'
         await bgp_engine.advertise_network(device_id, net)
         return
 
