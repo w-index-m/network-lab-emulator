@@ -1707,6 +1707,13 @@ class BgpSession:
     prefixes_received: int = 0
     prefixes_sent: int = 0
     keepalive_task: Optional[Any] = None
+    # AWS Direct Connect / VPN 向け拡張
+    password: str = ''            # MD5認証パスワード（TCP MD5 / RFC2385）
+    route_map_in: str = ''        # インバウンド route-map 名
+    route_map_out: str = ''       # アウトバウンド route-map 名
+    bfd: bool = False             # fall-over bfd 有効
+    bfd_state: str = 'Down'       # BFDセッション状態 Up/Down
+    neighbor_ip: str = ''         # 設定上のネイバーIP（表示用）
 
 @dataclass
 class BgpRoute:
@@ -1736,8 +1743,55 @@ class BgpEngine:
                 'loc_rib': [],     # ベストパス
                 'networks': [],    # 広告ネットワーク
                 'keepalive_interval': 30,
+                'route_maps': {},  # name -> {'prepend':[as..],'local_pref':int,'med':int}
+                'bfd': {'interval': 300, 'min_rx': 300, 'multiplier': 3},
             }
         return self.nodes[device_id]
+
+    # ── AWS DX/VPN 向け設定API ───────────────────────────
+    def set_neighbor_password(self, device_id: str, neighbor_id: str, password: str):
+        s = self._node(device_id)['sessions'].get(neighbor_id)
+        if s:
+            s.password = password
+
+    def set_neighbor_route_map(self, device_id: str, neighbor_id: str,
+                               name: str, direction: str):
+        s = self._node(device_id)['sessions'].get(neighbor_id)
+        if s:
+            if direction == 'in':
+                s.route_map_in = name
+            else:
+                s.route_map_out = name
+
+    def set_neighbor_bfd(self, device_id: str, neighbor_id: str, enabled: bool):
+        s = self._node(device_id)['sessions'].get(neighbor_id)
+        if s:
+            s.bfd = enabled
+
+    def add_route_map(self, device_id: str, name: str, prepend=None,
+                      local_pref=None, med=None):
+        n = self._node(device_id)
+        rm = n['route_maps'].setdefault(name, {'prepend': [], 'local_pref': None, 'med': None})
+        if prepend:
+            rm['prepend'] = list(prepend)
+        if local_pref is not None:
+            rm['local_pref'] = local_pref
+        if med is not None:
+            rm['med'] = med
+
+    def _apply_route_map(self, device_id: str, rm_name: str, route: 'BgpRoute'):
+        """route-mapのset句を経路に適用（as-path prepend / local-preference / metric）"""
+        n = self.nodes.get(device_id, {})
+        rm = n.get('route_maps', {}).get(rm_name)
+        if not rm:
+            return route
+        if rm.get('prepend'):
+            route.as_path = list(rm['prepend']) + route.as_path
+        if rm.get('local_pref') is not None:
+            route.local_pref = rm['local_pref']
+        if rm.get('med') is not None:
+            route.med = rm['med']
+        return route
 
     async def start(self, device_id: str, hostname: str, local_as: int):
         n = self._node(device_id)
@@ -1751,18 +1805,34 @@ class BgpEngine:
         })
 
     async def add_neighbor(self, device_id: str, neighbor_id: str,
-                            neighbor_hostname: str, remote_as: int):
+                            neighbor_hostname: str, remote_as: int,
+                            neighbor_ip: str = ''):
         n = self._node(device_id)
         if not n['enabled']:
             return
-        session = BgpSession(neighbor_id=neighbor_id, hostname=neighbor_hostname,
-                              remote_as=int(remote_as))
+        # 既存セッションがあれば設定（password/route-map/bfd）を引き継ぐ
+        session = n['sessions'].get(neighbor_id)
+        if session:
+            session.remote_as = int(remote_as)
+            session.hostname = neighbor_hostname
+            if neighbor_ip:
+                session.neighbor_ip = neighbor_ip
+        else:
+            session = BgpSession(neighbor_id=neighbor_id, hostname=neighbor_hostname,
+                                  remote_as=int(remote_as), neighbor_ip=neighbor_ip)
         n['sessions'][neighbor_id] = session
         await vnet.send_to(device_id, {
             'type': 'bgp_log',
-            'message': vendor_log.bgp_neighbor_change(vnet.ws_send_callbacks.get(f'_type_{device_id}','cisco'), n['hostname'], neighbor_ip if 'neighbor_ip' in dir() else neighbor_hostname, remote_as, 'Idle')
+            'message': vendor_log.bgp_neighbor_change(vnet.ws_send_callbacks.get(f'_type_{device_id}','cisco'), n['hostname'], neighbor_ip or neighbor_hostname, remote_as, 'Idle')
         })
-        await self._open_session(device_id, neighbor_id)
+        # セッション確立を少し遅延させ、後続の neighbor password / route-map /
+        # fall-over bfd 等の属性が適用されてから開くようにする（設定順序非依存）。
+        async def _delayed_open():
+            await asyncio.sleep(1.0)
+            s = self.nodes.get(device_id, {}).get('sessions', {}).get(neighbor_id)
+            if s and s.state not in ('Established',):
+                await self._open_session(device_id, neighbor_id)
+        _spawn(_delayed_open())
 
     async def _open_session(self, device_id: str, neighbor_id: str):
         n = self.nodes.get(device_id)
@@ -1774,10 +1844,38 @@ class BgpEngine:
             session.state = 'Active'
             return
 
+        # ── TCP MD5認証（RFC2385）チェック ──
+        # 両端のパスワードが一致しなければセッションは確立しない（Cisco実機準拠）。
+        nbr_session_pre = nbr_node['sessions'].get(device_id)
+        my_pw = session.password
+        peer_pw = nbr_session_pre.password if nbr_session_pre else ''
+        if my_pw != peer_pw:
+            session.state = 'Active'   # OpenSentで止まりリトライ状態
+            if nbr_session_pre:
+                nbr_session_pre.state = 'Active'
+            await vnet.send_to(device_id, {
+                'type': 'bgp_log',
+                'message': (f'%TCP-6-BADAUTH: Invalid MD5 digest from '
+                            f'{session.neighbor_ip or session.hostname} to neighbor '
+                            f'(AS{session.remote_as}) — 認証不一致でセッション確立不可')
+            })
+            return
+
         # RFC 4271 §8.2.2 FSM: Idle → Connect → OpenSent → OpenConfirm → Established
         for st in ('Connect', 'OpenSent', 'OpenConfirm'):
             session.state = st
             await asyncio.sleep(0.5)
+
+        # ── BFDセッション確立（双方で fall-over bfd 有効時）──
+        nbr_session_bfd = nbr_node['sessions'].get(device_id)
+        if session.bfd and nbr_session_bfd and nbr_session_bfd.bfd:
+            session.bfd_state = 'Up'
+            nbr_session_bfd.bfd_state = 'Up'
+            await vnet.send_to(device_id, {
+                'type': 'bgp_log',
+                'message': (f'%BFD-6-SESSION: BFD session to {session.neighbor_ip or session.hostname} '
+                            f'state UP (interval {n["bfd"]["interval"]}ms multiplier {n["bfd"]["multiplier"]})')
+            })
         await vnet.send_to(device_id, {
             'type': 'bgp_log',
             'message': vendor_log.bgp_neighbor_change(vnet.ws_send_callbacks.get(f'_type_{device_id}','cisco'), n['hostname'], session.hostname, session.remote_as, 'Established')
@@ -1842,19 +1940,30 @@ class BgpEngine:
         if not routes:
             return
 
+        nbr_session = nbr_node['sessions'].get(device_id)
         for r in routes:
-            key = f'{r.prefix}/{r.prefix_len}'
+            # アウトバウンド route-map（送信側）: AS-path prepend / MED 等
+            if session.route_map_out:
+                r = self._apply_route_map(device_id, session.route_map_out, r)
+            new_r = BgpRoute(prefix=r.prefix, prefix_len=r.prefix_len,
+                             next_hop=device_id, local_pref=100, med=r.med,
+                             as_path=r.as_path.copy(), origin=r.origin,
+                             learned_from=device_id,
+                             learned_from_hostname=n['hostname'])
+            # インバウンド route-map（受信側）: local-preference / prepend 等
+            if nbr_session and nbr_session.route_map_in:
+                new_r = self._apply_route_map(neighbor_id, nbr_session.route_map_in, new_r)
             existing = next((x for x in nbr_node['rib_in']
                              if x.prefix == r.prefix and x.prefix_len == r.prefix_len
                              and x.learned_from == device_id), None)
-            if not existing:
-                new_r = BgpRoute(prefix=r.prefix, prefix_len=r.prefix_len,
-                                 next_hop=device_id, local_pref=100, med=0,
-                                 as_path=r.as_path.copy(), origin=r.origin,
-                                 learned_from=device_id,
-                                 learned_from_hostname=n['hostname'])
+            if existing:
+                # 属性を更新（prepend/local-pref変更を反映）
+                existing.as_path = new_r.as_path
+                existing.local_pref = new_r.local_pref
+                existing.med = new_r.med
+            else:
                 nbr_node['rib_in'].append(new_r)
-                nbr_node['prefixes_received'] = len(nbr_node['rib_in'])
+            nbr_node['prefixes_received'] = len(nbr_node['rib_in'])
 
         session.prefixes_sent += len(routes)
         await vnet.send_to(device_id, {
@@ -1873,21 +1982,23 @@ class BgpEngine:
         n = self.nodes.get(device_id)
         if not n:
             return
+        def _better(r, cur):
+            # BGPベストパス選択（簡易・Cisco順序準拠）:
+            # 1) local-preference 大, 2) AS-path 短, 3) MED 小
+            if r.local_pref != cur.local_pref:
+                return r.local_pref > cur.local_pref
+            if len(r.as_path) != len(cur.as_path):
+                return len(r.as_path) < len(cur.as_path)
+            return r.med < cur.med
         best = {}
         for r in n['rib_in']:
             key = f'{r.prefix}/{r.prefix_len}'
-            if key not in best:
+            if key not in best or _better(r, best[key]):
                 best[key] = r
-            else:
-                existing = best[key]
-                if r.local_pref > existing.local_pref:
-                    best[key] = r
-                elif r.local_pref == existing.local_pref and \
-                        len(r.as_path) < len(existing.as_path):
-                    best[key] = r
         n['loc_rib'] = [{'prefix': r.prefix, 'prefix_len': r.prefix_len,
                           'next_hop': r.next_hop, 'local_pref': r.local_pref,
                           'med': r.med, 'as_path': r.as_path, 'origin': r.origin,
+                          'learned_from': r.learned_from,
                           'learned_from_hostname': r.learned_from_hostname}
                          for r in best.values()]
 
@@ -1898,6 +2009,71 @@ class BgpEngine:
         for neighbor_id, session in n['sessions'].items():
             if session.state == 'Established':
                 await self._send_update(device_id, neighbor_id)
+
+    async def session_down(self, device_id: str, neighbor_id: str, reason: str = 'interface down'):
+        """
+        BGPセッションを切断（インターフェースダウン / BFD検知）。
+        学習経路を撤去し、ベストパスを再計算 → 冗長構成では別ピア経由へフェイルオーバー。
+        両端で対称に処理する。
+        """
+        for a, b in ((device_id, neighbor_id), (neighbor_id, device_id)):
+            n = self.nodes.get(a)
+            if not n:
+                continue
+            s = n['sessions'].get(b)
+            if not s or s.state != 'Established':
+                continue
+            bfd_note = ''
+            if s.bfd and s.bfd_state == 'Up':
+                s.bfd_state = 'Down'
+                bfd_note = ' (BFD: 高速障害検知でホールドタイマー待たずにダウン)'
+            s.state = 'Idle'
+            s.uptime = None
+            if s.keepalive_task:
+                s.keepalive_task.cancel()
+            # このネイバーから学習した経路を撤去
+            before = len(n['rib_in'])
+            n['rib_in'] = [r for r in n['rib_in'] if r.learned_from != b]
+            self._recalc_best_path(a)
+            await vnet.send_to(a, {
+                'type': 'bgp_log',
+                'message': (f'%BGP-5-ADJCHANGE: neighbor {s.neighbor_ip or s.hostname} '
+                            f'Down — {reason}{bfd_note} '
+                            f'(撤去prefix {before - len(n["rib_in"])})')
+            })
+            await vnet.send_to(a, {'type': 'bgp_routes', 'routes': n['loc_rib']})
+
+    async def try_reestablish(self, device_id: str, neighbor_id: str):
+        """インターフェース復旧時にセッションを再確立"""
+        n = self.nodes.get(device_id)
+        if not n:
+            return
+        s = n['sessions'].get(neighbor_id)
+        if s and s.state != 'Established':
+            await self._open_session(device_id, neighbor_id)
+
+    def format_show_bfd_neighbors(self, device_id: str) -> str:
+        n = self.nodes.get(device_id)
+        if not n or not n.get('enabled'):
+            return '% BGP/BFD is not configured.'
+        bfd_sessions = [(nid, s) for nid, s in n['sessions'].items() if s.bfd]
+        if not bfd_sessions:
+            return 'No BFD sessions configured.'
+        cfg = n['bfd']
+        lines = [
+            'NeighAddr                              LD/RD    RH/RS     State     Int',
+            '--------------------------------------------------------------------------',
+        ]
+        for i, (nid, s) in enumerate(bfd_sessions, 1):
+            addr = s.neighbor_ip or s.hostname
+            rh = 'Up' if s.bfd_state == 'Up' else 'Down'
+            lines.append(
+                f'{addr:<38} {i}/{i}      {rh:<9} {s.bfd_state:<9} Gi0/0/1'
+            )
+        lines.append('')
+        lines.append(f'BFD parameters: interval {cfg["interval"]}ms '
+                     f'min_rx {cfg["min_rx"]}ms multiplier {cfg["multiplier"]}')
+        return '\n'.join(lines)
 
     def format_show_bgp_summary(self, device_id: str) -> str:
         n = self.nodes.get(device_id)
@@ -1919,8 +2095,9 @@ class BgpEngine:
             pfx_count = sum(1 for r in n['rib_in'] if r.learned_from == nid)
             state_or_pfx = str(pfx_count) \
                 if session.state == 'Established' else session.state
+            addr = session.neighbor_ip or ('192.168.1.' + str(nid))
             lines.append(
-                f'{"192.168.1."+str(nid):<16}4{str(session.remote_as):>6}'
+                f'{addr:<16}4{str(session.remote_as):>6}'
                 f'{random.randint(10,200):>8}{random.randint(10,200):>8}'
                 f'{1:>9}{0:>5}{0:>5} {uptime:<9} {state_or_pfx}'
             )
@@ -1937,20 +2114,36 @@ class BgpEngine:
             '',
             '   Network          Next Hop            Metric LocPrf Weight Path',
         ]
+        def _nh_ip(learned_from):
+            """learned_from(デバイスID)を設定上のネイバーIPへ変換"""
+            s = n['sessions'].get(learned_from)
+            if s and s.neighbor_ip:
+                return s.neighbor_ip
+            return '0.0.0.0'
+        # ベストパス（loc_rib）
         for r in n['loc_rib']:
+            key = f'{r["prefix"]}/{r["prefix_len"]}'
+            lf = r.get('learned_from', '')
+            nh = _nh_ip(lf) if lf else '0.0.0.0'
+            # 自分が起点(local origin)なら weight 32768, 学習経路は 0
+            weight = 32768 if not lf else 0
             lines.append(
-                f'*> {r["prefix"]+"/"+(str(r["prefix_len"])):<18} {"0.0.0.0":<20} '
-                f'{str(r["med"]):>6} {str(r["local_pref"]):>6} {32768:>6} '
+                f'*> {key:<18} {nh:<20} '
+                f'{str(r["med"]):>6} {str(r["local_pref"]):>6} {weight:>6} '
                 f'{" ".join(str(a) for a in r["as_path"])} {r["origin"]}'
             )
+        # ベスト以外の候補（冗長経路）も表示: 同一prefixで非ベストのもの
         for r in n['rib_in']:
             key = f'{r.prefix}/{r.prefix_len}'
-            if not any(f'{x["prefix"]}/{x["prefix_len"]}' == key for x in n['loc_rib']):
-                lines.append(
-                    f'*  {key:<18} {"192.168.1."+str(r.learned_from):<20} '
-                    f'{r.med:>6} {r.local_pref:>6} {0:>6} '
-                    f'{" ".join(str(a) for a in r.as_path)} {r.origin}'
-                )
+            best = next((x for x in n['loc_rib']
+                         if f'{x["prefix"]}/{x["prefix_len"]}' == key), None)
+            if best and best.get('learned_from') == r.learned_from:
+                continue  # これはベスト自身
+            lines.append(
+                f'*  {key:<18} {_nh_ip(r.learned_from):<20} '
+                f'{r.med:>6} {r.local_pref:>6} {0:>6} '
+                f'{" ".join(str(a) for a in r.as_path)} {r.origin}'
+            )
         return '\n'.join(lines)
 
 
