@@ -149,9 +149,42 @@ def scenario_etherchannel():
     check("Gi1/0/2復旧で両メンバーP", "Gi1/0/1(P)" in d4 and "Gi1/0/2(P)" in d4, d4)
 
 
+def scenario_rip_chain():
+    print("== シナリオ1b: 3台Cisco RIP チェーン (rp1-rp2-rp3, 広域イーサ中継) ==")
+    for d in ("rp1", "rp2", "rp3"):
+        device(d, "cisco")
+    link("rp1", "rp2", "GigabitEthernet0/0/1", "GigabitEthernet0/0/1")
+    link("rp2", "rp3", "GigabitEthernet0/0/0", "GigabitEthernet0/0/0")
+    conf("rp1",
+         "interface GigabitEthernet0/0/1", "ip address 10.2.12.1 255.255.255.0", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.11.1 255.255.255.0", "no shutdown", "exit",
+         "router rip", "version 2", "network 10.0.0.0", "network 192.168.11.0", "network 192.168.12.0", "network 192.168.13.0", "exit")
+    conf("rp2",
+         "interface GigabitEthernet0/0/1", "ip address 10.2.12.2 255.255.255.0", "no shutdown", "exit",
+         "interface GigabitEthernet0/0/0", "ip address 10.2.23.2 255.255.255.0", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.12.1 255.255.255.0", "no shutdown", "exit",
+         "router rip", "version 2", "network 10.0.0.0", "network 192.168.11.0", "network 192.168.12.0", "network 192.168.13.0", "exit")
+    conf("rp3",
+         "interface GigabitEthernet0/0/0", "ip address 10.2.23.3 255.255.255.0", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.13.1 255.255.255.0", "no shutdown", "exit",
+         "router rip", "version 2", "network 10.0.0.0", "network 192.168.11.0", "network 192.168.12.0", "network 192.168.13.0", "exit")
+    time.sleep(7)
+    r1 = cli("rp1", "show ip route rip")
+    r3 = cli("rp3", "show ip route rip")
+    # RIPは距離ベクトル: 2ホップ先のLANはメトリック3で学習
+    check("RP1がRP3のLAN 192.168.13.0 をRIP学習(metric3)",
+          "192.168.13.0" in r1 and "/3" in r1, r1)
+    check("RP3がRP1のLAN 192.168.11.0 をRIP学習(逆方向)", "192.168.11.0" in r3, r3)
+    p13 = cli("rp1", "ping 192.168.13.1")
+    p31 = cli("rp3", "ping 192.168.11.1")
+    check("RP1->RP3 LAN ping 成功", "Success rate is 100" in p13, p13)
+    check("RP3->RP1 LAN ping 成功", "Success rate is 100" in p31, p31)
+
+
 def main():
     print(f"リグレッション実行 → {BASE}\n")
     scenario_ospf_chain()
+    scenario_rip_chain()
     scenario_stp_triangle()
     scenario_etherchannel()
     print()

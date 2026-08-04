@@ -3153,19 +3153,26 @@ class IcmpEngine:
             peer_info = self.device_ips.get(peer, {})
             if next_hop_ip in peer_info.get('ips', {}):
                 return peer, next_hop_ip
-        # OSPF等が付与する合成next-hop（隣接ルータのrouter-id）を実デバイス＋
-        # 直結セグメント上の実IPへ解決する。これが無いと多段OSPF経路で
-        # 次ホップが誤った隣接にフォールバックし到達不能になる。
+        # 合成next-hopを実デバイス＋直結セグメント上の実IPへ解決する。
+        # RIPはnext-hopにデバイスID（例 'r2'）、OSPFは隣接ルータのrouter-idを
+        # 付与するため、そのままではIP所有デバイスが見つからず、複数隣接を持つ
+        # 中継ルータで次ホップが誤った隣接にフォールバックし到達不能になる。
         my_info = self.device_ips.get(device_id, {})
+
+        def _shared_ip(peer):
+            """peerの、device_idと同一直結セグメント上のIPを返す"""
+            peer_info = self.device_ips.get(peer, {})
+            for p_ip, _pp in peer_info.get('ips', {}).items():
+                for m_ip, m_pref in my_info.get('ips', {}).items():
+                    if self._ip_in_network(p_ip, m_ip, m_pref):
+                        return p_ip
+            return next_hop_ip
+
         for peer in vnet.get_neighbors(device_id):
             onode = ospf_engine.nodes.get(peer)
-            if onode and onode.get('router_id') == next_hop_ip:
-                peer_info = self.device_ips.get(peer, {})
-                for p_ip, p_pref in peer_info.get('ips', {}).items():
-                    for m_ip, m_pref in my_info.get('ips', {}).items():
-                        if self._ip_in_network(p_ip, m_ip, m_pref):
-                            return peer, p_ip
-                return peer, next_hop_ip
+            # next-hopがデバイスID一致（RIP） or OSPF router-id一致
+            if peer == next_hop_ip or (onode and onode.get('router_id') == next_hop_ip):
+                return peer, _shared_ip(peer)
         neighbors = vnet.get_neighbors(device_id)
         dev = next(iter(neighbors), None) if neighbors else None
         return dev, next_hop_ip
