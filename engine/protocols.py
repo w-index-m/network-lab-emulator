@@ -2619,12 +2619,22 @@ class StpEngine:
             return f'% Spanning tree instance for VLAN {vlan} does not exist.'
         if not vi:
             vi = n
-        is_root = vi.get('root_bridge_id') == vi.get('bridge_id')
-        pri = vi.get('bridge_priority', 32768)
+        # ルート選出などの動的状態は receive_bpdu が更新する self.nodes(n) を参照する
+        # （pvst_nodes の vi はブリッジ自身の優先度/VLAN情報のみ保持）
+        root_bid = n.get('root_bridge_id', n.get('bridge_id'))
+        own_bid = n.get('bridge_id')
+        is_root = (root_bid == own_bid)
+        pri = vi.get('bridge_priority', n.get('bridge_priority', 32768))
         mac = vi.get('bridge_mac', n.get('bridge_mac',''))
         mode = vi.get('mode', n.get('mode','rstp'))
-        tc_count = vi.get('tc_count', 0)
-        tc_last = vi.get('tc_last_time')
+        tc_count = n.get('tc_count', 0)
+        tc_last = n.get('tc_last_time')
+        # ルートブリッジの優先度/MACを root_bridge_id 文字列から取り出す
+        try:
+            root_pri_ext, root_mac = root_bid.split('.', 1)
+            root_pri_ext = int(root_pri_ext)
+        except Exception:
+            root_pri_ext, root_mac = pri + vlan, mac
         if tc_last:
             elapsed = int(time.time() - tc_last)
             tc_time_str = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
@@ -2633,13 +2643,13 @@ class StpEngine:
         lines = [
             f'VLAN{vlan:04d}',
             f'  Spanning tree enabled protocol {mode}',
-            f'  Root ID    Priority    {pri + vlan}',
-            f'             Address     {mac}',
+            f'  Root ID    Priority    {root_pri_ext}',
+            f'             Address     {root_mac}',
         ]
         if is_root:
             lines.append('             This bridge is the root')
         else:
-            lines.append(f'             Cost        {vi.get("root_path_cost", 0)}')
+            lines.append(f'             Cost        {n.get("root_path_cost", 0)}')
             lines.append(f'             Hello Time  2 sec  Max Age 20 sec  Forward Delay 15 sec')
         lines += [
             '',
@@ -2653,7 +2663,7 @@ class StpEngine:
             'Interface           Role Sts Cost      Prio.Nbr Type',
             '-' * 68,
         ]
-        ports = vi.get('ports', n.get('ports', {}))
+        ports = n.get('ports', {}) or vi.get('ports', {})
         for port in ports.values():
             state_short = PORT_STATE.get(port['state'], port['state'][:3])
             if port['state'] == 'ROOT_INCONSISTENT':
