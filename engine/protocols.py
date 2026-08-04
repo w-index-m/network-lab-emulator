@@ -1441,12 +1441,52 @@ class OspfEngine:
                     checksum=lsa.checksum, age=lsa.age,
                     links=list(lsa.links),
                 )
-        # 両側でSPF再計算
-        self._recalc_routes(device_id)
-        self._recalc_routes(neighbor_id)
+        # エリア内全域へLSAをフラッディング（推移的伝播）してから全ノードでSPF再計算。
+        # これにより R1-R2-R3 のような多段構成でも遠方ルータのLSAが伝播する。
+        self._flood_lsdb_area(n['area_id'])
         await vnet.send_to(neighbor_id, {
             'type': 'ospf_routes', 'routes': nbr_node['routes']
         })
+
+    def _flood_lsdb_area(self, area_id: str):
+        """
+        指定エリア内でLSDBを隣接関係に沿ってフラッディングし、収束(fixpoint)まで
+        相互マージする。実機OSPFのType1/2 LSA面的フラッディングを再現。
+        収束後、対象ノード全てでSPFを再計算する。
+        """
+        active = [d for d, nn in self.nodes.items()
+                  if nn.get('enabled') and nn.get('area_id') == area_id]
+        # フラッディング前に全ノードのRouter/Network/Summary LSAを最新化する。
+        # これにより「R1のRouter LSAが古くR2へのリンクを含まない」等の順序依存を排除。
+        for d in active:
+            self._generate_router_lsa(d)
+            if self.nodes[d].get('dr') == d:
+                self._generate_network_lsa(d)
+            self._generate_summary_lsa(d)
+        changed = True
+        guard = 0
+        while changed and guard < 30:
+            changed = False
+            guard += 1
+            for d in active:
+                n = self.nodes[d]
+                for peer in vnet.get_neighbors(d):
+                    pn = self.nodes.get(peer)
+                    if not pn or not pn.get('enabled') or pn.get('area_id') != area_id:
+                        continue
+                    # peer が shutdown 中のリンクはフラッディング対象外
+                    for key, lsa in list(pn['lsdb'].items()):
+                        cur = n['lsdb'].get(key)
+                        if cur is None or cur.seq_num < lsa.seq_num:
+                            n['lsdb'][key] = OspfLsa(
+                                ls_type=lsa.ls_type, ls_id=lsa.ls_id,
+                                adv_router=lsa.adv_router, seq_num=lsa.seq_num,
+                                checksum=lsa.checksum, age=lsa.age,
+                                links=list(lsa.links),
+                            )
+                            changed = True
+        for d in active:
+            self._recalc_routes(d)
 
     def _inject_external_routes(self, device_id: str):
         """再配信ルート（O E2）をroutesに追加"""
@@ -3113,6 +3153,19 @@ class IcmpEngine:
             peer_info = self.device_ips.get(peer, {})
             if next_hop_ip in peer_info.get('ips', {}):
                 return peer, next_hop_ip
+        # OSPF等が付与する合成next-hop（隣接ルータのrouter-id）を実デバイス＋
+        # 直結セグメント上の実IPへ解決する。これが無いと多段OSPF経路で
+        # 次ホップが誤った隣接にフォールバックし到達不能になる。
+        my_info = self.device_ips.get(device_id, {})
+        for peer in vnet.get_neighbors(device_id):
+            onode = ospf_engine.nodes.get(peer)
+            if onode and onode.get('router_id') == next_hop_ip:
+                peer_info = self.device_ips.get(peer, {})
+                for p_ip, p_pref in peer_info.get('ips', {}).items():
+                    for m_ip, m_pref in my_info.get('ips', {}).items():
+                        if self._ip_in_network(p_ip, m_ip, m_pref):
+                            return peer, p_ip
+                return peer, next_hop_ip
         neighbors = vnet.get_neighbors(device_id)
         dev = next(iter(neighbors), None) if neighbors else None
         return dev, next_hop_ip
@@ -4641,6 +4694,7 @@ class EtherChannelMember:
     interface: str
     mode: str             # active | passive | on
     state: str = 'down'   # down | bundled | independent
+    admin_down: bool = False   # shutdownによる管理ダウン（初期未確立と区別）
 
 class LacpEngine:
     """
@@ -4695,8 +4749,8 @@ class LacpEngine:
         ch['_negotiated'] = ok
         new_state = 'bundled' if ok else 'independent'
         for m in ch['members']:
-            # 既に障害(down)のメンバーは復旧コマンドが来るまでdownのまま
-            if m.state != 'down':
+            # shutdown中(admin_down)のメンバーは復旧コマンドが来るまでdownのまま
+            if not m.admin_down:
                 m.state = new_state
         return ok
 
@@ -4730,6 +4784,7 @@ class LacpEngine:
         po_num, ch, m = self._find_member(device_id, interface)
         if not m:
             return None, 0
+        m.admin_down = True
         m.state = 'down'
         remaining = sum(1 for x in ch['members'] if x.state == 'bundled')
         return po_num, remaining
@@ -4740,6 +4795,7 @@ class LacpEngine:
         po_num, ch, m = self._find_member(device_id, interface)
         if not m:
             return None, 0
+        m.admin_down = False
         # チャネル全体が成立状態（他メンバーがbundled、または過去に成立）なら復帰
         negotiated = ch.get('protocol') == 'static' or any(
             x.state == 'bundled' for x in ch['members']
