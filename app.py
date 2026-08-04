@@ -569,8 +569,25 @@ async def cli_command(body: dict):
         if peer_ids:
             await ospf_engine.interface_down(device_id, peer_ids)
             await rip_engine.interface_down(device_id, peer_ids)
+        # EtherChannel メンバーポート障害 → バンドルから外す
+        po_num, remaining = lacp_engine.member_down(device_id, iface_for_flap)
+        if po_num is not None:
+            buf = proto_log_buffer.setdefault(device_id, [])
+            buf.append({'type': 'lacp_log',
+                        'message': (f'%EC-5-UNBUNDLE: Interface {iface_for_flap} left the '
+                                    f'port-channel Po{po_num}'
+                                    + ('' if remaining else
+                                       f'\n%LINK-3-UPDOWN: Interface Port-channel{po_num}, '
+                                       f'changed state to down (全メンバーdown)'))})
     elif c_low in ('no shutdown', 'no shut') and iface_for_flap:
         vnet.interface_up(device_id, iface_for_flap)
+        # EtherChannel メンバーポート復旧 → バンドルへ復帰
+        po_num, bundled = lacp_engine.member_up(device_id, iface_for_flap)
+        if po_num is not None:
+            buf = proto_log_buffer.setdefault(device_id, [])
+            buf.append({'type': 'lacp_log',
+                        'message': (f'%EC-5-BUNDLE: Interface {iface_for_flap} joined '
+                                    f'port-channel Po{po_num}')})
 
     if re.search(r'ip\s+addr(?:ess)?|ip\s+route|remote\s+\d+\s+ip\s+route|'
                  r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address|'
