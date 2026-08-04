@@ -1531,14 +1531,50 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     rip_net = re.match(r'^(?:ip\s+rip\s+network|network)\s+([\d.]+(?:/\d+)?)', c)
     if rip_net and (getattr(state, '_rip_pending', False) or
                     'rip' in getattr(state, '_routing_mode', '')):
-        net = rip_net.group(1)
-        if '/' not in net:
-            net += '/24'
+        raw = rip_net.group(1)
         if not hasattr(state, '_rip_networks'):
             state._rip_networks = []
-        if net not in state._rip_networks:
-            state._rip_networks.append(net)
-        await rip_engine.start(device_id, hostname, state._rip_networks)
+        added = []
+        if '/' in raw:
+            # 明示プレフィックス指定はそのまま採用
+            added = [raw]
+        else:
+            # 実機Cisco RIP同様、classful network文はその範囲に実インターフェースが
+            # ある場合のみ有効化し、当該インターフェースの直結ネットワークを広告する。
+            # （インターフェースを持たない網を書いても幽霊経路を広告しない）
+            base = raw
+            octets = base.split('.')
+            first = int(octets[0]) if octets and octets[0].isdigit() else 0
+            if first < 128:
+                cf_prefix = 8
+            elif first < 192:
+                cf_prefix = 16
+            else:
+                cf_prefix = 24
+            cf_net = _network_address(base, cf_prefix)  # 'A.0.0.0/8' 等
+            cf_only = cf_net.split('/')[0]
+            def _in_cf(ip):
+                try:
+                    a = [int(x) for x in ip.split('.')]
+                    b = [int(x) for x in cf_only.split('.')]
+                    ii = (a[0] << 24) | (a[1] << 16) | (a[2] << 8) | a[3]
+                    nn = (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]
+                    mask = (0xffffffff << (32 - cf_prefix)) & 0xffffffff
+                    return (ii & mask) == (nn & mask)
+                except Exception:
+                    return False
+            for _ifn, _info in state.interfaces.items():
+                _ip = _info.get('ip', '')
+                if _ip and _ip != '127.0.0.1' and _in_cf(_ip):
+                    connected = _network_address(_ip, _info.get('prefix', 24))
+                    if connected not in added:
+                        added.append(connected)
+            # 一致インターフェースが無ければ何も有効化しない（実機同様）
+        for net in added:
+            if net not in state._rip_networks:
+                state._rip_networks.append(net)
+        if state._rip_networks:
+            await rip_engine.start(device_id, hostname, state._rip_networks)
         return
 
     # ── OSPF ──
