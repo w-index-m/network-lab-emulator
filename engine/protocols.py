@@ -4692,13 +4692,61 @@ class LacpEngine:
         if not ch or not peer_ch:
             return False
         ok = self._modes_compatible(ch['mode'], peer_ch['mode'])
+        ch['_negotiated'] = ok
         new_state = 'bundled' if ok else 'independent'
         for m in ch['members']:
-            m.state = new_state
+            # 既に障害(down)のメンバーは復旧コマンドが来るまでdownのまま
+            if m.state != 'down':
+                m.state = new_state
         return ok
 
     def get_channel(self, device_id: str, po_number: int):
         return self.channels.get(device_id, {}).get(po_number)
+
+    @staticmethod
+    def _norm_if(name: str) -> str:
+        """インターフェース名を数字/スラッシュ部分だけに正規化して照合用に使う。
+        例: GigabitEthernet1/0/1 / Gi1/0/1 / gi1/0/1 → 1/0/1"""
+        s = (name or '').lower()
+        for pref in ('gigabitethernet', 'tengigabitethernet', 'fastethernet',
+                     'ethernet', 'gi', 'te', 'fa', 'eth', 'et', 'g'):
+            if s.startswith(pref):
+                s = s[len(pref):]
+                break
+        return s.strip()
+
+    def _find_member(self, device_id: str, interface: str):
+        """指定インターフェースが属するEtherChannelとメンバーを返す"""
+        target = self._norm_if(interface)
+        for po_num, ch in self.channels.get(device_id, {}).items():
+            for m in ch['members']:
+                if self._norm_if(m.interface) == target:
+                    return po_num, ch, m
+        return None, None, None
+
+    def member_down(self, device_id: str, interface: str):
+        """メンバーポート障害（shutdown/リンクダウン）。バンドルから外す。
+        返り値: (po_number, 残りbundled数) 該当なしなら (None, 0)"""
+        po_num, ch, m = self._find_member(device_id, interface)
+        if not m:
+            return None, 0
+        m.state = 'down'
+        remaining = sum(1 for x in ch['members'] if x.state == 'bundled')
+        return po_num, remaining
+
+    def member_up(self, device_id: str, interface: str):
+        """メンバーポート復旧（no shutdown）。ネゴ成立済みならbundledへ戻す。
+        返り値: (po_number, bundled数) 該当なしなら (None, 0)"""
+        po_num, ch, m = self._find_member(device_id, interface)
+        if not m:
+            return None, 0
+        # チャネル全体が成立状態（他メンバーがbundled、または過去に成立）なら復帰
+        negotiated = ch.get('protocol') == 'static' or any(
+            x.state == 'bundled' for x in ch['members']
+        ) or ch.get('_negotiated', True)
+        m.state = 'bundled' if negotiated else 'independent'
+        bundled = sum(1 for x in ch['members'] if x.state == 'bundled')
+        return po_num, bundled
 
     def format_etherchannel_summary(self, device_id: str) -> str:
         """show etherchannel summary の出力（Cisco/Catalyst用）"""
