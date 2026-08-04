@@ -1704,7 +1704,11 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     stp_mode = re.match(r'^spanning-tree\s+mode\s+(rapid-pvst|pvst|rstp|mst|stp)', c)
     if stp_mode:
         mode = 'rstp' if stp_mode.group(1) in ('rapid-pvst', 'rstp') else 'stp'
-        pri = getattr(state, '_stp_priority', 32768)
+        # 既に "spanning-tree vlan X priority Y" などで優先度を設定済みなら維持する
+        n = stp_engine.nodes.get(device_id)
+        pri = getattr(state, '_stp_priority', None)
+        if pri is None:
+            pri = n['bridge_priority'] if (n and n.get('bridge_priority', 32768) != 32768) else 32768
         await stp_engine.start(device_id, hostname, mode, pri)
         return
     # Si-R: "stp mode stp" / "stp mode rstp"
