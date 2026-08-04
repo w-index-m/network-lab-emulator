@@ -207,6 +207,68 @@ def scenario_bgp_aws():
     check("BGPネイバーが確立(summary)", "64512" in summ, summ)
 
 
+def scenario_aws_dx_vpn():
+    print("== シナリオ6: 擬似AWS Direct Connect + VPNバックアップ "
+          "(MD5/prepend/BFD/フェイルオーバー) ==")
+    for d in ("cg", "adx", "avpn"):
+        device(d, "cisco")
+    link("cg", "adx", "GigabitEthernet0/0/1", "GigabitEthernet0/0/1")
+    link("cg", "avpn", "GigabitEthernet0/0/2", "GigabitEthernet0/0/1")
+    conf("cg",
+         "interface GigabitEthernet0/0/1", "ip address 169.254.10.1 255.255.255.252", "no shutdown", "exit",
+         "interface GigabitEthernet0/0/2", "ip address 169.254.20.1 255.255.255.252", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.200.1 255.255.255.0", "no shutdown", "exit",
+         "route-map DX-IN permit 10", "set local-preference 200", "exit",
+         "router bgp 65000",
+         "neighbor 169.254.10.2 remote-as 64512", "neighbor 169.254.10.2 password KEY1",
+         "neighbor 169.254.10.2 fall-over bfd", "neighbor 169.254.10.2 route-map DX-IN in",
+         "neighbor 169.254.20.2 remote-as 64512", "neighbor 169.254.20.2 password KEY2",
+         "network 192.168.200.0 mask 255.255.255.0", "exit")
+    conf("adx",
+         "interface GigabitEthernet0/0/1", "ip address 169.254.10.2 255.255.255.252", "no shutdown", "exit",
+         "interface Loopback0", "ip address 10.200.0.1 255.255.0.0", "no shutdown", "exit",
+         "router bgp 64512", "neighbor 169.254.10.1 remote-as 65000",
+         "neighbor 169.254.10.1 password KEY1", "neighbor 169.254.10.1 fall-over bfd",
+         "network 10.200.0.0 mask 255.255.0.0", "exit")
+    conf("avpn",
+         "interface GigabitEthernet0/0/1", "ip address 169.254.20.2 255.255.255.252", "no shutdown", "exit",
+         "interface Loopback0", "ip address 10.200.0.2 255.255.0.0", "no shutdown", "exit",
+         "route-map VPN-OUT permit 10", "set as-path prepend 64512 64512", "exit",
+         "router bgp 64512", "neighbor 169.254.20.1 remote-as 65000",
+         "neighbor 169.254.20.1 password KEY2", "neighbor 169.254.20.1 route-map VPN-OUT out",
+         "network 10.200.0.0 mask 255.255.0.0", "exit")
+    time.sleep(6)
+    bgp = cli("cg", "show ip bgp")
+    bfd = cli("cg", "show bfd neighbors")
+    # DXがベスト（local-pref200, AS-path短）、VPNは冗長候補（prepend）
+    dx_best = ("*> 10.200.0.0/16" in bgp and "169.254.10.2" in bgp and "200" in bgp)
+    check("DXがベストパス(local-pref200)", dx_best, bgp)
+    check("VPN冗長経路がAS-path prependされている", "64512 64512 64512" in bgp, bgp)
+    check("BFDセッションがUp(DX)", "Up" in bfd and "169.254.10.2" in bfd, bfd)
+    # フェイルオーバー: DX障害 → VPNへ
+    conf("cg", "interface GigabitEthernet0/0/1", "shutdown", "exit")
+    time.sleep(2)
+    bgp_fo = cli("cg", "show ip bgp")
+    check("DX障害でVPN(169.254.20.2)へフェイルオーバー",
+          "*> 10.200.0.0/16" in bgp_fo and "169.254.20.2" in bgp_fo, bgp_fo)
+    # 復旧: DXへ戻る
+    conf("cg", "interface GigabitEthernet0/0/1", "no shutdown", "exit")
+    time.sleep(4)
+    bgp_rec = cli("cg", "show ip bgp")
+    check("DX復旧でベストパスがDXへ戻る",
+          "*> 10.200.0.0/16" in bgp_rec and "169.254.10.2" in bgp_rec, bgp_rec)
+    # MD5不一致: VPNパスワードを誤りに → セッション確立不可
+    conf("avpn", "router bgp 64512", "neighbor 169.254.20.1 password BADKEY", "exit")
+    conf("cg", "interface GigabitEthernet0/0/2", "shutdown", "exit")
+    time.sleep(1)
+    conf("cg", "interface GigabitEthernet0/0/2", "no shutdown", "exit")
+    time.sleep(3)
+    summ = cli("cg", "show ip bgp summary")
+    vpn_line = [l for l in summ.splitlines() if "169.254.20.2" in l]
+    check("MD5不一致でVPNセッションが確立しない(Active)",
+          bool(vpn_line) and "Active" in vpn_line[0], summ)
+
+
 def scenario_rip_distribute_list():
     print("== シナリオ5: RIP + distribute-list (prefix-list / 標準ACL) ==")
     # dl1-dl2-dl3。dl2がdl3のLANを2種のdistribute-listで抑制
@@ -269,6 +331,7 @@ def main():
     scenario_stp_triangle()
     scenario_etherchannel()
     scenario_bgp_aws()
+    scenario_aws_dx_vpn()
     scenario_rip_distribute_list()
     print()
     if _fails:

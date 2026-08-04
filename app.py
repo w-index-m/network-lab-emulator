@@ -569,6 +569,12 @@ async def cli_command(body: dict):
         if peer_ids:
             await ospf_engine.interface_down(device_id, peer_ids)
             await rip_engine.interface_down(device_id, peer_ids)
+        # BGPセッション断（インターフェースダウン / BFD高速検知）→ 冗長ピアへフェイルオーバー
+        bn = bgp_engine.nodes.get(device_id)
+        if bn and bn.get('enabled'):
+            for _pid in list(bn.get('sessions', {}).keys()):
+                if _pid in peer_ids:
+                    await bgp_engine.session_down(device_id, _pid, 'interface shutdown')
         # EtherChannel メンバーポート障害 → バンドルから外す
         po_num, remaining = lacp_engine.member_down(device_id, iface_for_flap)
         if po_num is not None:
@@ -581,6 +587,13 @@ async def cli_command(body: dict):
                                        f'changed state to down (全メンバーdown)'))})
     elif c_low in ('no shutdown', 'no shut') and iface_for_flap:
         vnet.interface_up(device_id, iface_for_flap)
+        # BGPセッション復旧（インターフェースアップ）
+        bn = bgp_engine.nodes.get(device_id)
+        if bn and bn.get('enabled'):
+            peer_ids_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
+            for _pid in list(bn.get('sessions', {}).keys()):
+                if _pid in peer_ids_up:
+                    await bgp_engine.try_reestablish(device_id, _pid)
         # EtherChannel メンバーポート復旧 → バンドルへ復帰
         po_num, bundled = lacp_engine.member_up(device_id, iface_for_flap)
         if po_num is not None:
@@ -814,6 +827,42 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         buf = proto_log_buffer.setdefault(device_id, [])
         buf.append({'type': 'filter_log',
                     'message': f'prefix-list {name}: {action} {net}/{prefix} 追加'})
+        return
+
+    # ── route-map 定義（AWS DX/VPN: AS-path prepend / local-preference）──
+    # "route-map AWS-PRIMARY-IN permit 10"
+    rm_def = re.match(r'^route-map\s+(\S+)\s+(permit|deny)(?:\s+(\d+))?', c)
+    if rm_def:
+        state._current_route_map = rm_def.group(1)
+        # 空のマップを用意（set句が無くても存在させる）
+        bgp_engine.add_route_map(device_id, rm_def.group(1))
+        return
+    # route-map内 "set as-path prepend 65000 65000"
+    rm_prepend = re.match(r'^set\s+as-path\s+prepend\s+([\d\s]+)', c)
+    if rm_prepend and getattr(state, '_current_route_map', None):
+        ases = [int(x) for x in rm_prepend.group(1).split()]
+        bgp_engine.add_route_map(device_id, state._current_route_map, prepend=ases)
+        return
+    # route-map内 "set local-preference 200"
+    rm_lp = re.match(r'^set\s+local-preference\s+(\d+)', c)
+    if rm_lp and getattr(state, '_current_route_map', None):
+        bgp_engine.add_route_map(device_id, state._current_route_map,
+                                 local_pref=int(rm_lp.group(1)))
+        return
+    # route-map内 "set metric 100" (MED)
+    rm_med = re.match(r'^set\s+metric\s+(\d+)', c)
+    if rm_med and getattr(state, '_current_route_map', None):
+        bgp_engine.add_route_map(device_id, state._current_route_map,
+                                 med=int(rm_med.group(1)))
+        return
+    # ── BFDインターバル（neighbor fall-over bfd用パラメータ）──
+    bfd_int = re.match(r'^bfd\s+interval\s+(\d+)\s+min[_-]?rx\s+(\d+)\s+multiplier\s+(\d+)', c)
+    if bfd_int:
+        bn = bgp_engine.nodes.get(device_id)
+        if bn:
+            bn['bfd'] = {'interval': int(bfd_int.group(1)),
+                         'min_rx': int(bfd_int.group(2)),
+                         'multiplier': int(bfd_int.group(3))}
         return
 
     # ── distribute-list ──
@@ -1745,7 +1794,36 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         if peer_id:
             peer_state = device_sessions.get(peer_id)
             peer_hostname = peer_state.hostname if peer_state else peer_id
-            await bgp_engine.add_neighbor(device_id, peer_id, peer_hostname, remote_as)
+            # ネイバーIP→peer_id の対応を控えておく（後続 neighbor サブコマンド用）
+            if not hasattr(state, '_bgp_nbr_ipmap'):
+                state._bgp_nbr_ipmap = {}
+            state._bgp_nbr_ipmap[neighbor_ip] = peer_id
+            await bgp_engine.add_neighbor(device_id, peer_id, peer_hostname,
+                                          remote_as, neighbor_ip)
+        return
+    # ── AWS DX/VPN: neighbor <ip> password <pw>（TCP MD5認証）──
+    bgp_pw = re.match(r'^neighbor\s+([\d.]+)\s+password\s+(?:\d\s+)?(\S+)', c)
+    if bgp_pw and getattr(state, '_routing_mode', '') == 'bgp':
+        nip, pw = bgp_pw.group(1), bgp_pw.group(2)
+        peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
+        if peer_id:
+            bgp_engine.set_neighbor_password(device_id, peer_id, pw)
+        return
+    # ── neighbor <ip> route-map <name> in|out（AS-path prepend / local-pref適用）──
+    bgp_rm = re.match(r'^neighbor\s+([\d.]+)\s+route-map\s+(\S+)\s+(in|out)', c)
+    if bgp_rm and getattr(state, '_routing_mode', '') == 'bgp':
+        nip, rmname, direction = bgp_rm.group(1), bgp_rm.group(2), bgp_rm.group(3)
+        peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
+        if peer_id:
+            bgp_engine.set_neighbor_route_map(device_id, peer_id, rmname, direction)
+        return
+    # ── neighbor <ip> fall-over bfd（BFD高速障害検知）──
+    bgp_bfd = re.match(r'^neighbor\s+([\d.]+)\s+fall-over\s+bfd', c)
+    if bgp_bfd and getattr(state, '_routing_mode', '') == 'bgp':
+        nip = bgp_bfd.group(1)
+        peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
+        if peer_id:
+            bgp_engine.set_neighbor_bfd(device_id, peer_id, True)
         return
     # Si-R: "bgp network <ip>/<prefix>" 広告
     sir_bgp_net = re.match(r'^bgp\s+network\s+([\d.]+(?:/\d+)?)', c)
@@ -2220,6 +2298,11 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
         n = bgp_engine.nodes.get(device_id)
         if n and n.get('enabled'):
             return bgp_engine.format_show_bgp_table(device_id)
+    # BFD
+    if re.match(r'^show\s+bfd\s+(neighbors|neighbor|sessions)', c):
+        n = bgp_engine.nodes.get(device_id)
+        if n and n.get('enabled'):
+            return bgp_engine.format_show_bfd_neighbors(device_id)
 
     # STP
     if re.match(r'^show\s+spanning-tree\s+summary', c):
@@ -2336,12 +2419,38 @@ def _format_show_snmp(state) -> str:
 
 
 def _find_peer_by_ip(device_id: str, target_ip: str) -> str:
-    """指定IPアドレスを持つ隣接装置のdevice_idを返す"""
+    """指定IPアドレスを持つ隣接装置のdevice_idを返す。
+    1) 対向がそのIPを登録済みなら直接一致で解決。
+    2) 未登録でも、target_ip を含むサブネットのローカルインターフェースが
+       接続する対向で解決（設定順序に依存しない）。"""
     from engine.protocols import icmp_engine as _icmp
-    for neighbor_id in vnet.get_neighbors(device_id):
+
+    def _same_subnet(ip_a, ip_b, prefix):
+        try:
+            a = [int(x) for x in ip_a.split('.')]
+            b = [int(x) for x in ip_b.split('.')]
+            ai = (a[0] << 24) | (a[1] << 16) | (a[2] << 8) | a[3]
+            bi = (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]
+            mask = (0xffffffff << (32 - int(prefix))) & 0xffffffff
+            return (ai & mask) == (bi & mask)
+        except Exception:
+            return False
+
+    neighbors = list(vnet.get_neighbors(device_id))
+    # 1) 対向がIP登録済み
+    for neighbor_id in neighbors:
         nbr_ips = _icmp.device_ips.get(neighbor_id, {}).get('ips', {})
         if target_ip in nbr_ips:
             return neighbor_id
+    # 2) ローカルインターフェースのサブネット照合で解決
+    st = device_sessions.get(device_id)
+    if st:
+        for neighbor_id in neighbors:
+            local_if = vnet.interface_links.get(device_id, {}).get(neighbor_id)
+            info = st.interfaces.get(local_if) if local_if else None
+            if info and info.get('ip'):
+                if _same_subnet(target_ip, info['ip'], info.get('prefix', 24)):
+                    return neighbor_id
     return ''
 
 
