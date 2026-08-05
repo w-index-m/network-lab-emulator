@@ -44,6 +44,17 @@ def device(dev_id, dtype):
     _post("/api/device", {"id": dev_id, "type": dtype, "hostname": dev_id})
 
 
+def device2(dev_id, dtype, ip=None, gateway=None, prefix=24):
+    """PC等をIP/ゲートウェイ付きで作成"""
+    body = {"id": dev_id, "type": dtype, "hostname": dev_id}
+    if ip:
+        body["ip"] = ip
+        body["prefix"] = prefix
+    if gateway:
+        body["gateway"] = gateway
+    _post("/api/device", body)
+
+
 def link(a, b, ia, ib):
     _post("/api/link", {"a": a, "b": b, "iface_a": ia, "iface_b": ib})
 
@@ -286,6 +297,40 @@ def scenario_aws_dx_vpn():
           bool(vpn_line) and "Active" in vpn_line[0], summ)
 
 
+def scenario_inter_vlan():
+    print("== シナリオ8: 3スイッチ inter-VLAN ルーティング (L3コア + L2アクセス2台) ==")
+    for d in ("l3core", "l2a", "l2b"):
+        device(d, "catalyst")
+    device2("ivpc1", "pc", ip="172.20.10.100", gateway="172.20.10.1")
+    device2("ivpc2", "pc", ip="172.20.20.100", gateway="172.20.20.1")
+    link("l3core", "l2a", "Gi1/0/1", "Gi1/0/24")
+    link("l3core", "l2b", "Gi1/0/2", "Gi1/0/24")
+    link("l2a", "ivpc1", "Gi1/0/1", "eth0")
+    link("l2b", "ivpc2", "Gi1/0/1", "eth0")
+    conf("l3core", "ip routing",
+         "interface vlan 30", "ip address 172.20.10.1 255.255.255.0", "no shutdown", "exit",
+         "interface vlan 40", "ip address 172.20.20.1 255.255.255.0", "no shutdown", "exit",
+         "interface Gi1/0/1", "switchport mode trunk", "exit",
+         "interface Gi1/0/2", "switchport mode trunk", "exit")
+    conf("l2a", "interface Gi1/0/24", "switchport mode trunk", "exit",
+         "interface Gi1/0/1", "switchport access vlan 30", "exit")
+    conf("l2b", "interface Gi1/0/24", "switchport mode trunk", "exit",
+         "interface Gi1/0/1", "switchport access vlan 40", "exit")
+    time.sleep(2)
+    # SVIが正しい名前(Vlan30/Vlan40)で作られているか
+    brief = cli("l3core", "show ip interface brief")
+    check("SVI Vlan30/Vlan40 が正しく作成される",
+          "Vlan30" in brief and "Vlan40" in brief, brief)
+    # VLAN間ルーティング（双方向）
+    p12 = cli("ivpc1", "ping 172.20.20.100")
+    p21 = cli("ivpc2", "ping 172.20.10.100")
+    check("PC1->PC2 VLAN間ルーティング疎通", "0% packet loss" in p12, p12)
+    check("PC2->PC1 VLAN間ルーティング疎通(逆方向)", "0% packet loss" in p21, p21)
+    # 同一VLAN外（自ゲートウェイ）
+    pg = cli("ivpc1", "ping 172.20.10.1")
+    check("PC1->自ゲートウェイ(SVI)疎通", "0% packet loss" in pg, pg)
+
+
 def scenario_bgp_transit():
     print("== シナリオ7: BGP 3-ASトランジット (b1 AS65001 - b2 AS65002 - b3 AS65003) ==")
     for d in ("bt1", "bt2", "bt3"):
@@ -382,6 +427,7 @@ def main():
     scenario_bgp_aws()
     scenario_aws_dx_vpn()
     scenario_bgp_transit()
+    scenario_inter_vlan()
     scenario_rip_distribute_list()
     print()
     if _fails:

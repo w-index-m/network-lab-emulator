@@ -750,9 +750,20 @@ class RuleEngine:
         return ifname
 
     def _cmd_interface(self, cmd, state):
-        m = re.match(r'^interface\s+(\S+)', cmd, re.I)
+        m = re.match(r'^interface\s+(.+?)\s*$', cmd, re.I)
         if m:
-            ifname = self._resolve_ifname(m.group(1), state)
+            spec = m.group(1).strip()
+            # SVI "vlan 20" / Port-channel "port-channel 1" は種別＋番号が空白区切りの
+            # 複数トークン。\S+ 一語で切ると "vlan" 等の壊れた名前になるため個別に正規化。
+            mv = re.match(r'^vlan\s+(\d+)$', spec, re.I)
+            mpc = re.match(r'^(?:port-channel|po)\s+(\d+)$', spec, re.I)
+            if mv:
+                ifname = f'Vlan{int(mv.group(1))}'
+            elif mpc:
+                ifname = f'Port-channel{int(mpc.group(1))}'
+            else:
+                ifname = spec.split()[0]
+            ifname = self._resolve_ifname(ifname, state)
             state.current_if = ifname
             state.mode = "config-if"
             # Loopbackは存在しなければ作成し、常にup状態
@@ -765,6 +776,14 @@ class RuleEngine:
                     }
                 else:
                     state.interfaces[ifname]['status'] = 'up'
+            # SVI(Vlan)は存在しなければ作成（no shutdownでup）
+            elif ifname.lower().startswith('vlan'):
+                if ifname not in state.interfaces:
+                    state.interfaces[ifname] = {
+                        'ip': '', 'prefix': 0, 'status': 'down',
+                        'speed': '', 'duplex': '', 'desc': '',
+                        'type': 'SVI',
+                    }
         return ""
 
     def _cmd_router_mode(self, cmd, state):
