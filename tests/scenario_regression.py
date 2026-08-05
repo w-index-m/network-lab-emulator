@@ -269,6 +269,38 @@ def scenario_aws_dx_vpn():
           bool(vpn_line) and "Active" in vpn_line[0], summ)
 
 
+def scenario_bgp_transit():
+    print("== シナリオ7: BGP 3-ASトランジット (b1 AS65001 - b2 AS65002 - b3 AS65003) ==")
+    for d in ("bt1", "bt2", "bt3"):
+        device(d, "cisco")
+    link("bt1", "bt2", "GigabitEthernet0/0/1", "GigabitEthernet0/0/1")
+    link("bt2", "bt3", "GigabitEthernet0/0/0", "GigabitEthernet0/0/0")
+    conf("bt1",
+         "interface GigabitEthernet0/0/1", "ip address 10.12.0.1 255.255.255.0", "no shutdown", "exit",
+         "interface Loopback0", "ip address 172.16.1.1 255.255.255.0", "no shutdown", "exit",
+         "router bgp 65001", "neighbor 10.12.0.2 remote-as 65002",
+         "network 172.16.1.0 mask 255.255.255.0", "exit")
+    conf("bt2",
+         "interface GigabitEthernet0/0/1", "ip address 10.12.0.2 255.255.255.0", "no shutdown", "exit",
+         "interface GigabitEthernet0/0/0", "ip address 10.23.0.2 255.255.255.0", "no shutdown", "exit",
+         "router bgp 65002", "neighbor 10.12.0.1 remote-as 65001",
+         "neighbor 10.23.0.3 remote-as 65003",
+         "network 172.16.2.0 mask 255.255.255.0", "exit")
+    conf("bt3",
+         "interface GigabitEthernet0/0/0", "ip address 10.23.0.3 255.255.255.0", "no shutdown", "exit",
+         "interface Loopback0", "ip address 172.16.3.1 255.255.255.0", "no shutdown", "exit",
+         "router bgp 65003", "neighbor 10.23.0.2 remote-as 65002",
+         "network 172.16.3.0 mask 255.255.255.0", "exit")
+    time.sleep(7)
+    b1 = cli("bt1", "show ip bgp")
+    b3 = cli("bt3", "show ip bgp")
+    # トランジット: b1 は b3 の経路を AS-path 65002 65003 で学習
+    check("B1がB3経路172.16.3.0をトランジット学習(AS-path 65002 65003)",
+          "172.16.3.0/24" in b1 and "65002 65003" in b1, b1)
+    check("B3がB1経路172.16.1.0をトランジット学習(AS-path 65002 65001)",
+          "172.16.1.0/24" in b3 and "65002 65001" in b3, b3)
+
+
 def scenario_rip_distribute_list():
     print("== シナリオ5: RIP + distribute-list (prefix-list / 標準ACL) ==")
     # dl1-dl2-dl3。dl2がdl3のLANを2種のdistribute-listで抑制
@@ -332,6 +364,7 @@ def main():
     scenario_etherchannel()
     scenario_bgp_aws()
     scenario_aws_dx_vpn()
+    scenario_bgp_transit()
     scenario_rip_distribute_list()
     print()
     if _fails:
