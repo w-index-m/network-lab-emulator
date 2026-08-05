@@ -1923,60 +1923,132 @@ class BgpEngine:
                     break
         session.keepalive_task = _spawn(keepalive())
 
-    async def _send_update(self, device_id: str, neighbor_id: str):
+    def _compute_adverts(self, device_id: str, neighbor_id: str) -> list:
+        """
+        device_id が neighbor_id へ広告するBgpRouteのリストを計算する。
+        - 自分起点のネットワーク（network文）
+        - 他ピアから学習したベスト経路（トランジット）
+        eBGP/iBGPのルールを適用:
+        - eBGP宛: as_pathに自ASをprepend
+        - iBGP宛: prependせず、かつ iBGP学習経路は再広告しない（split-horizon）
+        - 学習元ピアには広告し返さない
+        """
         n = self.nodes.get(device_id)
-        nbr_node = self.nodes.get(neighbor_id)
-        if not n or not nbr_node:
-            return
-        session = n['sessions'].get(neighbor_id)
+        session = n['sessions'].get(neighbor_id) if n else None
+        if not n or not session:
+            return []
+        is_ebgp = (session.remote_as != n['local_as'])
+        out = []
+        # 1) 自分起点のネットワーク
+        for net in n['networks']:
+            out.append(BgpRoute(
+                prefix=net.split('/')[0],
+                prefix_len=int(net.split('/')[1]) if '/' in net else 24,
+                next_hop=device_id,
+                as_path=[n['local_as']], origin='i',
+                learned_from='', learned_from_hostname=n['hostname']))
+        # 2) 学習済みベスト経路（トランジット）
+        for lr in n.get('loc_rib', []):
+            src = lr.get('learned_from', '')
+            if not src:
+                continue  # 自分起点はすでに追加済み
+            if src == neighbor_id:
+                continue  # 学習元へは広告し返さない
+            src_session = n['sessions'].get(src)
+            src_is_ibgp = src_session and src_session.remote_as == n['local_as']
+            # iBGPで学習した経路は他のiBGPピアへ再広告しない（split-horizon）
+            if src_is_ibgp and not is_ebgp:
+                continue
+            new_path = ([n['local_as']] + list(lr['as_path'])) if is_ebgp else list(lr['as_path'])
+            out.append(BgpRoute(
+                prefix=lr['prefix'], prefix_len=lr['prefix_len'],
+                next_hop=device_id, med=lr.get('med', 0), origin=lr.get('origin', 'i'),
+                as_path=new_path, learned_from='',
+                learned_from_hostname=n['hostname']))
+        # アウトバウンド route-map 適用
+        if session.route_map_out:
+            out = [self._apply_route_map(device_id, session.route_map_out, r) for r in out]
+        return out
+
+    async def _send_update(self, device_id: str, neighbor_id: str):
+        """初回トリガ/ログ。実際の経路配布はネットワーク全体の伝播で収束させる。"""
+        n = self.nodes.get(device_id)
+        session = n['sessions'].get(neighbor_id) if n else None
         if not session or session.state != 'Established':
             return
+        cnt = len(self._compute_adverts(device_id, neighbor_id))
+        if cnt:
+            await vnet.send_to(device_id, {
+                'type': 'bgp_log',
+                'message': vendor_log.ios('BGP', 6, 'TABLECHG', f'Neighbor {session.hostname} UPDATE sent, {cnt} prefix(es)')
+            })
+        self._propagate_bgp()
+        for nid in list(n['sessions'].keys()):
+            nbr = self.nodes.get(nid)
+            if nbr:
+                await vnet.send_to(nid, {'type': 'bgp_routes', 'routes': nbr['loc_rib']})
 
-        routes = [BgpRoute(prefix=net.split('/')[0],
-                           prefix_len=int(net.split('/')[1]) if '/' in net else 24,
-                           next_hop='0.0.0.0',
-                           as_path=[n['local_as']], origin='i')
-                  for net in n['networks']]
-        if not routes:
-            return
-
-        nbr_session = nbr_node['sessions'].get(device_id)
-        for r in routes:
-            # アウトバウンド route-map（送信側）: AS-path prepend / MED 等
-            if session.route_map_out:
-                r = self._apply_route_map(device_id, session.route_map_out, r)
-            new_r = BgpRoute(prefix=r.prefix, prefix_len=r.prefix_len,
-                             next_hop=device_id, local_pref=100, med=r.med,
-                             as_path=r.as_path.copy(), origin=r.origin,
-                             learned_from=device_id,
-                             learned_from_hostname=n['hostname'])
-            # インバウンド route-map（受信側）: local-preference / prepend 等
-            if nbr_session and nbr_session.route_map_in:
-                new_r = self._apply_route_map(neighbor_id, nbr_session.route_map_in, new_r)
-            existing = next((x for x in nbr_node['rib_in']
-                             if x.prefix == r.prefix and x.prefix_len == r.prefix_len
-                             and x.learned_from == device_id), None)
-            if existing:
-                # 属性を更新（prepend/local-pref変更を反映）
-                existing.as_path = new_r.as_path
-                existing.local_pref = new_r.local_pref
-                existing.med = new_r.med
-            else:
-                nbr_node['rib_in'].append(new_r)
-            nbr_node['prefixes_received'] = len(nbr_node['rib_in'])
-
-        session.prefixes_sent += len(routes)
-        await vnet.send_to(device_id, {
-            'type': 'bgp_log',
-            'message': vendor_log.ios('BGP', 6, 'TABLECHG', f'Neighbor {session.hostname} UPDATE sent, {len(routes)} prefix(es)')
-        })
-        await vnet.send_to(neighbor_id, {
-            'type': 'bgp_log',
-            'message': vendor_log.ios('BGP', 6, 'TABLECHG', f'Neighbor {n["hostname"]} (AS{n["local_as"]}) UPDATE received, {len(routes)} prefix(es)')
-        })
-        self._recalc_best_path(neighbor_id)
-        await vnet.send_to(neighbor_id, {'type': 'bgp_routes',
-                                          'routes': nbr_node['loc_rib']})
+    def _propagate_bgp(self):
+        """
+        全BGPノード間で経路をfixpointまで伝播させる（トランジット/多段対応）。
+        各Established隣接について _compute_adverts の結果を受信側 rib_in へ反映し、
+        ループ防止（受信AS が as_path に含まれる経路は拒否）を適用。収束後ベスト再計算。
+        """
+        active = [d for d, nn in self.nodes.items() if nn.get('enabled')]
+        changed = True
+        guard = 0
+        while changed and guard < 40:
+            changed = False
+            guard += 1
+            for dev in active:
+                n = self.nodes[dev]
+                for nid, session in list(n['sessions'].items()):
+                    if session.state != 'Established':
+                        continue
+                    nbr = self.nodes.get(nid)
+                    if not nbr:
+                        continue
+                    nbr_session = nbr['sessions'].get(dev)
+                    adverts = self._compute_adverts(dev, nid)
+                    # 受信側のインバウンド route-map と ループ防止を適用
+                    wanted = {}
+                    for r in adverts:
+                        # AS-path ループ防止: 受信側の自ASが含まれる経路は拒否（RFC4271）
+                        if nbr['local_as'] in r.as_path:
+                            continue
+                        rr = BgpRoute(prefix=r.prefix, prefix_len=r.prefix_len,
+                                      next_hop=dev, local_pref=100, med=r.med,
+                                      as_path=list(r.as_path), origin=r.origin,
+                                      learned_from=dev, learned_from_hostname=n['hostname'])
+                        if nbr_session and nbr_session.route_map_in:
+                            rr = self._apply_route_map(nid, nbr_session.route_map_in, rr)
+                        wanted[(rr.prefix, rr.prefix_len)] = rr
+                    # 既存の dev 由来経路と突き合わせて更新/追加/削除
+                    existing = {(x.prefix, x.prefix_len): x for x in nbr['rib_in']
+                                if x.learned_from == dev}
+                    # 削除（撤回）
+                    for key in list(existing.keys()):
+                        if key not in wanted:
+                            nbr['rib_in'].remove(existing[key])
+                            changed = True
+                    # 追加/更新
+                    for key, rr in wanted.items():
+                        cur = existing.get(key)
+                        if cur is None:
+                            nbr['rib_in'].append(rr)
+                            changed = True
+                        elif (cur.as_path != rr.as_path or cur.local_pref != rr.local_pref
+                              or cur.med != rr.med):
+                            cur.as_path = rr.as_path
+                            cur.local_pref = rr.local_pref
+                            cur.med = rr.med
+                            changed = True
+                    nbr['prefixes_received'] = len(nbr['rib_in'])
+            # 各ノードのベスト経路を再計算（次の反復の _compute_adverts に反映）
+            for dev in active:
+                self._recalc_best_path(dev)
+        for dev in active:
+            self._recalc_best_path(dev)
 
     def _recalc_best_path(self, device_id: str):
         n = self.nodes.get(device_id)
@@ -2035,6 +2107,8 @@ class BgpEngine:
             before = len(n['rib_in'])
             n['rib_in'] = [r for r in n['rib_in'] if r.learned_from != b]
             self._recalc_best_path(a)
+            # トランジット経由で伝播していた経路も再収束（撤回を波及）
+            self._propagate_bgp()
             await vnet.send_to(a, {
                 'type': 'bgp_log',
                 'message': (f'%BGP-5-ADJCHANGE: neighbor {s.neighbor_ip or s.hostname} '

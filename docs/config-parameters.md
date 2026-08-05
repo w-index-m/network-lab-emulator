@@ -5,7 +5,7 @@
 
 - 検証方法: `NETLAB_AUTH_DISABLE=1 NETLAB_FAST_TIMERS=1 uvicorn app:app --port 8099` 起動後、
   `python tests/scenario_regression.py` で全シナリオ回帰。
-- 最終更新: 2026-08-04
+- 最終更新: 2026-08-05
 
 ---
 
@@ -46,6 +46,7 @@
 
 - FSM: Idle→Connect→OpenSent→OpenConfirm→Established (RFC4271)。
 - ベストパス選択: local-preference → AS-path長 → MED。
+- **トランジット**: 他ピアから学習した経路も再広告（eBGPは自ASをprepend）。iBGP学習経路は他iBGPピアへ再広告しない(split-horizon)。AS-pathループ防止（自ASを含む経路は拒否）。
 - 確認: `show ip bgp` / `show ip bgp summary`
 
 ## BGP — AWS Direct Connect / VPN 向け拡張
@@ -114,3 +115,4 @@
 4. 擬似AWS eBGP（VGW相当）
 5. RIP + distribute-list（prefix-list / 標準ACL）
 6. 擬似AWS Direct Connect + VPNバックアップ（MD5/prepend/BFD/フェイルオーバー）
+7. BGP 3-ASトランジット（AS-path伝播・prepend・ループ防止）
