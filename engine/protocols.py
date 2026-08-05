@@ -3540,17 +3540,24 @@ class IcmpEngine:
         if not matched:
             return None, None
         next_hop_ip = matched['next_hop']
+        neighbors = list(vnet.get_neighbors(device_id))
         if next_hop_ip in ('0.0.0.0', ''):
+            # 直結ネットワーク: 宛先を所有する装置。隣接を優先し、
+            # プリロードのデフォルト機器などが同一IPを持つ誤解決を避ける。
+            for peer in neighbors:
+                if dest_ip in self.device_ips.get(peer, {}).get('ips', {}):
+                    return peer, dest_ip
             dev = self._find_device_owning_ip(dest_ip) or \
                   self._find_device_in_network(dest_ip)
             return dev, dest_ip
+        # ネクストホップ(ゲートウェイ)は必ず直結先にある。隣接を最優先で解決し、
+        # 同一IPを持つ非隣接のデフォルト機器へ誤って解決しないようにする。
+        for peer in neighbors:
+            if next_hop_ip in self.device_ips.get(peer, {}).get('ips', {}):
+                return peer, next_hop_ip
         nh_device = self._find_device_owning_ip(next_hop_ip)
         if nh_device:
             return nh_device, next_hop_ip
-        for peer in vnet.get_neighbors(device_id):
-            peer_info = self.device_ips.get(peer, {})
-            if next_hop_ip in peer_info.get('ips', {}):
-                return peer, next_hop_ip
         # 合成next-hopを実デバイス＋直結セグメント上の実IPへ解決する。
         # RIPはnext-hopにデバイスID（例 'r2'）、OSPFは隣接ルータのrouter-idを
         # 付与するため、そのままではIP所有デバイスが見つからず、複数隣接を持つ

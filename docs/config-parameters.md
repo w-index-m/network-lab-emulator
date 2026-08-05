@@ -91,6 +91,20 @@
 - メンバー障害: `shutdown`で`(D)`、残1本でもPoは`SU`維持、全滅で`SD`。`no shutdown`で`(P)`復帰。
 - 確認: `show etherchannel summary`
 
+## VLAN / inter-VLAN ルーティング (Catalyst)
+
+| コマンド | 説明 | 状態 |
+|---|---|---|
+| `vlan <id>` | VLAN作成 | 対応 |
+| `interface vlan <id>` → `ip address` / `no shutdown` | SVI作成＋IP（**複数語IF名を正しく解釈**） | 対応 |
+| `ip routing` | L3スイッチのルーティング有効化 | 対応 |
+| `switchport mode access` / `switchport access vlan <id>` | アクセスポート | 対応 |
+| `switchport mode trunk` / `switchport trunk allowed vlan` | トランク | 対応 |
+
+- L3コア(SVI) + L2アクセス2台 + VLAN別PC で**VLAN間ルーティング**が双方向疎通。
+- ネクストホップ(ゲートウェイ)解決は**直結隣接を優先**（デフォルト機器のIP重複による誤解決を回避）。
+- 確認: `show vlan brief` / `show ip interface brief` / `show interfaces trunk`
+
 ## 経路フィルタ共通 (prefix-list / ACL / route-map)
 
 | コマンド | 説明 | 状態 |
@@ -117,5 +131,6 @@
 5. RIP + distribute-list（prefix-list / 標準ACL）
 6. 擬似AWS Direct Connect + VPNバックアップ（MD5/prepend/BFD/フェイルオーバー）
 7. BGP 3-ASトランジット（AS-path伝播・prepend・ループ防止）
+8. 3スイッチ inter-VLAN ルーティング（L3コア+L2アクセス2台、VLAN間疎通）
 
 シナリオ2にSTP動的再収束（ルート障害→再選出→復旧）チェックを追加。
