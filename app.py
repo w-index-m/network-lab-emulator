@@ -569,6 +569,12 @@ async def cli_command(body: dict):
         if peer_ids:
             await ospf_engine.interface_down(device_id, peer_ids)
             await rip_engine.interface_down(device_id, peer_ids)
+        # STP: リンク障害を両端に通知（ルート/ポート役割の再収束）
+        if stp_engine.nodes.get(device_id, {}).get('enabled') or any(
+                stp_engine.nodes.get(p, {}).get('enabled') for p in peer_ids):
+            for _pid in peer_ids:
+                await stp_engine.port_down(device_id, _pid)
+                await stp_engine.port_down(_pid, device_id)
         # BGPセッション断（インターフェースダウン / BFD高速検知）→ 冗長ピアへフェイルオーバー
         bn = bgp_engine.nodes.get(device_id)
         if bn and bn.get('enabled'):
@@ -587,6 +593,13 @@ async def cli_command(body: dict):
                                        f'changed state to down (全メンバーdown)'))})
     elif c_low in ('no shutdown', 'no shut') and iface_for_flap:
         vnet.interface_up(device_id, iface_for_flap)
+        # STP: リンク回復を両端に通知（ポート再追加・再収束）
+        _peers_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
+        if stp_engine.nodes.get(device_id, {}).get('enabled') or any(
+                stp_engine.nodes.get(p, {}).get('enabled') for p in _peers_up):
+            for _pid in _peers_up:
+                await stp_engine.port_up(device_id, _pid)
+                await stp_engine.port_up(_pid, device_id)
         # BGPセッション復旧（インターフェースアップ）
         bn = bgp_engine.nodes.get(device_id)
         if bn and bn.get('enabled'):

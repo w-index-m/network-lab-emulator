@@ -163,10 +163,26 @@ class VirtualNetwork:
         """インターフェースをno shutdown状態に戻す"""
         self.down_interfaces[device_id].discard(iface)
 
+    @staticmethod
+    def _norm_iface(name: str) -> str:
+        """インターフェース名を照合用に正規化。
+        GigabitEthernet1/0/1 / Gi1/0/1 / gi1/0/1 → 1/0/1（種別接頭辞を除去）"""
+        s = (name or '').lower().strip()
+        for pref in ('tengigabitethernet', 'gigabitethernet', 'fastethernet',
+                     'ethernet', 'tengige', 'te', 'gi', 'fa', 'eth', 'et', 'ge', 'g', 'e'):
+            if s.startswith(pref):
+                rest = s[len(pref):]
+                # 接頭辞の直後が数字/空白のときのみ種別接頭辞とみなす
+                if rest[:1].isdigit() or rest[:1] in (' ', ''):
+                    return rest.strip()
+        return s
+
     def get_peers_on_interface(self, device_id: str, iface: str) -> set:
-        """指定インターフェース経由で接続されているpeer device_idのセット"""
+        """指定インターフェース経由で接続されているpeer device_idのセット。
+        インターフェース名は短縮形/正式形の差を吸収して照合する。"""
+        target = self._norm_iface(iface)
         return {peer for peer, if_name in self.interface_links.get(device_id, {}).items()
-                if if_name == iface}
+                if if_name == iface or self._norm_iface(if_name) == target}
 
     def remove_link(self, a: str, b: str):
         self.links[a].discard(b)
@@ -2229,6 +2245,17 @@ PORT_STATE = {'BLOCKING': 'BLK', 'LISTENING': 'LIS', 'LEARNING': 'LRN',
 PORT_ROLE  = {'ROOT': 'Root', 'DESIGNATED': 'Desgn', 'ALTERNATE': 'Altn',
               'BACKUP': 'Backup', 'DISABLED': 'Disabled'}
 
+
+def _bid_key(bid: str):
+    """bridge_id 'priority.mac' を比較用キー(優先度int, mac文字列)に変換。
+    優先度は10進(priority+vlan)。値が小さいほど優先度が高い。"""
+    try:
+        pa, ma = bid.split('.', 1)
+        return (int(pa), ma)
+    except Exception:
+        return (1 << 20, bid or '')
+
+
 class StpEngine:
     def __init__(self):
         self.nodes: Dict[str, dict] = {}
@@ -2787,11 +2814,113 @@ class StpEngine:
         else:
             # 非ルートポートが消えた → ポート役割を再計算するだけ
             self._recompute_port_roles(device_id)
+        # トポロジー全体を最短パスで再収束（ルート消失時のstale root/ループを回避）
+        self.recompute_topology()
+
+    def recompute_topology(self):
+        """
+        STP-enabledノード全体を、現在生きているポート(connected_to)から最短パスで
+        再計算する。実機のmax-age失効＋再選出に相当し、ルート消失時のstale root残存や
+        count-to-infinityを回避する。
+        - 各連結成分のルート = 最小bridge_id
+        - ルートからのDijkstraで各ノードのroot_path_cost/root_portを決定
+        - ポート役割(Root/Designated/Alternate)を確定
+        """
+        import heapq
+        enabled = {d: n for d, n in self.nodes.items() if n.get('enabled')}
+        # 双方向に生きているSTPポートのみで隣接を構成
+        adj = {d: {} for d in enabled}
+        for d, n in enabled.items():
+            for p in n['ports'].values():
+                peer = p.get('connected_to')
+                pn = enabled.get(peer)
+                if not pn:
+                    continue
+                if any(pp.get('connected_to') == d for pp in pn['ports'].values()):
+                    adj[d][peer] = p.get('cost', 19)
+        # 連結成分ごとにルート(最小bridge_id)を決定
+        seen = set()
+        for start in enabled:
+            if start in seen:
+                continue
+            comp = []
+            stack = [start]
+            seen.add(start)
+            while stack:
+                x = stack.pop()
+                comp.append(x)
+                for y in adj[x]:
+                    if y not in seen:
+                        seen.add(y)
+                        stack.append(y)
+            root = min(comp, key=lambda d: _bid_key(enabled[d]['bridge_id']))
+            root_bid = enabled[root]['bridge_id']
+            # Dijkstra: rootからの最小コストと次ホップ(root方向の隣接)
+            dist = {root: 0}
+            nexthop = {root: None}
+            pq = [(0, root)]
+            while pq:
+                c, u = heapq.heappop(pq)
+                if c > dist.get(u, 1e9):
+                    continue
+                for v, w in adj[u].items():
+                    nc = c + w
+                    if nc < dist.get(v, 1e9):
+                        dist[v] = nc
+                        nexthop[v] = u  # vからrootへ向かう次ホップはu
+                        heapq.heappush(pq, (nc, v))
+            # 各ノードの状態を更新
+            for d in comp:
+                n = enabled[d]
+                n['root_bridge_id'] = root_bid
+                n['root_path_cost'] = dist.get(d, 0)
+                if d == root:
+                    n['root_port'] = None
+                    for p in n['ports'].values():
+                        if p.get('connected_to') in adj[d]:
+                            p['role'] = 'DESIGNATED'
+                            p['state'] = 'FORWARDING'
+                    continue
+                # このノードからrootへの次ホップ = nexthop_toward_root
+                # dist[u]が最小の隣接がroot方向
+                toward = None
+                best = 1e18
+                for v in adj[d]:
+                    if dist.get(v, 1e9) + adj[d][v] == dist.get(d) and dist.get(v, 1e9) < best:
+                        best = dist.get(v, 1e9)
+                        toward = v
+                for p in n['ports'].values():
+                    peer = p.get('connected_to')
+                    if peer not in adj[d]:
+                        continue
+                    if peer == toward:
+                        p['role'] = 'ROOT'
+                        p['state'] = 'FORWARDING'
+                    else:
+                        # セグメントのDesignatedはrootに近い(低コスト、tieはbridge_id小)側
+                        my_cost = n['root_path_cost']
+                        their_cost = dist.get(peer, 1e9)
+                        if their_cost < my_cost or (
+                                their_cost == my_cost and
+                                _bid_key(enabled[peer]['bridge_id']) < _bid_key(n['bridge_id'])):
+                            p['role'] = 'ALTERNATE'
+                            p['state'] = 'BLOCKING'
+                        else:
+                            p['role'] = 'DESIGNATED'
+                            p['state'] = 'FORWARDING'
+        # 表示更新
+        for d in enabled:
+            _spawn(vnet.send_to(d, {'type': 'stp_ports',
+                                    'ports': list(enabled[d]['ports'].values())}))
 
     async def port_up(self, device_id: str, peer_id: str):
         """リンク回復時の処理"""
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
+            return
+        # 既に同一peerへのポートがあれば重複追加しない
+        if any(p.get('connected_to') == peer_id for p in n['ports'].values()):
+            self.recompute_topology()
             return
         # 新しいポートを追加してSTP収束させる
         port_num = len(n['ports']) + 1
@@ -2812,6 +2941,8 @@ class StpEngine:
         # RSTP: Proposal/Agreementで高速遷移
         if n['mode'] == 'rstp':
             await self._rstp_rapid_transition(device_id, port_name, n['ports'][port_name])
+        # トポロジー全体を再収束
+        self.recompute_topology()
 
     async def _rstp_rapid_transition(self, device_id: str, port_name: str, port: dict):
         """

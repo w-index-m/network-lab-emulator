@@ -78,6 +78,7 @@
 | `spanning-tree portfast` / `bpduguard enable` / `guard root` | ポート保護 | 対応 |
 
 - 3台トライアングルで最小優先度がルート選出、1ポートがAlternate/Blockingでループ遮断。
+- **動的再収束**: ルート/リンク障害時にトポロジー全体を最短パスで再計算（新ルート再選出・迂回、復旧で復帰）。
 - 確認: `show spanning-tree` / `show spanning-tree summary`
 
 ## EtherChannel / LACP (Catalyst)
@@ -116,3 +117,5 @@
 5. RIP + distribute-list（prefix-list / 標準ACL）
 6. 擬似AWS Direct Connect + VPNバックアップ（MD5/prepend/BFD/フェイルオーバー）
 7. BGP 3-ASトランジット（AS-path伝播・prepend・ループ防止）
+
+シナリオ2にSTP動的再収束（ルート障害→再選出→復旧）チェックを追加。

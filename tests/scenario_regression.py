@@ -110,6 +110,23 @@ def scenario_stp_triangle():
     check("SW3はルートではない", "This bridge is the root" not in s3, s3)
     check("SW3にブロッキング/Alternateポートがある(ループ遮断)",
           "Altn" in s3 or "BLK" in s3, s3)
+    # 動的再収束: ルートSW1をダウン → SW2が新ルート、SW3が迂回
+    conf("sw1", "interface Gi1/0/1", "shutdown", "exit",
+         "interface Gi1/0/3", "shutdown", "exit")
+    time.sleep(5)
+    s2_fo = cli("sw2", "show spanning-tree")
+    s3_fo = cli("sw3", "show spanning-tree")
+    check("ルート障害でSW2が新ルートに再選出",
+          "This bridge is the root" in s2_fo, s2_fo)
+    check("SW3が新ルートSW2配下へ再収束(ルートID変化)",
+          "8193" in s3_fo.split("Bridge ID")[0], s3_fo)
+    # 復旧: SW1が戻ると元のルートへ
+    conf("sw1", "interface Gi1/0/1", "no shutdown", "exit",
+         "interface Gi1/0/3", "no shutdown", "exit")
+    time.sleep(5)
+    s3_rec = cli("sw3", "show spanning-tree")
+    check("SW1復旧で元のルート(4097)へ復帰",
+          "4097" in s3_rec.split("Bridge ID")[0], s3_rec)
 
 
 # ── シナリオ3: EtherChannel メンバー障害/復旧 ─────────────────
