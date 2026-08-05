@@ -101,8 +101,11 @@ async def query_ollama(prompt: str, system: str) -> str:
 # ══════════════════════════════════════════
 # アプリ起動
 # ══════════════════════════════════════════
-def _trigger_ike_negotiation(device_id: str):
-    """IKE ネゴシエーションを実行してログをバッファに積む"""
+def _trigger_ike_negotiation(device_id: str, _cascade: bool = True):
+    """IKE ネゴシエーションを実行してログをバッファに積む。
+    _cascade=True のとき、対向デバイス側のネゴシエーションも1度だけ実行して
+    設定順序に依らず両側で収束させる（片側の設定完了時に相手が未設定でも、
+    後から相手が設定を打った時点で成立する）。"""
     results = negotiate_ipsec(device_sessions, device_id)
     buf = proto_log_buffer.setdefault(device_id, [])
     for tid_str, result in results.items():
@@ -147,6 +150,9 @@ def _trigger_ike_negotiation(device_id: str):
                                          'hostname': ps.hostname,
                                          'facility': 'IPSEC' if 'IPsec' in log_line else 'IKE',
                                          'level': 'INFO' if result.success else 'ERROR'})
+                        # 対向側からもネゴシエーションを1度だけ走らせて両側収束させる
+                        if _cascade:
+                            _trigger_ike_negotiation(pid, _cascade=False)
 
 
 def _save_config():
@@ -554,6 +560,15 @@ async def cli_command(body: dict):
 
     output = rule_engine.process(command, state)
 
+    # ── IPsec/IKE: RuleEngineが全設定を反映した「後」にネゴシエーションを再実行。
+    # handle_protocol_config内の初回トリガは設定反映前に走るため順序依存で失敗しうる。
+    # ここで再実行することで、有効化フラグ・crypto設定が揃った状態で確実に収束させる。
+    if (re.match(r'^crypto\s+isakmp\s+(enable|key)', c_low) or
+            re.match(r'^crypto\s+map\s+\S+\s+interface', c_low) or
+            c_low in ('ike use on', 'ipsec use on') or
+            re.match(r'^remote\s+\d+\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key', c_low)):
+        _trigger_ike_negotiation(device_id)
+
     # IPアドレス・ルート変更があればicmp_engineに再登録
     # no crypto map / shutdown → DPD detecting 状態へ遷移
     if re.match(r'^no\s+crypto\s+map', c_low) or (
@@ -715,9 +730,16 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             _trigger_ike_negotiation(device_id)
     # ── Cisco IOS: IKE negotiate ──
     if state.device_type in ('cisco', 'catalyst'):
-        if (re.match(r'^crypto\s+isakmp\s+enable', c) or
+        m_ike_en = re.match(r'^crypto\s+isakmp\s+enable(?:\s+(\S+))?', c)
+        if (m_ike_en or
                 re.match(r'^crypto\s+isakmp\s+key', c) or
                 re.match(r'^crypto\s+map\s+\S+\s+interface', c)):
+            # isakmp_enabled はRuleEngine処理(この後)で立つが、ネゴシエーションが
+            # 先に走るため、順序依存で失敗しないようここで先に立てる。
+            if m_ike_en:
+                if not hasattr(state, 'ipsec_crypto') or state.ipsec_crypto is None:
+                    state.ipsec_crypto = {}
+                state.ipsec_crypto['isakmp_enabled'] = m_ike_en.group(1) or 'enabled'
             _trigger_ike_negotiation(device_id)
     if state.device_type in ('catalyst', 'cisco', 'srs', 'nexus'):
         prev_mode = state.mode
@@ -821,6 +843,12 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             _sir_log(device_id, 'VRRP', 'VRRP initialized')
         # IPsec/IKE ネゴシエーション
         elif c in ('ike use on', 'ipsec use on') or re.match(r'^remote\s+\d+\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key', c):
+            # 有効化フラグはRuleEngine処理(この後)で立つが、ネゴシエーションは
+            # ここで先に走るため、順序依存で「ike use on not set」になるのを防ぐ。
+            if c == 'ike use on':
+                state.ike_enabled = True
+            elif c == 'ipsec use on':
+                state.ipsec_enabled = True
             _trigger_ike_negotiation(device_id)
 
     # ── prefix-list ──

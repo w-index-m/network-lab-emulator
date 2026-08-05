@@ -144,19 +144,31 @@ def _find_peer(device_sessions: dict, local_id: str, remote_ip: str):
     Si-R, Cisco IOS, ASA を対象にする。
     戻り値: (peer_id, peer_state) or (None, None)
     """
+    matches = []
     for dev_id, state in device_sessions.items():
         if dev_id == local_id:
             continue
         dt = state.device_type
         if dt in ('sir', 'srs'):
-            for t in getattr(state, 'ipsec_tunnels', {}).values():
-                if t.get('local_ip') == remote_ip:
-                    return dev_id, state
+            if any(t.get('local_ip') == remote_ip
+                   for t in getattr(state, 'ipsec_tunnels', {}).values()):
+                matches.append((dev_id, state))
         elif dt in ('cisco', 'catalyst', 'asa'):
-            for _, info in state.interfaces.items():
-                if info.get('ip') == remote_ip:
-                    return dev_id, state
-    return None, None
+            if any(info.get('ip') == remote_ip for info in state.interfaces.values()):
+                matches.append((dev_id, state))
+    if not matches:
+        return None, None
+    # 同一IPを持つプリロードのデフォルト機器などと区別するため、
+    # local_id と直結（vnet neighbor）している対向を最優先で選ぶ。
+    try:
+        from engine.protocols import vnet
+        nbrs = set(vnet.get_neighbors(local_id))
+        for dev_id, state in matches:
+            if dev_id in nbrs:
+                return dev_id, state
+    except Exception:
+        pass
+    return matches[0]
 
 
 # ══════════════════════════════════════════════════════════
