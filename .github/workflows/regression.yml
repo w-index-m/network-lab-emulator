@@ -1,0 +1,52 @@
+name: regression
+
+# PR とデフォルトブランチへのpush時にシナリオ回帰テストを自動実行する。
+# 実サーバ(uvicorn)を起動し、HTTP経由で OSPF/RIP/STP/EtherChannel/BGP(AWS DX/VPN)/
+# distribute-list の各シナリオを検証する。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  scenario-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start emulator server
+        env:
+          NETLAB_AUTH_DISABLE: '1'
+          NETLAB_FAST_TIMERS: '1'
+        run: |
+          nohup python -m uvicorn app:app --port 8099 > server.log 2>&1 &
+          echo "server started (pid $!)"
+
+      - name: Wait for server to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8099/api/health > /dev/null; then
+              echo "server is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not become ready"; cat server.log; exit 1
+
+      - name: Run scenario regression
+        run: python tests/scenario_regression.py http://127.0.0.1:8099
+
+      - name: Dump server log on failure
+        if: failure()
+        run: cat server.log
