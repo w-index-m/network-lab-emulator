@@ -560,6 +560,13 @@ async def cli_command(body: dict):
 
     output = rule_engine.process(command, state)
 
+    # ── GRE トンネル: source/destination/ip設定後に対向を探して仮想隣接を確立 ──
+    _cif_now = getattr(state, 'current_if', '') or ''
+    if (_cif_now.lower().startswith('tunnel') and
+            (re.match(r'^tunnel\s+(source|destination|mode)', c_low) or
+             re.match(r'^ip\s+address', c_low) or c_low in ('no shutdown', 'no shut'))):
+        _try_establish_gre_tunnel(device_id, _cif_now, state)
+
     # ── IPsec/IKE: RuleEngineが全設定を反映した「後」にネゴシエーションを再実行。
     # handle_protocol_config内の初回トリガは設定反映前に走るため順序依存で失敗しうる。
     # ここで再実行することで、有効化フラグ・crypto設定が揃った状態で確実に収束させる。
@@ -3390,6 +3397,65 @@ async def add_device(body: dict):
         _register_stub(dev_id)
         _register_icmp(dev_id)
     return {"ok": True, "id": dev_id}
+
+
+def _try_establish_gre_tunnel(device_id: str, tunnel_if: str, state):
+    """
+    GRE トンネルインターフェースの対向を探し、両端が相互に指し合っていれば
+    仮想隣接(vnetリンク)を張ってトンネルIPサブネット上で疎通/OSPFできるようにする。
+    条件: このトンネルの destination を transport IP として持つ装置が存在し、
+          その装置側のトンネルが source=このdest / destination=このsource で一致。
+    トランスポート(source→destination)が到達可能なときのみ up にする。
+    """
+    info = state.interfaces.get(tunnel_if, {})
+    src = info.get('tunnel_source')
+    dst = info.get('tunnel_dest')
+    tip = info.get('ip')
+    if not (src and dst and tip):
+        return  # 未完成
+    # destination(対向のトランスポートIP)を持つ装置を探す
+    peer_id = None
+    for pid, ps in device_sessions.items():
+        if pid == device_id:
+            continue
+        for _n, _i in ps.interfaces.items():
+            if _i.get('ip') == dst:
+                peer_id = pid
+                break
+        if peer_id:
+            break
+    if not peer_id:
+        return
+    peer_state = device_sessions[peer_id]
+    # 対向側で source/destination が反対に一致するトンネルIFを探す
+    peer_tif = None
+    for _n, _i in peer_state.interfaces.items():
+        if (_i.get('type') == 'Tunnel' and
+                _i.get('tunnel_source') == dst and _i.get('tunnel_dest') == src):
+            peer_tif = _n
+            break
+    if not peer_tif:
+        return
+    # トランスポート到達性チェック（source→destination）
+    reachable = icmp_engine.trace_path(device_id, dst).get('reachable', False)
+    if not reachable:
+        return
+    # 仮想隣接を張る（トンネルIF名で登録）。既存物理リンクがあってもset上は冪等。
+    vnet.add_link(device_id, peer_id, tunnel_if, peer_tif)
+    _update_neighbors(device_id, peer_id, add=True)
+    # 両端のトンネルIPを登録（直結ネットワークとして扱えるように）
+    info['status'] = 'up'
+    peer_state.interfaces[peer_tif]['status'] = 'up'
+    _register_icmp(device_id)
+    _register_icmp(peer_id)
+    buf = proto_log_buffer.setdefault(device_id, [])
+    buf.append({'type': 'tunnel_log',
+                'message': (f'%LINEPROTO-5-UPDOWN: Line protocol on Interface {tunnel_if}, '
+                            f'changed state to up (GRE {src} -> {dst})')})
+    pbuf = proto_log_buffer.setdefault(peer_id, [])
+    pbuf.append({'type': 'tunnel_log',
+                 'message': (f'%LINEPROTO-5-UPDOWN: Line protocol on Interface {peer_tif}, '
+                             f'changed state to up (GRE {dst} -> {src})')})
 
 
 def _register_icmp(device_id: str):

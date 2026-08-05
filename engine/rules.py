@@ -3688,6 +3688,34 @@ Configuration Revision            : 5"""
         if vss_out is not None:
             return vss_out
 
+        # ── GRE トンネルインターフェース設定 (Cisco/Catalyst) ──
+        # current_if が Tunnel の場合のみ有効
+        _cif = getattr(state, 'current_if', '') or ''
+        if _cif.lower().startswith('tunnel'):
+            m_tsrc = re.match(r'^tunnel\s+source\s+(\S+)', cmd, re.I)
+            if m_tsrc:
+                src = m_tsrc.group(1)
+                # インターフェース名指定ならそのIPを解決
+                if not re.match(r'^[\d.]+$', src):
+                    resolved = state.interfaces.get(src, {}).get('ip')
+                    if not resolved:
+                        for _n, _i in state.interfaces.items():
+                            if _n.lower() == src.lower() and _i.get('ip'):
+                                resolved = _i['ip']; break
+                    src = resolved or src
+                state.interfaces.setdefault(_cif, {})['tunnel_source'] = src
+                state.interfaces[_cif]['type'] = 'Tunnel'
+                return ""
+            m_tdst = re.match(r'^tunnel\s+destination\s+([\d.]+)', c)
+            if m_tdst:
+                state.interfaces.setdefault(_cif, {})['tunnel_dest'] = m_tdst.group(1)
+                state.interfaces[_cif]['type'] = 'Tunnel'
+                return ""
+            m_tmode = re.match(r'^tunnel\s+mode\s+(.+)', c)
+            if m_tmode:
+                state.interfaces.setdefault(_cif, {})['tunnel_mode'] = m_tmode.group(1).strip()
+                return ""
+
         # interface ip address (CIDR notation: ip address X.X.X.X/prefix)
         m_cidr = re.match(r'^ip\s+address\s+([\d.]+)/(\d+)', c)
         if m_cidr:
