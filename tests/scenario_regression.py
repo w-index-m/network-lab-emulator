@@ -297,6 +297,47 @@ def scenario_aws_dx_vpn():
           bool(vpn_line) and "Active" in vpn_line[0], summ)
 
 
+def scenario_gre_tunnel():
+    print("== シナリオ9: GREトンネル over マルチホップ + トンネル上OSPF ==")
+    # gr1 - gr2 - gr3 (物理チェーン)。gr1とgr3は非隣接だがGREトンネルで結ぶ
+    for d in ("gr1", "gr2", "gr3"):
+        device(d, "cisco")
+    link("gr1", "gr2", "GigabitEthernet0/0/0", "GigabitEthernet0/0/0")
+    link("gr2", "gr3", "GigabitEthernet0/0/1", "GigabitEthernet0/0/0")
+    conf("gr1",
+         "interface GigabitEthernet0/0/0", "ip address 10.71.12.1 255.255.255.0", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.71.1 255.255.255.0", "no shutdown", "exit",
+         "ip route 10.71.23.0 255.255.255.0 10.71.12.2")
+    conf("gr2",
+         "interface GigabitEthernet0/0/0", "ip address 10.71.12.2 255.255.255.0", "no shutdown", "exit",
+         "interface GigabitEthernet0/0/1", "ip address 10.71.23.2 255.255.255.0", "no shutdown", "exit")
+    conf("gr3",
+         "interface GigabitEthernet0/0/0", "ip address 10.71.23.3 255.255.255.0", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.73.1 255.255.255.0", "no shutdown", "exit",
+         "ip route 10.71.12.0 255.255.255.0 10.71.23.2")
+    # GRE Tunnel0 gr1<->gr3
+    conf("gr1", "interface Tunnel0", "ip address 172.31.0.1 255.255.255.252",
+         "tunnel source 10.71.12.1", "tunnel destination 10.71.23.3", "tunnel mode gre ip", "exit")
+    conf("gr3", "interface Tunnel0", "ip address 172.31.0.2 255.255.255.252",
+         "tunnel source 10.71.23.3", "tunnel destination 10.71.12.1", "tunnel mode gre ip", "exit")
+    time.sleep(1)
+    ping_tun = cli("gr1", "ping 172.31.0.2")
+    check("GREトンネルIP疎通(gr1->gr3 172.31.0.2, マルチホップ越し)",
+          "Success rate is 100" in ping_tun, ping_tun)
+    # トンネル上OSPF
+    conf("gr1", "router ospf 1", "network 172.31.0.0 0.0.0.3 area 0",
+         "network 192.168.71.0 0.0.0.255 area 0", "exit")
+    conf("gr3", "router ospf 1", "network 172.31.0.0 0.0.0.3 area 0",
+         "network 192.168.73.0 0.0.0.255 area 0", "exit")
+    time.sleep(9)
+    nbr = cli("gr1", "show ip ospf neighbor")
+    rt = cli("gr1", "show ip route ospf")
+    check("GREトンネル越しにOSPF Full隣接", "Full" in nbr, nbr)
+    check("トンネル経由でgr3のLAN 192.168.73.0 をOSPF学習", "192.168.73.0" in rt, rt)
+    p = cli("gr1", "ping 192.168.73.1")
+    check("トンネル経由OSPF経路でLAN間ping", "Success rate is 100" in p, p)
+
+
 def scenario_inter_vlan():
     print("== シナリオ8: 3スイッチ inter-VLAN ルーティング (L3コア + L2アクセス2台) ==")
     for d in ("l3core", "l2a", "l2b"):
@@ -427,6 +468,7 @@ def main():
     scenario_bgp_aws()
     scenario_aws_dx_vpn()
     scenario_bgp_transit()
+    scenario_gre_tunnel()
     scenario_inter_vlan()
     scenario_rip_distribute_list()
     print()

@@ -105,6 +105,19 @@
 - ネクストホップ(ゲートウェイ)解決は**直結隣接を優先**（デフォルト機器のIP重複による誤解決を回避）。
 - 確認: `show vlan brief` / `show ip interface brief` / `show interfaces trunk`
 
+## GRE トンネルインターフェース (Cisco/Catalyst)
+
+| コマンド | 説明 | 状態 |
+|---|---|---|
+| `interface Tunnel<n>` | トンネルIF作成 | 対応 |
+| `tunnel source <ip\|if>` / `tunnel destination <ip>` | トンネル始点/終点 | 対応 |
+| `tunnel mode gre ip` | GREモード | 対応 |
+| `ip address` (Tunnel IF上) | オーバーレイIP | 対応 |
+
+- 両端が相互に指し合い、transport到達可能なとき仮想直結隣接を張る（多段GRE可）。
+- トンネルIP上で ping / OSPF / スタティックが利用可能。
+- 確認: `show ip interface brief`(Tunnel0 up) / `show ip ospf neighbor`
+
 ## 経路フィルタ共通 (prefix-list / ACL / route-map)
 
 | コマンド | 説明 | 状態 |
