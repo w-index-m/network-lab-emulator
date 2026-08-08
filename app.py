@@ -108,12 +108,17 @@ def _trigger_ike_negotiation(device_id: str, _cascade: bool = True):
     後から相手が設定を打った時点で成立する）。"""
     results = negotiate_ipsec(device_sessions, device_id)
     buf = proto_log_buffer.setdefault(device_id, [])
+    _self_state = device_sessions.get(device_id)
     for tid_str, result in results.items():
         for log_line in result.logs:
             buf.append({'type': 'sir_log', 'message': log_line,
                         'hostname': device_sessions[device_id].hostname,
                         'facility': 'IPSEC' if 'IPsec' in log_line else 'IKE',
                         'level': 'INFO' if result.success else 'ERROR'})
+            # Si-Rイベントログにも記録（重要イベントのみ）
+            if _self_state is not None and ('Tunnel' in log_line or 'Phase' in log_line
+                                            or 'Error' in log_line or 'FAILED' in log_line):
+                _sir_event(_self_state, 'IPSEC' if 'IPsec' in log_line else 'IKE', log_line)
         # 対向デバイスにも結果ログを積む
         state = device_sessions.get(device_id)
         if state:
@@ -559,6 +564,10 @@ async def cli_command(body: dict):
         return {"output": "", "mode": state.mode, "hostname": state.hostname}
 
     output = rule_engine.process(command, state)
+
+    # ── Si-R/SR-S: 投入した設定コマンドをキャプチャ（show running-config で忠実再現）──
+    if state.device_type in ('sir', 'srs'):
+        _capture_sir_config(state, command)
 
     # ── GRE トンネル: source/destination/ip設定後に対向を探して仮想隣接を確立 ──
     _cif_now = getattr(state, 'current_if', '') or ''
@@ -2508,6 +2517,55 @@ def find_peer_by_link(device_id: str):
     return next(iter(neighbors), None) if neighbors else None
 
 
+# Si-R running-config に含めない運用/表示系コマンド
+_SIR_NONCONFIG = {
+    'show', 'ping', 'traceroute', 'save', 'exit', 'quit', 'end', 'enable',
+    'disable', 'clear', 'reboot', 'reset', 'commit', 'telnet', 'ssh', 'logout',
+    'cls', 'help', 'write', 'copy', 'tftp', 'terminal', 'configure', 'admin',
+    'hostname',  # hostname は running 先頭で別途出力
+}
+
+
+def _sir_config_key(cmd: str) -> str:
+    """Si-R設定コマンドの重複判定キー。末尾の値トークン（IP/数値/on-off等）を
+    落とし、設定対象を識別する先頭部分を返す。再投入で同じ設定を上書きするため。"""
+    toks = cmd.split()
+    # 末尾から値っぽいトークンを除去
+    val_re = re.compile(r'^(\d+(\.\d+)*(/\d+)?|on|off|use|v1|v2|enable|disable|'
+                        r'\*+|[\d.]+/\d+|"[^"]*")$', re.I)
+    while len(toks) > 1 and val_re.match(toks[-1]):
+        toks.pop()
+    return ' '.join(toks).lower()
+
+
+def _sir_event(state, facility: str, message: str):
+    """Si-R/SR-Sのイベントログに1行追加（show syslog/logging用、最大200行）"""
+    log = getattr(state, 'event_log', None)
+    if log is None:
+        return
+    log.append((facility, message))
+    if len(log) > 200:
+        del log[:len(log) - 200]
+
+
+def _capture_sir_config(state, command: str):
+    cmd = command.strip()
+    if not cmd:
+        return
+    first = cmd.split()[0].lower()
+    if first in _SIR_NONCONFIG or first.startswith('sh'):
+        return
+    # preshared-key 等はマスクして保存
+    disp = re.sub(r'(preshared-key)\s+\S+', r'\1 ****', cmd, flags=re.I)
+    disp = re.sub(r'(password[^\s]*\s+set)\s+\S+', r'\1 ****', disp, flags=re.I)
+    key = _sir_config_key(cmd)
+    if key:
+        is_new = key not in state.sir_config
+        state.sir_config[key] = disp
+        # 設定変更をイベントログに記録
+        _sir_event(state, 'CONFIG', f'configuration {"added" if is_new else "changed"}: {disp}')
+
+
 def _build_running_config(device_id: str, state) -> str:
     """プロトコルエンジンの状態を反映したrunning-configを生成"""
     is_cisco = state.device_type in ('catalyst', 'cisco')
@@ -2749,81 +2807,77 @@ def _build_running_config(device_id: str, state) -> str:
         # Si-R形式
         lines.append('# Si-R running configuration')
         lines.append(f'hostname {state.hostname}')
-        state_ifaces = getattr(state, 'interfaces', {})
-        info = icmp_engine.device_ips.get(device_id, {})
-        # state.interfaces優先、なければICMP情報
-        ifaces_src = state_ifaces if state_ifaces else info.get('interfaces', {})
-        for ifname, iinfo in ifaces_src.items():
-            ip = iinfo.get('ip', '')
-            if ip and ifname.startswith('lan'):
-                idx = ifname.replace('lan', '')
-                lines.append(f'lan {idx} ip address {ip}/{iinfo.get("prefix",24)} 3')
-            elif ip and ifname.startswith('wan'):
-                idx = ifname.replace('wan', '')
-                lines.append(f'wan {idx} ip address {ip}/{iinfo.get("prefix",24)}')
-        rib_node = rib_engine.nodes.get(device_id)
-        if rib_node:
-            _seen_r = set()
-            for r in rib_node['static_routes']:
-                if r.next_hop in ('0.0.0.0', ''):
-                    continue
-                key = (r.network, r.prefix, r.next_hop)
-                if key in _seen_r:
-                    continue
-                _seen_r.add(key)
-                ad = f' {r.ad}' if r.ad != 1 else ''
-                lines.append(f'ip route {r.network}/{r.prefix} {r.next_hop}{ad}')
-        rn = rip_engine.nodes.get(device_id)
-        if rn and rn.get('enabled'):
-            lines.append('ip rip use on')
-            for net in rn['networks']:
-                lines.append(f'ip rip network {net}')
-        on = ospf_engine.nodes.get(device_id)
-        if on and on.get('enabled'):
-            lines.append('ospf use on')
-            for net in on.get('networks', []):
-                lines.append(f'ip ospf network {net}')
-            lines.append('lan 0 ip ospf use on')
-        bn = bgp_engine.nodes.get(device_id)
-        if bn and bn.get('local_as'):
-            lines.append(f'router bgp {bn["local_as"]}')
-            neighbor_ips = bn.get('_neighbor_ips', {})
-            for sid, sess in bn.get('sessions', {}).items():
-                # _neighbor_ipsからIPアドレスを取得、なければneighbor_idを使用
-                peer_ip = neighbor_ips.get(sid, sess.neighbor_id)
-                lines.append(f' neighbor {peer_ip} remote-as {sess.remote_as}')
-            for net in bn.get('networks', []):
-                lines.append(f' network {net}')
-        # VRRP (Si-R形式)
-        for gid, g in sorted(vrrp_engine.vrrp.get(device_id, {}).items()):
-            lines.append(f'vrrp use on')
-            iface_idx = '0'
-            iface = g.interface or 'lan0'
-            if iface.startswith('lan'):
-                iface_idx = iface.replace('lan','')
-            lines.append(f'lan {iface_idx} vrrp group {gid} id {gid} {g.priority} {g.vip}')
-        # LACP / linkaggregation（SR-S形式）
-        lag_lines = lacp_engine.get_running_config_lines(device_id, state.device_type)
-        if lag_lines:
-            lines.extend(lag_lines)
-        # コンソール / リモートアクセス設定（Si-R形式）
+        captured = getattr(state, 'sir_config', {})
+        if captured:
+            # 投入した設定コマンドをそのまま再現（DHCP/NAPT/IPsec/filter等も含む）
+            lines.extend(captured.values())
+        else:
+            # キャプチャが無い場合（設定JSON取り込み等）はエンジン状態から再構成
+            state_ifaces = getattr(state, 'interfaces', {})
+            info = icmp_engine.device_ips.get(device_id, {})
+            ifaces_src = state_ifaces if state_ifaces else info.get('interfaces', {})
+            for ifname, iinfo in ifaces_src.items():
+                ip = iinfo.get('ip', '')
+                if ip and ifname.startswith('lan'):
+                    idx = ifname.replace('lan', '')
+                    lines.append(f'lan {idx} ip address {ip}/{iinfo.get("prefix",24)} 1')
+                elif ip and ifname.startswith('wan'):
+                    idx = ifname.replace('wan', '')
+                    lines.append(f'wan {idx} ip address {ip}/{iinfo.get("prefix",24)}')
+            rib_node = rib_engine.nodes.get(device_id)
+            if rib_node:
+                _seen_r = set()
+                for r in rib_node['static_routes']:
+                    if r.next_hop in ('0.0.0.0', ''):
+                        continue
+                    key = (r.network, r.prefix, r.next_hop)
+                    if key in _seen_r:
+                        continue
+                    _seen_r.add(key)
+                    ad = f' {r.ad}' if r.ad != 1 else ''
+                    lines.append(f'ip route {r.network}/{r.prefix} {r.next_hop}{ad}')
+            rn = rip_engine.nodes.get(device_id)
+            if rn and rn.get('enabled'):
+                lines.append('ip rip use on')
+                for net in rn['networks']:
+                    lines.append(f'ip rip network {net}')
+            on = ospf_engine.nodes.get(device_id)
+            if on and on.get('enabled'):
+                lines.append('ospf use on')
+                for net in on.get('networks', []):
+                    lines.append(f'ip ospf network {net}')
+                lines.append('lan 0 ip ospf use on')
+            bn = bgp_engine.nodes.get(device_id)
+            if bn and bn.get('local_as'):
+                lines.append(f'router bgp {bn["local_as"]}')
+                neighbor_ips = bn.get('_neighbor_ips', {})
+                for sid, sess in bn.get('sessions', {}).items():
+                    peer_ip = neighbor_ips.get(sid, sess.neighbor_id)
+                    lines.append(f' neighbor {peer_ip} remote-as {sess.remote_as}')
+                for net in bn.get('networks', []):
+                    lines.append(f' network {net}')
+            for gid, g in sorted(vrrp_engine.vrrp.get(device_id, {}).items()):
+                lines.append(f'vrrp use on')
+                iface = g.interface or 'lan0'
+                iface_idx = iface.replace('lan', '') if iface.startswith('lan') else '0'
+                lines.append(f'lan {iface_idx} vrrp group {gid} id {gid} {g.priority} {g.vip}')
+            lag_lines = lacp_engine.get_running_config_lines(device_id, state.device_type)
+            if lag_lines:
+                lines.extend(lag_lines)
+            for s in getattr(state, 'syslog_servers', []):
+                lines.append(f'syslog server {s["host"]}')
+            for c in getattr(state, 'snmp_community', []):
+                lines.append(f'snmp community {c["name"]} {c["perm"]}')
+            for h in getattr(state, 'snmp_hosts', []):
+                lines.append(f'snmp trap host {h["host"]} community {h["community"]}')
+            if getattr(state, 'snmp_location', ''):
+                lines.append(f'snmp location {state.snmp_location}')
+        # コンソール / リモートアクセスの既定設定（Si-R実機同様に常時表示）
         lines.append('consoleinfo authtype password')
         lines.append('telnetinfo authtype password')
         lines.append('terminal charset SJIS')
         lines.append('rebootlog use on')
         lines.append('syslog facility 1')
-        # syslog送信先
-        for s in getattr(state, 'syslog_servers', []):
-            lines.append(f'syslog server {s["host"]}')
-            if s.get('port', 514) != 514:
-                lines.append(f'syslog port {s["port"]}')
-        # SNMP
-        for c in getattr(state, 'snmp_community', []):
-            lines.append(f'snmp community {c["name"]} {c["perm"]}')
-        for h in getattr(state, 'snmp_hosts', []):
-            lines.append(f'snmp trap host {h["host"]} community {h["community"]}')
-        if getattr(state, 'snmp_location', ''):
-            lines.append(f'snmp location {state.snmp_location}')
         lines.append('save')
     return '\n'.join(lines)
 
