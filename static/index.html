@@ -397,6 +397,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
           <button class="dev-add-btn" onclick="addDevice('nexus')"    style="border-color:#ff6a00;color:#ff6a00">＋ Nexus 9300</button>
           <button class="dev-add-btn" onclick="addDevice('cisco')"    style="border-color:var(--cisco);color:var(--cisco)">＋ Cisco Router</button>
           <button class="dev-add-btn" onclick="addDevice('apresia')"  style="border-color:#00d4aa;color:#00d4aa">＋ APRESIA</button>
+          <button class="dev-add-btn" onclick="addDevice('bigip')"    style="border-color:#e4002b;color:#e4002b">＋ F5 BIG-IP</button>
           <button class="dev-add-btn" onclick="addDevice('generic-router')" style="border-color:#a040c0;color:#a040c0">＋ 汎用Router</button>
           <button class="dev-add-btn" onclick="addDevice('generic-switch')" style="border-color:#408040;color:#408040">＋ 汎用Switch</button>
           <button class="dev-add-btn" onclick="addDevice('pc')"       style="border-color:#606060;color:#808080">＋ PC</button>
@@ -672,6 +673,7 @@ const DEV_TEMPLATES = {
   'cisco':          {icon:'R', color:'#e05a00', model:'Cisco ISR4321',       prefix:'Cisco',  type:'cisco'},
   'nexus':          {icon:'N', color:'#ff6a00', model:'Nexus 9300',          prefix:'Nexus',  type:'nexus'},
   'apresia':        {icon:'A', color:'#00d4aa', model:'APRESIA ApresiaLight', prefix:'AP',    type:'apresia'},
+  'bigip':          {icon:'F', color:'#e4002b', model:'F5 BIG-IP',           prefix:'BIGIP',  type:'bigip'},
   'generic-router': {icon:'R', color:'#a040c0', model:'Generic Router',      prefix:'Router', type:'cisco'},
   'generic-switch': {icon:'S', color:'#408040', model:'Generic Switch',      prefix:'SW',     type:'srs'},
   'pc':             {icon:'H', color:'#606060', model:'Host PC',             prefix:'PC',     type:'pc'},

@@ -338,6 +338,29 @@ def scenario_gre_tunnel():
     check("トンネル経由OSPF経路でLAN間ping", "Success rate is 100" in p, p)
 
 
+def scenario_bigip_ltm():
+    print("== シナリオ10: F5 BIG-IP LTM (プール/仮想サーバ/メンバー up-down) ==")
+    device("bigip1", "bigip")
+    cli("bigip1", "tmsh create ltm pool web_pool { members add "
+                  "{ 10.90.0.1:80 10.90.0.2:80 10.90.0.3:80 } "
+                  "monitor http load-balancing-mode least-connections-member }")
+    cli("bigip1", "tmsh create ltm virtual vs_web { destination 192.0.2.10:80 "
+                  "pool web_pool profiles add { http tcp } }")
+    p = cli("bigip1", "show ltm pool web_pool")
+    check("プール作成・3メンバーup", "Members      : 3 (up: 3, down: 0)" in p, p)
+    check("負荷分散モード反映", "least-connections-member" in p, p)
+    v = cli("bigip1", "show ltm virtual vs_web")
+    check("仮想サーバ作成(destination/pool)", "192.0.2.10:80" in v and "web_pool" in v, v)
+    # メンバー1台を user-down → 2 up / 1 down
+    cli("bigip1", "modify ltm pool web_pool members modify "
+                  "{ 10.90.0.1:80 { state user-down } }")
+    p2 = cli("bigip1", "show ltm pool web_pool")
+    check("メンバーuser-downで up:2 down:1", "up: 2, down: 1" in p2, p2)
+    check("該当メンバーがoffline(red)", "10.90.0.1:80   offline (red)" in p2, p2)
+    v2 = cli("bigip1", "show ltm virtual vs_web")
+    check("仮想サーバのMembers upが2に減少", "Members up   : 2" in v2, v2)
+
+
 def scenario_inter_vlan():
     print("== シナリオ8: 3スイッチ inter-VLAN ルーティング (L3コア + L2アクセス2台) ==")
     for d in ("l3core", "l2a", "l2b"):
@@ -470,6 +493,7 @@ def main():
     scenario_bgp_transit()
     scenario_gre_tunnel()
     scenario_inter_vlan()
+    scenario_bigip_ltm()
     scenario_rip_distribute_list()
     print()
     if _fails:
