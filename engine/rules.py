@@ -307,6 +307,15 @@ class DeviceState:
         if device_type == "sir":
             self.lldp_neighbors = []
 
+        # F5 BIG-IP (LTM) 状態
+        if device_type == "bigip":
+            self.f5_nodes = {}      # name/ip -> {'address':ip, 'status':'up'}
+            self.f5_pools = {}      # name -> {'members':[{'node','port','status'}],
+                                    #          'monitor','lb_mode'}
+            self.f5_virtuals = {}   # name -> {'destination','pool','status','profiles'}
+            self.f5_monitors = {}   # name -> {'type', ...}
+            self.f5_folder = "/Common"
+
     def uptime_str(self):
         delta = datetime.now() - self.startup_time
         h = int(delta.total_seconds() // 3600)
@@ -619,6 +628,10 @@ class RuleEngine:
         # APRESIAはOSコマンド体系が独自 → 専用ハンドラへ
         if state.device_type == 'apresia':
             return self._apresia_process(cmd, c, state)
+
+        # F5 BIG-IP は tmsh 体系 → 専用ハンドラへ
+        if state.device_type == 'bigip':
+            return self._bigip_process(cmd, c, state)
 
         # モード遷移
         if c in ("exit", "end", "quit"):
@@ -4316,6 +4329,272 @@ Configuration Revision            : 5"""
         return "\n".join(lines)
 
     # ─── Cisco ASA コマンドエンジン（シングルコンテキスト 9.x準拠）────
+    # ══════════════════════════════════════════
+    # F5 BIG-IP (TMOS / tmsh) — LTM ロードバランサ
+    # ══════════════════════════════════════════
+    def _bigip_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """F5 BIG-IP の tmsh コマンド（LTM中心）を処理する。
+        bash から `tmsh <cmd>` でも、tmsh シェル内で `<cmd>` でも受け付ける。"""
+        orig = cmd.strip()
+        # 先頭の tmsh を除去（あってもなくても可）
+        body = re.sub(r'^tmsh\s+', '', orig, flags=re.I).strip()
+        bl = body.lower()
+
+        if bl in ('quit', 'exit'):
+            return ''
+        if bl in ('', 'tmsh'):
+            return ''
+        if bl in ('save sys config', 'save /sys config', 'save sys config partitions all'):
+            return 'Saving running configuration...\n  /config/bigip.conf\n  /config/bigip_base.conf'
+        if bl in ('show sys version', 'show /sys version'):
+            return ('Sys::Version\nMain Package\n  Product     BIG-IP\n'
+                    '  Version     17.1.0\n  Build       0.0.75\n  Edition     Final')
+        # running-config 相当（tmsh list / show running-config）
+        if (re.match(r'^(show|list)\s+running-config', bl) or bl in ('list', 'list ltm', 'list /ltm')):
+            secs = []
+            for name, n in state.f5_nodes.items():
+                secs.append(f'ltm node {name} {{\n    address {n.get("address", name)}\n}}')
+            secs.append(self._bigip_show_pool(state, None, list_mode=True))
+            secs.append(self._bigip_show_virtual(state, None, list_mode=True))
+            for k, v in state.f5_monitors.items():
+                secs.append(f'ltm monitor {v["type"]} {k} {{ }}')
+            body_out = '\n'.join(s for s in secs if s)
+            return body_out if body_out.strip() else '(empty configuration)'
+
+        def _norm_name(n):
+            # /Common/web_pool → web_pool 表示用に partition を保持
+            return n if n.startswith('/') else f'/Common/{n}'
+
+        def _parse_members(text):
+            """{ 10.0.0.1:80 { } 10.0.0.2:80 } 等から ip:port を抽出"""
+            out = []
+            for m in re.finditer(r'(\d{1,3}(?:\.\d{1,3}){3})[:\.](\d+)', text):
+                out.append({'node': m.group(1), 'port': int(m.group(2)), 'status': 'up'})
+            return out
+
+        # ── create/modify ltm node ──
+        m = re.match(r'^(create|modify)\s+ltm\s+node\s+(\S+)\s*\{?\s*(?:address\s+([\d.]+))?', body, re.I)
+        if m:
+            name = m.group(2)
+            addr = m.group(3) or (name if re.match(r'^[\d.]+$', name) else '')
+            state.f5_nodes[name] = {'address': addr, 'status': 'up'}
+            return ''
+
+        # ── create/modify ltm pool ──
+        m = re.match(r'^(create|modify)\s+ltm\s+pool\s+(\S+)\s*(.*)$', body, re.I | re.S)
+        if m:
+            action, name, rest = m.group(1), m.group(2), m.group(3)
+            pool = state.f5_pools.setdefault(name, {'members': [], 'monitor': 'none',
+                                                    'lb_mode': 'round-robin'})
+            # members add { ... } / members { ... }
+            mem = re.search(r'members\s+(?:add\s+)?\{(.*?)\}\s*\}?', rest, re.S)
+            if not mem:
+                mem = re.search(r'members\s+(?:add\s+)?\{(.*)$', rest, re.S)
+            if mem:
+                added = _parse_members(mem.group(1))
+                existing = {(x['node'], x['port']) for x in pool['members']}
+                for a in added:
+                    if (a['node'], a['port']) not in existing:
+                        pool['members'].append(a)
+            # members delete { ip:port }
+            deim = re.search(r'members\s+delete\s+\{(.*?)\}', rest, re.S)
+            if deim:
+                rm = {(x['node'], x['port']) for x in _parse_members(deim.group(1))}
+                pool['members'] = [x for x in pool['members']
+                                   if (x['node'], x['port']) not in rm]
+            # members modify { ip:port { state user-down | session user-disabled } }
+            momod = re.search(r'members\s+modify\s+\{\s*([\d.]+)[:.](\d+)\s*\{(.*?)\}', rest, re.S | re.I)
+            if momod:
+                node, port, inner = momod.group(1), int(momod.group(2)), momod.group(3).lower()
+                down = ('user-down' in inner or 'user-disabled' in inner or
+                        re.search(r'state\s+down', inner) or 'forced-offline' in inner)
+                for mem in pool['members']:
+                    if mem['node'] == node and mem['port'] == port:
+                        mem['status'] = 'down' if down else 'up'
+            mon = re.search(r'monitor\s+([^\s{}]+)', rest, re.I)
+            if mon:
+                pool['monitor'] = mon.group(1)
+            lb = re.search(r'load-balancing-mode\s+([^\s{}]+)', rest, re.I)
+            if lb:
+                pool['lb_mode'] = lb.group(1)
+            return ''
+
+        # ── create/modify ltm virtual ──
+        m = re.match(r'^(create|modify)\s+ltm\s+virtual\s+(\S+)\s*(.*)$', body, re.I | re.S)
+        if m:
+            action, name, rest = m.group(1), m.group(2), m.group(3)
+            v = state.f5_virtuals.setdefault(name, {'destination': '', 'pool': '',
+                                                    'status': 'available', 'profiles': []})
+            dst = re.search(r'destination\s+([\d.]+[:.]?\d*)', rest, re.I)
+            if dst:
+                v['destination'] = dst.group(1)
+            pl = re.search(r'\bpool\s+([^\s{}]+)', rest, re.I)
+            if pl:
+                v['pool'] = pl.group(1)
+            profs = re.search(r'profiles\s+(?:add\s+)?\{(.*?)\}', rest, re.S)
+            if profs:
+                v['profiles'] = [p for p in re.split(r'\s+', profs.group(1).strip()) if p]
+            return ''
+
+        # ── create ltm monitor ──
+        m = re.match(r'^(create|modify)\s+ltm\s+monitor\s+(\S+)\s+(\S+)', body, re.I)
+        if m:
+            mtype, mname = m.group(2), m.group(3)
+            state.f5_monitors[mname] = {'type': mtype}
+            return ''
+
+        # ── delete ──
+        m = re.match(r'^delete\s+ltm\s+(pool|virtual|node|monitor)\s+(\S+)', body, re.I)
+        if m:
+            kind, name = m.group(1).lower(), m.group(2)
+            store = {'pool': state.f5_pools, 'virtual': state.f5_virtuals,
+                     'node': state.f5_nodes, 'monitor': state.f5_monitors}[kind]
+            store.pop(name, None)
+            return ''
+
+        # detail/all/all-properties/field-fmt 等の修飾子は対象名ではないので除外する
+        _F5_KEYWORDS = {'detail', 'all', 'all-properties', 'field-fmt', 'members',
+                        'non-default-properties', 'recursive', 'one-line'}
+
+        # ── show/list ltm pool ──
+        if re.match(r'^(show|list)\s+ltm\s+pool', bl):
+            mp = re.match(r'^(?:show|list)\s+ltm\s+pool\s+(\S+)', body, re.I)
+            target = mp.group(1) if mp else None
+            if target and target.lower() in _F5_KEYWORDS:
+                target = None
+            return self._bigip_show_pool(state, target, list_mode=bl.startswith('list'))
+
+        # ── show/list ltm virtual ──
+        if re.match(r'^(show|list)\s+ltm\s+virtual', bl):
+            mv = re.match(r'^(?:show|list)\s+ltm\s+virtual\s+(\S+)', body, re.I)
+            target = mv.group(1) if mv else None
+            if target and target.lower() in _F5_KEYWORDS:
+                target = None
+            return self._bigip_show_virtual(state, target, list_mode=bl.startswith('list'))
+
+        # ── show/list ltm node ──
+        if re.match(r'^(show|list)\s+ltm\s+node', bl):
+            return self._bigip_show_node(state)
+
+        # ── list ltm monitor ──
+        if re.match(r'^(show|list)\s+ltm\s+monitor', bl):
+            if not state.f5_monitors:
+                return ''
+            return '\n'.join(f'ltm monitor {v["type"]} {k} {{ }}'
+                             for k, v in state.f5_monitors.items())
+
+        # ── メンバーの手動 up/down（動作確認用: modify ... session/state）──
+        m = re.match(r'^modify\s+ltm\s+pool\s+(\S+)\s+members\s+modify\s+\{\s*([\d.]+[:.]\d+)\s*\{\s*(?:session\s+(\S+)|state\s+(\S+))', body, re.I)
+        if m:
+            pname = m.group(1)
+            ipport = re.split(r'[:.]', m.group(2))
+            node, port = ipport[0], int(ipport[1])
+            newst = 'down' if (m.group(3) in ('user-disabled',) or m.group(4) in ('user-down', 'down')) else 'up'
+            pool = state.f5_pools.get(pname)
+            if pool:
+                for mem in pool['members']:
+                    if mem['node'] == node and mem['port'] == port:
+                        mem['status'] = newst
+            return ''
+
+        # 不明な tmsh コマンド
+        return (f'Syntax Error: unexpected argument "{body.split()[0] if body.split() else body}"\n'
+                f'  対応: create/modify/delete/show/list ltm pool|virtual|node|monitor')
+
+    def _bigip_show_pool(self, state, target=None, list_mode=False):
+        pools = state.f5_pools
+        if not pools:
+            return '' if list_mode else '(no pools configured)'
+        names = [target] if target and target in pools else list(pools.keys())
+        if target and target not in pools:
+            return f'  01020036:3: The requested pool ({target}) was not found.'
+        out = []
+        for name in names:
+            p = pools[name]
+            up = sum(1 for m in p['members'] if m['status'] == 'up')
+            total = len(p['members'])
+            if list_mode:
+                out.append(f'ltm pool {name} {{')
+                out.append(f'    load-balancing-mode {p["lb_mode"]}')
+                out.append(f'    members {{')
+                for m in p['members']:
+                    out.append(f'        {m["node"]}:{m["port"]} {{')
+                    out.append(f'            address {m["node"]}')
+                    out.append(f'        }}')
+                out.append(f'    }}')
+                if p['monitor'] != 'none':
+                    out.append(f'    monitor {p["monitor"]}')
+                out.append('}')
+            else:
+                avail = 'available' if up > 0 else 'offline'
+                color = 'green' if up > 0 else 'red'
+                out.append(f'Ltm::Pool: {name}')
+                out.append('-' * 60)
+                out.append(f'  Status')
+                out.append(f'    Availability : {avail} ({color})')
+                out.append(f'    State        : enabled')
+                out.append(f'    Reason       : The pool is available')
+                out.append(f'    Load Balancing Mode : {p["lb_mode"]}')
+                out.append(f'    Monitor      : {p["monitor"]}')
+                out.append(f'    Members      : {total} (up: {up}, down: {total-up})')
+                out.append('')
+                for m in p['members']:
+                    st = 'available (green)' if m['status'] == 'up' else 'offline (red)'
+                    out.append(f'  Member: {m["node"]}:{m["port"]}   {st}')
+                out.append('')
+        return '\n'.join(out)
+
+    def _bigip_show_virtual(self, state, target=None, list_mode=False):
+        vs = state.f5_virtuals
+        if not vs:
+            return '' if list_mode else '(no virtual servers configured)'
+        names = [target] if target and target in vs else list(vs.keys())
+        if target and target not in vs:
+            return f'  01020036:3: The requested virtual server ({target}) was not found.'
+        out = []
+        for name in names:
+            v = vs[name]
+            pool = state.f5_pools.get(v.get('pool', ''), None)
+            up = sum(1 for m in pool['members'] if m['status'] == 'up') if pool else 0
+            avail = 'available' if up > 0 else ('offline' if pool else 'unknown')
+            color = 'green' if up > 0 else ('red' if pool else 'blue')
+            if list_mode:
+                out.append(f'ltm virtual {name} {{')
+                out.append(f'    destination {v["destination"]}')
+                if v.get('pool'):
+                    out.append(f'    pool {v["pool"]}')
+                if v.get('profiles'):
+                    out.append(f'    profiles {{')
+                    for pr in v['profiles']:
+                        out.append(f'        {pr} {{ }}')
+                    out.append(f'    }}')
+                out.append('}')
+            else:
+                out.append(f'Ltm::Virtual Server: {name}')
+                out.append('-' * 60)
+                out.append(f'  Status')
+                out.append(f'    Availability : {avail} ({color})')
+                out.append(f'    State        : enabled')
+                out.append(f'    Destination  : {v["destination"]}')
+                out.append(f'    Pool         : {v.get("pool","(none)")}')
+                out.append(f'    Members up   : {up}')
+                out.append('')
+        return '\n'.join(out)
+
+    def _bigip_show_node(self, state):
+        # ノードはプールメンバーからも集約
+        nodes = dict(state.f5_nodes)
+        for p in state.f5_pools.values():
+            for m in p['members']:
+                nodes.setdefault(m['node'], {'address': m['node'], 'status': m['status']})
+        if not nodes:
+            return '(no nodes configured)'
+        out = ['Ltm::Nodes', '-' * 40]
+        for name, n in nodes.items():
+            st = 'available (green)' if n.get('status', 'up') == 'up' else 'offline (red)'
+            out.append(f'  {name}  ({n.get("address", name)})  {st}')
+        return '\n'.join(out)
+
     def _asa_process(self, cmd: str, c: str, state: DeviceState) -> str:
         """Cisco ASA シングルコンテキスト CLIコマンドを処理する"""
 

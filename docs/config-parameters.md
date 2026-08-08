@@ -118,6 +118,21 @@
 - トンネルIP上で ping / OSPF / スタティックが利用可能。
 - 確認: `show ip interface brief`(Tunnel0 up) / `show ip ospf neighbor`
 
+## F5 BIG-IP (LTM / tmsh)
+
+| コマンド | 説明 | 状態 |
+|---|---|---|
+| `tmsh create ltm pool <n> { members add {ip:port ...} monitor <m> load-balancing-mode <mode> }` | プール作成 | 対応 |
+| `modify ltm pool <n> members modify { ip:port { state user-down\|user-up } }` | メンバー手動up/down | 対応 |
+| `create ltm virtual <n> { destination ip:port pool <p> profiles add {...} }` | 仮想サーバ(VIP) | 対応 |
+| `show ltm pool\|virtual [<n>] [detail]` / `show ltm node` | 状態表示 | 対応 |
+| `show running-config` / `list ltm ...` | 設定出力 | 対応 |
+| `delete ltm pool\|virtual\|node\|monitor <n>` | 削除 | 対応 |
+
+- `tmsh <cmd>`（bashから）でも tmsh シェル内の `<cmd>` でも受付。
+- メンバーの up/down で負荷分散対象の増減を再現（VIPの `Members up` も連動）。
+- 現状は LTM 中心。GTM/APM/ASM・iRule・SNAT詳細は未対応。
+
 ## 経路フィルタ共通 (prefix-list / ACL / route-map)
 
 | コマンド | 説明 | 状態 |
