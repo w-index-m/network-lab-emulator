@@ -307,6 +307,13 @@ class DeviceState:
         if device_type == "sir":
             self.lldp_neighbors = []
 
+        # Si-R / SR-S: 投入した設定コマンドを順序保持でキャプチャ（running-config再現用）
+        if device_type in ("sir", "srs"):
+            self.sir_config = {}   # config-key -> 元コマンド（順序保持dict）
+            self.event_log = [     # イベントログ（show syslog/logging用）
+                ('SYSTEM', 'system started (Si-R G120 V40.00)'),
+            ]
+
         # F5 BIG-IP (LTM) 状態
         if device_type == "bigip":
             self.f5_nodes = {}      # name/ip -> {'address':ip, 'status':'up'}
@@ -2298,7 +2305,16 @@ Configuration Revision            : 5"""
                 lines.append('  (no syslog server configured)')
             lines.append('')
             lines.append('--- Recent Log ---')
-            lines.append('2026/06/28 12:00:00 SYS: system started')
+            elog = getattr(state, 'event_log', None)
+            if elog:
+                base = datetime.now().replace(microsecond=0)
+                n = len(elog)
+                for i, (fac, msg) in enumerate(elog[-50:]):
+                    # 擬似タイムスタンプ（新しいものほど現在時刻に近い）
+                    ts = (base - timedelta(seconds=(min(n, 50) - i))).strftime('%Y/%m/%d %H:%M:%S')
+                    lines.append(f'{ts} {fac}: {msg}')
+            else:
+                lines.append('2026/06/28 12:00:00 SYSTEM: system started')
             return '\n'.join(lines)
         # show filter / show acl（Si-R）
         if re.match(r'^show\s+(filter|acl)', c):
