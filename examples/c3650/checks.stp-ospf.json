@@ -1,0 +1,17 @@
+{
+  "sw1": [
+    {"cmd": "show spanning-tree vlan 10", "expect": "This bridge is the root"},
+    {"cmd": "show ip ospf neighbor", "expect": "FULL"},
+    {"cmd": "show ip route ospf", "expect": "O"}
+  ],
+  "sw2": [
+    {"cmd": "show spanning-tree vlan 10", "expect": "Root ID"},
+    {"cmd": "show ip ospf neighbor", "expect": "FULL"},
+    {"cmd": "show ip route ospf", "expect": "O"}
+  ],
+  "sw3": [
+    {"cmd": "show spanning-tree vlan 10", "expect": "BLK"},
+    {"cmd": "show ip ospf neighbor", "expect": "FULL"},
+    {"cmd": "show ip route ospf", "expect": "O"}
+  ]
+}

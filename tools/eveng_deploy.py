@@ -25,8 +25,53 @@ EVE-NG 上に立てた各ノードの管理IPへ netmiko(SSH) で
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.request
+
+
+# ── 実機プラットフォーム向けインターフェース名変換 ────────────
+# 本ツールのexport configは Gi0/0/x（ルータ流）等になるため、
+# 実機のポート体系へ寄せる。Catalyst 3650 は Gi1/0/x / Te1/1/x。
+_IF_RE = re.compile(
+    r'\b(TenGigabitEthernet|GigabitEthernet|FastEthernet|Te|Gi|Fa)'
+    r'(\d+)/(\d+)(?:/(\d+))?\b')
+
+
+def build_if_map(cfg: str, platform: str) -> dict:
+    """cfg中に出現するインターフェース名を実機体系へ写す辞書を作る。
+
+    出現順に 1 始まりで採番するので、ポート0や重複衝突を起こさない
+    （合成ポート番号は物理ポートと無関係なため、連番化して安全側に倒す）。
+    戻り値: {元の名前: 変換後の名前}
+    """
+    if platform in (None, '', 'generic'):
+        return {}
+    mapping = {}
+    gi_n = [0]
+    te_n = [0]
+    for m in _IF_RE.finditer(cfg):
+        name = m.group(0)
+        if name in mapping:
+            continue
+        is_ten = m.group(1) in ('TenGigabitEthernet', 'Te')
+        if platform == 'c3650':
+            if is_ten:
+                te_n[0] += 1
+                mapping[name] = f'TenGigabitEthernet1/1/{te_n[0]}'
+            else:
+                gi_n[0] += 1
+                mapping[name] = f'GigabitEthernet1/0/{gi_n[0]}'
+    return mapping
+
+
+def _apply_if_map(text: str, mapping: dict) -> str:
+    if not text or not mapping:
+        return text
+    # 長い名前から先に置換（GigabitEthernet を Gi より先に）
+    for src in sorted(mapping, key=len, reverse=True):
+        text = re.sub(r'\b' + re.escape(src) + r'\b', mapping[src], text)
+    return text
 
 
 def fetch_export(api_base):
@@ -39,14 +84,19 @@ def cmd_export(args):
     data = fetch_export(args.api)
     os.makedirs(args.out, exist_ok=True)
     inv = {}
+    if_maps = {}   # dev_id -> {元IF名: 変換後}
     for d in data['devices']:
         path = os.path.join(args.out, f"{d['id']}.cfg")
+        cfg = d['running_config']
+        ifmap = build_if_map(cfg, args.platform)
+        if_maps[d['id']] = ifmap
+        cfg = _apply_if_map(cfg, ifmap)
         with open(path, 'w') as f:
-            f.write(d['running_config'].rstrip() + '\n')
+            f.write(cfg.rstrip() + '\n')
         mgmt = d.get('mgmt') or {}
         inv[d['id']] = {
             'device_type': d['netmiko_device_type'],
-            'host':        mgmt.get('ip', ''),      # ← EVE-NG の mgmt IP に要確認/上書き
+            'host':        mgmt.get('ip', ''),      # ← 実機/EVE-NG の mgmt IP に要確認/上書き
             'username':    'admin',
             'password':    'admin',
             'secret':      'admin',
@@ -54,9 +104,20 @@ def cmd_export(args):
         }
         print(f"  wrote {path}  (type={d['type']} netmiko={d['netmiko_device_type']} "
               f"mgmt={mgmt.get('ip','?')})")
-    # トポロジと inventory 雛形も出力
+        if ifmap:
+            for src, dst in ifmap.items():
+                print(f"      IF {src} -> {dst}")
+    # トポロジ（リンク）: IF名も同じ変換を適用して整合させる
+    links_out = []
+    for lk in data['links']:
+        links_out.append({
+            'a':       lk['a'],
+            'iface_a': if_maps.get(lk['a'], {}).get(lk['iface_a'], lk['iface_a']),
+            'b':       lk['b'],
+            'iface_b': if_maps.get(lk['b'], {}).get(lk['iface_b'], lk['iface_b']),
+        })
     with open(os.path.join(args.out, 'topology.json'), 'w') as f:
-        json.dump(data['links'], f, indent=2, ensure_ascii=False)
+        json.dump(links_out, f, indent=2, ensure_ascii=False)
     inv_path = os.path.join(args.out, 'inventory.json')
     with open(inv_path, 'w') as f:
         json.dump(inv, f, indent=2, ensure_ascii=False)
@@ -145,6 +206,8 @@ def main():
     pe = sub.add_parser('export', help='構成をファイルへ書き出す')
     pe.add_argument('--api', default='http://127.0.0.1:8099')
     pe.add_argument('--out', default='./eveng_out')
+    pe.add_argument('--platform', default='generic', choices=['generic', 'c3650'],
+                    help='インターフェース名を実機体系へ変換 (c3650: Gi1/0/x, Te1/1/x)')
 
     pd = sub.add_parser('deploy', help='running-config を投入')
     pd.add_argument('--inventory', required=True)
