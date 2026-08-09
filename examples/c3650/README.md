@@ -48,6 +48,23 @@ python tools/eveng_deploy.py verify --inventory ./c3650_out/inventory.json \
 | `{"cmd": ..., "expect": ...}` | SSH(netmiko) | show出力に文字列が含まれるか |
 | `{"path": ..., "expect": ...}` | RESTCONF(GET) | 返却JSONに文字列が含まれるか |
 | `{"path": ..., "all_equal": {"key","value"}}` | RESTCONF(GET) | 指定キーの全値が期待値と一致か |
+| `{"path": ..., "route_present": {"prefix",...}}` | RESTCONF(GET) | RIBに特定経路が入っているか |
+
+### ルーティングテーブル検証（route_present）
+
+`Cisco-IOS-XE-routing-oper` のRIBを取得し、**特定の経路が入っているか**を判定します。
+テンプレートは `checks.routes.json`。確認したい経路は後から書き足せます。
+
+```json
+{"path": "Cisco-IOS-XE-routing-oper:routing-oper-data/routing-instance=default/ribs/rib=ipv4-default",
+ "route_present": {"prefix": "10.10.30.0/24", "protocol": "ospf", "next_hop": "10.1.12.2"}}
+```
+
+- `prefix` … 必須。`10.10.30.0/24` でも `10.10.30.0`（ネットワークのみ）でも可
+- `protocol` … 任意。`ospf`/`connected`/`static` 等（`proto-` 接頭辞は自動吸収）
+- `next_hop` … 任意。空文字/省略でチェックしない
+- 「そのprefixのエントリで、指定属性が一致するものが1件でもあればPASS」
+- `_` で始まるキー（`_comment` 等）はメタとして無視されるのでテンプレにコメントを残せます
 
 RESTCONF版のサンプルは `checks.restconf.json`。OSPF隣接を
 `Cisco-IOS-XE-ospf-oper` から取り、**全隣接の `adjacency-state` が `full`** かを

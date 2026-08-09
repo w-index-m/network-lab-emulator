@@ -1,0 +1,14 @@
+{
+  "_comment": "ルーティングテーブル検証テンプレート。確認したい経路は後から prefix/protocol/next_hop を書き足す。protocol と next_hop は任意（省略すると存在チェックのみ）。RESTCONFパスはIOS-XE版により差異あり、合わなければ docs/c3650-api.md 参照。",
+  "sw1": [
+    {"path": "Cisco-IOS-XE-routing-oper:routing-oper-data/routing-instance=default/ribs/rib=ipv4-default",
+     "route_present": {"prefix": "10.10.30.0/24", "protocol": "ospf", "next_hop": ""}},
+
+    {"path": "Cisco-IOS-XE-routing-oper:routing-oper-data/routing-instance=default/ribs/rib=ipv4-default",
+     "route_present": {"prefix": "0.0.0.0/0"}}
+  ],
+  "sw2": [
+    {"path": "Cisco-IOS-XE-routing-oper:routing-oper-data/routing-instance=default/ribs/rib=ipv4-default",
+     "route_present": {"prefix": "192.168.1.0/24", "protocol": "connected"}}
+  ]
+}

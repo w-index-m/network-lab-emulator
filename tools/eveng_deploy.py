@@ -208,10 +208,51 @@ def _collect_values(obj, key):
     return found
 
 
+def _find_route_dicts(obj, prefix):
+    """JSON中から、指定prefixを持つ「経路エントリ」の部分木を集める。
+    キー名の名前空間接頭辞は無視。prefix は "10.0.0.0/24" 形式でも
+    ネットワークアドレスのみ "10.0.0.0" でも一致させる。"""
+    net_only = prefix.split('/')[0]
+    hits = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k.split(':')[-1] == 'prefix' and isinstance(v, str):
+                if v == prefix or v.split('/')[0] == net_only:
+                    hits.append(obj)
+                    break
+        for v in obj.values():
+            hits += _find_route_dicts(v, prefix)
+    elif isinstance(obj, list):
+        for it in obj:
+            hits += _find_route_dicts(it, prefix)
+    return hits
+
+
+def _route_matches(route, protocol=None, next_hop=None):
+    """経路エントリ部分木が protocol / next_hop 制約を満たすか"""
+    if protocol:
+        want = protocol.lower()
+        protos = [str(v).lower().replace('proto-', '')
+                  for v in _collect_values(route, 'source-protocol')]
+        protos += [str(v).lower().replace('proto-', '')
+                   for v in _collect_values(route, 'protocol')]
+        if not any(want in p for p in protos):
+            return False
+    if next_hop:
+        nhs = [str(v) for v in _collect_values(route, 'next-hop-address')]
+        nhs += [str(v) for v in _collect_values(route, 'next-hop')]
+        if not any(next_hop in n for n in nhs):
+            return False
+    return True
+
+
 def _eval_restconf_item(entry, it, verbose=False):
     """RESTCONF項目を評価。対応形式:
       {"path": <RESTCONFデータパス>, "expect": <生JSON部分文字列>}
       {"path": ..., "all_equal": {"key": <キー名>, "value": <期待値>}}
+      {"path": ..., "route_present": {"prefix": "10.0.0.0/24",
+                                      "protocol": "ospf",       # 任意
+                                      "next_hop": "10.1.12.2"}} # 任意
     戻り値: (ok: bool, label: str)
     """
     path = it['path']
@@ -219,6 +260,18 @@ def _eval_restconf_item(entry, it, verbose=False):
         data = _restconf_get(entry, path)
     except Exception as e:
         return False, f"GET {path} -> {e}"
+    if 'route_present' in it:
+        spec = it['route_present']
+        prefix = spec['prefix']
+        proto = spec.get('protocol')
+        nh = spec.get('next_hop')
+        routes = _find_route_dicts(data, prefix)
+        ok = any(_route_matches(r, proto, nh) for r in routes)
+        cond = prefix + (f", proto={proto}" if proto else "") + \
+            (f", nh={nh}" if nh else "")
+        label = f"{path} : route_present({cond})  " \
+                f"(prefix候補 {len(routes)}件)"
+        return ok, label
     if 'all_equal' in it:
         key = it['all_equal']['key']
         want = str(it['all_equal']['value']).lower()
@@ -240,6 +293,8 @@ def cmd_verify(args):
     checks = json.load(open(args.checks))
     rc = 0
     for dev_id, items in checks.items():
+        if dev_id.startswith('_'):   # _comment 等のメタキーは無視
+            continue
         entry = inv.get(dev_id)
         if not entry or not entry.get('host'):
             print(f"[SKIP] {dev_id}: inventory に host なし")
