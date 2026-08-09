@@ -170,32 +170,106 @@ def cmd_deploy(args):
     return rc
 
 
-# ── verify: show を実行し期待文字列をチェック ─────────────────
+# ── RESTCONF ヘルパ（IOS-XE 16.x, HTTPS/JSON, 自己署名前提） ──
+def _restconf_get(entry, path):
+    import requests
+    from requests.auth import HTTPBasicAuth
+    try:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except Exception:
+        pass
+    port = entry.get('restconf_port', 443)
+    url = f"https://{entry['host']}:{port}/restconf/data/{path}"
+    r = requests.get(
+        url,
+        auth=HTTPBasicAuth(entry.get('username', 'admin'),
+                           entry.get('password', 'admin')),
+        headers={"Accept": "application/yang-data+json"},
+        verify=entry.get('tls_verify', False),
+        timeout=entry.get('timeout', 20),
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _collect_values(obj, key):
+    """JSON中から指定キー名（名前空間接頭辞は無視）の値をすべて集める"""
+    found = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == key or k.split(':')[-1] == key:
+                if not isinstance(v, (dict, list)):
+                    found.append(v)
+            found += _collect_values(v, key)
+    elif isinstance(obj, list):
+        for it in obj:
+            found += _collect_values(it, key)
+    return found
+
+
+def _eval_restconf_item(entry, it, verbose=False):
+    """RESTCONF項目を評価。対応形式:
+      {"path": <RESTCONFデータパス>, "expect": <生JSON部分文字列>}
+      {"path": ..., "all_equal": {"key": <キー名>, "value": <期待値>}}
+    戻り値: (ok: bool, label: str)
+    """
+    path = it['path']
+    try:
+        data = _restconf_get(entry, path)
+    except Exception as e:
+        return False, f"GET {path} -> {e}"
+    if 'all_equal' in it:
+        key = it['all_equal']['key']
+        want = str(it['all_equal']['value']).lower()
+        vals = [str(v).lower() for v in _collect_values(data, key)]
+        ok = bool(vals) and all(v == want for v in vals)
+        label = (f"{path} : all '{key}' == '{want}'  "
+                 f"(found {len(vals)}: {vals[:5]})")
+        return ok, label
+    if 'expect' in it:
+        raw = json.dumps(data, ensure_ascii=False)
+        ok = it['expect'] in raw
+        return ok, f"{path} : contains '{it['expect']}'"
+    return False, f"{path} : 不正なcheck定義"
+
+
+# ── verify: show(SSH) / RESTCONF(GET) を実行しチェック ────────
 def cmd_verify(args):
     inv = json.load(open(args.inventory))
-    checks = json.load(open(args.checks))   # {dev_id: [{"cmd":..,"expect":..}, ...]}
+    checks = json.load(open(args.checks))
     rc = 0
     for dev_id, items in checks.items():
         entry = inv.get(dev_id)
         if not entry or not entry.get('host'):
             print(f"[SKIP] {dev_id}: inventory に host なし")
             continue
-        try:
-            conn = _connect(entry)
-            conn.enable()
-            for it in items:
-                out = conn.send_command(it['cmd'])
-                ok = it['expect'] in out
-                print(f"  [{'PASS' if ok else 'FAIL'}] {dev_id}: '{it['cmd']}' "
-                      f"expect '{it['expect']}'")
-                if not ok:
-                    rc = 1
-                    if args.verbose:
-                        print(out)
-            conn.disconnect()
-        except Exception as e:
-            print(f"[FAIL] {dev_id}: {e}")
-            rc = 1
+        ssh_items = [it for it in items if 'cmd' in it]
+        rc_items = [it for it in items if 'path' in it]
+        # RESTCONF（SSH接続不要）
+        for it in rc_items:
+            ok, label = _eval_restconf_item(entry, it, args.verbose)
+            print(f"  [{'PASS' if ok else 'FAIL'}] {dev_id} (restconf): {label}")
+            if not ok:
+                rc = 1
+        # SSH(netmiko) は必要なときだけ接続
+        if ssh_items:
+            try:
+                conn = _connect(entry)
+                conn.enable()
+                for it in ssh_items:
+                    out = conn.send_command(it['cmd'])
+                    ok = it['expect'] in out
+                    print(f"  [{'PASS' if ok else 'FAIL'}] {dev_id} (ssh): "
+                          f"'{it['cmd']}' expect '{it['expect']}'")
+                    if not ok:
+                        rc = 1
+                        if args.verbose:
+                            print(out)
+                conn.disconnect()
+            except Exception as e:
+                print(f"[FAIL] {dev_id} (ssh): {e}")
+                rc = 1
     return rc
 
 

@@ -39,7 +39,31 @@ python tools/eveng_deploy.py verify --inventory ./c3650_out/inventory.json \
     --checks examples/c3650/checks.stp-ospf.json
 ```
 
-## checks.stp-ospf.json が見ているもの
+## 検証は SSH と RESTCONF を混在できる
+
+`checks.json` の各項目は**キーで自動振り分け**されます。
+
+| 項目形式 | 経路 | 例 |
+|---|---|---|
+| `{"cmd": ..., "expect": ...}` | SSH(netmiko) | show出力に文字列が含まれるか |
+| `{"path": ..., "expect": ...}` | RESTCONF(GET) | 返却JSONに文字列が含まれるか |
+| `{"path": ..., "all_equal": {"key","value"}}` | RESTCONF(GET) | 指定キーの全値が期待値と一致か |
+
+RESTCONF版のサンプルは `checks.restconf.json`。OSPF隣接を
+`Cisco-IOS-XE-ospf-oper` から取り、**全隣接の `adjacency-state` が `full`** かを
+構造で判定します（文字列grepより堅い）。RESTCONF利用時は 3650 で
+`restconf` / `ip http secure-server` を有効化し、`pip install requests` が必要です。
+
+```bash
+python tools/eveng_deploy.py verify --inventory ./c3650_out/inventory.json \
+    --checks examples/c3650/checks.restconf.json
+```
+
+> RESTCONFのモデルパスはIOS-XE版で差異あり。合わない場合は実機で
+> `GET /restconf/data/ietf-yang-library:modules-state` を叩き搭載モデルを確認。
+> 詳細は `docs/c3650-api.md`。
+
+## checks.stp-ospf.json（SSHのみ版）が見ているもの
 
 | 機器 | チェック | 期待 |
 |---|---|---|
