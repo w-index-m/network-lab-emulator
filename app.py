@@ -4104,6 +4104,72 @@ def _register_stub(device_id: str):
     if state and getattr(state, 'syslog_servers', []):
         syslog_dispatcher.register(device_id, state.syslog_servers)
 
+# netmiko の device_type へのマッピング（EVE-NG 実機投入用）
+_NETMIKO_TYPE = {
+    'cisco':    'cisco_ios',
+    'catalyst': 'cisco_ios',
+    'nexus':    'cisco_nxos',
+    'asa':      'cisco_asa',
+    'bigip':    'f5_tmsh',
+    'f5':       'f5_tmsh',
+    'sir':      'generic_termserver',   # 富士通Si-R: netmiko標準未対応 → generic
+    'srs':      'generic_termserver',
+    'apresia':  'generic_termserver',
+}
+
+
+def _first_mgmt_ip(state):
+    """running-config上で最初にIPが振られているインターフェースをmgmt候補として返す"""
+    for ifname, iinfo in getattr(state, 'interfaces', {}).items():
+        if iinfo.get('ip'):
+            return {"interface": ifname, "ip": iinfo['ip'],
+                    "prefix": iinfo.get('prefix', 24)}
+    return None
+
+
+@app.get("/api/export")
+async def export_configs():
+    """全機器の running-config とトポロジを EVE-NG 投入用にエクスポート。
+
+    tools/eveng_deploy.py が消費し、netmiko 経由で mgmt IP へSSH投入・検証する。
+    """
+    devices = []
+    for dev_id, state in device_sessions.items():
+        try:
+            cfg = _build_running_config(dev_id, state)
+        except Exception as e:
+            cfg = f"! (config generation failed: {e})"
+        devices.append({
+            "id":                  dev_id,
+            "hostname":            state.hostname,
+            "type":                state.device_type,
+            "netmiko_device_type": _NETMIKO_TYPE.get(state.device_type,
+                                                     'generic_termserver'),
+            "mgmt":                _first_mgmt_ip(state),
+            "running_config":      cfg,
+        })
+    # トポロジ（リンク）: vnet.links を基準に interface_links から両端IF名を補完
+    seen = set()
+    links = []
+    for a in list(vnet.links.keys()):
+        for b in list(vnet.links.get(a, set())):
+            key = tuple(sorted([a, b]))
+            if key in seen:
+                continue
+            seen.add(key)
+            links.append({
+                "a":       a,
+                "iface_a": vnet.interface_links.get(a, {}).get(b),
+                "b":       b,
+                "iface_b": vnet.interface_links.get(b, {}).get(a),
+            })
+    return {
+        "generated_at": datetime.now().isoformat(timespec='seconds'),
+        "devices":      devices,
+        "links":        links,
+    }
+
+
 @app.get("/api/topology")
 async def get_topology():
     """現在のトポロジー情報を返す"""
