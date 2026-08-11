@@ -1,0 +1,18 @@
+{
+  "sw1": [
+    {"path": "Cisco-IOS-XE-ospf-oper:ospf-oper-data",
+     "all_equal": {"key": "adjacency-state", "value": "full"}},
+    {"path": "Cisco-IOS-XE-interfaces-oper:interfaces/interface=Vlan10",
+     "expect": "if-oper-state-ready"},
+    {"cmd": "show spanning-tree vlan 10", "expect": "This bridge is the root"}
+  ],
+  "sw2": [
+    {"path": "Cisco-IOS-XE-ospf-oper:ospf-oper-data",
+     "all_equal": {"key": "adjacency-state", "value": "full"}}
+  ],
+  "sw3": [
+    {"path": "Cisco-IOS-XE-ospf-oper:ospf-oper-data",
+     "all_equal": {"key": "adjacency-state", "value": "full"}},
+    {"cmd": "show spanning-tree vlan 10", "expect": "BLK"}
+  ]
+}

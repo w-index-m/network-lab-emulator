@@ -563,6 +563,10 @@ async def cli_command(body: dict):
         arp_engine.clear(device_id)
         return {"output": "", "mode": state.mode, "hostname": state.hostname}
 
+    # ── BIG-IP: show/list ltm の前にヘルスモニターでメンバー状態を自動判定 ──
+    if state.device_type == 'bigip' and re.search(r'(show|list)\s+ltm|show\s+running|list\s+running', c_low):
+        _bigip_health_check(state)
+
     output = rule_engine.process(command, state)
 
     # ── Si-R/SR-S: 投入した設定コマンドをキャプチャ（show running-config で忠実再現）──
@@ -2538,6 +2542,34 @@ def _sir_config_key(cmd: str) -> str:
     return ' '.join(toks).lower()
 
 
+def _member_reachable(member_ip: str) -> bool:
+    """プールメンバー(実サーバ)がヘルスモニター的に到達可能か判定。
+    そのIPを持つ装置が存在し、当該インターフェースがdown(shutdown)でなければ up。
+    装置が無い/インターフェースdown → down。"""
+    dev = icmp_engine._find_device_owning_ip(member_ip)
+    if not dev:
+        return False
+    info = icmp_engine.device_ips.get(dev, {})
+    down_ifaces = vnet.down_interfaces.get(dev, set())
+    for ifname, iinfo in info.get('interfaces', {}).items():
+        if iinfo.get('ip') == member_ip:
+            return ifname not in down_ifaces
+    return member_ip in info.get('ips', {})
+
+
+def _bigip_health_check(state):
+    """BIG-IP: monitorが設定されたプールのメンバー状態を疎通で自動更新。
+    実効status = (admin_downでない) かつ (monitorがnoneならup / それ以外は疎通結果)。"""
+    for pool in getattr(state, 'f5_pools', {}).values():
+        has_monitor = pool.get('monitor', 'none') not in ('none', '', None)
+        for m in pool['members']:
+            if has_monitor:
+                m['monitor_status'] = 'up' if _member_reachable(m['node']) else 'down'
+            else:
+                m['monitor_status'] = 'up'
+            m['status'] = 'down' if (m.get('admin_down') or m['monitor_status'] == 'down') else 'up'
+
+
 def _sir_event(state, facility: str, message: str):
     """Si-R/SR-Sのイベントログに1行追加（show syslog/logging用、最大200行）"""
     log = getattr(state, 'event_log', None)
@@ -3617,9 +3649,23 @@ async def api_load():
 
 @app.delete("/api/device/{dev_id}")
 async def remove_device(dev_id: str):
-    """装置を削除"""
+    """装置を削除。関連する各エンジンの登録も掃除する。"""
     if dev_id in device_sessions:
         del device_sessions[dev_id]
+    # ICMP/到達性・トポロジー登録を除去（残すとメンバー疎通判定等で誤検出する）
+    icmp_engine.device_ips.pop(dev_id, None)
+    for peer in list(vnet.get_neighbors(dev_id)):
+        vnet.remove_link(dev_id, peer)
+        _update_neighbors(dev_id, peer, add=False)
+    vnet.links.pop(dev_id, None)
+    vnet.interface_links.pop(dev_id, None)
+    vnet.down_interfaces.pop(dev_id, None)
+    vnet.device_types.pop(dev_id, None)
+    for _eng in (rip_engine, ospf_engine, bgp_engine, stp_engine):
+        try:
+            _eng.nodes.pop(dev_id, None)
+        except Exception:
+            pass
     return {"ok": True}
 
 @app.post("/api/config/validate")
@@ -4057,6 +4103,72 @@ def _register_stub(device_id: str):
     # syslogターゲットをdispatcherに同期
     if state and getattr(state, 'syslog_servers', []):
         syslog_dispatcher.register(device_id, state.syslog_servers)
+
+# netmiko の device_type へのマッピング（EVE-NG 実機投入用）
+_NETMIKO_TYPE = {
+    'cisco':    'cisco_ios',
+    'catalyst': 'cisco_ios',
+    'nexus':    'cisco_nxos',
+    'asa':      'cisco_asa',
+    'bigip':    'f5_tmsh',
+    'f5':       'f5_tmsh',
+    'sir':      'generic_termserver',   # 富士通Si-R: netmiko標準未対応 → generic
+    'srs':      'generic_termserver',
+    'apresia':  'generic_termserver',
+}
+
+
+def _first_mgmt_ip(state):
+    """running-config上で最初にIPが振られているインターフェースをmgmt候補として返す"""
+    for ifname, iinfo in getattr(state, 'interfaces', {}).items():
+        if iinfo.get('ip'):
+            return {"interface": ifname, "ip": iinfo['ip'],
+                    "prefix": iinfo.get('prefix', 24)}
+    return None
+
+
+@app.get("/api/export")
+async def export_configs():
+    """全機器の running-config とトポロジを EVE-NG 投入用にエクスポート。
+
+    tools/eveng_deploy.py が消費し、netmiko 経由で mgmt IP へSSH投入・検証する。
+    """
+    devices = []
+    for dev_id, state in device_sessions.items():
+        try:
+            cfg = _build_running_config(dev_id, state)
+        except Exception as e:
+            cfg = f"! (config generation failed: {e})"
+        devices.append({
+            "id":                  dev_id,
+            "hostname":            state.hostname,
+            "type":                state.device_type,
+            "netmiko_device_type": _NETMIKO_TYPE.get(state.device_type,
+                                                     'generic_termserver'),
+            "mgmt":                _first_mgmt_ip(state),
+            "running_config":      cfg,
+        })
+    # トポロジ（リンク）: vnet.links を基準に interface_links から両端IF名を補完
+    seen = set()
+    links = []
+    for a in list(vnet.links.keys()):
+        for b in list(vnet.links.get(a, set())):
+            key = tuple(sorted([a, b]))
+            if key in seen:
+                continue
+            seen.add(key)
+            links.append({
+                "a":       a,
+                "iface_a": vnet.interface_links.get(a, {}).get(b),
+                "b":       b,
+                "iface_b": vnet.interface_links.get(b, {}).get(a),
+            })
+    return {
+        "generated_at": datetime.now().isoformat(timespec='seconds'),
+        "devices":      devices,
+        "links":        links,
+    }
+
 
 @app.get("/api/topology")
 async def get_topology():

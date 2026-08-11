@@ -152,8 +152,36 @@ class VirtualNetwork:
             self.interface_links[a][b] = iface_a
         if iface_b:
             self.interface_links[b][a] = iface_b
+        # 並列リンク（同一ペア間の複数物理リンク）を個別に記録。
+        # 片側の全インターフェースがdownして初めて隣接が断となる（EtherChannel等）。
+        if not hasattr(self, 'link_ifaces'):
+            self.link_ifaces = defaultdict(lambda: defaultdict(set))
+        if iface_a:
+            self.link_ifaces[a][b].add(iface_a)
+        if iface_b:
+            self.link_ifaces[b][a].add(iface_b)
         if loop_path:
             self._notify_loop_events(a, b, iface_a or a, iface_b or b, loop_path)
+
+    def _edge_up(self, a: str, b: str) -> bool:
+        """a-b間の物理リンクが1本でも生きていれば True。
+        並列リンクは全down時のみ断とする。iface情報が無ければ従来通りup扱い。"""
+        lifaces = getattr(self, 'link_ifaces', {})
+        a_ifs = lifaces.get(a, {}).get(b, set())
+        b_ifs = lifaces.get(b, {}).get(a, set())
+        if not a_ifs and not b_ifs:
+            return True  # iface不明 → 互換のためup
+        downa = {self._norm_iface(x) for x in self.down_interfaces.get(a, set())}
+        downb = {self._norm_iface(x) for x in self.down_interfaces.get(b, set())}
+        a_up = any(self._norm_iface(i) not in downa for i in a_ifs) if a_ifs else True
+        b_up = any(self._norm_iface(i) not in downb for i in b_ifs) if b_ifs else True
+        # 片側でも全downなら断（実機: リンク両端どちらかが全てshutで疎通不可）
+        return a_up and b_up
+
+    def active_neighbors(self, device_id: str) -> set:
+        """物理リンクが生きている隣接のみを返す（全downの並列リンクは除外）。"""
+        return {peer for peer in self.links.get(device_id, set())
+                if self._edge_up(device_id, peer)}
 
     def interface_down(self, device_id: str, iface: str):
         """インターフェースをshutdown状態にする（broadcast_to_neighborsがスキップする）"""
@@ -3484,6 +3512,12 @@ class IcmpEngine:
             # 宛先と同一直結ネットワーク → 到達（最後のホップは宛先自身なので追加しない）
             for dev_ip, prefix in cur_info.get('ips', {}).items():
                 if self._ip_in_network(dest_ip, dev_ip, prefix):
+                    # 同一直結サブネットでも、宛先装置との物理リンクが全down
+                    # （並列リンク全滅等）なら到達不可 → 通常ルーティングに委ねる
+                    dd = self._find_device_owning_ip(dest_ip)
+                    if (dd and dd != current and dd in vnet.links.get(current, set())
+                            and not vnet._edge_up(current, dd)):
+                        break  # 直結ショートカットを使わない
                     return {'reachable': True, 'hops': hops,
                             'reason': 'connected', 'dest_device': dest_device}
 
@@ -3541,14 +3575,23 @@ class IcmpEngine:
             return None, None
         next_hop_ip = matched['next_hop']
         neighbors = list(vnet.get_neighbors(device_id))
+
+        def _edge_dead(peer):
+            # 直結隣接だが物理リンクが全down（並列リンク全滅等）なら到達不可
+            return peer in vnet.links.get(device_id, set()) and not vnet._edge_up(device_id, peer)
+
         if next_hop_ip in ('0.0.0.0', ''):
             # 直結ネットワーク: 宛先を所有する装置。隣接を優先し、
             # プリロードのデフォルト機器などが同一IPを持つ誤解決を避ける。
             for peer in neighbors:
                 if dest_ip in self.device_ips.get(peer, {}).get('ips', {}):
+                    if _edge_dead(peer):
+                        return None, None  # リンク断
                     return peer, dest_ip
             dev = self._find_device_owning_ip(dest_ip) or \
                   self._find_device_in_network(dest_ip)
+            if dev and _edge_dead(dev):
+                return None, None
             return dev, dest_ip
         # ネクストホップ(ゲートウェイ)は必ず直結先にある。隣接を最優先で解決し、
         # 同一IPを持つ非隣接のデフォルト機器へ誤って解決しないようにする。

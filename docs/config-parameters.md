@@ -140,6 +140,19 @@
 | `ip prefix-list <name> [seq <n>] permit\|deny <net>/<len> [ge <n>] [le <n>]` | プレフィックスリスト | 対応 |
 | `access-list <num> permit\|deny <net> <wildcard>\|host <ip>\|any` | 標準ACL（経路フィルタにも橋渡し） | 対応 |
 
+## EVE-NG 実機連携（エクスポート／投入／検証）
+
+| API / ツール | 説明 | 状態 |
+|---|---|---|
+| `GET /api/export` | 全機器 running-config ＋ トポロジ ＋ netmiko種別 を JSON 出力 | 対応 |
+| `tools/eveng_deploy.py export` | `<id>.cfg` / `topology.json` / `inventory.json` を書き出し | 対応 |
+| `tools/eveng_deploy.py deploy` | mgmt IP へ SSH(netmiko) で running-config を投入 | 対応（実機必要） |
+| `tools/eveng_deploy.py verify` | show を実行し期待文字列をチェック | 対応（実機必要） |
+
+- netmiko種別: cisco/catalyst→`cisco_ios`、nexus→`cisco_nxos`、asa→`cisco_asa`、
+  bigip→`f5_tmsh`、sir/srs/apresia→`generic_termserver`。
+- 詳細手順は `docs/eveng-deploy.md`。
+
 ---
 
 ## 環境変数

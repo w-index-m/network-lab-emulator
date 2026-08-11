@@ -4385,7 +4385,10 @@ Configuration Revision            : 5"""
             """{ 10.0.0.1:80 { } 10.0.0.2:80 } 等から ip:port を抽出"""
             out = []
             for m in re.finditer(r'(\d{1,3}(?:\.\d{1,3}){3})[:\.](\d+)', text):
-                out.append({'node': m.group(1), 'port': int(m.group(2)), 'status': 'up'})
+                # status = 有効時の実効状態（モニターで自動更新）
+                # admin_down = 管理上の切り離し（user-disabled/user-down）
+                out.append({'node': m.group(1), 'port': int(m.group(2)),
+                            'status': 'up', 'admin_down': False, 'monitor_status': 'up'})
             return out
 
         # ── create/modify ltm node ──
@@ -4426,7 +4429,10 @@ Configuration Revision            : 5"""
                         re.search(r'state\s+down', inner) or 'forced-offline' in inner)
                 for mem in pool['members']:
                     if mem['node'] == node and mem['port'] == port:
-                        mem['status'] = 'down' if down else 'up'
+                        # 管理上の切り離し。実効statusは admin_down と monitor_status の論理積
+                        mem['admin_down'] = bool(down)
+                        mem['status'] = 'down' if (mem['admin_down'] or
+                                                   mem.get('monitor_status', 'up') == 'down') else 'up'
             mon = re.search(r'monitor\s+([^\s{}]+)', rest, re.I)
             if mon:
                 pool['monitor'] = mon.group(1)

@@ -175,6 +175,18 @@ def scenario_etherchannel():
     time.sleep(1)
     d4 = cli("ec1", "show etherchannel summary")
     check("Gi1/0/2復旧で両メンバーP", "Gi1/0/1(P)" in d4 and "Gi1/0/2(P)" in d4, d4)
+    # 並列リンク: 全メンバーdownで初めて疎通断（片系維持なら継続）
+    p_one = cli("ec1", "ping 10.9.9.2")
+    check("片系(1本)ではping継続", "Success rate is 100" in p_one, p_one)
+    conf("ec1", "interface gi1/0/1", "shutdown", "exit")
+    conf("ec1", "interface gi1/0/2", "shutdown", "exit")
+    time.sleep(1)
+    p_all = cli("ec1", "ping 10.9.9.2")
+    check("全メンバーdownで疎通断(全滅=断)", "0 percent" in p_all, p_all)
+    conf("ec1", "interface gi1/0/1", "no shutdown", "exit")
+    time.sleep(1)
+    p_rec = cli("ec1", "ping 10.9.9.2")
+    check("1本復旧で疎通回復", "Success rate is 100" in p_rec, p_rec)
 
 
 def scenario_rip_chain():
@@ -339,26 +351,35 @@ def scenario_gre_tunnel():
 
 
 def scenario_bigip_ltm():
-    print("== シナリオ10: F5 BIG-IP LTM (プール/仮想サーバ/メンバー up-down) ==")
+    print("== シナリオ10: F5 BIG-IP LTM (プール/仮想サーバ/ヘルスモニター自動判定) ==")
     device("bigip1", "bigip")
+    # バックエンド実サーバ（PC）3台。monitor http はこれらの疎通でup/downを自動判定
+    for i in (1, 2, 3):
+        device2(f"bsrv{i}", "pc", ip=f"10.90.0.{i}", gateway="10.90.0.254")
     cli("bigip1", "tmsh create ltm pool web_pool { members add "
                   "{ 10.90.0.1:80 10.90.0.2:80 10.90.0.3:80 } "
                   "monitor http load-balancing-mode least-connections-member }")
     cli("bigip1", "tmsh create ltm virtual vs_web { destination 192.0.2.10:80 "
                   "pool web_pool profiles add { http tcp } }")
     p = cli("bigip1", "show ltm pool web_pool")
-    check("プール作成・3メンバーup", "Members      : 3 (up: 3, down: 0)" in p, p)
+    check("実サーバ3台存在→モニターで3メンバーup",
+          "Members      : 3 (up: 3, down: 0)" in p, p)
     check("負荷分散モード反映", "least-connections-member" in p, p)
     v = cli("bigip1", "show ltm virtual vs_web")
     check("仮想サーバ作成(destination/pool)", "192.0.2.10:80" in v and "web_pool" in v, v)
-    # メンバー1台を user-down → 2 up / 1 down
-    cli("bigip1", "modify ltm pool web_pool members modify "
-                  "{ 10.90.0.1:80 { state user-down } }")
+    # ヘルスモニター自動判定: 実サーバ1台を撤去 → 自動でoffline
+    urllib.request.urlopen(
+        urllib.request.Request(BASE + "/api/device/bsrv2", method="DELETE"))
     p2 = cli("bigip1", "show ltm pool web_pool")
-    check("メンバーuser-downで up:2 down:1", "up: 2, down: 1" in p2, p2)
-    check("該当メンバーがoffline(red)", "10.90.0.1:80   offline (red)" in p2, p2)
+    check("サーバ撤去でモニター自動down(up:2 down:1)", "up: 2, down: 1" in p2, p2)
+    check("該当メンバーがoffline(red)", "10.90.0.2:80   offline (red)" in p2, p2)
     v2 = cli("bigip1", "show ltm virtual vs_web")
     check("仮想サーバのMembers upが2に減少", "Members up   : 2" in v2, v2)
+    # 管理up/down: 別メンバーを user-down → さらに1台down
+    cli("bigip1", "modify ltm pool web_pool members modify "
+                  "{ 10.90.0.1:80 { state user-down } }")
+    p3 = cli("bigip1", "show ltm pool web_pool")
+    check("user-downで up:1 down:2", "up: 1, down: 2" in p3, p3)
 
 
 def scenario_inter_vlan():
