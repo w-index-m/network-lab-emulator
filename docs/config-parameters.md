@@ -153,17 +153,19 @@
   bigip→`f5_tmsh`、sir/srs/apresia→`generic_termserver`。
 - 詳細手順は `docs/eveng-deploy.md`。
 
-### 実機BIG-IP qkview 一括取得
+### 実機BIG-IP 診断・バックアップ 一括取得（qkview / UCS）
 
 | ツール | 説明 | 状態 |
 |---|---|---|
-| `tools/bigip_qkview_collector.py` | 複数BIG-IPからqkviewをSSH一括取得しローカル保存 | 対応（実機必要） |
+| `tools/bigip_qkview_collector.py` | 複数BIG-IPから qkview / UCS をSSH一括取得しSCP保存 | 対応（実機必要） |
+| `tools/get_qkview.bat` / `get_ucs.bat` | Windowsワンクリック（同ディレクトリの hosts.txt 参照） | 対応 |
 
+- 取得モード `--mode qkview|ucs|all`（既定 all）。paramiko+scp。
 - TMOS/F5OSを自動判別（`tmsh show sys version` / `show system information`）。
-- qkview生成: TMOS=`run /util qkview -f /var/tmp/<name>`、F5OS=`system diagnostics qkview capture filename <name>`。
-- 取得元: TMOS=`/var/tmp/`、F5OS=`/var/export/chassis/diagnostics/qkview/`。
-- 既定ユーザ: TMOS=`root` / F5OS=`admin`。自動判別時は root→admin の順で接続試行。
-- `hosts.txt` 2列目で `tmos`/`f5os`・ユーザ名を個別固定可。詳細は `docs/bigip-qkview.md`。
+- qkview: TMOS=`qkview -f /var/tmp/<name>.qkview`（→`/var/tmp/`）、F5OS=`system diagnostics qkview capture filename <name>`（→`/var/export/chassis/diagnostics/qkview/`）。
+- バックアップ: TMOS=`tmsh save sys ucs /var/local/ucs/<name>.ucs`、F5OS=`system backup create name <name>`（→`/var/F5OS/backup/`）。
+- 既定ユーザ: TMOS=`root` / F5OS=`admin`（`--tmos-username`/`--f5os-username`で変更）。自動判別時は root→admin の順で接続試行。
+- `hosts.txt` 2列目で `tmos`/`f5os` 固定。詳細は `docs/bigip-qkview.md`。
 
 ---
 
