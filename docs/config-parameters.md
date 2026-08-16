@@ -153,6 +153,18 @@
   bigip→`f5_tmsh`、sir/srs/apresia→`generic_termserver`。
 - 詳細手順は `docs/eveng-deploy.md`。
 
+### 実機BIG-IP qkview 一括取得
+
+| ツール | 説明 | 状態 |
+|---|---|---|
+| `tools/bigip_qkview_collector.py` | 複数BIG-IPからqkviewをSSH一括取得しローカル保存 | 対応（実機必要） |
+
+- TMOS/F5OSを自動判別（`tmsh show sys version` / `show system information`）。
+- qkview生成: TMOS=`run /util qkview -f /var/tmp/<name>`、F5OS=`system diagnostics qkview capture filename <name>`。
+- 取得元: TMOS=`/var/tmp/`、F5OS=`/var/export/chassis/diagnostics/qkview/`。
+- 既定ユーザ: TMOS=`root` / F5OS=`admin`。自動判別時は root→admin の順で接続試行。
+- `hosts.txt` 2列目で `tmos`/`f5os`・ユーザ名を個別固定可。詳細は `docs/bigip-qkview.md`。
+
 ---
 
 ## 環境変数
