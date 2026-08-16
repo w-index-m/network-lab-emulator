@@ -1,0 +1,5 @@
+# BIG-IP / F5OS 収集対象リスト（get_qkview.bat / get_ucs.bat がこのファイルを参照）
+# 1列目: ホスト(必須) / 2列目(任意): tmos|f5os（省略時は自動判別 root→admin）
+192.168.1.1
+192.168.1.2  tmos
+192.168.1.3  f5os

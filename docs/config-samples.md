@@ -14,6 +14,7 @@
 3. [RIP（3ルータ・広域イーサ中継）](#3-rip3ルータ広域イーサ中継)
 4. [RIP + distribute-list（経路フィルタ）](#4-rip--distribute-list経路フィルタ)
 5. [STP（3スイッチ・トライアングル）](#5-stp3スイッチトライアングル)
+   - [5b. STP（3台 SR-S・トライアングル）](#5b-stp3台-sr-sトライアングル)
 6. [EtherChannel / LACP（2スイッチ）](#6-etherchannel--lacp2スイッチ)
 7. [inter-VLAN ルーティング（L3コア+L2アクセス2台）](#7-inter-vlan-ルーティングl3コアl2アクセス2台)
 8. [BGP eBGP（擬似AWS VGW）](#8-bgp-ebgp擬似aws-vgw)
@@ -239,6 +240,49 @@ spanning-tree mode rapid-pvst
 
 確認: `show spanning-tree`（sw1が root、sw3の1ポートが `Altn/BLK` でループ遮断）。
 ルート障害試験: sw1の全リンクを `shutdown` → sw2が新ルートに再選出、`no shutdown` で復帰。
+
+### 5b. STP（3台 SR-S・トライアングル）
+
+SR-S でも Catalyst と同じく3台トライアングルでSTPが成立する（動作確認済み）。
+
+```
+[s1]---[s2]
+   \   /
+    [s3]     s1-s2 / s2-s3 / s1-s3 の3リンクでループ
+```
+
+**s1 (SR-S, 最小優先度＝ルート)**
+```
+enable
+configure terminal
+spanning-tree mode rstp
+spanning-tree vlan 1 priority 4096
+```
+
+**s2**
+```
+enable
+configure terminal
+spanning-tree mode rstp
+spanning-tree vlan 1 priority 8192
+```
+
+**s3**
+```
+enable
+configure terminal
+spanning-tree mode rstp
+spanning-tree vlan 1 priority 32768
+```
+
+確認結果（`show spanning-tree`）:
+- **s1** = ルート（`This bridge is the root`）、2ポートとも `Desgn/FWD`
+- **s2** = `Root/FWD` + `Desgn/FWD`
+- **s3**（最大優先度）= `Root/FWD` + **`Altn/BLK`**（ループ遮断）
+
+再収束試験:
+- s1 の全リンクを `shutdown` → **s2 が新ルートに昇格**
+- s1 を `no shutdown` → s1 がルートに復帰
 
 ---
 
