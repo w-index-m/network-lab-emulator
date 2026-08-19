@@ -19,7 +19,10 @@
 | `interface <if>` → `ip ospf cost <n>` | コスト | 対応 |
 
 - **多段伝播**: エリア内全域へLSAをfixpointまでフラッディング。3台チェーンでも遠方LANを学習。
-- DR/BDR選出は非プリエンプティブ (RFC2328 §9.4)。dead = hello×4。
+- DR/BDR選出は非プリエンプティブ (RFC2328 §9.4)。dead = hello×4。`ip ospf priority <n>` で操作（0=選出対象外）。
+- **中央L2スイッチ共有セグメント対応**: スイッチがHelloを各ポートへフラッディングし、
+  同一セグメント上で複数ルータが隣接・DR/BDR選出。データもスイッチ透過で端末間疎通可
+  （L2スイッチはL3ホップに数えない）。サンプルは config-samples.md §2b。
 - 確認: `show ip ospf neighbor` / `show ip route ospf` / `show ip ospf database`
 
 ## RIP (Cisco)
@@ -179,6 +182,7 @@
 ## 回帰シナリオ (`tests/scenario_regression.py`)
 
 1. 3台Cisco OSPFチェーン（多段ルート交換＋双方向ping）
+1c. 3台Cisco OSPF 中央L2スイッチ（共有セグメント・DR/BDR選出・スイッチ越し疎通）
 1b. 3台Cisco RIPチェーン（広域イーサ中継）
 2. 3台Catalyst STPトライアングル
 3. Catalyst EtherChannel メンバー障害/復旧
