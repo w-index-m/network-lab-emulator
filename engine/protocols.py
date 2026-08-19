@@ -404,6 +404,60 @@ class VirtualNetwork:
                     continue   # 別セグメント → 届かない
             await self.send_to(peer_id, msg)
 
+        # 中央にL2スイッチを挟む共有セグメント: スイッチはOSPF/RIPの
+        # マルチキャストを他ポートへフラッディングする（実機準拠）。
+        # 直結先が「そのプロトコルを喋らない中継装置(=スイッチ)」の場合、
+        # その先のL3エンドポイントまでリレーして隣接を成立させる。
+        if msg_type in ('rip_update', 'rip_request', 'rip_packet',
+                        'ospf_hello', 'ospf_lsa'):
+            await self._flood_through_switches(src_id, msg)
+
+    def _runs_proto(self, dev: str, msg_type: str) -> bool:
+        """dev が該当プロトコル(OSPF/RIP)を実際に喋っているか"""
+        if msg_type in ('ospf_hello', 'ospf_lsa'):
+            n = ospf_engine.nodes.get(dev)
+            return bool(n and n.get('enabled'))
+        if msg_type in ('rip_update', 'rip_request', 'rip_packet'):
+            return dev in rip_engine.nodes
+        return False
+
+    def _live_neighbors(self, node: str) -> list:
+        """物理リンクが生きている(=downでない)直結隣接を返す"""
+        down = self.down_interfaces.get(node, set())
+        out = []
+        for peer in self.links.get(node, set()):
+            cif = self.interface_links.get(node, {}).get(peer)
+            if cif and cif in down:
+                continue
+            if not self._edge_up(node, peer):
+                continue
+            out.append(peer)
+        return out
+
+    async def _flood_through_switches(self, src_id: str, msg: dict):
+        """L2スイッチ(=当該プロトコル非対応の中継装置)を越えて、
+        その先のL3エンドポイントへマルチキャストをリレーする。
+        直結エンドポイントは通常ループで配送済みなので二重配送しない。"""
+        msg_type = msg.get('type', '')
+        visited = {src_id}
+        queue = []
+        for peer in self._live_neighbors(src_id):
+            visited.add(peer)                       # 直結先は配送済み扱い
+            if not self._runs_proto(peer, msg_type):
+                queue.append(peer)                  # 中継スイッチ → 先を展開
+        while queue:
+            sw = queue.pop(0)
+            for peer in self._live_neighbors(sw):
+                if peer in visited:
+                    continue
+                visited.add(peer)
+                if self._runs_proto(peer, msg_type):
+                    # スイッチ越しのL3エンドポイント: 同一セグメントなら配送
+                    if self._shares_segment(src_id, peer):
+                        await self.send_to(peer, msg)
+                else:
+                    queue.append(peer)              # 別のスイッチ → さらにフラッド
+
 # グローバルネットワークインスタンス
 vnet = VirtualNetwork()
 
@@ -3621,9 +3675,42 @@ class IcmpEngine:
             # next-hopがデバイスID一致（RIP） or OSPF router-id一致
             if peer == next_hop_ip or (onode and onode.get('router_id') == next_hop_ip):
                 return peer, _shared_ip(peer)
+        # 中央L2スイッチを挟む共有セグメント: 直結隣接に見つからない場合、
+        # スイッチ越しに同一セグメント上のL3ルータを探索する（L2スイッチは
+        # L3ホップにならないので、その先のルータを次ホップとして返す）。
+        for peer in self._l2_segment_peers(device_id):
+            onode = ospf_engine.nodes.get(peer)
+            if peer == next_hop_ip or (onode and onode.get('router_id') == next_hop_ip):
+                return peer, _shared_ip(peer)
+            if next_hop_ip in self.device_ips.get(peer, {}).get('ips', {}):
+                return peer, next_hop_ip
         neighbors = vnet.get_neighbors(device_id)
         dev = next(iter(neighbors), None) if neighbors else None
         return dev, next_hop_ip
+
+    def _l2_segment_peers(self, device_id: str) -> set:
+        """L2スイッチ(=OSPF非対応の中継装置)を越えて到達できる、
+        同一L2セグメント上のL3装置の集合を返す。"""
+        switch_types = {'catalyst', 'apresia', 'nexus', 'srs'}
+        visited = {device_id}
+        result = set()
+        queue = [p for p in vnet.links.get(device_id, set())
+                 if vnet._edge_up(device_id, p)]
+        while queue:
+            node = queue.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
+            dtype = vnet.device_types.get(node)
+            is_transit = (dtype in switch_types
+                          and not (ospf_engine.nodes.get(node, {}) or {}).get('enabled'))
+            if is_transit:
+                for p in vnet.links.get(node, set()):
+                    if p not in visited and vnet._edge_up(node, p):
+                        queue.append(p)
+            else:
+                result.add(node)     # スイッチ越しのL3エンドポイント
+        return result
 
     def _local_ip_toward(self, device_id: str, next_hop_ip: str) -> Optional[str]:
         """next_hop_ipと同一セグメントの自分のIPを返す"""

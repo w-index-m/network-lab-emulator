@@ -503,9 +503,48 @@ def scenario_rip_distribute_list():
     check("抑制対象外の10.6.23.0はALAに届く", "10.6.23.0" in r_acl, r_acl)
 
 
+def scenario_ospf_hub():
+    print("== シナリオ1c: 3台Cisco OSPF 中央L2スイッチ (DR/BDR・共有セグメント) ==")
+    device("sw", "catalyst")
+    for d in ("oh1", "oh2", "oh3"):
+        device(d, "cisco")
+    link("oh1", "sw", "GigabitEthernet0/0/0", "GigabitEthernet1/0/1")
+    link("oh2", "sw", "GigabitEthernet0/0/0", "GigabitEthernet1/0/2")
+    link("oh3", "sw", "GigabitEthernet0/0/0", "GigabitEthernet1/0/3")
+    conf("oh1",
+         "interface GigabitEthernet0/0/0", "ip address 10.9.0.1 255.255.255.0",
+         "ip ospf priority 200", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.71.1 255.255.255.0", "no shutdown", "exit",
+         "router ospf 1", "network 10.9.0.0 0.0.0.255 area 0",
+         "network 192.168.71.0 0.0.0.255 area 0", "exit")
+    conf("oh2",
+         "interface GigabitEthernet0/0/0", "ip address 10.9.0.2 255.255.255.0",
+         "ip ospf priority 100", "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.72.1 255.255.255.0", "no shutdown", "exit",
+         "router ospf 1", "network 10.9.0.0 0.0.0.255 area 0",
+         "network 192.168.72.0 0.0.0.255 area 0", "exit")
+    conf("oh3",
+         "interface GigabitEthernet0/0/0", "ip address 10.9.0.3 255.255.255.0",
+         "no shutdown", "exit",
+         "interface Loopback0", "ip address 192.168.73.1 255.255.255.0", "no shutdown", "exit",
+         "router ospf 1", "network 10.9.0.0 0.0.0.255 area 0",
+         "network 192.168.73.0 0.0.0.255 area 0", "exit")
+    time.sleep(9)
+    nb = cli("oh3", "show ip ospf neighbor")
+    check("中央スイッチ越しにOSPF隣接がFULL(2ネイバー)", nb.upper().count("FULL") >= 2, nb)
+    check("DR選出(priority200のoh1がDR)", "/DR" in nb, nb)
+    r1 = cli("oh1", "show ip route ospf")
+    check("oh1がoh3のLAN 192.168.73.0 を学習", "192.168.73.0" in r1, r1)
+    p13 = cli("oh1", "ping 192.168.73.1")
+    p31 = cli("oh3", "ping 192.168.71.1")
+    check("oh1->oh3 スイッチ越しping成功", "Success rate is 100" in p13, p13)
+    check("oh3->oh1 スイッチ越しping成功(逆)", "Success rate is 100" in p31, p31)
+
+
 def main():
     print(f"リグレッション実行 → {BASE}\n")
     scenario_ospf_chain()
+    scenario_ospf_hub()
     scenario_rip_chain()
     scenario_stp_triangle()
     scenario_etherchannel()

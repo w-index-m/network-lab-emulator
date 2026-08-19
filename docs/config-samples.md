@@ -11,6 +11,7 @@
 ## 目次
 1. [静的ルーティング（2ルータ）](#1-静的ルーティング2ルータ)
 2. [OSPF（3ルータ・チェーン）](#2-ospf3ルータチェーン)
+   - [2b. OSPF（中央L2スイッチ・DR/BDR）](#2b-ospf3ルータ中央にl2スイッチ共有セグメントdrbdr選出)
 3. [RIP（3ルータ・広域イーサ中継）](#3-rip3ルータ広域イーサ中継)
 4. [RIP + distribute-list（経路フィルタ）](#4-rip--distribute-list経路フィルタ)
 5. [STP（3スイッチ・トライアングル）](#5-stp3スイッチトライアングル)
@@ -115,6 +116,54 @@ router ospf 1
 ```
 
 確認: `show ip ospf neighbor`、`show ip route ospf`（r1がr3のLAN `O 192.168.3.0/24 [110/30]` を多段学習）、`ping 192.168.3.1`
+
+### 2b. OSPF（3ルータ・中央にL2スイッチ／共有セグメント・DR/BDR選出）
+
+真ん中にイーサ機器（L2スイッチ）を置き、3ルータを**同一セグメント**（10.0.0.0/24）に
+収容する構成。マルチアクセスなので **DR/BDR 選出**が発生する（動作確認済み）。
+
+```
+        [h1] pri200 ── DR
+          |
+        [ sw ]  ← L2スイッチ（Helloを各ポートへフラッディング）
+        /     \
+  [h2]pri100   [h3]pri既定
+   BDR          DROther
+```
+
+**h1（DR狙い・priority 200）**
+```
+enable
+configure terminal
+interface GigabitEthernet0/0/0
+ ip address 10.0.0.1 255.255.255.0
+ ip ospf priority 200
+ no shutdown
+interface Loopback0
+ ip address 192.168.1.1 255.255.255.0
+ no shutdown
+router ospf 1
+ network 10.0.0.0 0.0.0.255 area 0
+ network 192.168.1.0 0.0.0.255 area 0
+```
+
+**h2（BDR狙い・priority 100）** … IP `10.0.0.2` / Lo `192.168.2.1`、`ip ospf priority 100`、その他はh1と同様
+**h3（priority 既定=1）** … IP `10.0.0.3` / Lo `192.168.3.1`、priority設定なし、その他同様
+
+（中央 `sw` は catalyst をL2スイッチとして各ルータのアクセスポートに接続するだけ。IP不要）
+
+**動作試験の結果（実サーバ検証）**
+
+| 確認項目 | コマンド | 結果 |
+|---|---|---|
+| 隣接確立（3台フルメッシュ） | `show ip ospf neighbor` | 全ネイバー `FULL` |
+| DR/BDR選出 | 〃 | h1=**DR**(pri200) / h2=**BDR**(pri100) / h3=**DROther** |
+| 経路交換 | `show ip route ospf` | 相手LAN(192.168.x.0)を `O` で学習 |
+| 端末間疎通（スイッチ越し） | `ping 192.168.3.1` 等 | h1↔h3 / h2→h3 / h1→h2 いずれも `Success rate is 100` |
+
+- **ポイント**: L2スイッチはOSPF Helloを他ポートへフラッディングし、共有セグメント上で
+  隣接が成立する。データも透過転送され、スイッチはL3ホップとして数えない（traceroute非表示）。
+- DRを変えたい場合は `ip ospf priority` を調整（0にすると選出対象外＝DROther固定）。
 
 ---
 
