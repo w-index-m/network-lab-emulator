@@ -3,6 +3,10 @@
 エミュレータで**動作確認済み**の、Cisco IOS ルータと Si-R ルータ間の
 サイト間 IPsec VPN と、その上で OSPF による動的ルーティングを行う構成サンプル。
 
+> **最終検証: 2026-08-19**（実サーバで再確認）。
+> `show ipsec sa` = MATURE / `show crypto isakmp sa` = QM_IDLE・ACTIVE /
+> OSPF相互学習（IOSが192.168.1.0、SiRが10.10.0.0）/ `ping 192.168.1.1` = 100%。
+
 ```
 192.168.1.0/24 --- [SiR-HQ]                          [IOS-Branch] --- 10.10.0.0/24
    (LAN)      lan0:192.168.1.1                     Gi0/0/1:10.10.0.1  (LAN)
