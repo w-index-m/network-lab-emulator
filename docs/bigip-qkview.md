@@ -25,11 +25,16 @@ SSH で一括生成し、ローカルへ SCP ダウンロードするツール�
 |---|---|---|
 | 判別コマンド | `tmsh show sys version` | `show system information` |
 | 既定ユーザ | `root` | `admin` |
-| qkview生成 | `qkview -f /var/tmp/<name>.qkview` | `system diagnostics qkview capture filename <name>` |
-| qkview取得元 | `/var/tmp/` | `/var/export/chassis/diagnostics/qkview/` |
-| バックアップ生成 | `tmsh save sys ucs /var/local/ucs/<name>.ucs` | `system backup create name <name>` |
-| バックアップ取得元 | `/var/local/ucs/` | `/var/F5OS/backup/` |
+| qkview生成 | `qkview -f /var/tmp/<name>.qkview` | `system diagnostics qkview capture` → `status` → `list` |
+| qkview取得元 | `/var/tmp/` | list で実名取得（版により `file export` 回収） |
+| バックアップ生成 | `tmsh save sys ucs /var/local/ucs/<name>.ucs` | `system database config-backup name <name>`（UCSではない） |
+| バックアップ取得元 | `/var/local/ucs/` | `config-backup list` / `file list` で実名取得 |
 | リモート掃除 | qkview/UCSを `rm -f` | 残置（管理領域のため） |
+
+> **F5OS 実装状況**: SSH方式は上表の**実コマンド（capture→status→list、config-backup）に修正済み**。
+> ただし回収パスは F5OS 版で差があり、実機によっては **`file export` 回収が必要**なことがあります
+> （その場合は要調整）。**API(RESTCONF)方式は WIP** — `tools/f5os_api.py` に器を用意し、
+> `--f5os-method api` で呼べますが未実装（明確なエラーを返す）。SSH方式が既定です。
 
 ## hosts.txt 書式
 
@@ -74,6 +79,11 @@ python tools/bigip_qkview_collector.py hosts.txt --tmos-username admin --f5os-us
 ### プラットフォーム固定 `--platform`
 `--platform {auto,tmos,f5os}`（既定 auto）で全ホストのプラットフォームを固定できます。
 `tmos` 指定時は F5OS 判別を行わず TMOS 処理（root接続）に固定。
+
+### F5OS 取得方式 `--f5os-method`
+`--f5os-method {ssh,api}`（既定 ssh）。`ssh`=CLI(capture→status→list)＋SFTP回収、
+`api`=RESTCONF方式（**WIP/開発中**。`tools/f5os_api.py` の TODO を実装するまでは
+明確なエラーを返す）。実機のRESTCONFエンドポイント確定後にAPI実装を流し込む器。
 
 ### 依存: paramiko 必須 / scp 任意
 接続・回収は **paramiko** で完結します。`scp` が入っていれば進捗表示付きSCP、
