@@ -167,39 +167,45 @@ def process_tmos(ssh: paramiko.SSHClient, hostname: str, local_dir: Path) -> Pat
 # F5OS qkview
 # ---------------------------------------------------------------------------
 
+def _pick_f5os_generated(list_out: str, name: str) -> str:
+    """F5OSのlist出力から、指定nameを含むファイル名を拾う。無ければ最新行。"""
+    m = re.search(rf"([^\s]*{re.escape(name)}[^\s]*)", list_out)
+    if m:
+        return m.group(1)
+    lines = [l.strip() for l in list_out.splitlines() if l.strip()
+             and not l.lower().startswith(('name', 'total', '---'))]
+    if not lines:
+        raise FileNotFoundError("F5OS 生成ファイルが見つかりません（list出力空）")
+    # 行の最後のトークン（ファイル名列想定）を返す
+    return lines[0].split()[-1]
+
+
 def f5os_generate_qkview(ssh: paramiko.SSHClient, hostname: str) -> str:
+    """F5OS qkview: capture → status(確認) → list(実ファイル名取得)。
+    実機の実フローに準拠。保存先パスは版により異なるため要確認。"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"qkview_{hostname}_{timestamp}"
 
-    log.info(f"[{hostname}] [F5OS] qkview 生成開始")
-
-    # F5OS CLI でキャプチャ実行
+    log.info(f"[{hostname}] [F5OS] qkview capture 実行")
     out, err = run_command(
-        ssh,
-        f"system diagnostics qkview capture filename {filename}",
-        timeout=QKVIEW_TIMEOUT_SEC,
-    )
-    log.debug(f"[{hostname}] [F5OS] qkview output: {out}")
+        ssh, f"system diagnostics qkview capture filename {filename}",
+        timeout=QKVIEW_TIMEOUT_SEC)
+    log.debug(f"[{hostname}] [F5OS] capture output: {out}")
+    if "error" in (out + err).lower():
+        raise RuntimeError(f"F5OS qkview capture エラー: {out or err}")
 
-    if "error" in out.lower() or "error" in err.lower():
-        raise RuntimeError(f"F5OS qkview エラー: {out or err}")
+    # 完了確認（ベストエフォート。出力はログのみ）
+    st, _ = run_command(ssh, "system diagnostics qkview status", timeout=120)
+    if st.strip():
+        log.info(f"[{hostname}] [F5OS] qkview status: {st.strip().splitlines()[-1]}")
 
-    # 生成ファイルのパスを検索（拡張子 .tar.gz または .qkview）
-    list_out, _ = run_command(ssh, f"ls -t {F5OS_QKVIEW_REMOTE_DIR}/", timeout=30)
-    # ファイル名に timestamp 文字列が含まれる行を探す
-    match = re.search(rf"({re.escape(filename)}[^\s]*)", list_out)
-    if not match:
-        # フォールバック: 最新ファイル
-        lines = [l.strip() for l in list_out.splitlines() if l.strip()]
-        if not lines:
-            raise FileNotFoundError("F5OS qkview 生成ファイルが見つかりません")
-        generated = lines[0]
-        log.warning(f"[{hostname}] [F5OS] タイムスタンプでマッチせず。最新ファイルを使用: {generated}")
-    else:
-        generated = match.group(1)
+    # 実ファイル名を list から取得
+    list_out, _ = run_command(ssh, "system diagnostics qkview list", timeout=60)
+    generated = _pick_f5os_generated(list_out, filename)
 
     remote_file = f"{F5OS_QKVIEW_REMOTE_DIR}/{generated}"
-    log.info(f"[{hostname}] [F5OS] qkview 生成完了: {remote_file}")
+    log.info(f"[{hostname}] [F5OS] qkview 生成完了: {generated}")
+    # 注: 版により回収は file export が必要な場合あり（docs/bigip-qkview.md 参照）
     return remote_file
 
 
@@ -247,28 +253,26 @@ def process_tmos_ucs(ssh: paramiko.SSHClient, hostname: str, local_dir: Path) ->
 # ---------------------------------------------------------------------------
 
 def f5os_generate_backup(ssh: paramiko.SSHClient, hostname: str) -> str:
+    """F5OS 設定バックアップ: UCSではなく `system database config-backup`。
+    作成後 list で実ファイル名を取得。回収は版により file export が必要な場合あり。"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"backup_{hostname}_{timestamp}"
 
-    log.info(f"[{hostname}] [F5OS] バックアップ生成開始")
-    out, err = run_command(ssh, f"system backup create name {filename}", timeout=UCS_TIMEOUT_SEC)
+    log.info(f"[{hostname}] [F5OS] config-backup 実行")
+    out, err = run_command(
+        ssh, f"system database config-backup name {filename}", timeout=UCS_TIMEOUT_SEC)
+    if "error" in (out + err).lower():
+        raise RuntimeError(f"F5OS config-backup エラー: {out or err}")
 
-    if "error" in out.lower() or "error" in err.lower():
-        raise RuntimeError(f"F5OS バックアップエラー: {out or err}")
-
-    list_out, _ = run_command(ssh, f"ls -t {F5OS_BACKUP_REMOTE_DIR}/", timeout=30)
-    match = re.search(rf"({re.escape(filename)}[^\s]*)", list_out)
-    if not match:
-        lines = [ln.strip() for ln in list_out.splitlines() if ln.strip()]
-        if not lines:
-            raise FileNotFoundError("F5OS バックアップファイルが見つかりません")
-        generated = lines[0]
-        log.warning(f"[{hostname}] [F5OS] タイムスタンプでマッチせず。最新ファイルを使用: {generated}")
-    else:
-        generated = match.group(1)
+    # 生成済みバックアップ一覧から実ファイル名を取得
+    list_out, _ = run_command(ssh, "system database config-backup list", timeout=60)
+    if not list_out.strip():
+        # 一部版は list サブコマンド非対応 → file list へフォールバック
+        list_out, _ = run_command(ssh, f"file list path {F5OS_BACKUP_REMOTE_DIR}", timeout=60)
+    generated = _pick_f5os_generated(list_out, filename)
 
     remote_file = f"{F5OS_BACKUP_REMOTE_DIR}/{generated}"
-    log.info(f"[{hostname}] [F5OS] バックアップ生成完了: {remote_file}")
+    log.info(f"[{hostname}] [F5OS] config-backup 生成完了: {generated}")
     return remote_file
 
 
@@ -298,6 +302,7 @@ def process_host(
     local_dir: Path,
     forced_platform: Platform | None,
     mode: str = "all",
+    f5os_method: str = "ssh",
 ) -> bool:
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # noqa: S507 - 内部ネットワーク前提
@@ -338,10 +343,17 @@ def process_host(
         collected: list[Path] = []
         errors: list[str] = []
 
+        f5os_api = (platform == Platform.F5OS and f5os_method == "api")
+
         if mode in ("qkview", "all"):
             try:
                 if platform == Platform.F5OS:
-                    collected.append(process_f5os(ssh, host, local_dir / "qkview"))
+                    if f5os_api:
+                        from f5os_api import collect_qkview as _api_qk
+                        collected.append(_api_qk(host, username or F5OS_USERNAME,
+                                                 password, local_dir / "qkview"))
+                    else:
+                        collected.append(process_f5os(ssh, host, local_dir / "qkview"))
                 else:
                     collected.append(process_tmos(ssh, host, local_dir / "qkview"))
             except Exception as e:
@@ -350,7 +362,12 @@ def process_host(
         if mode in ("ucs", "all"):
             try:
                 if platform == Platform.F5OS:
-                    collected.append(process_f5os_backup(ssh, host, local_dir / "backup"))
+                    if f5os_api:
+                        from f5os_api import collect_backup as _api_bk
+                        collected.append(_api_bk(host, username or F5OS_USERNAME,
+                                                 password, local_dir / "backup"))
+                    else:
+                        collected.append(process_f5os_backup(ssh, host, local_dir / "backup"))
                 else:
                     collected.append(process_tmos_ucs(ssh, host, local_dir / "ucs"))
             except Exception as e:
@@ -432,6 +449,8 @@ hosts.txt の形式:
     parser.add_argument("--platform", choices=["auto", "tmos", "f5os"], default="auto",
                         help="全ホストのプラットフォームを固定 (既定 auto=自動判別)。"
                              "tmos指定でF5OS判別を行わずTMOS処理に固定")
+    parser.add_argument("--f5os-method", choices=["ssh", "api"], default="ssh",
+                        help="F5OSの取得方式。ssh(既定)=CLI+SFTP / api=RESTCONF(WIP/開発中)")
     args = parser.parse_args()
 
     # 既定ユーザ名の上書き
@@ -455,7 +474,8 @@ hosts.txt の形式:
     results: dict[str, list[str]] = {"success": [], "failure": []}
     for host, plat in entries:
         eff_plat = forced if forced else plat   # --platform 指定があれば全ホスト固定
-        ok = process_host(host, args.password, args.key_file, local_dir, eff_plat, args.mode)
+        ok = process_host(host, args.password, args.key_file, local_dir, eff_plat,
+                          args.mode, args.f5os_method)
         (results["success"] if ok else results["failure"]).append(host)
 
     print("\n========== 結果サマリー ==========")
