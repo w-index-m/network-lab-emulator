@@ -36,7 +36,12 @@ from enum import Enum, auto
 from pathlib import Path
 
 import paramiko
-from scp import SCPClient
+try:
+    from scp import SCPClient          # あれば進捗表示付きSCPを使う
+    _HAS_SCP = True
+except ImportError:                     # 無ければ paramiko の SFTP で回収（paramikoは必須）
+    SCPClient = None
+    _HAS_SCP = False
 
 TMOS_QKVIEW_REMOTE_DIR = "/var/tmp"
 F5OS_QKVIEW_REMOTE_DIR = "/var/export/chassis/diagnostics/qkview"
@@ -89,8 +94,16 @@ def download_file(ssh: paramiko.SSHClient, remote_path: str, local_dir: Path, ho
     local_dir.mkdir(parents=True, exist_ok=True)
     local_file = local_dir / os.path.basename(remote_path)
     log.info(f"[{hostname}] ダウンロード開始: {remote_path} -> {local_file}")
-    with SCPClient(ssh.get_transport(), progress=_scp_progress) as scp:
-        scp.get(remote_path, str(local_file))
+    if _HAS_SCP:
+        with SCPClient(ssh.get_transport(), progress=_scp_progress) as scp:
+            scp.get(remote_path, str(local_file))
+    else:
+        # scp未インストール時: paramiko の SFTP で回収（paramikoのみで完結）
+        sftp = ssh.open_sftp()
+        try:
+            sftp.get(remote_path, str(local_file))
+        finally:
+            sftp.close()
     log.info(f"[{hostname}] ダウンロード完了: {local_file}")
     return local_file
 
@@ -416,11 +429,17 @@ hosts.txt の形式:
                         help=f"TMOS の既定ユーザ名 (デフォルト: {TMOS_USERNAME})")
     parser.add_argument("--f5os-username", default=F5OS_USERNAME,
                         help=f"F5OS の既定ユーザ名 (デフォルト: {F5OS_USERNAME})")
+    parser.add_argument("--platform", choices=["auto", "tmos", "f5os"], default="auto",
+                        help="全ホストのプラットフォームを固定 (既定 auto=自動判別)。"
+                             "tmos指定でF5OS判別を行わずTMOS処理に固定")
     args = parser.parse_args()
 
     # 既定ユーザ名の上書き
     TMOS_USERNAME = args.tmos_username
     F5OS_USERNAME = args.f5os_username
+
+    # --platform でプラットフォームを全ホスト固定（TMOS専用運用など）
+    forced = {"tmos": Platform.TMOS, "f5os": Platform.F5OS}.get(args.platform)
 
     if not args.password and not args.key_file:
         args.password = getpass.getpass("SSH パスワード: ")
@@ -435,7 +454,8 @@ hosts.txt の形式:
 
     results: dict[str, list[str]] = {"success": [], "failure": []}
     for host, plat in entries:
-        ok = process_host(host, args.password, args.key_file, local_dir, plat, args.mode)
+        eff_plat = forced if forced else plat   # --platform 指定があれば全ホスト固定
+        ok = process_host(host, args.password, args.key_file, local_dir, eff_plat, args.mode)
         (results["success"] if ok else results["failure"]).append(host)
 
     print("\n========== 結果サマリー ==========")

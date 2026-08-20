@@ -62,8 +62,23 @@ python tools/bigip_qkview_collector.py hosts.txt --tmos-username admin --f5os-us
 
 ### Windows ワンクリック
 `tools/` 内の以下を実行（同ディレクトリの `hosts.txt` を参照）:
-- `get_qkview.bat` … qkview のみ
-- `get_ucs.bat` … UCS / バックアップ のみ
+- `get_qkview.bat` … qkview のみ（自動判別）
+- `get_ucs.bat` … UCS / バックアップ のみ（自動判別）
+- **`get_qkview_tmos.bat`** … qkview のみ・**TMOS固定**（`--platform tmos`。F5OS判別せずroot接続）
+- **`get_ucs_tmos.bat`** … UCS のみ・**TMOS固定**
+
+> **実機検証状況**: **TMOS / qkview は実機取得OK（2026-08-19）**。F5OS は取得フローが
+> 異なる（capture→list→export）ため現状未対応の可能性あり（調査中）。当面 TMOS 運用は
+> 上記 `*_tmos.bat` を使うと F5OS 判別で詰まらず確実です。
+
+### プラットフォーム固定 `--platform`
+`--platform {auto,tmos,f5os}`（既定 auto）で全ホストのプラットフォームを固定できます。
+`tmos` 指定時は F5OS 判別を行わず TMOS 処理（root接続）に固定。
+
+### 依存: paramiko 必須 / scp 任意
+接続・回収は **paramiko** で完結します。`scp` が入っていれば進捗表示付きSCP、
+無ければ **paramiko の SFTP** で自動フォールバックするので `scp` 未インストールでも動作します。
+（`pip install paramiko` は必須、`scp` は任意）
 
 追加オプションは `.bat` の後ろにそのまま渡せる（例: `get_qkview.bat -p P@ss`）。
 
