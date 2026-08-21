@@ -1,59 +1,33 @@
 # BIG-IP / F5OS 診断・バックアップ 一括取得（qkview / UCS）
 
-複数の BIG-IP から **qkview**（診断アーカイブ）と **UCS / F5OS バックアップ** を
-SSH で一括生成し、ローカルへ SCP ダウンロードするツール。
-`tools/bigip_qkview_collector.py`（Windows 用ワンクリック `.bat` 同梱）。
+複数の BIG-IP から **qkview** と **UCS / F5OSバックアップ** を一括取得しローカル保存するツール。
+`tools/bigip_qkview_collector.py`（Windows用 `.bat` 同梱）。
 
-> TMOS と F5OS で生成コマンド・保存先・既定ユーザが異なるため、接続後に自動判別して切り替える。
+- **TMOS**: SSH(paramiko) で `qkview` / `tmsh save sys ucs` を実行 → SCP回収。
+- **F5OS**: **REST API(RESTCONF)** で qkview / config-backup を生成 → SCP回収。
 
-## できること
+> **実機検証状況**
+> - **TMOS: qkview / UCS ともに実機取得OK（確認済み）**
+> - F5OS: REST API 実装済み・**実機デバッグ中**（エンドポイント/完了判定/DLパスを調整中）
 
-- **接続**: paramiko(SSH)。パスワード認証 / 秘密鍵認証。
-- **一括**: `hosts.txt` に列挙した複数機器を順に処理、末尾にサマリー表示。
-- **取得モード** `--mode`:
-  - `qkview` … qkview のみ
-  - `ucs` … UCS(TMOS) / バックアップ(F5OS) のみ
-  - `all` … 両方（デフォルト）
-- **自動判別**: `tmsh show sys version`→TMOS / `show system information`→F5OS。
-- **認証切替**: TMOS=既定 `root` / F5OS=既定 `admin`。自動判別時は **root→admin** の順で試行。
-- **転送**: SCP（進捗%表示）。TMOSは取得後リモート一時ファイルを削除。
-- **ログ**: 標準出力＋`qkview_collector.log` に記録。
-
-## プラットフォーム別の挙動
-
-| 項目 | TMOS | F5OS |
-|---|---|---|
-| 判別コマンド | `tmsh show sys version` | `show system information` |
-| 既定ユーザ | `root` | `admin` |
-| qkview生成 | `qkview -f /var/tmp/<name>.qkview` | `system diagnostics qkview capture` → `status` → `list` |
-| qkview取得元 | `/var/tmp/` | list で実名取得（版により `file export` 回収） |
-| バックアップ生成 | `tmsh save sys ucs /var/local/ucs/<name>.ucs` | `system database config-backup name <name>`（UCSではない） |
-| バックアップ取得元 | `/var/local/ucs/` | `config-backup list` / `file list` で実名取得 |
-| リモート掃除 | qkview/UCSを `rm -f` | 残置（管理領域のため） |
-
-> **F5OS 実装状況**: SSH方式は上表の**実コマンド（capture→status→list、config-backup）に修正済み**。
-> ただし回収パスは F5OS 版で差があり、実機によっては **`file export` 回収が必要**なことがあります
-> （その場合は要調整）。**API(RESTCONF)方式は WIP** — `tools/f5os_api.py` に器を用意し、
-> `--f5os-method api` で呼べますが未実装（明確なエラーを返す）。SSH方式が既定です。
+## 事前準備
+```
+pip install paramiko scp requests
+```
 
 ## hosts.txt 書式
-
-1列目=ホスト（必須）。2列目=`tmos`/`f5os`（任意・省略で自動判別）。
-
 ```
-192.168.1.1              # 自動判別（root→admin）
-192.168.1.2   tmos       # TMOS 固定 (user=root)
-192.168.1.3   f5os       # F5OS 固定 (user=admin)
+<IPアドレス>  [tmos|f5os]  [ホスト名]
 ```
-
-> ユーザ名はプラットフォーム単位で `--tmos-username` / `--f5os-username` により変更。
-> （このアップロード版は hosts.txt でのホスト別ユーザ指定は行わない）
+- 2列目でプラットフォーム固定（省略時は自動判別 root→admin）
+- **3列目=ホスト名**（ファイル名に使用。例: `LTM0344A-TMOS`）。省略時はIP
+```
+10.202.127.253   tmos   LTM0344A
+10.202.254.68    f5os   LTM0344A
+```
 
 ## 使い方
-
 ```bash
-pip install paramiko scp
-
 # qkview + UCS/バックアップ 両方（既定）
 python tools/bigip_qkview_collector.py hosts.txt -p 'P@ssword'
 
@@ -61,52 +35,35 @@ python tools/bigip_qkview_collector.py hosts.txt -p 'P@ssword'
 python tools/bigip_qkview_collector.py hosts.txt --mode qkview -p 'P@ss'
 python tools/bigip_qkview_collector.py hosts.txt --mode ucs    -p 'P@ss'
 
-# TMOS/F5OSともadminで、鍵認証、保存先指定
-python tools/bigip_qkview_collector.py hosts.txt --tmos-username admin --f5os-username admin -k ~/.ssh/id_rsa -o ./bigip_output
+# 鍵認証・保存先指定
+python tools/bigip_qkview_collector.py hosts.txt -k ~/.ssh/id_rsa -o ./bigip_output
 ```
 
 ### Windows ワンクリック
-`tools/` 内の以下を実行（同ディレクトリの `hosts.txt` を参照）:
-- `get_qkview.bat` … qkview のみ（自動判別）
-- `get_ucs.bat` … UCS / バックアップ のみ（自動判別）
-- **`get_qkview_tmos.bat`** … qkview のみ・**TMOS固定**（`--platform tmos`。F5OS判別せずroot接続）
-- **`get_ucs_tmos.bat`** … UCS のみ・**TMOS固定**
+`tools/` 内で（同ディレクトリの `hosts.txt` を参照）:
+- `get_qkview.bat` … qkview のみ
+- `get_ucs.bat` … UCS / バックアップ のみ
 
-> **実機検証状況**: **TMOS / qkview は実機取得OK（2026-08-19）**。F5OS は取得フローが
-> 異なる（capture→list→export）ため現状未対応の可能性あり（調査中）。当面 TMOS 運用は
-> 上記 `*_tmos.bat` を使うと F5OS 判別で詰まらず確実です。
-
-### プラットフォーム固定 `--platform`
-`--platform {auto,tmos,f5os}`（既定 auto）で全ホストのプラットフォームを固定できます。
-`tmos` 指定時は F5OS 判別を行わず TMOS 処理（root接続）に固定。
-
-### F5OS 取得方式 `--f5os-method`
-`--f5os-method {ssh,api}`（既定 ssh）。`ssh`=CLI(capture→status→list)＋SFTP回収、
-`api`=RESTCONF方式（**WIP/開発中**。`tools/f5os_api.py` の TODO を実装するまでは
-明確なエラーを返す）。実機のRESTCONFエンドポイント確定後にAPI実装を流し込む器。
-
-### 依存: paramiko 必須 / scp 任意
-接続・回収は **paramiko** で完結します。`scp` が入っていれば進捗表示付きSCP、
-無ければ **paramiko の SFTP** で自動フォールバックするので `scp` 未インストールでも動作します。
-（`pip install paramiko` は必須、`scp` は任意）
-
-追加オプションは `.bat` の後ろにそのまま渡せる（例: `get_qkview.bat -p P@ss`）。
+## プラットフォーム別の挙動
+| 項目 | TMOS | F5OS |
+|---|---|---|
+| 生成方式 | SSH(tmsh) | REST API(RESTCONF) |
+| 既定ユーザ | `root` | `admin` |
+| qkview生成 | `qkview -f /var/tmp/<name>.qkview` | `.../f5-diagnostics:qkview/capture` → status ポーリング |
+| qkview回収 | `/var/tmp/` から SCP | `diags/shared/qkview/<name>` を SCP |
+| バックアップ生成 | `tmsh save sys ucs /var/local/ucs/<name>.ucs` | `.../f5-database:database/config-backup` |
+| バックアップ回収 | `/var/local/ucs/` から SCP | `configs/<name>` を SCP |
+| リモート掃除 | qkview/UCSを `rm -f` | 残置 |
 
 ## オプション
-
 | オプション | 既定 | 説明 |
 |---|---|---|
-| `-p, --password` | 対話入力 | SSHパスワード |
-| `-k, --key-file` | — | 秘密鍵ファイル |
-| `-o, --output-dir` | `bigip_output` | ローカル保存先（`qkview/`・`ucs/`・`backup/` に振り分け） |
+| `-p, --password` | 対話入力 | SSH/API パスワード |
+| `-k, --key-file` | — | SSH 秘密鍵 |
+| `-o, --output-dir` | `bigip_output` | 保存先（`qkview/`・`ucs/`・`backup/`） |
 | `--mode` | `all` | `qkview` / `ucs` / `all` |
-| `--tmos-username` | `root` | TMOSの既定ユーザ |
-| `--f5os-username` | `admin` | F5OSの既定ユーザ |
 
 ## 注意点
-
-- qkview生成は数分かかるため実行タイムアウトは qkview=600s / UCS=300s。
-- SCP到達性（管理IPへSSH/SCP可）が前提。
-- 認証情報はラボ運用向けの簡略前提。運用ではアカウント/鍵の分離を。
-- この本ツール(擬似CLI)側の BIG-IP エミュレータは qkview/UCS を実生成しない。
-  本スクリプトは **実機BIG-IP** に対して使う外部ツール（`tools/eveng_deploy.py` と同系統）。
+- qkview生成は数分。タイムアウトは qkview=600s / UCS=300s。
+- 認証・TLSはラボ運用前提（F5OS APIは自己署名のため `verify=False`）。運用ではCA/アカウント分離を。
+- F5OS API はまだ実機デバッグ中。詰まる場合は `qkview_collector.log` を確認。

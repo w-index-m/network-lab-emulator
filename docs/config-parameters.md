@@ -160,15 +160,14 @@
 
 | ツール | 説明 | 状態 |
 |---|---|---|
-| `tools/bigip_qkview_collector.py` | 複数BIG-IPから qkview / UCS をSSH一括取得しSCP保存 | 対応（実機必要） |
+| `tools/bigip_qkview_collector.py` | 複数BIG-IPから qkview / UCS を一括取得しSCP保存 | **TMOS実機OK** / F5OSはAPIデバッグ中 |
 | `tools/get_qkview.bat` / `get_ucs.bat` | Windowsワンクリック（同ディレクトリの hosts.txt 参照） | 対応 |
 
-- 取得モード `--mode qkview|ucs|all`（既定 all）。paramiko+scp。
-- TMOS/F5OSを自動判別（`tmsh show sys version` / `show system information`）。
-- qkview: TMOS=`qkview -f /var/tmp/<name>.qkview`（→`/var/tmp/`）、F5OS=`system diagnostics qkview capture filename <name>`（→`/var/export/chassis/diagnostics/qkview/`）。
-- バックアップ: TMOS=`tmsh save sys ucs /var/local/ucs/<name>.ucs`、F5OS=`system backup create name <name>`（→`/var/F5OS/backup/`）。
-- 既定ユーザ: TMOS=`root` / F5OS=`admin`（`--tmos-username`/`--f5os-username`で変更）。自動判別時は root→admin の順で接続試行。
-- `hosts.txt` 2列目で `tmos`/`f5os` 固定。詳細は `docs/bigip-qkview.md`。
+- 取得モード `--mode qkview|ucs|all`（既定 all）。依存: `paramiko scp requests`。
+- **TMOS**: SSH(tmsh)。qkview=`qkview -f /var/tmp/<name>.qkview`、UCS=`tmsh save sys ucs /var/local/ucs/<name>.ucs` → SCP回収。**実機検証済み**。
+- **F5OS**: REST API(RESTCONF)。qkview capture→statusポーリング、`config-backup` → SCP(`diags/shared/qkview/` `configs/`)。**実機デバッグ中**。
+- 既定ユーザ TMOS=`root` / F5OS=`admin`。自動判別は root→admin。
+- `hosts.txt` 2列目で `tmos`/`f5os` 固定、3列目=ホスト名（ファイル名に使用）。詳細は `docs/bigip-qkview.md`。
 
 ---
 

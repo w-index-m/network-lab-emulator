@@ -1,6 +1,7 @@
-# BIG-IP / F5OS 収集対象リスト
-# 1列目: ホスト(必須) / 2列目(任意): tmos|f5os（省略時は自動判別 root→admin）
-# ユーザ名は --tmos-username / --f5os-username で変更（既定 TMOS=root, F5OS=admin）
+# BIG-IP / F5OS 取得対象ホスト一覧
+# 形式: <IPアドレス>  [tmos|f5os]  [ホスト名]
+# ホスト名を指定するとファイル名に使用されます（省略時はIP）。# はコメント。
 192.168.1.1
-192.168.1.2  tmos
-192.168.1.3  f5os
+192.168.1.2      tmos
+192.168.1.3      f5os
+10.202.127.253   tmos   LTM0344A
