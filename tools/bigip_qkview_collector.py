@@ -171,6 +171,41 @@ def _f5os_api_post(host: str, username: str, password: str, path: str, body: dic
 # F5OS qkview (REST API)
 # ---------------------------------------------------------------------------
 
+def _to_num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _f5os_qkview_done(status) -> bool:
+    """qkview status 応答(dict/list)を再帰走査して完了を判定する。
+    名前空間接頭辞・大文字小文字・真偽値の表記ゆれに耐える:
+      - キー末尾が 'busy' で値が偽(False/"false"/0) → 完了
+      - キー末尾が 'percent'/'percent-complete'/'progress' で値>=100 → 完了
+    """
+    done = False
+
+    def walk(obj):
+        nonlocal done
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = str(k).split(':')[-1].lower().replace('_', '-')
+                if key == 'busy' and str(v).strip().lower() in ('false', '0', 'no'):
+                    done = True
+                if key in ('percent', 'percent-complete', 'progress'):
+                    n = _to_num(v)
+                    if n is not None and n >= 100:
+                        done = True
+                walk(v)
+        elif isinstance(obj, list):
+            for it in obj:
+                walk(it)
+
+    walk(status)
+    return done
+
+
 def f5os_generate_qkview_api(host: str, username: str, password: str, hostname: str) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"qkview_{hostname}_{timestamp}"
@@ -198,9 +233,8 @@ def f5os_generate_qkview_api(host: str, username: str, password: str, hostname: 
             log.warning(f"[{hostname}] [F5OS] qkview ステータス取得失敗 (無視): {e}")
             continue
         log.info(f"[{hostname}] [F5OS] qkview ステータス: {status}")
-        # 応答の result 文字列に "Busy":false または "Percent":100 が含まれれば完了
-        result_str = str(status)
-        if '"Busy": false' in result_str or '"Busy":false' in result_str or '"Percent": 100' in result_str:
+        # 応答を再帰走査して完了判定（Busy=false / Percent>=100 を接頭辞非依存で検出）
+        if _f5os_qkview_done(status):
             log.info(f"[{hostname}] [F5OS] qkview 生成完了")
             break
     else:
