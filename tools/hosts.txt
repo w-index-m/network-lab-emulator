@@ -1,5 +1,7 @@
-# BIG-IP / F5OS 収集対象リスト（get_qkview.bat / get_ucs.bat がこのファイルを参照）
-# 1列目: ホスト(必須) / 2列目(任意): tmos|f5os（省略時は自動判別 root→admin）
-192.168.1.1
-192.168.1.2  tmos
-192.168.1.3  f5os
+# BIG-IP / F5OS 取得対象ホスト一覧（get_qkview.bat / get_ucs.bat が参照）
+# 形式: <IPアドレス>  [tmos|f5os]  [ホスト名]
+# ホスト名を指定するとファイル名に使用されます（省略時はIP）。# はコメント。
+10.202.127.253   tmos   LTM0344A
+10.202.127.252   tmos   LTM0344B
+10.202.254.68    f5os   LTM0344A
+10.202.254.69    f5os   LTM0344B
