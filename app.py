@@ -1705,6 +1705,15 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         if state._rip_networks:
             await rip_engine.start(device_id, hostname, state._rip_networks)
         return
+    # "ip rip neighbor 192.168.1.2"（Si-R: ユニキャストRIP。NBMA/VPNリンクなど
+    # ブロードキャストが届かない区間で、指定IPの相手に直接updateを送る）
+    rip_neighbor = re.match(r'^ip\s+rip\s+neighbor\s+([\d.]+)', c)
+    if rip_neighbor:
+        rip_engine.add_neighbor(device_id, rip_neighbor.group(1))
+        buf = proto_log_buffer.setdefault(device_id, [])
+        buf.append({'type': 'rip_log',
+                    'message': f'ip rip neighbor {rip_neighbor.group(1)} を追加（ユニキャスト）'})
+        return
 
     # ── OSPF ──
     ospf_m = re.match(r'^router\s+ospf\s+(\d+)', c)

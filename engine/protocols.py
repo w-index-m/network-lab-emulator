@@ -493,8 +493,36 @@ class RipEngine:
                 'peers': {},          # peer_id -> {hostname, last_seen, routes}
                 'auth_mode': '',      # '' | 'text' | 'md5'
                 'auth_key': '',       # 認証キー（RFC2453準拠の簡易実装）
+                'static_neighbors': set(),  # ip rip neighbor <IP>（ユニキャストRIP）
             }
         return self.nodes[device_id]
+
+    def add_neighbor(self, device_id: str, ip: str):
+        """ip rip neighbor <IP> 相当。
+        指定IPの装置に対しては、同一セグメント判定(_shares_segment)を
+        バイパスしてユニキャストでRIP updateを送る（実機のNBMA/VPNリンク向け機能）。"""
+        n = self._node(device_id)
+        n['static_neighbors'].add(ip)
+
+    def remove_neighbor(self, device_id: str, ip: str):
+        n = self.nodes.get(device_id)
+        if n:
+            n['static_neighbors'].discard(ip)
+
+    def _resolve_static_neighbor_devices(self, device_id: str) -> set:
+        """static_neighborsのIPを実際のdevice_idへ解決する"""
+        n = self.nodes.get(device_id)
+        if not n or not n.get('static_neighbors'):
+            return set()
+        resolved = set()
+        for cand_id, cand_info in icmp_engine.device_ips.items():
+            if cand_id == device_id:
+                continue
+            for ip in cand_info.get('ips', {}):
+                if ip in n['static_neighbors']:
+                    resolved.add(cand_id)
+                    break
+        return resolved
 
     def set_authentication(self, device_id: str, mode: str, key: str):
         """ip rip authentication mode md5 / key-chain 相当。
@@ -599,14 +627,17 @@ class RipEngine:
             return
 
         down = vnet.down_interfaces.get(device_id, set())
+        static_neighbor_devices = self._resolve_static_neighbor_devices(device_id)
         for peer_id in vnet.get_neighbors(device_id):
             # shutdownインターフェース経由のピアには送信しない
             if down:
                 connecting_iface = vnet.interface_links.get(device_id, {}).get(peer_id)
                 if connecting_iface and connecting_iface in down:
                     continue
-            # セグメントチェック: 共通IPセグメントがなければ届かない
-            if not vnet._shares_segment(device_id, peer_id):
+            # セグメントチェック: 共通IPセグメントがなければ届かない。
+            # ただし ip rip neighbor で明示的にユニキャスト指定された相手は
+            # セグメント不一致でも送信する（実機のNBMA/VPNリンク向け動作）。
+            if peer_id not in static_neighbor_devices and not vnet._shares_segment(device_id, peer_id):
                 continue
             entries = []
             # 直接ネットワーク

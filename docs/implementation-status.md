@@ -126,6 +126,44 @@ pytest tests/test_ospf_distribute_list.py -v
 
 ---
 
+### Si-R: ip rip neighbor（ユニキャストRIP）✅
+
+**実装内容:**
+- これまで `ip rip neighbor <IP>` はコマンドとして受理されるだけで
+  実際には何もしない no-op だったことが判明（レビュー時に発見）
+- `RipEngine` に `static_neighbors` を追加し、`add_neighbor()` /
+  `remove_neighbor()` で管理
+- `_send_update()` で、通常はセグメント不一致によりスキップされる相手でも
+  `ip rip neighbor` で明示指定されていれば送信するよう変更
+  （実機のNBMA/VPNリンク向けユニキャストRIPを模擬）
+
+**CLI使用例:**
+```
+configure
+ ip rip use on
+ ip rip neighbor 192.168.1.2
+exit
+```
+
+**制約:**
+- エミュレーターの内部構造上、`vnet` の直結リンク（トポロジ上のリンク）を
+  越えたルーティングはできないため、直結していない相手をユニキャスト
+  neighbor に指定しても届かない（実機のようにIP到達性だけで届く訳ではない）
+
+**テスト:**
+```bash
+pytest tests/test_rip_neighbor.py -v
+# 4/4 テスト成功 ✅
+```
+
+**ファイル変更:**
+- `engine/protocols.py`: `RipEngine.add_neighbor/remove_neighbor/_resolve_static_neighbor_devices`,
+  `_send_update()` のセグメントチェックにバイパス条件追加
+- `app.py`: `ip rip neighbor <IP>` CLIパーサー追加
+- `tests/test_rip_neighbor.py`: 新規テストスイート
+
+---
+
 ## 📈 次のステップ（Priority 1-3）
 
 ### 1-3. OSPF NSSA（推奨順位: 中）
