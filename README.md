@@ -7,6 +7,9 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-green)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
+> 📊 **[実装進捗ダッシュボード](./IMPLEMENTATION_PROGRESS.md)** ← チーム共有用の最新実装状況  
+> ✅ Priority 1 の 50% 完了 | BGP Community ✨ | Big-IP LTM テストツール ✨
+
 ---
 
 ## 対応機種
@@ -17,16 +20,23 @@
 | **富士通 SR-S324TR1** | SR-Sシリーズ準拠 | VLAN / LACP / STP |
 | **Cisco Catalyst 9300** | IOS-XE 17.x準拠 | OSPF / BGP / HSRP / STP / EtherChannel |
 | **Cisco Nexus 9300** | NX-OS 10.2準拠 | OSPF / BGP / vPC / VRRP / LACP |
+| **Cisco ASA** | ASA 9.x準拠 | ファイアウォール / NAT / ACL |
 | **APRESIA ApresiaLight GM200** | ApresiaLight準拠 | VLAN / STP / LACP |
+| **F5 BIG-IP** | TMOS / tmsh準拠 | LTM / Pool / Virtual Server ✨ |
 
 ---
 
 ## 実装済み機能
 
+### 🆕 最新追加機能 (2026-08-30)
+- **BGP Community 属性** — route-map で `set community` / `neighbor send-community` をサポート ✨
+- **Big-IP LTM テスト自動化** — 7シナリオの自動テストツール（Pool/Virtual/Member管理） ✨
+- **BigIP REST API ログ採取** — qkview / UCS を TMOS (Paramiko) + F5OS (REST API) で採取 ✨
+
 ### プロトコル
 - **RIP v2** — ネイバー確立・経路学習・タイムアウト・メトリック・**複数ネイバー対応**
 - **OSPF** — DR/BDR選出・LSA交換・SPF計算・Area 0・**複数隣接・複数経路学習・ベンダー間相互接続**
-- **BGP (eBGP)** — セッション確立・経路広告・AS間ルーティング・**複数AS・複数prefix送受信**
+- **BGP (eBGP)** — セッション確立・経路広告・AS間ルーティング・**複数AS・複数prefix送受信・Community 属性 ✨**
 - **スタティックルート** — AD値比較・フローティングスタティック・**マルチプロトコル経路選択**
 - **VRRP / HSRP** — Master/Backup遷移・preempt
 - **STP / Rapid-PVST+** — Root Bridge選出・PortFast・BPDU Guard
