@@ -916,6 +916,13 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         bgp_engine.add_route_map(device_id, state._current_route_map,
                                  med=int(rm_med.group(1)))
         return
+    # route-map内 "set community 65000:100" or "set community 65000:100 65001:200"
+    rm_comm = re.match(r'^set\s+community\s+(.+)$', c)
+    if rm_comm and getattr(state, '_current_route_map', None):
+        comms = rm_comm.group(1).strip().split()
+        bgp_engine.add_route_map(device_id, state._current_route_map,
+                                 communities=comms)
+        return
     # ── BFDインターバル（neighbor fall-over bfd用パラメータ）──
     bfd_int = re.match(r'^bfd\s+interval\s+(\d+)\s+min[_-]?rx\s+(\d+)\s+multiplier\s+(\d+)', c)
     if bfd_int:
@@ -1885,6 +1892,14 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
         if peer_id:
             bgp_engine.set_neighbor_bfd(device_id, peer_id, True)
+        return
+    # ── neighbor <ip> send-community（community属性を送信）──
+    bgp_send_comm = re.match(r'^neighbor\s+([\d.]+)\s+send-community', c)
+    if bgp_send_comm and getattr(state, '_routing_mode', '') == 'bgp':
+        nip = bgp_send_comm.group(1)
+        peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
+        if peer_id:
+            bgp_engine.set_neighbor_send_community(device_id, peer_id, True)
         return
     # Si-R: "bgp network <ip>/<prefix>" 広告
     sir_bgp_net = re.match(r'^bgp\s+network\s+([\d.]+(?:/\d+)?)', c)

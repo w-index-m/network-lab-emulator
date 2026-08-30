@@ -1858,6 +1858,7 @@ class BgpSession:
     neighbor_ip: str = ''         # 設定上のネイバーIP（表示用）
     prefix_list_in: str = ''      # インバウンド prefix-list 名（filter_engine参照）
     prefix_list_out: str = ''     # アウトバウンド prefix-list 名（filter_engine参照）
+    send_community: bool = False  # send-community 有効（community 属性を送信）
 
 @dataclass
 class BgpRoute:
@@ -1870,6 +1871,7 @@ class BgpRoute:
     origin: str = 'i'
     learned_from: str = ''
     learned_from_hostname: str = ''
+    communities: List[str] = field(default_factory=list)  # ["65000:100", "65001:200"]
 
 class BgpEngine:
     def __init__(self):
@@ -1923,19 +1925,28 @@ class BgpEngine:
         if s:
             s.bfd = enabled
 
+    def set_neighbor_send_community(self, device_id: str, neighbor_id: str, enabled: bool):
+        s = self._node(device_id)['sessions'].get(neighbor_id)
+        if s:
+            s.send_community = enabled
+
     def add_route_map(self, device_id: str, name: str, prepend=None,
-                      local_pref=None, med=None):
+                      local_pref=None, med=None, communities=None):
         n = self._node(device_id)
-        rm = n['route_maps'].setdefault(name, {'prepend': [], 'local_pref': None, 'med': None})
+        rm = n['route_maps'].setdefault(name, {
+            'prepend': [], 'local_pref': None, 'med': None, 'communities': []
+        })
         if prepend:
             rm['prepend'] = list(prepend)
         if local_pref is not None:
             rm['local_pref'] = local_pref
         if med is not None:
             rm['med'] = med
+        if communities:
+            rm['communities'] = list(communities)
 
     def _apply_route_map(self, device_id: str, rm_name: str, route: 'BgpRoute'):
-        """route-mapのset句を経路に適用（as-path prepend / local-preference / metric）"""
+        """route-mapのset句を経路に適用（as-path prepend / local-preference / metric / community）"""
         n = self.nodes.get(device_id, {})
         rm = n.get('route_maps', {}).get(rm_name)
         if not rm:
@@ -1946,6 +1957,8 @@ class BgpEngine:
             route.local_pref = rm['local_pref']
         if rm.get('med') is not None:
             route.med = rm['med']
+        if rm.get('communities'):
+            route.communities = list(rm['communities'])
         return route
 
     async def start(self, device_id: str, hostname: str, local_as: int):
