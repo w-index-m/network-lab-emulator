@@ -976,6 +976,21 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                f'route-manage {list_name} ({count}経路)'})
         return
 
+    # Si-R: distribute-list相当 "ip rip use route-manage <name> in|out" /
+    # "ip ospf use route-manage <name> in|out"
+    # （Ciscoのdistribute-listと同じくfilter_engineを共用し、学習経路自体を絞る）
+    sir_use_rm = re.match(
+        r'^ip\s+(rip|ospf)\s+use\s+route-manage\s+(\S+)\s+(in|out)', orig, re.I)
+    if sir_use_rm:
+        proto = sir_use_rm.group(1).lower()
+        list_name = sir_use_rm.group(2)
+        direction = sir_use_rm.group(3).lower()
+        filter_engine.set_distribute_list(device_id, proto, direction, list_name)
+        buf = proto_log_buffer.setdefault(device_id, [])
+        buf.append({'type': 'filter_log',
+                    'message': f'ip {proto} use route-manage {list_name} {direction} を適用'})
+        return
+
     # ── EtherChannel / LACP（Cisco/Catalyst）──
     # "interface range GigabitEthernet1/0/1 - 2" で複数ポート選択
     irange = re.match(

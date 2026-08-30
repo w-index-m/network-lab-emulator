@@ -7432,7 +7432,7 @@ class CliCompletion:
             'route':            'Set static route',
             'rip': {
                 '_desc': 'RIP configuration',
-                'use':          'Enable RIP (ip rip use use)',
+                'use':          'Enable RIP (ip rip use use) / Apply route filter (ip rip use route-manage <name> in|out)',
                 'network':      'Set RIP network',
                 'neighbor':     'Set RIP neighbor',
                 'version':      'Set RIP version',
@@ -7441,7 +7441,9 @@ class CliCompletion:
                 '_desc': 'OSPF configuration',
                 'priority': 'Set OSPF priority',
                 'cost':     'Set OSPF cost',
+                'use':      'Apply route filter (ip ospf use route-manage <name> in|out)',
             },
+            'route-manage': 'Define a named route filter (permit/deny) for redistribution and distribute filtering',
         },
         'ospf': {
             '_desc': 'OSPF global configuration',

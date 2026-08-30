@@ -164,6 +164,39 @@ pytest tests/test_rip_neighbor.py -v
 
 ---
 
+### Si-R: distribute-list相当（ip rip/ospf use route-manage in|out）✅
+
+**実装内容:**
+- これまで Si-R の `route-manage` は「再配信フィルタ」専用で、
+  Ciscoの`distribute-list`相当（RIP/OSPFが学習・広告する経路自体を絞る）
+  はSi-R構文で存在しないことが判明（レビューで発見）
+- `ip rip use route-manage <name> in|out` / `ip ospf use route-manage <name> in|out`
+  を追加。既存の `filter_engine.set_distribute_list()` をそのまま共用するため、
+  Cisco `distribute-list` と全く同じフィルタ機構（RIP inbound/outbound、
+  OSPF SPF結果へのin適用）がSi-Rでも動く
+
+**CLI使用例:**
+```
+configure
+ ip route-manage RIPFILTER permit 10.0.0.0/8
+ ip rip use route-manage RIPFILTER in
+ ip ospf use route-manage RIPFILTER out
+exit
+```
+
+**テスト:**
+```bash
+pytest tests/test_sir_route_manage_distribute.py -v
+# 5/5 テスト成功 ✅
+```
+
+**ファイル変更:**
+- `app.py`: `ip rip|ospf use route-manage <name> in|out` CLIパーサー追加
+- `engine/rules.py`: SIR_CONFIG ヘルプツリーに `route-manage` / `use route-manage` を追記（ヘルプ補完漏れの一部修正）
+- `tests/test_sir_route_manage_distribute.py`: 新規テストスイート
+
+---
+
 ## 📈 次のステップ（Priority 1-3）
 
 ### 1-3. OSPF NSSA（推奨順位: 中）
