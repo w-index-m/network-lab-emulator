@@ -2623,6 +2623,9 @@ def _capture_sir_config(state, command: str):
     cmd = command.strip()
     if not cmd:
         return
+    # "?" によるヘルプ照会は設定変更ではないため running-config に残さない
+    if cmd.endswith('?'):
+        return
     first = cmd.split()[0].lower()
     if first in _SIR_NONCONFIG or first.startswith('sh'):
         return

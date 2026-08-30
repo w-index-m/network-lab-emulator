@@ -2318,10 +2318,7 @@ Configuration Revision            : 5"""
             return '\n'.join(lines)
         # show filter / show acl（Si-R）
         if re.match(r'^show\s+(filter|acl)', c):
-            return ('IP Filter Information\n'
-                    '  No.  Action  Source           Destination      Proto\n'
-                    '  ---  ------  ---------------  ---------------  -----\n'
-                    '  (no filter configured)')
+            return self._sir_show_filter(state)
         # show rip（Si-R）
         if re.match(r'^show\s+(ip\s+)?rip', c):
             return ('RIP Information\n'
@@ -2367,10 +2364,7 @@ Configuration Revision            : 5"""
             return self._show_ip_route(state) if hasattr(self, '_show_ip_route') else None
         # show ip filter / show ip acl
         if re.match(r'^show\s+ip\s+(filter|acl)', c):
-            return ('IP Filter Table\n'
-                    '  No.  Dir  Action  Source           Destination      Proto  Port\n'
-                    '  ---  ---  ------  ---------------  ---------------  -----  ----\n'
-                    '  (no filter configured)')
+            return self._sir_show_filter(state)
         # show sntp
         if re.match(r'^show\s+sntp', c):
             return 'SNTP Client : enabled\n  Server : ntp.nict.jp\n  Status : synchronized'
@@ -2392,6 +2386,41 @@ Configuration Revision            : 5"""
                     '--- system ---\n' + self._sir_show(cmd, 'show system', state) +
                     '\n--- memory ---\n' + self._sir_show(cmd, 'show memory', state))
         return None
+
+    def _sir_show_filter(self, state: DeviceState) -> str:
+        """show filter / show ip filter / show acl / show ip acl（Si-R）。
+        route-manage で定義された prefix-list と、それがRIP/OSPFの
+        distribute-list や redistribute フィルタとしてどこに適用されているかを表示する。"""
+        from engine.protocols import filter_engine
+        device_id = getattr(state, '_device_id', None)
+        lists = filter_engine.prefix_lists.get(device_id, {}) if device_id else {}
+        if not lists:
+            return ('IP Filter Information\n'
+                    '  No.  Action  Source           Destination      Proto\n'
+                    '  ---  ------  ---------------  ---------------  -----\n'
+                    '  (no filter configured)')
+
+        # このprefix-listがどこで使われているか（distribute-list / redistフィルタ）を逆引き
+        used_in = {}
+        for (proto, direction), name in filter_engine.distribute_lists.get(device_id, {}).items():
+            used_in.setdefault(name, []).append(f'{proto} use route-manage {direction}')
+        for (target, source), name in filter_engine.redist_filters.get(device_id, {}).items():
+            used_in.setdefault(name, []).append(f'redistribute {source} -> {target}')
+
+        lines = ['IP Filter Information (route-manage)']
+        for name, entries in lists.items():
+            usage = used_in.get(name)
+            usage_str = f' [used by: {", ".join(usage)}]' if usage else ' [not applied]'
+            lines.append(f'  route-manage {name}{usage_str}')
+            lines.append('    No.  Action  Network')
+            for e in entries:
+                gele = ''
+                if e.ge is not None:
+                    gele += f' ge {e.ge}'
+                if e.le is not None:
+                    gele += f' le {e.le}'
+                lines.append(f'    {e.seq:<4} {e.action:<7} {e.network}/{e.prefix}{gele}')
+        return '\n'.join(lines)
 
     def _sir_show_ipsec_sa(self, state: DeviceState) -> str:
         tunnels = getattr(state, 'ipsec_tunnels', {})

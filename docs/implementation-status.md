@@ -197,6 +197,52 @@ pytest tests/test_sir_route_manage_distribute.py -v
 
 ---
 
+### Si-R: show filter / show ip filter が実設定を反映するよう修正 ✅
+
+**実装内容:**
+- これまで `show filter` / `show ip filter` / `show acl` / `show ip acl` は
+  固定文字列 "no filter configured" しか返さず、`route-manage` で
+  設定したprefix-listが一切見えなかった（レビューで発見したバグ）
+- `_sir_show_filter()` を新設し、`filter_engine.prefix_lists` を実際に参照。
+  さらに `distribute_lists` / `redist_filters` を逆引きして、
+  各filterがRIP/OSPFのどのdirectionや再配信に使われているかも表示
+
+**Before/After:**
+```
+# Before
+$ ip route-manage RIPFILTER permit 10.0.0.0/8
+$ show filter
+  (no filter configured)          ← 設定したのに見えない
+
+# After
+$ show filter
+  route-manage RIPFILTER [used by: rip use route-manage in]
+    No.  Action  Network
+    5    permit  10.0.0.0/8
+```
+
+**テスト:** `pytest tests/test_sir_show_filter.py -v` — 3/3 成功 ✅
+
+---
+
+### Si-R: config中の "?" ヘルプ照会が running-config に残る不具合を修正 ✅
+
+**実装内容:**
+- `_capture_sir_config()` が config モードで入力されたコマンドを
+  無条件にキャプチャしており、`ip route-manage ?` のようなヘルプ照会まで
+  設定として保存されていた（レビューで発見したバグ）
+- コマンドが `?` で終わる場合はキャプチャをスキップするよう修正
+
+**Before/After:**
+```
+# Before: show running-config に "ip route-manage ?" が残る
+# After : ヘルプ照会は保存されず、実際の設定行のみ残る
+```
+
+**テスト:** `pytest tests/test_sir_capture_config.py -v` — 3/3 成功 ✅
+
+---
+
 ## 📈 次のステップ（Priority 1-3）
 
 ### 1-3. OSPF NSSA（推奨順位: 中）
