@@ -103,7 +103,7 @@ class TestSuite:
 # ============================================================
 # テスト1: RIP マルチネイバー（複数経路学習・配信）
 # ============================================================
-async def test_rip_multivendor_neighbors(suite: TestSuite):
+async def run_rip_multivendor_neighbors(suite: TestSuite):
     """RIP: 複数ベンダー・複数ネイバー・複数経路の受信送信
 
     テストシナリオ:
@@ -166,7 +166,7 @@ async def test_rip_multivendor_neighbors(suite: TestSuite):
 # ============================================================
 # テスト2: OSPF マルチネイバー（複数隣接・複数経路学習）
 # ============================================================
-async def test_ospf_multivendor_neighbors(suite: TestSuite):
+async def run_ospf_multivendor_neighbors(suite: TestSuite):
     """OSPF: 複数ベンダー・複数隣接・複数経路学習
 
     テストシナリオ:
@@ -222,7 +222,7 @@ async def test_ospf_multivendor_neighbors(suite: TestSuite):
 # ============================================================
 # テスト3: BGP マルチネイバー（複数AS・複数prefix学習・配信）
 # ============================================================
-async def test_bgp_multivendor_neighbors(suite: TestSuite):
+async def run_bgp_multivendor_neighbors(suite: TestSuite):
     """BGP: 複数AS・複数セッション・複数prefix学習・配信
 
     テストシナリオ:
@@ -281,7 +281,7 @@ async def test_bgp_multivendor_neighbors(suite: TestSuite):
 # ============================================================
 # テスト4: マルチプロトコル混在（経路選択）
 # ============================================================
-async def test_multiprotocol_route_selection(suite: TestSuite):
+async def run_multiprotocol_route_selection(suite: TestSuite):
     """マルチプロトコル混在: AD値による経路選択確認
 
     テストシナリオ:
@@ -352,7 +352,7 @@ async def test_multiprotocol_route_selection(suite: TestSuite):
 # ============================================================
 # テスト5: 複数ベンダー相互接続
 # ============================================================
-async def test_multivendor_interoperability(suite: TestSuite):
+async def run_multivendor_interoperability(suite: TestSuite):
     """複数ベンダー相互接続テスト
 
     対応ベンダー:
@@ -432,7 +432,7 @@ async def test_multivendor_interoperability(suite: TestSuite):
 # ============================================================
 # テスト6: フェイルオーバー・復旧
 # ============================================================
-async def test_failover_recovery(suite: TestSuite):
+async def run_failover_recovery(suite: TestSuite):
     """フェイルオーバー・復旧テスト
 
     シナリオ:
@@ -492,22 +492,22 @@ async def main():
     print()
 
     # テスト実行
-    await test_rip_multivendor_neighbors(suite)
+    await run_rip_multivendor_neighbors(suite)
     print("✓ RIP マルチネイバーテスト完了")
 
-    await test_ospf_multivendor_neighbors(suite)
+    await run_ospf_multivendor_neighbors(suite)
     print("✓ OSPF マルチネイバーテスト完了")
 
-    await test_bgp_multivendor_neighbors(suite)
+    await run_bgp_multivendor_neighbors(suite)
     print("✓ BGP マルチネイバーテスト完了")
 
-    await test_multiprotocol_route_selection(suite)
+    await run_multiprotocol_route_selection(suite)
     print("✓ マルチプロトコル経路選択テスト完了")
 
-    await test_multivendor_interoperability(suite)
+    await run_multivendor_interoperability(suite)
     print("✓ マルチベンダー相互接続テスト完了")
 
-    await test_failover_recovery(suite)
+    await run_failover_recovery(suite)
     print("✓ フェイルオーバー・復旧テスト完了")
 
     # 結果レポート
