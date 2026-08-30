@@ -1537,7 +1537,10 @@ class OspfEngine:
             key = f'{r["network"]}/{r["prefix"]}'
             if key not in best or best[key]['metric'] > r['metric']:
                 best[key] = r
-        n['routes'] = list(best.values())
+        # distribute-list in: SPFで計算した経路をローカルRIBに入れる前にフィルタ
+        filtered_routes = filter_engine.filter_routes(
+            device_id, 'ospf', 'in', list(best.values()))
+        n['routes'] = filtered_routes
         self._inject_external_routes(device_id)
         _spawn(vnet.send_to(device_id, {
             'type': 'ospf_log',

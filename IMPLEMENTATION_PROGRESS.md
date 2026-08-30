@@ -3,17 +3,17 @@
 > GitHub で進捗が一目瞭然！ チームで「こんなにやったのか」と共有できるドキュメント
 
 **最終更新**: 2026-08-30  
-**進捗**: **Priority 1** の 2/4 完了 (50%) ✅
+**進捗**: **Priority 1** の 3/4 完了 (75%) ✅
 
 ---
 
 ## 📊 全体進捗ビジュアル
 
 ```
-Priority 1: ████████░░ 50% (2/4 完了)
+Priority 1: ███████░░░ 75% (3/4 完了)
   ✅ 1-1. BGP Community 属性         [████████░░] 完了
+  ✅ 1-2. distribute-list CLI       [████████░░] 完了
   ✅ 1-4. Big-IP LTM テストツール   [████████░░] 完了
-  ⏳ 1-2. distribute-list CLI       [░░░░░░░░░░] 設計完了
   ⏳ 1-3. OSPF NSSA               [░░░░░░░░░░] 設計完了
 
 Priority 2: ░░░░░░░░░░ 0% (0/3 完了)
@@ -97,6 +97,56 @@ $ pytest tests/test_bgp_community.py -v
 - ✅ Neighbor send-community flag
 - ✅ Attribute preservation
 - ✅ Complex multi-attribute policies
+
+---
+
+### ✅ 1-2. distribute-list CLI
+
+**状態**: 完了 ✅  
+**テスト**: 3/3 成功
+
+#### ビフォーアフター
+
+| 項目 | Before | After |
+|-----|--------|-------|
+| RIP distribute-list | ✅ 実装済み | ✅ 実装済み（変更なし） |
+| OSPF distribute-list | ❌ CLI解析のみ・未反映 | ✅ SPF計算結果に反映 ✨ |
+| ローカル RIB フィルタ | RIP のみ | **RIP + OSPF** ✅ |
+
+#### できるようになったこと
+
+```cisco
+! prefix-list で許可する経路を定義
+ip prefix-list OSPF_IN seq 5 permit 10.0.0.0/8 le 32
+
+! OSPF エリアで distribute-list in を適用
+router ospf 1
+  distribute-list prefix-list OSPF_IN in
+  exit
+```
+
+上記設定で、OSPF が SPF 計算で学習した経路のうち `10.0.0.0/8` 配下
+以外はローカル RIB にインストールされなくなります（Cisco 実機同様、
+`distribute-list in` は LSA フラッディングではなく経路インストールを
+フィルタする仕様）。
+
+#### 実装内容
+
+| ファイル | 変更内容 | 行数 |
+|---------|---------|-----|
+| `engine/protocols.py` | `OspfEngine._recalc_routes()` に distribute-list in フィルタ追加 | +3 |
+| `tests/test_ospf_distribute_list.py` | 新規テストスイート | +90 |
+
+#### テスト
+
+```bash
+$ pytest tests/test_ospf_distribute_list.py -v
+✅ test_ospf_distribute_list_in_filters_routes
+✅ test_ospf_distribute_list_not_configured_keeps_all_routes
+✅ test_ospf_engine_recalc_routes_applies_distribute_list
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3 passed in 0.03s ✅
+```
 
 ---
 

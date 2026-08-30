@@ -7,11 +7,11 @@
 | タスク | ステータス | 実装日 | 詳細 |
 |--------|---------|--------|------|
 | **1-1. BGP Community 属性** | ✅ **完了** | 2026-08-30 | route-map set community + send-community neighbor |
-| **1-2. distribute-list CLI** | ⏳ 計画中 | TBD | RIP/OSPF フィルタリング基盤準備中 |
+| **1-2. distribute-list CLI** | ✅ **完了** | 2026-08-30 | RIP（既存）+ OSPF SPF結果へのフィルタ適用 |
 | **1-3. OSPF NSSA** | ⏳ 計画中 | TBD | マルチエリア LSA Type 7 変換 |
 | **1-4. Big-IP Test Tool** | ✅ **完了** | 2026-08-30 | Pool/VIP/Member 管理テスト 7 シナリオ |
 
-**完了率: 2/4 (50%)** → 次週でさらに 1-2, 1-3 実装予定
+**完了率: 3/4 (75%)** → 次は 1-3 (OSPF NSSA) を実装予定
 
 ---
 
@@ -89,27 +89,44 @@ python tools/test_bigip_ltm.py --emulator
 
 ---
 
-## 📈 次のステップ（Priority 1-2, 1-3）
+## 🎯 実装済み機能の詳細（続き）
 
-### 1-2. distribute-list CLI（推奨順位: 高）
+### 1-2. distribute-list CLI ✅
 
-**実装の流れ:**
-1. `DeviceState` に `distribute_lists` フィールド追加
-2. CLI コマンド解析 （app.py）
-   ```cisco
-   router ospf 1
-    distribute-list 1 in GigabitEthernet1/0/1
-    distribute-list prefix-list PL_FILTER out
-   ```
-3. filter_engine への連携
-4. テストスイート作成
+**実装内容:**
+- RIP: 既存実装（`app.py` の distribute-list パーサー + `FilterEngine.filter_routes()`）で
+  outbound update（`_send_update`）と inbound受信（`process_rip_packet`）の両方をフィルタ済みだったことを確認
+- OSPF: `OspfEngine._recalc_routes()` の SPF計算結果（`n['routes']`）に対して
+  `filter_engine.filter_routes(device_id, 'ospf', 'in', routes)` を適用するよう追加実装
+  - Cisco実機同様、OSPFの`distribute-list in`はLSAフラッディングそのものではなく
+    ローカルRIBへの経路インストールをフィルタする仕様に準拠
 
-**期待テスト:**
-- RIP/OSPF で特定経路をフィルタ
-- prefix-list + distribute-list の組み合わせ
-- in/out 方向制御
+**CLI使用例:**
+```cisco
+ip prefix-list OSPF_IN seq 5 permit 10.0.0.0/8 le 32
+
+router ospf 1
+  distribute-list prefix-list OSPF_IN in
+  exit
+```
+
+**テスト:**
+```bash
+pytest tests/test_ospf_distribute_list.py -v
+# 3/3 テスト成功 ✅
+```
+
+**ファイル変更:**
+- `engine/protocols.py`: `OspfEngine._recalc_routes()` に distribute-list in フィルタを追加
+- `tests/test_ospf_distribute_list.py`: 新規テストスイート
+
+**期待効果:**
+- OSPF エリアで特定経路をローカル RIB から除外可能に
+- prefix-list との組み合わせでポリシー制御（RIP と同様の柔軟性を OSPF にも）
 
 ---
+
+## 📈 次のステップ（Priority 1-3）
 
 ### 1-3. OSPF NSSA（推奨順位: 中）
 
