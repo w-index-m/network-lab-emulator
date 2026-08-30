@@ -491,8 +491,17 @@ class RipEngine:
                 'expire_tasks': {},   # "net/prefix" -> task
                 'redistributed': {},  # net/prefix -> {metric, source}
                 'peers': {},          # peer_id -> {hostname, last_seen, routes}
+                'auth_mode': '',      # '' | 'text' | 'md5'
+                'auth_key': '',       # 認証キー（RFC2453準拠の簡易実装）
             }
         return self.nodes[device_id]
+
+    def set_authentication(self, device_id: str, mode: str, key: str):
+        """ip rip authentication mode md5 / key-chain 相当。
+        両端のキーが一致しない場合、受信したupdateを拒否する。"""
+        n = self._node(device_id)
+        n['auth_mode'] = mode
+        n['auth_key'] = key
 
     async def start(self, device_id: str, hostname: str, networks: List[str], version: int = 2):
         n = self._node(device_id)
@@ -627,7 +636,9 @@ class RipEngine:
             pkt = {'type': 'rip_packet', 'command': 'response',
                    'version': n['version'], 'src_id': device_id,
                    'src_hostname': n['hostname'], 'entries': entries,
-                   'timestamp': time.time()}
+                   'timestamp': time.time(),
+                   'auth_mode': n.get('auth_mode', ''),
+                   'auth_key': n.get('auth_key', '')}
             peer_node = self.nodes.get(peer_id)
             if peer_node and peer_node.get('enabled'):
                 await vnet.send_to(peer_id, pkt)
@@ -643,6 +654,17 @@ class RipEngine:
         if command == 'request':
             await self._send_update(receiver_id)
             return
+
+        # 認証チェック（受信側でキーが設定されている場合のみ強制）
+        if n.get('auth_key'):
+            if msg.get('auth_key', '') != n['auth_key']:
+                await vnet.send_to(receiver_id, {
+                    'type': 'rip_log',
+                    'message': (f'%RIP-4-AUTH: Invalid authentication (mode='
+                                f'{n.get("auth_mode", "md5")}) from {src_hostname} '
+                                f'— update rejected')
+                })
+                return
 
         # ピアとして記録（ルートの有無に関わらず）
         if src_id:
@@ -940,6 +962,8 @@ class OspfEngine:
                 'redistributed': {},
                 'abr': False,     # ABR（マルチエリア）フラグ
                 'summary_routes': [],  # ABRが生成するSummary LSA
+                'auth_mode': '',  # '' | 'text' | 'md5'
+                'auth_key': '',   # 認証キー（RFC2328 §D 簡易実装）
             }
         return self.nodes[device_id]
 
@@ -949,6 +973,13 @@ class OspfEngine:
         # 既にネイバーがいればDR再選出をトリガー
         if n.get('enabled') and n.get('neighbors'):
             _spawn(self._elect_dr_bdr(device_id))
+
+    def set_authentication(self, device_id: str, mode: str, key: str):
+        """ip ospf authentication message-digest + ip ospf message-digest-key
+        相当。両端のキーが一致しない場合、受信したHelloを拒否し隣接しない。"""
+        n = self._node(device_id)
+        n['auth_mode'] = mode
+        n['auth_key'] = key
 
     def set_cost(self, device_id: str, cost: int):
         n = self._node(device_id)
@@ -1071,6 +1102,8 @@ class OspfEngine:
             'networks': n['networks'],
             'external_routes': dict(n.get('redistributed', {})),
             'cost': n['interface_cost'],
+            'auth_mode': n.get('auth_mode', ''),
+            'auth_key': n.get('auth_key', ''),
         }
         await vnet.broadcast_to_neighbors(device_id, pkt)
 
@@ -1092,6 +1125,17 @@ class OspfEngine:
         # hello/dead interval確認（不一致なら隣接不可）
         if msg.get('hello_interval') and msg['hello_interval'] != n['hello_interval']:
             return
+
+        # 認証チェック（受信側でキーが設定されている場合のみ強制、RFC2328 §D）
+        if n.get('auth_key'):
+            if msg.get('auth_key', '') != n['auth_key']:
+                await vnet.send_to(receiver_id, {
+                    'type': 'ospf_log',
+                    'message': (f'%OSPF-4-ERRRCV: Received invalid packet: '
+                                f'mismatch authentication Key - '
+                                f'from {src_hostname}')
+                })
+                return
 
         # 外部ルート記録
         ext = msg.get('external_routes', {})
@@ -1812,6 +1856,8 @@ class BgpSession:
     bfd: bool = False             # fall-over bfd 有効
     bfd_state: str = 'Down'       # BFDセッション状態 Up/Down
     neighbor_ip: str = ''         # 設定上のネイバーIP（表示用）
+    prefix_list_in: str = ''      # インバウンド prefix-list 名（filter_engine参照）
+    prefix_list_out: str = ''     # アウトバウンド prefix-list 名（filter_engine参照）
 
 @dataclass
 class BgpRoute:
@@ -1860,6 +1906,17 @@ class BgpEngine:
                 s.route_map_in = name
             else:
                 s.route_map_out = name
+
+    def set_neighbor_prefix_list(self, device_id: str, neighbor_id: str,
+                                 name: str, direction: str):
+        """neighbor <ip> prefix-list <name> in|out 相当。
+        filter_engine.prefix_lists（distribute-listと共通の定義）を参照する。"""
+        s = self._node(device_id)['sessions'].get(neighbor_id)
+        if s:
+            if direction == 'in':
+                s.prefix_list_in = name
+            else:
+                s.prefix_list_out = name
 
     def set_neighbor_bfd(self, device_id: str, neighbor_id: str, enabled: bool):
         s = self._node(device_id)['sessions'].get(neighbor_id)
@@ -2066,6 +2123,10 @@ class BgpEngine:
         # アウトバウンド route-map 適用
         if session.route_map_out:
             out = [self._apply_route_map(device_id, session.route_map_out, r) for r in out]
+        # アウトバウンド prefix-list 適用（permitされたprefixのみ広告）
+        if session.prefix_list_out:
+            out = [r for r in out if filter_engine.check_prefix_list(
+                device_id, session.prefix_list_out, r.prefix, r.prefix_len)]
         return out
 
     async def _send_update(self, device_id: str, neighbor_id: str):
@@ -2113,6 +2174,11 @@ class BgpEngine:
                     for r in adverts:
                         # AS-path ループ防止: 受信側の自ASが含まれる経路は拒否（RFC4271）
                         if nbr['local_as'] in r.as_path:
+                            continue
+                        # インバウンド prefix-list 適用（permitされたprefixのみ受理）
+                        if (nbr_session and nbr_session.prefix_list_in and
+                                not filter_engine.check_prefix_list(
+                                    nid, nbr_session.prefix_list_in, r.prefix, r.prefix_len)):
                             continue
                         rr = BgpRoute(prefix=r.prefix, prefix_len=r.prefix_len,
                                       next_hop=dev, local_pref=100, med=r.med,
@@ -3349,6 +3415,68 @@ class RibEngine:
                 if c['ad'] < cur['ad'] or (c['ad'] == cur['ad'] and c['metric'] < cur['metric']):
                     best[key] = c
         return list(best.values())
+
+    def get_ecmp_routes(self, device_id: str) -> List[dict]:
+        """
+        ECMP（Equal-Cost Multi-Path）対応版。
+        get_best_routes と同じ候補集合から、宛先ごとに
+        「AD最小 かつ metric最小」の全候補（next-hopが異なるもの）を集約する
+        （Cisco の maximum-paths 相当、デフォルト最大4）。
+        戻り値: [{'network','prefix','ad','metric','source','next_hops':[str,...]}]
+        """
+        candidates = []
+        n = self.nodes.get(device_id)
+        if n:
+            for r in n['static_routes']:
+                if r.active:
+                    candidates.append({
+                        'network': r.network, 'prefix': r.prefix,
+                        'next_hop': r.next_hop, 'ad': r.ad,
+                        'source': 'static', 'metric': 0,
+                    })
+        rnode = rip_engine.nodes.get(device_id)
+        if rnode and rnode.get('enabled'):
+            for r in rnode['table']:
+                if r.learned_from == 'direct':
+                    continue
+                candidates.append({
+                    'network': r.network, 'prefix': r.prefix,
+                    'next_hop': r.next_hop, 'ad': AD_VALUES['rip'],
+                    'source': 'rip', 'metric': r.metric,
+                })
+        onode = ospf_engine.nodes.get(device_id)
+        if onode and onode.get('enabled'):
+            for r in onode.get('routes', []):
+                if r['via'] == 'direct':
+                    continue
+                candidates.append({
+                    'network': r['network'], 'prefix': int(r['prefix']),
+                    'next_hop': r.get('next_hop', '0.0.0.0'),
+                    'ad': AD_VALUES['ospf'], 'source': 'ospf', 'metric': r['metric'],
+                })
+
+        best_key: Dict[str, tuple] = {}   # dest -> (ad, metric)
+        for c in candidates:
+            key = f"{c['network']}/{c['prefix']}"
+            cur = best_key.get(key)
+            score = (c['ad'], c['metric'])
+            if cur is None or score < cur:
+                best_key[key] = score
+
+        groups: Dict[str, dict] = {}
+        MAX_PATHS = 4  # Cisco デフォルトの maximum-paths
+        for c in candidates:
+            key = f"{c['network']}/{c['prefix']}"
+            if (c['ad'], c['metric']) != best_key[key]:
+                continue
+            g = groups.setdefault(key, {
+                'network': c['network'], 'prefix': c['prefix'],
+                'ad': c['ad'], 'metric': c['metric'], 'source': c['source'],
+                'next_hops': [],
+            })
+            if c['next_hop'] not in g['next_hops'] and len(g['next_hops']) < MAX_PATHS:
+                g['next_hops'].append(c['next_hop'])
+        return list(groups.values())
 
     def format_show_ip_route(self, device_id: str, hostname: str = '') -> str:
         """統合ルーティングテーブル表示（AD/メトリック付き）"""
