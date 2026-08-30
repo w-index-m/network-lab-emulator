@@ -136,6 +136,17 @@
 - メンバーの up/down で負荷分散対象の増減を再現（VIPの `Members up` も連動）。
 - 現状は LTM 中心。GTM/APM/ASM・iRule・SNAT詳細は未対応。
 
+### 実機ルータ 経路注入（route injector）
+
+| ツール | 説明 | 状態 |
+|---|---|---|
+| `tools/route_injector/network_route_injector.py` | RIP/OSPF(P2P・Broadcast)/BGP(FlowSpec) を実機へ注入するWindows GUI | 追加（実機/Windows必要） |
+
+- **検証用途専用**。自分が管理するラボ機器・許可対象のみ（ネイバー偽装・経路注入を含む）。
+- RIP/BGPは標準ライブラリのみ（管理者不要）、OSPFは scapy＋Npcap＋管理者。
+- Catalyst/Si-Rへの注入手順・確認コマンドは `tools/route_injector/README.md`。
+- 注入後の確認は各機器の `show ip route` か `tools/eveng_deploy.py verify` の `route_present`。
+
 ## 経路フィルタ共通 (prefix-list / ACL / route-map)
 
 | コマンド | 説明 | 状態 |
