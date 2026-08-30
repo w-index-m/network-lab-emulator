@@ -17,6 +17,7 @@
 | **Nexus 9300** | L3スイッチ | Cisco | NX-OS 10.2 | ✅ `cisco_nxos` | ✅ | ✅ |
 | **ASA** | ファイアウォール | Cisco | ASA 9.x準拠 | ✅ `cisco_asa` | ✅ | ✅ |
 | **APRESIA Light GM200** | L2/L3スイッチ | APRESIA | ApresiaLight準拠 | ⚠️ | ✅ | ✅ |
+| **F5 BIG-IP** | ロードバランサー | F5 | TMOS / tmsh | ✅ `f5_tmsh` | ✅ | ✅ |
 
 ### ホスト・エンドデバイス
 
@@ -376,6 +377,62 @@
 
 ---
 
+### Load Balancing (F5 BIG-IP LTM)
+
+```
+✅ 実装済み機能:
+  - Pool作成・管理
+    - メンバー追加/削除 (ip:port)
+    - メンバー状態管理 (up/down/user-down)
+    - ヘルスモニター設定 (http/tcp/icmp等)
+  
+  - Virtual Server（VIP）設定
+    - 宛先 IP:port 設定
+    - プール割り当て
+    - プロファイル設定 (http/tcp)
+  
+  - 負荷分散方式
+    - Round-robin (デフォルト)
+    - Least-connections-member
+    - Static member-order
+  
+  - 管理機能
+    - show ltm pool (プール状態表示)
+    - show ltm virtual (VIP状態表示)
+    - show ltm node (ノード一覧)
+    - show running-config (全設定出力)
+    - list ltm (詳細設定表示)
+
+✅ 対応コマンド:
+  - create/modify ltm pool
+  - create/modify ltm virtual
+  - create ltm monitor
+  - modify ltm pool members [add/delete/modify]
+  - delete ltm [pool|virtual|node|monitor]
+  - show/list ltm [pool|virtual|node|monitor]
+  - show running-config / save sys config
+
+✅ 検証済み:
+  - 複数プール構成
+  - メンバー自動健全性判定
+  - 手動 up/down 切り替え
+  - 負荷分散対象の増減反映
+
+⚠️ 非対応機能 (予定):
+  - GTM (Global Traffic Management)
+  - APM (Access Policy Manager)
+  - ASM (Application Security Manager)
+  - iRule (ビジネスルール)
+  - SNAT (Source NAT) 詳細動作
+  - F5OS (次世代プラットフォーム) REST API
+
+**テスト**: 
+- `python tools/test_bigip_ltm.py` (計画中)
+- エミュレーター内: tmsh コマンド直接投入
+```
+
+---
+
 ## 🔍 ネットワーク管理・監視
 
 ### ARP (Address Resolution Protocol)
@@ -659,10 +716,11 @@
 
 | カテゴリ | 実装数 | テスト | 備考 |
 |---------|------|------|------|
-| **デバイス** | 8機種 | ✅ | Si-R/SR-S/Catalyst/Cisco/Nexus/ASA/APRESIA/PC |
+| **デバイス** | 9機種 | ✅ | Si-R/SR-S/Catalyst/Cisco/Nexus/ASA/APRESIA/F5/PC |
 | **ルーティング** | 4プロトコル | ✅ | RIP/OSPF/BGP/Static + redistribute |
 | **スイッチング** | 6機能 | ✅ | VLAN/STP/LACP/vPC/VRRP/HSRP |
 | **フィルタ/セキュリティ** | 7機能 | ✅ | ACL/Prefix-list/Route-map/ICMP/IPFilter/NAT/Firewall |
+| **ロードバランシング** | 1機能 | ✅ | F5 BIG-IP LTM (Pool/Virtual/Monitor) |
 | **管理・監視** | 6機能 | ✅ | ARP/CEF/DP/Syslog/SNMP/NTP |
 | **テストツール** | 11スイート | ✅ | 100+ テストケース |
 | **統合ツール** | 4種類 | ✅ | Netmiko/Paramiko/EVE-NG/HTTP API |
@@ -681,6 +739,29 @@
 ⬜ QoS (Queuing/Shaping)
 ⬜ マルチキャスト
 ⬜ IPv6
+```
+
+### 検討中のデバイス・機能
+
+```
+⬜ F5 BIG-IP (追加機能)
+   - GTM (Global Traffic Management / DNS LB)
+   - APM (Access Policy Manager / VPN)
+   - ASM (Application Security Manager / WAF)
+   - F5OS (次世代プラットフォーム RESTCONF API)
+
+⬜ Palo Alto Networks
+   - PAN-OS (ファイアウォール)
+   - Panorama (中央管理)
+   ※ 現在未実装。実装予定なし（コミュニティ要望に応じて検討）
+
+⬜ Juniper SRX
+   - Junos OS コマンドセット
+   - BGP / OSPF / IS-IS
+
+⬜ Fortinet FortiGate
+   - FortiOS コマンドセット
+   - ファイアウォール・VPN
 ```
 
 ### パフォーマンス最適化
