@@ -196,7 +196,12 @@ network-lab-emulator/
 │   ├── test_extended_topologies.py        # 大規模メッシュ(実タイマー・スタンドアロン)
 │   ├── test_bgp_advanced.py               # BGP高度機能(prepend/local-pref/MED/認証)
 │   ├── test_ospf_multiarea.py             # OSPFマルチエリア(ABR/O IA)
-│   └── test_filtering_auth_ecmp.py        # 経路フィルタ/MD5認証/ECMP
+│   ├── test_filtering_auth_ecmp.py        # 経路フィルタ/MD5認証/ECMP
+│   └── test_netmiko_catalyst.py           # Netmiko統合テスト（HTTP API版）
+├── tools/
+│   ├── eveng_deploy.py     # EVE-NG 実機デプロイツール (netmiko使用)
+│   ├── test_netmiko_integration.py  # 実機Catalyst netmikoテスト
+│   └── test_emulator_api.py         # エミュレーターHTTP API テスト
 ├── verify_all.py           # 全機能確認スクリプト（103項目）
 ├── lab_multivendor.py      # マルチベンダーラボ検証
 ├── demo_rip.py             # RIPデモスクリプト
@@ -342,6 +347,120 @@ pytest tests/test_ospf_multiarea.py -v
 pytest tests/test_filtering_auth_ecmp.py -v
 # → BGP prefix-list(in/out/ge・le) / RIP・OSPF MD5認証 / ECMP
 #    11/11 成功
+```
+
+---
+
+## 🧪 Netmiko テスト（実機・EVE-NG環境対応）
+
+### 対応状況
+
+| 機種 | Netmiko対応 | 設定投入 | 状態確認 |
+|------|-----------|--------|--------|
+| **Catalyst (IOS-XE)** | ✅ `cisco_ios` | ✅ | ✅ |
+| **Cisco ISR (IOS)** | ✅ `cisco_ios` | ✅ | ✅ |
+| **Nexus (NX-OS)** | ✅ `cisco_nxos` | ✅ | ✅ |
+| **ASA** | ✅ `cisco_asa` | ✅ | ✅ |
+| **Si-R (富士通)** | ❌ 標準未対応 | ⚠️ `generic_termserver` | ⚠️ |
+| **SR-S (富士通)** | ❌ 標準未対応 | ⚠️ `generic_termserver` | ⚠️ |
+
+### テストツール
+
+#### 1. **エミュレーター HTTP API テスト**（実機不要）
+
+エミュレーター内のCatalystに対して、HTTP APIを経由してCLIコマンドを送信し、設定変更と状態確認を行います。
+
+```bash
+# ターミナル1: エミュレーターサーバー起動
+python app.py
+
+# ターミナル2: テスト実行
+python tools/test_emulator_api.py --host localhost --port 8000 --device catalyst
+
+# 期待される出力:
+# ✅ Test 1: インターフェース設定投入・確認
+# ✅ Test 2: OSPF設定投入・確認
+# ✅ Test 3: BGP設定投入・確認
+# ✅ Test 4: VLAN設定投入・確認
+# ✅ Test 5: ACL設定投入・確認
+# ✅ Test 6: デバイス状態確認
+# → 6/6 成功
+```
+
+#### 2. **実機・EVE-NG Netmiko テスト**（実機が必要）
+
+実際のCatalystやCisco ISRに対して、netmiko経由でSSH接続し、設定変更と状態確認を行います。
+
+```bash
+# Netmiko インストール
+pip install netmiko
+
+# Catalyst への接続テスト（直接指定）
+python tools/test_netmiko_integration.py \
+  --host 192.168.1.100 \
+  --username admin \
+  --password admin \
+  --device-type cisco_ios
+
+# 環境変数での設定（推奨）
+export CATALYST_HOST=192.168.1.100
+export CATALYST_USER=admin
+export CATALYST_PASS=admin
+python tools/test_netmiko_integration.py --auto-env
+
+# 期待される出力:
+# ✅ Test 1: インターフェース設定投入・確認
+# ✅ Test 2: OSPF設定投入・確認
+# ✅ Test 3: BGP設定投入・確認
+# ✅ Test 4: VLAN設定投入・確認
+# ✅ Test 5: ACL設定投入・確認
+# ✅ Test 6: デバイス状態取得
+# → 6/6 成功
+```
+
+#### 3. **Pytest Netmiko 統合テスト**
+
+```bash
+# Netmiko が環境変数で設定されている場合、実機テストも実行
+NETMIKO_CATALYST_HOST=192.168.1.100 \
+NETMIKO_USERNAME=admin \
+NETMIKO_PASSWORD=admin \
+pytest tests/test_netmiko_catalyst.py -v
+
+# HTTP API版テスト（エミュレーター使用）
+pytest tests/test_netmiko_catalyst.py::TestCatalystNetmikoStyle -v
+```
+
+### テスト内容（各ツール共通）
+
+1. **インターフェース設定** — IP address投入・確認
+2. **OSPF設定** — プロセス設定・隣接確認
+3. **BGP設定** — AS・neighbor設定・セッション確認
+4. **VLAN設定** — VLAN作成・確認
+5. **ACL設定** — Access-list投入・確認
+6. **デバイス状態確認** — ホスト名・インターフェース・ルート確認
+
+### 実装の詳細
+
+**設定変更** — IOS-XE 標準コマンド投入
+```python
+# Netmiko を使用した設定投入例
+commands = [
+    'interface GigabitEthernet1/0/1',
+    'ip address 10.100.1.1 255.255.255.0',
+    'no shutdown'
+]
+net_connect.send_config_set(commands)
+```
+
+**状態確認** — Show コマンドで検証
+```python
+# 設定確認
+output = net_connect.send_command('show running-config interface Gi1/0/1')
+assert '10.100.1.1' in output  # 投入した設定が存在するか確認
+```
+
+---
 
 # マルチベンダー・複数ネイバー統合（pytest）
 pytest tests/test_multivendor_multi_neighbor.py -v
