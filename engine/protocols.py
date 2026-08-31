@@ -4888,10 +4888,28 @@ class SnmpAgent:
         'pc':       '1.3.6.1.4.1.8072.3.2.10',
     }
 
+    # CISCO-PROCESS-MIB (cpmCPUTotalTable) 対応機種のみCPU値を持つ
+    _CISCO_MIB_TYPES = frozenset({'cisco', 'catalyst', 'nexus', 'asa'})
+
     def __init__(self):
         self._start = time.time()
         # device_id -> hostname/type/contact/location/community を保持
         self.devices: Dict[str, dict] = {}
+        # device_id -> 直近のCPU使用率（緩やかなランダムウォークで遷移させる）
+        self._cpu_state: Dict[str, float] = {}
+
+    def _cpu_percent(self, device_id: str, dtype: str) -> Optional[float]:
+        """CISCO-PROCESS-MIB相当のCPU使用率を、緩やかな乱歩で遷移させながら返す。
+        Cisco系（cisco/catalyst/nexus/asa）以外はNone（当該MIB非対応）。"""
+        if dtype not in self._CISCO_MIB_TYPES:
+            return None
+        cur = self._cpu_state.get(device_id)
+        if cur is None:
+            cur = random.uniform(8, 25)
+        else:
+            cur = max(2.0, min(95.0, cur + random.uniform(-4, 4)))
+        self._cpu_state[device_id] = cur
+        return round(cur, 1)
 
     def register(self, device_id: str, device_type: str, hostname: str,
                  contact: str = '', location: str = '',
@@ -4954,6 +4972,13 @@ class SnmpAgent:
         mib.append(('1.3.6.1.2.1.1.5.0', 'STRING', host))
         mib.append(('1.3.6.1.2.1.1.6.0', 'STRING', d.get('location', '') or 'Lab'))
         mib.append(('1.3.6.1.2.1.1.7.0', 'INTEGER', '78'))  # sysServices
+        # ── CISCO-PROCESS-MIB: cpmCPUTotalTable（CPU使用率、Cisco系のみ）──
+        cpu = self._cpu_percent(device_id, dtype)
+        if cpu is not None:
+            cpu_int = str(int(cpu))
+            mib.append(('1.3.6.1.4.1.9.9.109.1.1.1.1.3.1', 'Gauge32', cpu_int))  # cpmCPUTotal5sec
+            mib.append(('1.3.6.1.4.1.9.9.109.1.1.1.1.4.1', 'Gauge32', cpu_int))  # cpmCPUTotal1min
+            mib.append(('1.3.6.1.4.1.9.9.109.1.1.1.1.7.1', 'Gauge32', cpu_int))  # cpmCPUTotal5minRev
         # ── interfaces group (1.3.6.1.2.1.2) ──
         info = icmp_engine.device_ips.get(device_id, {})
         ifaces = list(info.get('interfaces', {}).items())
@@ -5044,6 +5069,10 @@ class SnmpAgent:
         'ifoperstatus': '1.3.6.1.2.1.2.2.1.8', 'ifnumber': '1.3.6.1.2.1.2.1',
         'ip': '1.3.6.1.2.1.4', 'ipaddrtable': '1.3.6.1.2.1.4.20',
         'mib-2': '1.3.6.1.2.1', 'mib2': '1.3.6.1.2.1',
+        # CISCO-PROCESS-MIB（CPU使用率、Cisco系のみ）
+        'cpmcputotal5sec': '1.3.6.1.4.1.9.9.109.1.1.1.1.3',
+        'cpmcputotal1min': '1.3.6.1.4.1.9.9.109.1.1.1.1.4',
+        'cpmcputotal5min': '1.3.6.1.4.1.9.9.109.1.1.1.1.7',
     }
 
     def resolve_oid(self, name: str) -> str:

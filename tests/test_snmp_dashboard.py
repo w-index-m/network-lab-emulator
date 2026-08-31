@@ -68,6 +68,51 @@ def test_no_shutdown_restores_up():
         vnet.down_interfaces.pop(device_id, None)
 
 
+def test_cpu_percent_present_for_cisco_family():
+    """cisco/catalyst/nexus/asa はCISCO-PROCESS-MIB相当のCPU値を持つ"""
+    for dtype in ('cisco', 'catalyst', 'nexus', 'asa'):
+        device_id = f'snmp-cpu-{dtype}'
+        snmp_agent.register(device_id, dtype, 'TestDevice')
+        try:
+            mib = snmp_agent._build_mib(device_id)
+            by_oid = {oid: v for oid, t, v in mib}
+            assert '1.3.6.1.4.1.9.9.109.1.1.1.1.7.1' in by_oid
+            cpu = int(by_oid['1.3.6.1.4.1.9.9.109.1.1.1.1.7.1'])
+            assert 0 <= cpu <= 100
+        finally:
+            snmp_agent.devices.pop(device_id, None)
+            snmp_agent._cpu_state.pop(device_id, None)
+
+
+def test_cpu_percent_absent_for_non_cisco_family():
+    """Si-R/SR-S/APRESIAはCISCO-PROCESS-MIB非対応（OIDが出ない）"""
+    for dtype in ('sir', 'srs', 'apresia'):
+        device_id = f'snmp-cpu-{dtype}'
+        snmp_agent.register(device_id, dtype, 'TestDevice')
+        try:
+            mib = snmp_agent._build_mib(device_id)
+            by_oid = {oid: v for oid, t, v in mib}
+            assert '1.3.6.1.4.1.9.9.109.1.1.1.1.7.1' not in by_oid
+        finally:
+            snmp_agent.devices.pop(device_id, None)
+
+
+def test_cpu_percent_walks_smoothly_not_jumping_randomly():
+    """CPU値は毎回全くの乱数ではなく、緩やかな遷移（乱歩）であることを確認"""
+    device_id = 'snmp-cpu-walk'
+    snmp_agent.register(device_id, 'cisco', 'TestDevice')
+    try:
+        values = []
+        for _ in range(20):
+            v = snmp_agent._cpu_percent(device_id, 'cisco')
+            values.append(v)
+        diffs = [abs(values[i] - values[i - 1]) for i in range(1, len(values))]
+        assert all(d <= 4.01 for d in diffs)
+    finally:
+        snmp_agent.devices.pop(device_id, None)
+        snmp_agent._cpu_state.pop(device_id, None)
+
+
 def test_snmpset_if_admin_override_still_respected():
     """snmpsetによるifAdminStatus上書きは、shutdown状態より優先される"""
     device_id = 'snmp-test-4'

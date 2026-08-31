@@ -101,6 +101,20 @@
   .iface-traffic { color: var(--text-dim); font-family: 'Consolas', monospace; font-size: 11px; text-align: right; }
   .iface-speed { color: var(--text-dim); font-size: 10px; text-align: right; }
 
+  .metric-block { margin-bottom: 12px; }
+  .metric-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 11px; margin-bottom: 4px; }
+  .metric-head .metric-label { color: var(--text-dim); text-transform: uppercase; letter-spacing: .5px; font-size: 10px; }
+  .metric-head .metric-val { font-family: 'Consolas', monospace; font-weight: 700; font-size: 13px; }
+  .metric-val.green { color: var(--green); }
+  .metric-val.amber { color: var(--amber); }
+  .metric-val.red { color: var(--red); }
+  .sparkline { width: 100%; height: 32px; display: block; }
+  .sparkline .fill { fill: rgba(88,166,255,.12); stroke: none; }
+  .sparkline .line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+  .sparkline .line.cpu-green { stroke: var(--green); }
+  .sparkline .line.cpu-amber { stroke: var(--amber); }
+  .sparkline .line.cpu-red { stroke: var(--red); }
+
   .empty { text-align: center; padding: 60px 20px; color: var(--text-dim); }
   footer { margin-top: 24px; text-align: center; font-size: 11px; color: var(--text-dim); }
 </style>
@@ -159,6 +173,29 @@ function fmtBytes(n) {
 
 let lastCounters = {};   // device_id/if_index -> {in,out,ts} for rate calc
 
+function sparkline(values, min, max, lineClass) {
+  if (!values || values.length < 2) {
+    return `<svg class="sparkline"><line x1="0" y1="16" x2="100%" y2="16" stroke="var(--border)" stroke-width="1"/></svg>`;
+  }
+  const w = 300, h = 32, pad = 2;
+  const lo = min !== null ? min : Math.min(...values);
+  const hi = max !== null ? max : Math.max(...values);
+  const span = (hi - lo) || 1;
+  const step = (w - pad * 2) / (values.length - 1);
+  const pts = values.map((v, i) => {
+    const x = pad + i * step;
+    const y = h - pad - ((v - lo) / span) * (h - pad * 2);
+    return [x, y];
+  });
+  const line = pts.map(p => p.join(',')).join(' ');
+  const fill = `${pad},${h - pad} ` + line + ` ${w - pad},${h - pad}`;
+  return `
+    <svg class="sparkline" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <polygon class="fill" points="${fill}"></polygon>
+      <polyline class="line ${lineClass}" points="${line}"></polyline>
+    </svg>`;
+}
+
 function render(data) {
   const filter = document.getElementById('filter-input').value.trim().toLowerCase();
   const devices = data.devices.filter(d =>
@@ -189,6 +226,33 @@ function render(data) {
 
   grid.innerHTML = devices.map(d => {
     const anyDown = d.interfaces.some(i => i.oper_status !== 1);
+
+    // CPU使用率の遷移（CISCO-PROCESS-MIB対応機種のみ）
+    let cpuBlock = '';
+    if (d.cpu_percent !== null && d.cpu_percent !== undefined) {
+      const cpuHist = (d.history || []).map(h => h.cpu).filter(v => v !== null && v !== undefined);
+      const cls = d.cpu_percent >= 80 ? 'cpu-red' : (d.cpu_percent >= 60 ? 'cpu-amber' : 'cpu-green');
+      const valCls = d.cpu_percent >= 80 ? 'red' : (d.cpu_percent >= 60 ? 'amber' : 'green');
+      cpuBlock = `
+        <div class="metric-block">
+          <div class="metric-head">
+            <span class="metric-label">CPU</span>
+            <span class="metric-val ${valCls}">${d.cpu_percent}%</span>
+          </div>
+          ${sparkline(cpuHist, 0, 100, cls)}
+        </div>`;
+    }
+
+    // インターフェース総トラフィックの遷移
+    const trafficHist = (d.history || []).map(h => h.bytes);
+    const trafficBlock = trafficHist.length >= 2 ? `
+        <div class="metric-block">
+          <div class="metric-head">
+            <span class="metric-label">Traffic (累計bytes)</span>
+          </div>
+          ${sparkline(trafficHist, null, null, '')}
+        </div>` : '';
+
     const ifaceRows = d.interfaces.map(i => {
       const key = `${d.device_id}/${i.index}`;
       const prev = lastCounters[key];
@@ -224,6 +288,8 @@ function render(data) {
           <div class="meta-row"><span>Uptime</span><span>${fmtUptime(d.sys_uptime_ticks)}</span></div>
           <div class="meta-row"><span>Location</span><span>${d.sys_location || '-'}</span></div>
           <div class="sys-descr">${d.sys_descr}</div>
+          ${cpuBlock}
+          ${trafficBlock}
           ${ifaceRows}
         </div>
       </div>`;

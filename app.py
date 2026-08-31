@@ -8,6 +8,7 @@ import os, asyncio, json, re, httpx, time, random
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -487,6 +488,11 @@ async def get_status():
         "devices": list(device_sessions.keys()),
     }
 
+# device_id -> 直近60件の {t, cpu, total_bytes} サンプル（CPU/トラフィック遷移表示用）。
+# /api/snmp/dashboard がポーリングされるたびに1件追記する（別スレッドでのサンプリングはしない）。
+_metrics_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=60))
+
+
 @app.get("/api/snmp/dashboard")
 async def snmp_dashboard():
     """
@@ -494,7 +500,9 @@ async def snmp_dashboard():
     ダッシュボード表示用のJSONにまとめる。
     実UDP SNMPパケットではなく、engine.protocols.SnmpAgent が持つ
     MIB-II相当のデータ（sysDescr/sysUptime/ifTable等）を内部的に読む。
+    CISCO-PROCESS-MIB相当のCPU使用率（Cisco系機種のみ）も含む。
     """
+    now = time.time()
     devices = []
     for device_id, d in snmp_agent.devices.items():
         mib = snmp_agent._build_mib(device_id)
@@ -521,6 +529,13 @@ async def snmp_dashboard():
                 'out_octets': int(_val(f'1.3.6.1.2.1.2.2.1.16.{i}', '0') or 0),
             })
 
+        cpu_raw = by_oid.get('1.3.6.1.4.1.9.9.109.1.1.1.1.7.1')
+        cpu_percent = int(cpu_raw[1]) if cpu_raw else None
+        total_bytes = sum(i['in_octets'] + i['out_octets'] for i in interfaces)
+
+        history = _metrics_history[device_id]
+        history.append({'t': now, 'cpu': cpu_percent, 'bytes': total_bytes})
+
         devices.append({
             'device_id': device_id,
             'type': d.get('type'),
@@ -529,10 +544,12 @@ async def snmp_dashboard():
             'sys_uptime_ticks': int(_val('1.3.6.1.2.1.1.3.0', '0') or 0),
             'sys_contact': _val('1.3.6.1.2.1.1.4.0'),
             'sys_location': _val('1.3.6.1.2.1.1.6.0'),
+            'cpu_percent': cpu_percent,
             'interfaces': interfaces,
+            'history': list(history),
         })
     devices.sort(key=lambda x: x['device_id'])
-    return {'polled_at': time.time(), 'devices': devices}
+    return {'polled_at': now, 'devices': devices}
 
 
 @app.post("/api/cli")
