@@ -4961,13 +4961,19 @@ class SnmpAgent:
             # device_ips未登録ならインターフェース無し（最低1つlo相当）
             ifaces = [('lo0', {'ip': '127.0.0.1', 'prefix': 8})]
         mib.append(('1.3.6.1.2.1.2.1.0', 'INTEGER', str(len(ifaces))))  # ifNumber
+        down_ifaces = {vnet._norm_iface(x) for x in vnet.down_interfaces.get(device_id, set())}
         for i, (ifn, ii) in enumerate(ifaces, 1):
             mib.append((f'1.3.6.1.2.1.2.2.1.1.{i}', 'INTEGER', str(i)))            # ifIndex
             mib.append((f'1.3.6.1.2.1.2.2.1.2.{i}', 'STRING', ifn))                # ifDescr
             mib.append((f'1.3.6.1.2.1.2.2.1.3.{i}', 'INTEGER', '6'))               # ifType ethernetCsmacd
             mib.append((f'1.3.6.1.2.1.2.2.1.5.{i}', 'Gauge32', '1000000000'))      # ifSpeed 1G
-            status = '1' if ii.get('ip') else '2'                                  # up/down
-            admin = d.get('if_admin', {}).get(i, '1')                              # snmpset上書き反映
+            # shutdown（vnet.down_interfaces）を反映。CLIでshutdownされていれば
+            # admin/operとも down、それ以外はIPの有無で判定（従来動作を維持）
+            is_shutdown = vnet._norm_iface(ifn) in down_ifaces
+            admin = d.get('if_admin', {}).get(i)
+            if admin is None:
+                admin = '2' if is_shutdown else '1'
+            status = '2' if (is_shutdown or not ii.get('ip')) else '1'             # up/down
             mib.append((f'1.3.6.1.2.1.2.2.1.7.{i}', 'INTEGER', str(admin)))        # ifAdminStatus
             mib.append((f'1.3.6.1.2.1.2.2.1.8.{i}', 'INTEGER', status))            # ifOperStatus
             # ifInOctets / ifOutOctets（データプレーンカウンタ由来）

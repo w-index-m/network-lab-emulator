@@ -487,6 +487,54 @@ async def get_status():
         "devices": list(device_sessions.keys()),
     }
 
+@app.get("/api/snmp/dashboard")
+async def snmp_dashboard():
+    """
+    仮想空間内の全装置をSNMPエージェント(snmp_agent)経由でポーリングし、
+    ダッシュボード表示用のJSONにまとめる。
+    実UDP SNMPパケットではなく、engine.protocols.SnmpAgent が持つ
+    MIB-II相当のデータ（sysDescr/sysUptime/ifTable等）を内部的に読む。
+    """
+    devices = []
+    for device_id, d in snmp_agent.devices.items():
+        mib = snmp_agent._build_mib(device_id)
+        by_oid = {oid: (t, v) for oid, t, v in mib}
+
+        def _val(oid, default=''):
+            return by_oid.get(oid, (None, default))[1]
+
+        # ifTable行をインターフェース単位にまとめ直す
+        if_indexes = sorted({
+            int(oid.rsplit('.', 1)[1])
+            for oid in by_oid
+            if oid.startswith('1.3.6.1.2.1.2.2.1.') and oid.rsplit('.', 1)[1].isdigit()
+        })
+        interfaces = []
+        for i in if_indexes:
+            interfaces.append({
+                'index': i,
+                'descr': _val(f'1.3.6.1.2.1.2.2.1.2.{i}', f'if{i}'),
+                'speed': int(_val(f'1.3.6.1.2.1.2.2.1.5.{i}', '0') or 0),
+                'admin_status': int(_val(f'1.3.6.1.2.1.2.2.1.7.{i}', '2') or 2),
+                'oper_status': int(_val(f'1.3.6.1.2.1.2.2.1.8.{i}', '2') or 2),
+                'in_octets': int(_val(f'1.3.6.1.2.1.2.2.1.10.{i}', '0') or 0),
+                'out_octets': int(_val(f'1.3.6.1.2.1.2.2.1.16.{i}', '0') or 0),
+            })
+
+        devices.append({
+            'device_id': device_id,
+            'type': d.get('type'),
+            'hostname': d.get('hostname', device_id),
+            'sys_descr': _val('1.3.6.1.2.1.1.1.0'),
+            'sys_uptime_ticks': int(_val('1.3.6.1.2.1.1.3.0', '0') or 0),
+            'sys_contact': _val('1.3.6.1.2.1.1.4.0'),
+            'sys_location': _val('1.3.6.1.2.1.1.6.0'),
+            'interfaces': interfaces,
+        })
+    devices.sort(key=lambda x: x['device_id'])
+    return {'polled_at': time.time(), 'devices': devices}
+
+
 @app.post("/api/cli")
 async def cli_command(body: dict):
     """

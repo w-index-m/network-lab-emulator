@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SNMP モニタリングダッシュボード</title>
+<style>
+  :root {
+    --bg: #0a0e14;
+    --panel: #12161f;
+    --panel-2: #171c27;
+    --border: #232936;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --amber: #d29922;
+    --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(circle at top, #131a26 0%, #0a0e14 60%);
+    color: var(--text);
+    font-family: 'Segoe UI', 'Hiragino Sans', 'メイリオ', sans-serif;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
+  }
+  header h1 {
+    font-size: 20px; font-weight: 600;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .pulse-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--green); box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .controls { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--text-dim); }
+  .controls select, .controls input[type=text] {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; font-size: 12px;
+  }
+  .stat-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px; margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .stat-card .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .5px; }
+  .stat-card .value { font-size: 26px; font-weight: 700; margin-top: 4px; }
+  .stat-card .value.green { color: var(--green); }
+  .stat-card .value.red { color: var(--red); }
+  .stat-card .value.amber { color: var(--amber); }
+
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+  }
+  .device-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    overflow: hidden; transition: border-color .2s;
+  }
+  .device-card:hover { border-color: var(--accent); }
+  .device-card .head {
+    padding: 14px 16px; display: flex; align-items: center; justify-content: space-between;
+    background: var(--panel-2); border-bottom: 1px solid var(--border);
+  }
+  .device-card .head .title { display: flex; align-items: center; gap: 8px; }
+  .device-card .hostname { font-weight: 600; font-size: 14px; }
+  .type-badge {
+    font-size: 10px; padding: 2px 8px; border-radius: 20px; text-transform: uppercase;
+    letter-spacing: .5px; border: 1px solid var(--border); color: var(--text-dim);
+  }
+  .status-badge { font-size: 11px; padding: 3px 9px; border-radius: 20px; font-weight: 600; }
+  .status-badge.up { background: #12301f; color: var(--green); border: 1px solid #1f5c34; }
+  .status-badge.down { background: #3a1414; color: var(--red); border: 1px solid #6b1f1f; }
+  .device-card .body { padding: 12px 16px; }
+  .meta-row { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-bottom: 8px; }
+  .sys-descr { font-size: 11px; color: var(--text-dim); margin-bottom: 10px; word-break: break-all; }
+
+  .iface-row {
+    display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px;
+    align-items: center; padding: 6px 0; border-top: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .iface-row:first-of-type { border-top: none; }
+  .iface-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .iface-dot.up { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .iface-dot.down { background: var(--red); }
+  .iface-name { color: var(--text); }
+  .iface-traffic { color: var(--text-dim); font-family: 'Consolas', monospace; font-size: 11px; text-align: right; }
+  .iface-speed { color: var(--text-dim); font-size: 10px; text-align: right; }
+
+  .empty { text-align: center; padding: 60px 20px; color: var(--text-dim); }
+  footer { margin-top: 24px; text-align: center; font-size: 11px; color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="pulse-dot"></span> SNMP モニタリングダッシュボード</h1>
+  <div class="controls">
+    <label>更新間隔:
+      <select id="interval-select">
+        <option value="2000">2秒</option>
+        <option value="5000" selected>5秒</option>
+        <option value="10000">10秒</option>
+        <option value="30000">30秒</option>
+      </select>
+    </label>
+    <input type="text" id="filter-input" placeholder="装置名でフィルタ...">
+    <span id="last-poll">--:--:--</span>
+  </div>
+</header>
+
+<div class="stat-row" id="stat-row"></div>
+<div class="grid" id="device-grid">
+  <div class="empty">ポーリング中...</div>
+</div>
+
+<footer>engine.protocols.SnmpAgent 経由の仮想SNMPポーリング（MIB-II: system / interfaces）</footer>
+
+<script>
+const SESSION_KEY = 'netlabToken_v1';
+
+function getToken() {
+  try {
+    return localStorage.getItem(SESSION_KEY) ||
+           new URLSearchParams(location.search).get('token') || '';
+  } catch (e) { return ''; }
+}
+
+function fmtUptime(ticks) {
+  const sec = Math.floor(ticks / 100);
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${sec % 60}s`;
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 ** 3) return (n / 1024 ** 2).toFixed(1) + ' MB';
+  return (n / 1024 ** 3).toFixed(1) + ' GB';
+}
+
+let lastCounters = {};   // device_id/if_index -> {in,out,ts} for rate calc
+
+function render(data) {
+  const filter = document.getElementById('filter-input').value.trim().toLowerCase();
+  const devices = data.devices.filter(d =>
+    !filter || d.hostname.toLowerCase().includes(filter) || d.device_id.toLowerCase().includes(filter)
+  );
+
+  // stats
+  const totalIfaces = devices.reduce((s, d) => s + d.interfaces.length, 0);
+  const upIfaces = devices.reduce((s, d) => s + d.interfaces.filter(i => i.oper_status === 1).length, 0);
+  const downIfaces = totalIfaces - upIfaces;
+  const totalTraffic = devices.reduce((s, d) =>
+    s + d.interfaces.reduce((a, i) => a + i.in_octets + i.out_octets, 0), 0);
+
+  document.getElementById('stat-row').innerHTML = `
+    <div class="stat-card"><div class="label">装置数</div><div class="value">${devices.length}</div></div>
+    <div class="stat-card"><div class="label">インターフェース</div><div class="value">${totalIfaces}</div></div>
+    <div class="stat-card"><div class="label">Up</div><div class="value green">${upIfaces}</div></div>
+    <div class="stat-card"><div class="label">Down</div><div class="value ${downIfaces > 0 ? 'red' : ''}">${downIfaces}</div></div>
+    <div class="stat-card"><div class="label">累計トラフィック</div><div class="value amber" style="font-size:20px">${fmtBytes(totalTraffic)}</div></div>
+  `;
+
+  const now = Date.now();
+  const grid = document.getElementById('device-grid');
+  if (devices.length === 0) {
+    grid.innerHTML = '<div class="empty">該当する装置がありません</div>';
+    return;
+  }
+
+  grid.innerHTML = devices.map(d => {
+    const anyDown = d.interfaces.some(i => i.oper_status !== 1);
+    const ifaceRows = d.interfaces.map(i => {
+      const key = `${d.device_id}/${i.index}`;
+      const prev = lastCounters[key];
+      let rateStr = '';
+      if (prev) {
+        const dt = (now - prev.ts) / 1000;
+        if (dt > 0) {
+          const rate = Math.max(0, (i.in_octets + i.out_octets - prev.total)) / dt;
+          rateStr = fmtBytes(rate) + '/s';
+        }
+      }
+      lastCounters[key] = { total: i.in_octets + i.out_octets, ts: now };
+      const up = i.oper_status === 1;
+      return `
+        <div class="iface-row">
+          <span class="iface-dot ${up ? 'up' : 'down'}"></span>
+          <span class="iface-name">${i.descr}</span>
+          <span class="iface-traffic">${rateStr || fmtBytes(i.in_octets + i.out_octets)}</span>
+          <span class="iface-speed">${i.speed ? (i.speed / 1e6).toFixed(0) + 'M' : ''}</span>
+        </div>`;
+    }).join('') || '<div class="iface-row" style="color:var(--text-dim)">インターフェース情報なし</div>';
+
+    return `
+      <div class="device-card">
+        <div class="head">
+          <div class="title">
+            <span class="hostname">${d.hostname}</span>
+            <span class="type-badge">${d.type}</span>
+          </div>
+          <span class="status-badge ${anyDown ? 'down' : 'up'}">${anyDown ? 'ATTENTION' : 'HEALTHY'}</span>
+        </div>
+        <div class="body">
+          <div class="meta-row"><span>Uptime</span><span>${fmtUptime(d.sys_uptime_ticks)}</span></div>
+          <div class="meta-row"><span>Location</span><span>${d.sys_location || '-'}</span></div>
+          <div class="sys-descr">${d.sys_descr}</div>
+          ${ifaceRows}
+        </div>
+      </div>`;
+  }).join('');
+}
+
+async function poll() {
+  try {
+    const token = getToken();
+    const res = await fetch('/api/snmp/dashboard', {
+      headers: token ? { 'X-Session-Token': token } : {}
+    });
+    if (!res.ok) {
+      document.getElementById('device-grid').innerHTML =
+        `<div class="empty">取得失敗 (HTTP ${res.status})${res.status === 401 ? ' — ログインが必要です' : ''}</div>`;
+      return;
+    }
+    const data = await res.json();
+    render(data);
+    document.getElementById('last-poll').textContent = new Date().toLocaleTimeString('ja-JP');
+  } catch (e) {
+    document.getElementById('device-grid').innerHTML = `<div class="empty">接続エラー: ${e}</div>`;
+  }
+}
+
+let timer = null;
+function restartTimer() {
+  if (timer) clearInterval(timer);
+  const ms = parseInt(document.getElementById('interval-select').value, 10);
+  timer = setInterval(poll, ms);
+}
+
+document.getElementById('interval-select').addEventListener('change', restartTimer);
+document.getElementById('filter-input').addEventListener('input', poll);
+
+poll();
+restartTimer();
+</script>
+</body>
+</html>
