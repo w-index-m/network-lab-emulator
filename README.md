@@ -12,6 +12,25 @@
 
 ---
 
+## コンセプト: Network Infrastructure Digital Twin + AI Observability
+
+このプロジェクトは、一般的な「Digital Twin」（物理設備をセンサーデータで
+仮想空間に再現する）のネットワーク版と捉えられます。
+
+| Digital Twinの要素 | このリポジトリでの実装 |
+|---|---|
+| 物理資産を仮想空間に再現 | Catalyst / Cisco / Si-R / SR-S / ASA / Nexus / BigIP / APRESIA を**コア製品**としてプロトコルエンジンでエミュレート |
+| 仮想モデルからリアルなテレメトリを出力 | 仮想SNMPエージェント（MIB-II）、実UDPでのsyslog / SNMP trap送信（`engine/syslog_sender.py`） |
+| 監視・観測レイヤー | [SNMPモニタリングダッシュボード](./docs/snmp-dashboard.md)、[Syslog AIモニター](./docs/syslog-ai-monitor.md)（Ollamaによる要約 + ルールベース異常検知） |
+| 実世界との橋渡し（**ツール群**） | netmiko/paramikoによる実機連携、`route_injector`（経路負荷試験）、`bigip_qkview_collector`（実機ログ採取）等 |
+
+「AIがインフラを仮想化している」のではなく、**仮想化されたネットワークインフラを
+AIが観測・要約している**、という構図（Network Infrastructure Digital Twin +
+AI Observability）。コア製品とツールの区分は
+[`docs/feature-inventory.md`](./docs/feature-inventory.md) を参照。
+
+---
+
 ## 対応機種
 
 | 機種 | コマンド体系 | 主な実装機能 |
