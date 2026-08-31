@@ -2,8 +2,17 @@
 
 > GitHub で進捗が一目瞭然！ チームで「こんなにやったのか」と共有できるドキュメント
 
-**最終更新**: 2026-08-30  
+**最終更新**: 2026-08-31  
 **進捗**: **Priority 1** の 3/4 完了 (75%) ✅
+
+---
+
+## 🧭 コア製品 / ツールの区分（合意済み）
+
+- **コア製品**（プロトコルエンジンとしてエミュレート）: **Catalyst、Cisco、Si-R、SR-S、ASA、Nexus、BigIP、APRESIA**
+- **ツール群**（コア製品を実機・実プロトコル・実ログと繋げる周辺装備）: route_injector（経路負荷かけ試験）、netmiko/paramiko連携スクリプト、`syslog_ai_monitor.py`（監視+AI要約）等
+
+詳細は [`docs/feature-inventory.md`](./docs/feature-inventory.md) の「コア製品 / ツールの区分」参照。
 
 ---
 

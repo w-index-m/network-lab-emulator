@@ -27,6 +27,33 @@
 
 ---
 
+## 🧭 コア製品 / ツールの区分
+
+このリポジトリでの位置づけを明確にしておく（合意済み・変更禁止の分類）。
+
+### コア製品（プロトコルエンジンとしてエミュレート）
+
+**Catalyst、Cisco、Si-R、SR-S、ASA、Nexus、BigIP、APRESIA**
+
+上記8機種は `engine/protocols.py` / `engine/rules.py` 内でCLI・プロトコル動作を
+直接エミュレートしている中核デバイス。
+
+### ツール群（コア製品を外部から検証・負荷試験・監視・収集する周辺装備）
+
+| ツール | 技術 | 役割 |
+|-------|------|------|
+| `tools/route_injector/network_route_injector.py` | 生ソケット（RIP/OSPF/BGP パケット自作） | 実機への経路負荷かけ試験（大量経路注入でスケール検証） |
+| `tests/test_netmiko_catalyst.py`, `tools/test_netmiko_integration.py` | netmiko | 実機/EVE-NG機器へSSHでCLI投入・検証の自動化 |
+| `tools/eveng_deploy.py` | netmiko | EVE-NGトポロジへの設定自動投入 |
+| `tools/bigip_qkview_collector.py` | paramiko（+ F5OS REST API） | BigIP実機からqkview/UCS/configをSSH・SCPで採取 |
+| `tools/test_bigip_ltm.py` | HTTP（このエミュレーター向け） | Pool/VIP/Member管理の自動テスト |
+| `tools/syslog_ai_monitor.py` | UDP受信 + Ollama | ログ監視 + AI要約（フラップ検知等） |
+
+「ツール = コア製品と実機・実プロトコル・実ログで繋がるための橋渡し層」という位置づけ。
+新しい周辺スクリプトを追加する際もこの2分類（コア製品／ツール）で整理する。
+
+---
+
 ## 🌐 ルーティングプロトコル
 
 ### RIP v2
