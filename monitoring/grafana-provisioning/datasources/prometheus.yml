@@ -1,0 +1,10 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # Docker Compose内のサービス名で解決される（コンテナ間通信）
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

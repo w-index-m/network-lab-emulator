@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'netlab-emulator'
+    static_configs:
+      # Docker Desktop (Windows/Mac) はコンテナ内から
+      # host.docker.internal でホストOS上のプロセスに到達できる。
+      # Exporter (tools/prometheus_exporter.py) はホストOS側(Windows)で
+      # 直接 `python` 実行する想定のため、コンテナ内ではなくホストを指す。
+      - targets: ['host.docker.internal:9877']
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

@@ -42,29 +42,47 @@ python tools\prometheus_exporter.py --emulator-url http://localhost:8000 --port 
 ログイン認証が有効な構成（`NETLAB_AUTH_DISABLE`未設定）の場合は
 `--token <セッショントークン>` を付与する。
 
-### 2. Prometheus（Windows版）をセットアップ
+### 2. Prometheus + Grafana をセットアップ
 
-[prometheus.io/download](https://prometheus.io/download/) から
-Windows用バイナリ（`prometheus-x.x.x.windows-amd64.zip`）を取得し、
-`prometheus.yml` に以下を追加:
+**方法A: Docker Desktop（推奨・一番手軽）**
 
-```yaml
-scrape_configs:
-  - job_name: 'netlab-emulator'
-    static_configs:
-      - targets: ['localhost:9877']
-    scrape_interval: 15s
+`monitoring/docker-compose.yml` を同梱済み。Docker Desktop for Windows が
+入っていれば、インストール作業なしでそのまま:
+
+```
+cd monitoring
+docker compose up -d
 ```
 
-`prometheus.exe --config.file=prometheus.yml` で起動。
+- Grafana: http://localhost:3000 （`admin` / `admin`、初回にパスワード変更を求められる）
+- Prometheus UI: http://localhost:9090
+- Grafanaのデータソース（Prometheus）は `grafana-provisioning/` により
+  **自動設定済み**。手動でのデータソース追加は不要
 
-### 3. Grafana（Windows版）をセットアップ
+Exporter（`tools/prometheus_exporter.py`）はコンテナ化しておらず、
+Windowsホスト側で直接 `python` 実行する想定。`monitoring/prometheus.yml`
+は `host.docker.internal:9877` を見に行く設定にしてあるので、Docker Desktop
+（Windows/Mac）ならそのまま届く。
 
-[grafana.com/grafana/download](https://grafana.com/grafana/download?platform=windows)
-からWindows installerを取得してインストール・起動（既定 `http://localhost:3000`）。
+停止は `docker compose down`。
 
-- Data sources → Add data source → Prometheus → URL `http://localhost:9090`
-- Explore または新規ダッシュボードで `netlab_*` メトリックをクエリ
+**方法B: ネイティブインストール**
+
+- Prometheus: [prometheus.io/download](https://prometheus.io/download/) から
+  Windows用バイナリ（`prometheus-x.x.x.windows-amd64.zip`）を取得し、
+  `prometheus.yml` に以下を追加して `prometheus.exe --config.file=prometheus.yml` で起動:
+  ```yaml
+  scrape_configs:
+    - job_name: 'netlab-emulator'
+      static_configs:
+        - targets: ['localhost:9877']
+      scrape_interval: 15s
+  ```
+- Grafana: [grafana.com/grafana/download](https://grafana.com/grafana/download?platform=windows)
+  からWindows installerを取得してインストール・起動（既定 `http://localhost:3000`）。
+  Data sources → Add data source → Prometheus → URL `http://localhost:9090` を手動設定。
+
+いずれの方法でも、Explore または新規ダッシュボードで `netlab_*` メトリックをクエリできる。
 
 ## 公開しているメトリック
 
@@ -113,5 +131,8 @@ pytest tests/test_prometheus_exporter.py -v
 
 ## 制約
 
-- Prometheus/Grafana本体はこのリポジトリでは提供しない（公式バイナリを別途導入）
+- Prometheus/Grafana本体（コンテナイメージ）はこのリポジトリでは提供しない（Docker Hub上の公式イメージを`docker-compose.yml`が参照）
 - 認証・TLSはExporter側では未実装（社内ラボ用途を想定したシンプル構成）
+- **`monitoring/docker-compose.yml` / `prometheus.yml` / Grafanaデータソース定義はYAML構文のみ検証済み。
+  Docker daemonが使える環境がなく、実際にコンテナを起動しての動作確認（Grafana起動〜Prometheus疎通〜クエリ実行）
+  はできていない。** Docker Desktop環境で試した際に問題があれば教えてほしい。
