@@ -139,27 +139,64 @@ function fmtBytes(n) {
   return (n / 1024 ** 2).toFixed(1) + ' MB';
 }
 
-function sparkSvg(values, color, min, max) {
+function fmtTime(epochSec) {
+  const d = new Date(epochSec * 1000);
+  return d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function fmtAxisVal(v, unit) {
+  if (unit === 'B') return fmtBytes(v);
+  return Math.round(v * 10) / 10 + (unit || '');
+}
+
+// 横軸=時刻(times)、縦軸=値(unit付き)のラベルを持つチャートを描画する。
+// times が無い場合はインデックスをそのまま等間隔の時刻として扱う。
+function sparkSvg(values, color, min, max, times, unit) {
+  const w = 340, h = 170;
+  const leftPad = 46, rightPad = 10, topPad = 10, bottomPad = 24;
+  const plotW = w - leftPad - rightPad, plotH = h - topPad - bottomPad;
+
   if (!values || values.length < 2) {
-    return `<svg class="chart-svg" viewBox="0 0 300 140"><line x1="0" y1="70" x2="300" y2="70" stroke="#2c3235"/></svg>`;
+    return `<svg class="chart-svg" viewBox="0 0 ${w} ${h}">
+      <line x1="${leftPad}" y1="${topPad + plotH / 2}" x2="${w - rightPad}" y2="${topPad + plotH / 2}" stroke="#2c3235"/>
+      <text x="${leftPad}" y="${topPad + plotH / 2 - 6}" fill="#8e9297" font-size="11">データ収集中...</text>
+    </svg>`;
   }
-  const w = 300, h = 140, pad = 6;
+
   const lo = min !== undefined ? min : Math.min(...values);
   const hi = max !== undefined ? max : Math.max(...values);
   const span = (hi - lo) || 1;
-  const step = (w - pad * 2) / (values.length - 1);
-  const pts = values.map((v, i) => [pad + i * step, h - pad - ((v - lo) / span) * (h - pad * 2)]);
+  const step = plotW / (values.length - 1);
+  const pts = values.map((v, i) => [leftPad + i * step, topPad + plotH - ((v - lo) / span) * plotH]);
   const line = pts.map(p => p.join(',')).join(' ');
-  const area = `${pad},${h - pad} ` + line + ` ${w - pad},${h - pad}`;
+  const area = `${leftPad},${topPad + plotH} ` + line + ` ${leftPad + plotW},${topPad + plotH}`;
   const gradId = 'g' + Math.random().toString(36).slice(2, 8);
+
+  // Y軸: 上端(max)/中央/下端(min) の3段階でラベル表示
+  const yLabels = [hi, (hi + lo) / 2, lo].map((v, i) => {
+    const y = topPad + (plotH / 2) * i;
+    return `<text x="${leftPad - 6}" y="${y + 3}" fill="#8e9297" font-size="10" text-anchor="end">${fmtAxisVal(v, unit)}</text>
+            <line x1="${leftPad}" y1="${y}" x2="${w - rightPad}" y2="${y}" stroke="#22252b" stroke-width="1"/>`;
+  }).join('');
+
+  // X軸: 開始時刻(左)〜現在時刻(右)
+  const tStart = times && times.length ? times[0] : null;
+  const tEnd = times && times.length ? times[times.length - 1] : null;
+  const xLabels = tStart !== null ? `
+    <text x="${leftPad}" y="${h - 6}" fill="#8e9297" font-size="10" text-anchor="start">${fmtTime(tStart)}</text>
+    <text x="${w - rightPad}" y="${h - 6}" fill="#8e9297" font-size="10" text-anchor="end">${fmtTime(tEnd)}</text>
+  ` : '';
+
   return `
-    <svg class="chart-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <svg class="chart-svg" viewBox="0 0 ${w} ${h}">
       <defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="${color}" stop-opacity="0.35"/>
         <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
       </linearGradient></defs>
+      ${yLabels}
       <polygon points="${area}" fill="url(#${gradId})"/>
       <polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.5"/>
+      ${xLabels}
     </svg>`;
 }
 
@@ -197,10 +234,12 @@ function render(data) {
   // CPU panels for cisco-family devices (top 4 by cpu)
   const cpuColors = [ '#5794f2', '#73bf69', '#ff8833', '#b877d9', '#f2cc0c', '#f2495c' ];
   cpuDevices.slice(0, 6).forEach((d, i) => {
-    const hist = (d.history || []).map(h => h.cpu).filter(v => v !== null && v !== undefined);
+    const entries = (d.history || []).filter(h => h.cpu !== null && h.cpu !== undefined);
+    const hist = entries.map(h => h.cpu);
+    const times = entries.map(h => h.t);
     html += `<div class="panel span-4">
       <div class="panel-header"><span class="ptitle">📈 ${d.hostname} — CPU Utilization</span><span class="panel-icon">${d.type}</span></div>
-      <div class="panel-body">${sparkSvg(hist, cpuColors[i % cpuColors.length], 0, 100)}</div>
+      <div class="panel-body">${sparkSvg(hist, cpuColors[i % cpuColors.length], 0, 100, times, '%')}</div>
       <div class="legend"><span class="item"><span class="swatch" style="background:${cpuColors[i % cpuColors.length]}"></span>cpu_percent{device="${d.device_id}"} = ${d.cpu_percent}%</span></div>
     </div>`;
   });
@@ -208,18 +247,23 @@ function render(data) {
   // Traffic panel: 全装置のhistory(bytes)を時刻インデックスで合算した時系列
   const maxLen = Math.max(0, ...devices.map(d => (d.history || []).length));
   const trafficSeries = [];
+  const trafficTimes = [];
   for (let i = 0; i < maxLen; i++) {
-    let sum = 0;
+    let sum = 0, ts = null;
     for (const d of devices) {
       const h = d.history || [];
       const idx = h.length - maxLen + i;
-      if (idx >= 0 && h[idx]) sum += h[idx].bytes || 0;
+      if (idx >= 0 && h[idx]) {
+        sum += h[idx].bytes || 0;
+        ts = h[idx].t;
+      }
     }
     trafficSeries.push(sum);
+    trafficTimes.push(ts || (Date.now() / 1000));
   }
   html += `<div class="panel span-12">
     <div class="panel-header"><span class="ptitle">📊 Interface Traffic — All Devices (合算, 時系列)</span><span class="panel-icon">sum(netlab_interface_*_octets_total)</span></div>
-    <div class="panel-body" style="height:180px">${sparkSvg(trafficSeries, '#ff8833')}</div>
+    <div class="panel-body" style="flex:none;height:220px">${sparkSvg(trafficSeries, '#ff8833', undefined, undefined, trafficTimes, 'B')}</div>
   </div>`;
 
   // Table panel: device status
