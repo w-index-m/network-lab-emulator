@@ -21,7 +21,7 @@ def _sample_dashboard():
         'devices': [
             {
                 'device_id': 'r1', 'hostname': 'R1', 'type': 'cisco',
-                'sys_uptime_ticks': 12345, 'cpu_percent': 22,
+                'sys_uptime_ticks': 12345, 'cpu_percent': 22, 'route_count': 5,
                 'interfaces': [
                     {'index': 1, 'descr': 'Gi0/0', 'speed': 1000000000,
                      'admin_status': 1, 'oper_status': 1,
@@ -33,7 +33,7 @@ def _sample_dashboard():
             },
             {
                 'device_id': 'sir-a', 'hostname': 'Router-A', 'type': 'sir',
-                'sys_uptime_ticks': 500, 'cpu_percent': None,
+                'sys_uptime_ticks': 500, 'cpu_percent': None, 'route_count': 2,
                 'interfaces': [
                     {'index': 1, 'descr': 'lan0', 'speed': 1000000000,
                      'admin_status': 1, 'oper_status': 1,
@@ -66,6 +66,8 @@ def test_parses_with_prometheus_client_into_expected_families():
     assert families['netlab_device_up'].type == 'gauge'
     assert len(families['netlab_device_up'].samples) == 2
     assert len(families['netlab_interface_admin_status'].samples) == 3
+    assert len(families['netlab_route_count'].samples) == 2
+    assert {s.value for s in families['netlab_route_count'].samples} == {5, 2}
     # cpu_percentがNoneの装置(sir-a)は出力されない
     assert len(families['netlab_cpu_percent'].samples) == 1
 

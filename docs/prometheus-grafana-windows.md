@@ -97,6 +97,7 @@ Windowsホスト側で直接 `python` 実行する想定。`monitoring/prometheu
 | `netlab_interface_in_octets_total` | counter | ifInOctets（累積） |
 | `netlab_interface_out_octets_total` | counter | ifOutOctets（累積） |
 | `netlab_interface_speed_bps` | gauge | ifSpeed |
+| `netlab_route_count` | gauge | RIBの最良経路数（`rib_engine.get_best_routes()`、`tools/routing_generator.py`で増減を確認可能） |
 
 ラベル: `device_id`, `hostname`, `type`（+インターフェース系メトリックは `interface`）
 

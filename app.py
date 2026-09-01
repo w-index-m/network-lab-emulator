@@ -560,9 +560,11 @@ async def snmp_dashboard():
         cpu_raw = by_oid.get('1.3.6.1.4.1.9.9.109.1.1.1.1.7.1')
         cpu_percent = int(cpu_raw[1]) if cpu_raw else None
         total_bytes = sum(i['in_octets'] + i['out_octets'] for i in interfaces)
+        route_count = len(rib_engine.get_best_routes(device_id))
 
         history = _metrics_history[device_id]
-        history.append({'t': now, 'cpu': cpu_percent, 'bytes': total_bytes})
+        history.append({'t': now, 'cpu': cpu_percent, 'bytes': total_bytes,
+                        'routes': route_count})
 
         devices.append({
             'device_id': device_id,
@@ -573,6 +575,7 @@ async def snmp_dashboard():
             'sys_contact': _val('1.3.6.1.2.1.1.4.0'),
             'sys_location': _val('1.3.6.1.2.1.1.6.0'),
             'cpu_percent': cpu_percent,
+            'route_count': route_count,
             'interfaces': interfaces,
             'history': list(history),
         })

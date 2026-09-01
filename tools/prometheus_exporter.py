@@ -91,6 +91,11 @@ def build_metrics_text(data: dict) -> str:
         block('netlab_cpu_percent', 'CPU使用率(CISCO-PROCESS-MIB相当、対応機種のみ)', 'gauge',
               cpu_samples)
 
+    block('netlab_route_count', 'RIBの最良経路数(rib_engine.get_best_routes)', 'gauge', [
+        f'netlab_route_count{{{base_labels(d)}}} {d["route_count"]}'
+        for d in devices if d.get('route_count') is not None
+    ])
+
     def iface_labels(d, iface):
         return f'{base_labels(d)},interface="{_escape_label(iface["descr"])}"'
 
