@@ -23,83 +23,91 @@
     background: var(--bg);
     color: var(--text);
     font-family: 'Roboto', 'Segoe UI', 'Hiragino Sans', sans-serif;
-    font-size: 13px;
+    font-size: 18px;
   }
   .notice {
     background: #2c1f0a; border-bottom: 1px solid var(--grafana-orange);
-    color: #ffcb8a; padding: 6px 16px; font-size: 12px;
+    color: #ffcb8a; padding: 10px 20px; font-size: 16px;
     display: flex; align-items: center; gap: 8px;
   }
   .topnav {
     background: var(--panel-bg); border-bottom: 1px solid var(--panel-border);
-    padding: 8px 16px; display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px; display: flex; align-items: center; gap: 16px;
   }
   .grafana-logo {
-    width: 24px; height: 24px; border-radius: 4px;
+    width: 32px; height: 32px; border-radius: 4px;
     background: conic-gradient(from 180deg, var(--grafana-orange), var(--grafana-yellow), var(--grafana-orange));
   }
-  .topnav .title { font-size: 15px; font-weight: 500; }
-  .topnav .breadcrumb { color: var(--text-dim); font-size: 12px; }
+  .topnav .title { font-size: 22px; font-weight: 600; }
+  .topnav .breadcrumb { color: var(--text-dim); font-size: 16px; }
   .toolbar {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 16px; border-bottom: 1px solid var(--panel-border);
+    padding: 14px 20px; border-bottom: 1px solid var(--panel-border);
   }
-  .toolbar .left { display: flex; gap: 8px; align-items: center; }
+  .toolbar .left { display: flex; gap: 10px; align-items: center; }
   .pill {
-    background: #22252b; border: 1px solid var(--panel-border); border-radius: 3px;
-    padding: 4px 10px; font-size: 12px; color: var(--text-dim);
+    background: #22252b; border: 1px solid var(--panel-border); border-radius: 4px;
+    padding: 6px 14px; font-size: 16px; color: var(--text-dim);
   }
   .refresh-badge {
-    background: #22252b; border: 1px solid var(--grafana-orange); border-radius: 3px;
-    padding: 4px 10px; font-size: 12px; color: var(--grafana-orange);
-    display: flex; align-items: center; gap: 6px;
+    background: #22252b; border: 1px solid var(--grafana-orange); border-radius: 4px;
+    padding: 6px 14px; font-size: 16px; color: var(--grafana-orange);
+    display: flex; align-items: center; gap: 8px;
   }
-  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: blink 1.5s infinite; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); animation: blink 1.5s infinite; }
   @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
 
   .grid {
-    display: grid; grid-template-columns: repeat(12, 1fr); gap: 8px;
-    padding: 8px 16px;
+    display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px;
+    padding: 12px 20px;
   }
   .panel {
-    background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 3px;
-    display: flex; flex-direction: column; min-height: 220px;
+    background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 4px;
+    display: flex; flex-direction: column; min-height: 260px;
   }
   .panel.span-12 { grid-column: span 12; }
   .panel.span-6 { grid-column: span 6; }
   .panel.span-4 { grid-column: span 4; }
   .panel.span-3 { grid-column: span 3; }
   .panel-header {
-    padding: 8px 12px; font-size: 13px; color: var(--text);
+    padding: 12px 16px; font-size: 18px; color: var(--text);
     border-bottom: 1px solid var(--panel-border);
     display: flex; justify-content: space-between; align-items: center;
   }
-  .panel-header .ptitle { display: flex; align-items: center; gap: 6px; }
-  .panel-icon { color: var(--text-dim); font-size: 11px; }
-  .panel-body { flex: 1; padding: 8px 12px; position: relative; }
+  .panel-header .ptitle { display: flex; align-items: center; gap: 8px; }
+  .panel-icon { color: var(--text-dim); font-size: 15px; }
+  .panel-body { flex: 1; padding: 12px 16px; position: relative; }
 
   .big-stat { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; }
-  .big-stat .num { font-size: 40px; font-weight: 600; }
-  .big-stat .label { color: var(--text-dim); font-size: 12px; margin-top: 4px; }
+  .big-stat .num { font-size: 56px; font-weight: 700; }
+  .big-stat .label { color: var(--text-dim); font-size: 16px; margin-top: 6px; }
   .num.green { color: var(--green); } .num.red { color: var(--red); }
   .num.orange { color: var(--grafana-orange); } .num.blue { color: var(--blue); }
 
   .chart-svg { width: 100%; height: 100%; display: block; }
-  .legend { display: flex; flex-wrap: wrap; gap: 10px; padding: 4px 12px 8px; font-size: 11px; color: var(--text-dim); }
-  .legend .item { display: flex; align-items: center; gap: 4px; }
-  .swatch { width: 10px; height: 2px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; padding: 6px 16px 12px; font-size: 15px; color: var(--text-dim); }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 3px; }
 
-  table.grafana-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.grafana-table { width: 100%; border-collapse: collapse; font-size: 16px; }
   table.grafana-table th {
-    text-align: left; color: var(--text-dim); font-weight: 500; padding: 6px 8px;
+    text-align: left; color: var(--text-dim); font-weight: 600; padding: 10px 12px;
     border-bottom: 1px solid var(--panel-border);
   }
-  table.grafana-table td { padding: 5px 8px; border-bottom: 1px solid #22252b; }
-  .badge { padding: 1px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+  table.grafana-table td { padding: 9px 12px; border-bottom: 1px solid #22252b; }
+  .badge { padding: 3px 12px; border-radius: 12px; font-size: 14px; font-weight: 700; }
   .badge.up { background: #1a3a1a; color: var(--green); }
   .badge.down { background: #3a1a1a; color: var(--red); }
 
   .empty-state { color: var(--text-dim); text-align: center; padding: 40px; }
+
+  @media (max-width: 900px) {
+    .panel.span-3 { grid-column: span 6; }
+    .panel.span-4 { grid-column: span 12; }
+    .panel.span-6 { grid-column: span 12; }
+    .big-stat .num { font-size: 44px; }
+    table.grafana-table { font-size: 15px; }
+  }
 </style>
 </head>
 <body>
