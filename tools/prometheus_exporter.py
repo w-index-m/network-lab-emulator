@@ -29,6 +29,7 @@ Windowsの場合は tools/run_prometheus_exporter.bat から起動できる。
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -36,6 +37,21 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _last_payload = {'text': '', 'fetched_at': 0.0, 'error': None}
+
+_DEFAULT_WATCHLIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'monitor_watchlist.json')
+
+
+def _load_watchlist(path: str) -> set:
+    """tools/nl_monitor_control.py が書き出す監視対象リストを読み込み、
+    (device_id, interface) の集合を返す。ファイルが無い/壊れている場合は
+    空集合（=フィルタなし扱い）。ポーリング毎に読み直すので、NLツールで
+    追加した対象は次のスクレイプから即座に反映される。"""
+    try:
+        with open(path, encoding='utf-8') as f:
+            entries = json.load(f)
+        return {(e['device_id'], e['interface']) for e in entries}
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
+        return set()
 
 
 def _escape_label(v: str) -> str:
@@ -50,7 +66,7 @@ def _fetch_dashboard(emulator_url: str, token: str) -> dict:
         return json.loads(r.read().decode('utf-8'))
 
 
-def build_metrics_text(data: dict) -> str:
+def build_metrics_text(data: dict, watchlist: set = frozenset()) -> str:
     """/api/snmp/dashboard のJSONをPrometheus text exposition formatに変換。
 
     仕様上、同一メトリック名のサンプルは連続していなければならない
@@ -120,6 +136,16 @@ def build_metrics_text(data: dict) -> str:
         for d in devices for i in d.get('interfaces', [])
     ])
 
+    watchlist_samples = [
+        f'netlab_watchlist_target{{{iface_labels(d, i)}}} 1'
+        for d in devices for i in d.get('interfaces', [])
+        if (d['device_id'], i['descr']) in watchlist
+    ]
+    if watchlist_samples:
+        block('netlab_watchlist_target',
+              'tools/nl_monitor_control.py で自然言語指示により監視対象登録された場合1', 'gauge',
+              watchlist_samples)
+
     return '\n'.join(lines) + '\n'
 
 
@@ -147,11 +173,12 @@ class MetricsHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def poll_loop(emulator_url: str, token: str, interval: int):
+def poll_loop(emulator_url: str, token: str, interval: int, watchlist_path: str):
     while True:
         try:
             data = _fetch_dashboard(emulator_url, token)
-            _last_payload['text'] = build_metrics_text(data)
+            watchlist = _load_watchlist(watchlist_path)
+            _last_payload['text'] = build_metrics_text(data, watchlist)
             _last_payload['error'] = None
             _last_payload['fetched_at'] = time.time()
         except urllib.error.HTTPError as e:
@@ -172,6 +199,9 @@ def main():
     parser.add_argument('--port', type=int, default=9877, help='Exporterの公開ポート(既定: 9877)')
     parser.add_argument('--bind', default='0.0.0.0', help='待ち受けIP')
     parser.add_argument('--interval', type=int, default=15, help='ポーリング間隔(秒)')
+    parser.add_argument('--watchlist', default=_DEFAULT_WATCHLIST,
+                        help='tools/nl_monitor_control.py の監視対象リストJSON'
+                             f'(既定: {_DEFAULT_WATCHLIST})')
     args = parser.parse_args()
 
     print('\n' + '=' * 70)
@@ -183,7 +213,8 @@ def main():
     print('=' * 70)
 
     import threading
-    t = threading.Thread(target=poll_loop, args=(args.emulator_url, args.token, args.interval),
+    t = threading.Thread(target=poll_loop,
+                         args=(args.emulator_url, args.token, args.interval, args.watchlist),
                          daemon=True)
     t.start()
 

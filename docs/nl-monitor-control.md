@@ -74,8 +74,10 @@ $ python tools/nl_monitor_control.py "10.9.9.1のgi1/0/1を監視対象から外
   実機向け構成）が必要
 - IPアドレスが複数装置で重複している場合、`show ip interface brief`を
   照合した最初の装置がヒットする（曖昧性の解消はしない）
-- watchlist自体は現状、他のツール（`ai_grafana_autopilot.py`等）から
-  自動で参照される仕組みにはなっていない（今後の拡張ポイント）
+- watchlistは`tools/prometheus_exporter.py`から自動参照され、
+  `netlab_watchlist_target`メトリクスとしてPrometheus/Grafanaに反映される
+  （詳細: `docs/prometheus-grafana-windows.md`）。`ai_grafana_autopilot.py`
+  等、他のツールからの自動参照は今後の拡張ポイント
 
 ## テスト
 

@@ -104,8 +104,27 @@ Windowsホスト側で直接 `python` 実行する想定。`monitoring/prometheu
 | `netlab_interface_out_octets_total` | counter | ifOutOctets（累積） |
 | `netlab_interface_speed_bps` | gauge | ifSpeed |
 | `netlab_route_count` | gauge | RIBの最良経路数（`rib_engine.get_best_routes()`、`tools/routing_generator.py`で増減を確認可能） |
+| `netlab_watchlist_target` | gauge | `tools/nl_monitor_control.py`で自然言語指示により監視対象登録された場合1（未登録のインターフェースには出力されない） |
 
 ラベル: `device_id`, `hostname`, `type`（+インターフェース系メトリックは `interface`）
+
+## 自然言語での監視対象追加との連携
+
+`tools/nl_monitor_control.py`で「Catalystの10.9.9.1のGi1/0/1を監視対象にして」のように
+指示すると、`tools/monitor_watchlist.json`に対象が追記される。Exporterは
+`--watchlist`（既定でこのファイルを指す）を毎ポーリングごとに読み直しており、
+一致するインターフェースに `netlab_watchlist_target{...} 1` を付与する。
+
+Grafana側では例えば以下のようなPromQLで「NLツールで追加した対象だけ」に
+絞ったパネル/アラートを作れる:
+
+```
+netlab_interface_oper_status * on(device_id, interface) netlab_watchlist_target
+```
+
+Exporterの起動場所と`monitor_watchlist.json`は同じマシン上にある必要がある
+（既定では`tools/`ディレクトリ内の同じファイルを両方が参照する）。別ホストで
+watchlistを管理したい場合は `--watchlist <path>` で明示的に指定する。
 
 ## Grafanaでのクエリ例
 

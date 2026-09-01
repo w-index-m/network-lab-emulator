@@ -9,10 +9,11 @@ tools/prometheus_exporter.py テスト
 
 import sys
 import os
+import json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
-from tools.prometheus_exporter import build_metrics_text
+from tools.prometheus_exporter import build_metrics_text, _load_watchlist
 
 
 def _sample_dashboard():
@@ -85,6 +86,50 @@ def test_label_values_are_escaped():
     data['devices'][0]['hostname'] = 'R1 "weird" name'
     text = build_metrics_text(data)
     assert 'R1 \\"weird\\" name' in text
+
+
+def test_watchlist_metric_omitted_when_empty():
+    text = build_metrics_text(_sample_dashboard())
+    assert 'netlab_watchlist_target' not in text
+
+
+def test_watchlist_metric_emitted_for_matching_interface():
+    watchlist = {('r1', 'Gi0/0')}
+    text = build_metrics_text(_sample_dashboard(), watchlist)
+    assert 'netlab_watchlist_target{device_id="r1"' in text
+    assert 'interface="Gi0/0"} 1' in text
+    # Gi0/1 (同じ装置の別IF)は監視対象に含まれていないので出力されない
+    assert 'interface="Gi0/1"' not in text.split('netlab_watchlist_target')[1]
+
+
+def test_watchlist_metric_ignores_nonexistent_interface():
+    # nl_monitor_control.py が実在しないIFを登録してしまった場合でも、
+    # ダッシュボードに存在しないインターフェースは出力しない(誤検知防止)
+    watchlist = {('r1', 'Gi9/9')}
+    text = build_metrics_text(_sample_dashboard(), watchlist)
+    assert 'netlab_watchlist_target' not in text
+
+
+def test_load_watchlist_missing_file_returns_empty_set(tmp_path):
+    assert _load_watchlist(str(tmp_path / 'nonexistent.json')) == set()
+
+
+def test_load_watchlist_parses_device_and_interface_pairs(tmp_path):
+    p = tmp_path / 'watchlist.json'
+    p.write_text(json.dumps([
+        {'device_id': 'catalyst', 'interface': 'GigabitEthernet1/0/1', 'ip': '10.9.9.1'},
+        {'device_id': 'asa', 'interface': 'GigabitEthernet0/0'},
+    ]), encoding='utf-8')
+    assert _load_watchlist(str(p)) == {
+        ('catalyst', 'GigabitEthernet1/0/1'),
+        ('asa', 'GigabitEthernet0/0'),
+    }
+
+
+def test_load_watchlist_malformed_json_returns_empty_set(tmp_path):
+    p = tmp_path / 'broken.json'
+    p.write_text('{not valid json', encoding='utf-8')
+    assert _load_watchlist(str(p)) == set()
 
 
 if __name__ == '__main__':
