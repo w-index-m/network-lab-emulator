@@ -297,10 +297,38 @@ def _load_config():
         snmp_agent.register(dev_id, state.device_type, state.hostname)
 
     # リンクを復元
+    # 設定ファイルにはインターフェース名が保存されていないため、a/b双方の
+    # インターフェースIPを突き合わせて「同一セグメントのインターフェース」を推定する。
+    # これが無いと vnet.interface_links が空のままになり、ping等での
+    # dp_engine.bump()（トラフィックカウンタ更新）が常にスキップされてしまう
+    # （SNMPダッシュボード/Prometheus Exporterのトラフィックが常に0になるバグ）。
+    def _find_linked_iface(dev_id: str, peer_id: str) -> Optional[str]:
+        st = device_sessions.get(dev_id)
+        peer_st = device_sessions.get(peer_id)
+        if not st or not peer_st:
+            return None
+        peer_nets = []
+        for _, pinfo in peer_st.interfaces.items():
+            pip = pinfo.get('ip')
+            if pip and pip != '127.0.0.1':
+                mask = (0xffffffff << (32 - pinfo.get('prefix', 24))) & 0xffffffff
+                peer_nets.append((vnet._ip_to_int(pip) & mask, mask))
+        for ifname, iinfo in st.interfaces.items():
+            ip = iinfo.get('ip')
+            if not ip or ip == '127.0.0.1':
+                continue
+            ip_int = vnet._ip_to_int(ip)
+            for net, mask in peer_nets:
+                if (ip_int & mask) == net:
+                    return ifname
+        return None
+
     for link in data.get("links", []):
         a, b = link.get("a"), link.get("b")
         if a and b:
-            vnet.add_link(a, b)
+            iface_a = _find_linked_iface(a, b)
+            iface_b = _find_linked_iface(b, a)
+            vnet.add_link(a, b, iface_a, iface_b)
 
     print(f"[Config] 設定をロードしました: {len(data.get('devices',{}))} devices, "
           f"{len(data.get('links',[]))} links")
