@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grafana風モックアップ（実データ表示）</title>
+<style>
+  :root {
+    --bg: #111217;
+    --panel-bg: #181b1f;
+    --panel-border: #2c3235;
+    --text: #d8d9da;
+    --text-dim: #8e9297;
+    --grafana-orange: #ff8833;
+    --grafana-yellow: #f2cc0c;
+    --green: #73bf69;
+    --red: #f2495c;
+    --blue: #5794f2;
+    --purple: #b877d9;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Roboto', 'Segoe UI', 'Hiragino Sans', sans-serif;
+    font-size: 13px;
+  }
+  .notice {
+    background: #2c1f0a; border-bottom: 1px solid var(--grafana-orange);
+    color: #ffcb8a; padding: 6px 16px; font-size: 12px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .topnav {
+    background: var(--panel-bg); border-bottom: 1px solid var(--panel-border);
+    padding: 8px 16px; display: flex; align-items: center; gap: 12px;
+  }
+  .grafana-logo {
+    width: 24px; height: 24px; border-radius: 4px;
+    background: conic-gradient(from 180deg, var(--grafana-orange), var(--grafana-yellow), var(--grafana-orange));
+  }
+  .topnav .title { font-size: 15px; font-weight: 500; }
+  .topnav .breadcrumb { color: var(--text-dim); font-size: 12px; }
+  .toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; border-bottom: 1px solid var(--panel-border);
+  }
+  .toolbar .left { display: flex; gap: 8px; align-items: center; }
+  .pill {
+    background: #22252b; border: 1px solid var(--panel-border); border-radius: 3px;
+    padding: 4px 10px; font-size: 12px; color: var(--text-dim);
+  }
+  .refresh-badge {
+    background: #22252b; border: 1px solid var(--grafana-orange); border-radius: 3px;
+    padding: 4px 10px; font-size: 12px; color: var(--grafana-orange);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: blink 1.5s infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  .grid {
+    display: grid; grid-template-columns: repeat(12, 1fr); gap: 8px;
+    padding: 8px 16px;
+  }
+  .panel {
+    background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 3px;
+    display: flex; flex-direction: column; min-height: 220px;
+  }
+  .panel.span-12 { grid-column: span 12; }
+  .panel.span-6 { grid-column: span 6; }
+  .panel.span-4 { grid-column: span 4; }
+  .panel.span-3 { grid-column: span 3; }
+  .panel-header {
+    padding: 8px 12px; font-size: 13px; color: var(--text);
+    border-bottom: 1px solid var(--panel-border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .panel-header .ptitle { display: flex; align-items: center; gap: 6px; }
+  .panel-icon { color: var(--text-dim); font-size: 11px; }
+  .panel-body { flex: 1; padding: 8px 12px; position: relative; }
+
+  .big-stat { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; }
+  .big-stat .num { font-size: 40px; font-weight: 600; }
+  .big-stat .label { color: var(--text-dim); font-size: 12px; margin-top: 4px; }
+  .num.green { color: var(--green); } .num.red { color: var(--red); }
+  .num.orange { color: var(--grafana-orange); } .num.blue { color: var(--blue); }
+
+  .chart-svg { width: 100%; height: 100%; display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; padding: 4px 12px 8px; font-size: 11px; color: var(--text-dim); }
+  .legend .item { display: flex; align-items: center; gap: 4px; }
+  .swatch { width: 10px; height: 2px; }
+
+  table.grafana-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.grafana-table th {
+    text-align: left; color: var(--text-dim); font-weight: 500; padding: 6px 8px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  table.grafana-table td { padding: 5px 8px; border-bottom: 1px solid #22252b; }
+  .badge { padding: 1px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+  .badge.up { background: #1a3a1a; color: var(--green); }
+  .badge.down { background: #3a1a1a; color: var(--red); }
+
+  .empty-state { color: var(--text-dim); text-align: center; padding: 40px; }
+</style>
+</head>
+<body>
+
+<div class="notice">⚠️ これはGrafanaのモックアップです（実物のGrafanaではありません）。データは本物のエミュレーター(<code>/api/snmp/dashboard</code>)から取得した実データです。</div>
+
+<div class="topnav">
+  <div class="grafana-logo"></div>
+  <div class="title">Network Lab Emulator</div>
+  <div class="breadcrumb">Dashboards / Network Monitoring</div>
+</div>
+
+<div class="toolbar">
+  <div class="left">
+    <span class="pill">🕐 Last 15 minutes</span>
+    <span class="pill">📊 33 panels</span>
+  </div>
+  <div class="refresh-badge"><span class="dot"></span> Auto-refresh: 5s</div>
+</div>
+
+<div class="grid" id="grid">
+  <div class="panel span-12"><div class="panel-body empty-state">読み込み中...</div></div>
+</div>
+
+<script>
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 ** 2).toFixed(1) + ' MB';
+}
+
+function sparkSvg(values, color, min, max) {
+  if (!values || values.length < 2) {
+    return `<svg class="chart-svg" viewBox="0 0 300 140"><line x1="0" y1="70" x2="300" y2="70" stroke="#2c3235"/></svg>`;
+  }
+  const w = 300, h = 140, pad = 6;
+  const lo = min !== undefined ? min : Math.min(...values);
+  const hi = max !== undefined ? max : Math.max(...values);
+  const span = (hi - lo) || 1;
+  const step = (w - pad * 2) / (values.length - 1);
+  const pts = values.map((v, i) => [pad + i * step, h - pad - ((v - lo) / span) * (h - pad * 2)]);
+  const line = pts.map(p => p.join(',')).join(' ');
+  const area = `${pad},${h - pad} ` + line + ` ${w - pad},${h - pad}`;
+  const gradId = 'g' + Math.random().toString(36).slice(2, 8);
+  return `
+    <svg class="chart-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${color}" stop-opacity="0.35"/>
+        <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+      </linearGradient></defs>
+      <polygon points="${area}" fill="url(#${gradId})"/>
+      <polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.5"/>
+    </svg>`;
+}
+
+async function load() {
+  const token = (() => { try { return localStorage.getItem('netlabToken_v1') || ''; } catch(e) { return ''; } })();
+  const res = await fetch('/api/snmp/dashboard', { headers: token ? {'X-Session-Token': token} : {} });
+  if (!res.ok) {
+    document.getElementById('grid').innerHTML = `<div class="panel span-12"><div class="panel-body empty-state">取得失敗 (HTTP ${res.status})</div></div>`;
+    return;
+  }
+  const data = await res.json();
+  render(data);
+}
+
+function render(data) {
+  const devices = data.devices || [];
+  const cpuDevices = devices.filter(d => d.cpu_percent !== null && d.cpu_percent !== undefined);
+  const totalIf = devices.reduce((s, d) => s + d.interfaces.length, 0);
+  const upIf = devices.reduce((s, d) => s + d.interfaces.filter(i => i.oper_status === 1).length, 0);
+  const totalTraffic = devices.reduce((s, d) => s + d.interfaces.reduce((a, i) => a + i.in_octets + i.out_octets, 0), 0);
+  const avgCpu = cpuDevices.length ? Math.round(cpuDevices.reduce((s, d) => s + d.cpu_percent, 0) / cpuDevices.length) : 0;
+
+  let html = '';
+
+  // Stat row
+  html += `<div class="panel span-3"><div class="panel-header"><span class="ptitle">Devices Monitored</span></div>
+    <div class="panel-body big-stat"><div class="num blue">${devices.length}</div><div class="label">total devices</div></div></div>`;
+  html += `<div class="panel span-3"><div class="panel-header"><span class="ptitle">Interfaces Up</span></div>
+    <div class="panel-body big-stat"><div class="num green">${upIf}/${totalIf}</div><div class="label">operational</div></div></div>`;
+  html += `<div class="panel span-3"><div class="panel-header"><span class="ptitle">Avg CPU (Cisco family)</span></div>
+    <div class="panel-body big-stat"><div class="num ${avgCpu >= 80 ? 'red' : (avgCpu >= 60 ? 'orange' : 'green')}">${avgCpu}%</div><div class="label">${cpuDevices.length} devices</div></div></div>`;
+  html += `<div class="panel span-3"><div class="panel-header"><span class="ptitle">Total Traffic</span></div>
+    <div class="panel-body big-stat"><div class="num orange">${fmtBytes(totalTraffic)}</div><div class="label">cumulative</div></div></div>`;
+
+  // CPU panels for cisco-family devices (top 4 by cpu)
+  const cpuColors = [ '#5794f2', '#73bf69', '#ff8833', '#b877d9', '#f2cc0c', '#f2495c' ];
+  cpuDevices.slice(0, 6).forEach((d, i) => {
+    const hist = (d.history || []).map(h => h.cpu).filter(v => v !== null && v !== undefined);
+    html += `<div class="panel span-4">
+      <div class="panel-header"><span class="ptitle">📈 ${d.hostname} — CPU Utilization</span><span class="panel-icon">${d.type}</span></div>
+      <div class="panel-body">${sparkSvg(hist, cpuColors[i % cpuColors.length], 0, 100)}</div>
+      <div class="legend"><span class="item"><span class="swatch" style="background:${cpuColors[i % cpuColors.length]}"></span>cpu_percent{device="${d.device_id}"} = ${d.cpu_percent}%</span></div>
+    </div>`;
+  });
+
+  // Traffic panel: 全装置のhistory(bytes)を時刻インデックスで合算した時系列
+  const maxLen = Math.max(0, ...devices.map(d => (d.history || []).length));
+  const trafficSeries = [];
+  for (let i = 0; i < maxLen; i++) {
+    let sum = 0;
+    for (const d of devices) {
+      const h = d.history || [];
+      const idx = h.length - maxLen + i;
+      if (idx >= 0 && h[idx]) sum += h[idx].bytes || 0;
+    }
+    trafficSeries.push(sum);
+  }
+  html += `<div class="panel span-12">
+    <div class="panel-header"><span class="ptitle">📊 Interface Traffic — All Devices (合算, 時系列)</span><span class="panel-icon">sum(netlab_interface_*_octets_total)</span></div>
+    <div class="panel-body" style="height:180px">${sparkSvg(trafficSeries, '#ff8833')}</div>
+  </div>`;
+
+  // Table panel: device status
+  let rows = devices.map(d => {
+    const down = d.interfaces.filter(i => i.oper_status !== 1).length;
+    return `<tr>
+      <td>${d.hostname}</td><td>${d.type}</td>
+      <td>${d.cpu_percent !== null && d.cpu_percent !== undefined ? d.cpu_percent + '%' : '—'}</td>
+      <td>${d.interfaces.length}</td>
+      <td><span class="badge ${down > 0 ? 'down' : 'up'}">${down > 0 ? down + ' DOWN' : 'ALL UP'}</span></td>
+    </tr>`;
+  }).join('');
+  html += `<div class="panel span-12">
+    <div class="panel-header"><span class="ptitle">🗒 Device Status Table</span></div>
+    <div class="panel-body">
+      <table class="grafana-table">
+        <thead><tr><th>Hostname</th><th>Type</th><th>CPU</th><th>Interfaces</th><th>Status</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`;
+
+  document.getElementById('grid').innerHTML = html;
+}
+
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>
