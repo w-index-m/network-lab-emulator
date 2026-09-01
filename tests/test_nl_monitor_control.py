@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from tools.nl_monitor_control import (
     _rule_based_parse, _norm_iface, add_watchlist_entry, remove_watchlist_entry,
-    load_watchlist, save_watchlist, WATCHLIST_PATH,
+    load_watchlist, save_watchlist, WATCHLIST_PATH, _parse_bulk,
 )
 
 
@@ -88,6 +88,35 @@ def test_remove_nonexistent_returns_false():
     import tools.nl_monitor_control as mod
     removed = mod.remove_watchlist_entry('catalyst', 'GigabitEthernet9/9/9')
     assert removed is False
+
+
+def test_parse_bulk_all_ports():
+    bulk = _parse_bulk('catalystの全ポートを監視対象にして')
+    assert bulk is not None
+    assert bulk.device_hint == 'catalyst'
+    assert bulk.scope == 'all'
+    assert bulk.action == 'add'
+
+
+def test_parse_bulk_link_up_only():
+    bulk = _parse_bulk('catalystのlink upしているポートを監視対象にして')
+    assert bulk is not None
+    assert bulk.scope == 'up'
+
+
+def test_parse_bulk_remove_action():
+    bulk = _parse_bulk('catalystの全ポートを監視対象から外して')
+    assert bulk is not None
+    assert bulk.action == 'remove'
+
+
+def test_parse_bulk_returns_none_when_ip_present():
+    # IPアドレス付きの単一IF指定は一括指定として誤検知してはいけない
+    assert _parse_bulk('10.9.9.1のGi1/0/1を監視対象にして') is None
+
+
+def test_parse_bulk_returns_none_without_scope_or_device_hint():
+    assert _parse_bulk('こんにちは') is None
 
 
 if __name__ == '__main__':

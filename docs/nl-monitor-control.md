@@ -35,7 +35,26 @@ python tools/nl_monitor_control.py --list
 
 # Ollamaを使わず正規表現ベースのみで解析
 python tools/nl_monitor_control.py --no-ai "..."
+
+# 一括指定: 装置の全ポート/link upしているポートをまとめて追加・削除
+python tools/nl_monitor_control.py "catalystの全ポートを監視対象にして"
+python tools/nl_monitor_control.py "catalystのlink upしているポートを監視対象にして"
+python tools/nl_monitor_control.py "catalystの全ポートを監視対象から外して"
 ```
+
+## 一括指定（全ポート／link upのみ）
+
+IPアドレスを含まず、装置名/種別（`catalyst`/`cisco`/`sir`/`srs`/`asa`/`nexus`/
+`bigip`/`apresia`のいずれか）と「全ポート」「link upしているポート」のような
+語を含む指示は、単一IF指定ではなく一括指定として扱われる（`_parse_bulk()`）。
+一括指定では `/api/snmp/dashboard` から装置のインターフェース一覧を取得し、
+`scope=up`の場合は`oper_status==1`（up）のもののみに絞ってwatchlistへ
+追加/削除する。
+
+実際に確認した動作: Catalystの`Vlan10`をCLIで`shutdown`した状態で
+「catalystのlink upしているポートを監視対象にして」を実行すると、
+down状態の`Vlan10`は除外され、up状態の`GigabitEthernet1/0/1`のみが
+登録されることを確認済み。
 
 ## 実機統合確認（このリポジトリ内でのテスト）
 

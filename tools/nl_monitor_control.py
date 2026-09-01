@@ -48,6 +48,12 @@ _IFACE_RE = re.compile(
     r'Eth(?:ernet)?|Vlan|Loopback|lan|wan)\s*[\d./]+)', re.I)
 _REMOVE_WORDS = ('外し', '削除', '除外', 'remove', 'delete')
 
+# ── 一括指定（「catalystの全ポート」「link upしているポート」等） ──
+_DEVICE_TYPE_HINTS = ('catalyst', 'cisco', 'sir', 'srs', 'asa', 'nexus', 'bigip', 'apresia')
+_SCOPE_ALL_WORDS = ('全ポート', '全て', 'すべて', '全部', 'all ports', 'all interfaces')
+_SCOPE_UP_WORDS = ('link up', 'linkup', 'リンクアップ', 'アップしている', 'up している',
+                   'upしている', 'up状態', '稼働中', '稼働している')
+
 
 class ParsedCommand:
     def __init__(self, ip: Optional[str], iface: Optional[str], action: str):
@@ -57,6 +63,46 @@ class ParsedCommand:
 
     def __repr__(self):
         return f'<ParsedCommand ip={self.ip} iface={self.iface} action={self.action}>'
+
+
+class BulkCommand:
+    """「catalystの全ポートを監視対象にして」「link upしているポートを監視対象に」
+    のような、単一IF指定ではなく装置単位・条件単位の一括指示。"""
+
+    def __init__(self, device_hint: str, scope: str, action: str):
+        self.device_hint = device_hint  # 装置名/種別のヒント文字列（例: "catalyst"）
+        self.scope = scope              # 'all' | 'up'
+        self.action = action            # 'add' | 'remove'
+
+    def __repr__(self):
+        return f'<BulkCommand device_hint={self.device_hint} scope={self.scope} action={self.action}>'
+
+
+def _parse_bulk(text: str) -> Optional[BulkCommand]:
+    """一括指定かどうかを判定する。IPアドレスを含む単一IF指定と区別するため、
+    IPアドレスが見つからない場合のみ一括指定として扱う。"""
+    if _IPV4_RE.search(text):
+        return None
+
+    lower = text.lower()
+    scope = None
+    if any(w in lower for w in _SCOPE_UP_WORDS):
+        scope = 'up'
+    elif any(w in text for w in _SCOPE_ALL_WORDS) or any(w in lower for w in _SCOPE_ALL_WORDS):
+        scope = 'all'
+    if scope is None:
+        return None
+
+    device_hint = None
+    for hint in _DEVICE_TYPE_HINTS:
+        if hint in lower:
+            device_hint = hint
+            break
+    if device_hint is None:
+        return None
+
+    action = 'remove' if any(w in text for w in _REMOVE_WORDS) else 'add'
+    return BulkCommand(device_hint=device_hint, scope=scope, action=action)
 
 
 def _rule_based_parse(text: str) -> ParsedCommand:
@@ -144,6 +190,23 @@ class EmulatorClient:
                 return d.get('hostname', device_id)
         return device_id
 
+    def get_dashboard(self) -> dict:
+        req = urllib.request.Request(f'{self.base_url}/api/snmp/dashboard', headers=self._headers())
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read().decode())
+
+    def find_devices_by_hint(self, hint: str) -> list:
+        """装置名/種別ヒント文字列に一致する装置一覧を返す
+        （device_id・hostname・typeいずれかに部分一致）"""
+        data = self.get_dashboard()
+        hint_l = hint.lower()
+        return [
+            d for d in data.get('devices', [])
+            if hint_l in d.get('device_id', '').lower()
+            or hint_l in d.get('hostname', '').lower()
+            or hint_l in d.get('type', '').lower()
+        ]
+
     def find_device_by_ip(self, ip: str) -> Optional[tuple]:
         """全装置に `show ip interface brief` を投げてIPが一致する装置とIF名を特定する"""
         for device_id in self.list_device_ids():
@@ -206,6 +269,46 @@ def remove_watchlist_entry(device_id: str, iface: str) -> bool:
     return removed
 
 
+def _handle_bulk(bulk: BulkCommand, args) -> int:
+    scope_label = '全ポート' if bulk.scope == 'all' else 'link upしているポート'
+    print(f'🔍 一括解析結果: 装置ヒント={bulk.device_hint}, 対象={scope_label}, Action={bulk.action}')
+
+    client = EmulatorClient(args.url, args.token)
+    devices = client.find_devices_by_hint(bulk.device_hint)
+    if not devices:
+        print(f'❌ "{bulk.device_hint}" に一致する装置がラボ内に見つかりませんでした。')
+        return 1
+
+    total = 0
+    for d in devices:
+        device_id = d['device_id']
+        hostname = d.get('hostname', device_id)
+        ifaces = d.get('interfaces', [])
+        if bulk.scope == 'up':
+            ifaces = [i for i in ifaces if i.get('oper_status') == 1]
+        if not ifaces:
+            continue
+        print(f'  装置: {hostname} ({device_id}) — {len(ifaces)}件のインターフェース')
+        for i in ifaces:
+            iface_name = i['descr']
+            if bulk.action == 'add':
+                added = add_watchlist_entry(device_id, hostname, iface_name, d.get('ip', ''))
+                if added:
+                    print(f'    ✅ 追加: {iface_name}')
+                    total += 1
+                else:
+                    print(f'    ℹ️  既に登録済み: {iface_name}')
+            else:
+                removed = remove_watchlist_entry(device_id, iface_name)
+                if removed:
+                    print(f'    ✅ 削除: {iface_name}')
+                    total += 1
+
+    verb = '追加' if bulk.action == 'add' else '削除'
+    print(f'\n✅ 合計 {total} 件のインターフェースを監視対象に{verb}しました。')
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description='自然言語 監視対象コントロールツール')
     parser.add_argument('command', nargs='?', help='自然言語の指示（例: "192.168.1.1のGi1/1を監視対象に追加して"）')
@@ -230,6 +333,11 @@ def main():
         return 1
 
     print(f'\n💬 指示: "{args.command}"')
+
+    bulk = _parse_bulk(args.command)
+    if bulk:
+        return _handle_bulk(bulk, args)
+
     parsed = parse_command(args.command, use_ai=not args.no_ai)
     print(f'🔍 解析結果: IP={parsed.ip}, Interface={parsed.iface}, Action={parsed.action}')
 
