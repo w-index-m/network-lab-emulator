@@ -48,7 +48,7 @@ start_app() {
         return
     fi
     log "app.py: starting on :${APP_PORT}"
-    (cd "$REPO_DIR" && nohup uvicorn app:app --host 0.0.0.0 --port "$APP_PORT" \
+    (cd "$REPO_DIR" && NETLAB_AUTH_DISABLE=1 nohup uvicorn app:app --host 0.0.0.0 --port "$APP_PORT" \
         > "$STACK_DIR/app.log" 2>&1 &)
     sleep 2
 }
@@ -61,7 +61,7 @@ start_exporter() {
     fi
     log "prometheus_exporter: starting on :${EXPORTER_PORT}"
     (cd "$REPO_DIR" && nohup python3 tools/prometheus_exporter.py \
-        --app-url "http://localhost:${APP_PORT}" --port "$EXPORTER_PORT" --interval 5 \
+        --emulator-url "http://localhost:${APP_PORT}" --port "$EXPORTER_PORT" --interval 5 \
         > "$STACK_DIR/exporter.log" 2>&1 &)
     sleep 2
 }
@@ -170,7 +170,7 @@ EOF
 
 # ── 5. Grafana ──────────────────────────────────────
 fetch_grafana() {
-    if [ -n "$(find "$STACK_DIR" -maxdepth 1 -iname 'grafana-v*' -type d 2>/dev/null)" ]; then
+    if [ -n "$(find "$STACK_DIR" -maxdepth 1 -iregex '.*/grafana-v?[0-9].*' -type d 2>/dev/null)" ]; then
         log "grafana: already extracted"
         return
     fi
@@ -185,7 +185,7 @@ start_grafana() {
         return
     fi
     local gdir
-    gdir=$(find "$STACK_DIR" -maxdepth 1 -iname 'grafana-v*' -type d | head -1)
+    gdir=$(find "$STACK_DIR" -maxdepth 1 -iregex '.*/grafana-v?[0-9].*' -type d | head -1)
     if [ -z "$gdir" ]; then
         log "grafana: extracted directory not found, skipping"
         return
