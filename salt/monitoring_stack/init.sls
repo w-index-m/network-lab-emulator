@@ -28,8 +28,9 @@ start-app:
     - name: >
         cd {{ repo_dir }} &&
         NETLAB_AUTH_DISABLE=1 nohup uvicorn app:app --host 0.0.0.0 --port {{ app_port }}
-        > {{ stack_dir }}/app.log 2>&1 &
+        > {{ stack_dir }}/app.log 2>&1
     - shell: /bin/bash
+    - bg: True
     - unless: curl -sf -o /dev/null http://localhost:{{ app_port }}/api/snmp/dashboard
     - require:
       - file: stack_dir
@@ -52,8 +53,9 @@ start-exporter:
         cd {{ repo_dir }} &&
         nohup python3 tools/prometheus_exporter.py
         --emulator-url http://localhost:{{ app_port }} --port {{ exporter_port }} --interval 5
-        > {{ stack_dir }}/exporter.log 2>&1 &
+        > {{ stack_dir }}/exporter.log 2>&1
     - shell: /bin/bash
+    - bg: True
     - unless: curl -sf -o /dev/null http://localhost:{{ exporter_port }}/metrics
     - require:
       - cmd: wait-app
@@ -113,8 +115,9 @@ start-prometheus:
         --config.file={{ stack_dir }}/prometheus.yml
         --storage.tsdb.path={{ stack_dir }}/prom-data
         --web.listen-address=0.0.0.0:{{ prom_port }}
-        > {{ stack_dir }}/prometheus.log 2>&1 &
+        > {{ stack_dir }}/prometheus.log 2>&1
     - shell: /bin/bash
+    - bg: True
     - unless: curl -sf -o /dev/null http://localhost:{{ prom_port }}/-/healthy
     - require:
       - cmd: extract-prometheus
@@ -165,8 +168,9 @@ start-alertmanager:
         --storage.path={{ stack_dir }}/alertmanager-data
         --web.listen-address=0.0.0.0:{{ alertmanager_port }}
         --cluster.listen-address=""
-        > {{ stack_dir }}/alertmanager.log 2>&1 &
+        > {{ stack_dir }}/alertmanager.log 2>&1
     - shell: /bin/bash
+    - bg: True
     - unless: curl -sf -o /dev/null http://localhost:{{ alertmanager_port }}/
     - require:
       - cmd: extract-alertmanager
@@ -204,8 +208,9 @@ start-grafana:
         gh=$(ls -d {{ stack_dir }}/grafana-[0-9]* | head -1);
         nohup $gh/bin/grafana server --homepath=$gh --config=$gh/conf/defaults.ini
         cfg:default.server.http_port={{ grafana_port }}
-        > {{ stack_dir }}/grafana.log 2>&1 &
+        > {{ stack_dir }}/grafana.log 2>&1
     - shell: /bin/bash
+    - bg: True
     - unless: curl -sf -o /dev/null http://localhost:{{ grafana_port }}/api/health
     - require:
       - cmd: extract-grafana
