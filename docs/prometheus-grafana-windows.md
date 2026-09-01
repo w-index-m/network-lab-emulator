@@ -56,8 +56,14 @@ docker compose up -d
 
 - Grafana: http://localhost:3000 （`admin` / `admin`、初回にパスワード変更を求められる）
 - Prometheus UI: http://localhost:9090
+- Alertmanager UI: http://localhost:9093
 - Grafanaのデータソース（Prometheus）は `grafana-provisioning/` により
   **自動設定済み**。手動でのデータソース追加は不要
+- `alert_rules.yml` に `InterfaceDown`（ifOperStatus==2）と
+  `HighCpu`（CPU使用率80%以上）のアラートルールを同梱。Prometheusが
+  評価し、`alertmanager.yml`（受信設定）経由でAlertmanagerに通知される。
+  この構成は、Linuxサンドボックス環境で `tools/setup_monitoring_stack.sh`
+  により実バイナリで動作確認済みの構成と同じもの。
 
 Exporter（`tools/prometheus_exporter.py`）はコンテナ化しておらず、
 Windowsホスト側で直接 `python` 実行する想定。`monitoring/prometheus.yml`
