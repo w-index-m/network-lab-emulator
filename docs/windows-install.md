@@ -6,6 +6,32 @@ network-lab-emulator と、監視・AIツール一式をWindows PCにセット�
 
 各セクションは独立しているので、必要な部分だけ実行してもよい。
 
+## スクリプト1本でまとめて実行する場合
+
+Prometheus/Alertmanager/Grafanaのダウンロード〜起動〜Grafanaへの
+データソース登録までを1本にまとめた `tools/setup_monitoring_stack.ps1`
+がある（Linux版 `tools/setup_monitoring_stack.sh` のPowerShell移植）。
+べき等（既に起動しているサービスはスキップ）なので、何度実行しても安全。
+
+```powershell
+cd $env:USERPROFILE\Documents\network-lab-emulator
+
+# ダウンロード・起動
+.\tools\setup_monitoring_stack.ps1 -Action setup
+
+# Ollamaも一緒にセットアップしたい場合
+.\tools\setup_monitoring_stack.ps1 -Action setup -WithOllama
+
+# 状態確認
+.\tools\setup_monitoring_stack.ps1 -Action status
+
+# 停止
+.\tools\setup_monitoring_stack.ps1 -Action stop
+```
+
+以下のセクション2〜4は、このスクリプトが内部で行っている処理を
+手動で個別に実行したい場合の参考用。
+
 ## 0. 前提
 
 ```powershell
