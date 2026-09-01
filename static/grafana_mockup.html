@@ -226,6 +226,7 @@ function render(data) {
   const upIf = devices.reduce((s, d) => s + d.interfaces.filter(i => i.oper_status === 1).length, 0);
   const totalTraffic = devices.reduce((s, d) => s + d.interfaces.reduce((a, i) => a + i.in_octets + i.out_octets, 0), 0);
   const avgCpu = cpuDevices.length ? Math.round(cpuDevices.reduce((s, d) => s + d.cpu_percent, 0) / cpuDevices.length) : 0;
+  const totalRoutes = devices.reduce((s, d) => s + (d.route_count || 0), 0);
 
   let html = '';
 
@@ -238,6 +239,8 @@ function render(data) {
     <div class="panel-body big-stat"><div class="num ${avgCpu >= 80 ? 'red' : (avgCpu >= 60 ? 'orange' : 'green')}">${avgCpu}%</div><div class="label">${cpuDevices.length} devices</div></div></div>`;
   html += `<div class="panel span-3"><div class="panel-header"><span class="ptitle">Total Traffic</span></div>
     <div class="panel-body big-stat"><div class="num orange">${fmtBytes(totalTraffic)}</div><div class="label">cumulative</div></div></div>`;
+  html += `<div class="panel span-3"><div class="panel-header"><span class="ptitle">Total Routes (RIB)</span></div>
+    <div class="panel-body big-stat"><div class="num blue">${totalRoutes}</div><div class="label">sum(netlab_route_count)</div></div></div>`;
 
   // CPU panels for cisco-family devices (top 4 by cpu)
   const cpuColors = [ '#5794f2', '#73bf69', '#ff8833', '#b877d9', '#f2cc0c', '#f2495c' ];
@@ -274,6 +277,23 @@ function render(data) {
     <div class="panel-body" style="flex:none;height:220px">${sparkSvg(trafficSeries, '#ff8833', undefined, undefined, trafficTimes, 'B')}</div>
   </div>`;
 
+  // 経路数パネル: 経路を1つ以上持つ装置ごとに遷移グラフを表示
+  const routeColors = [ '#5794f2', '#73bf69', '#ff8833', '#b877d9', '#f2cc0c', '#f2495c' ];
+  const routeDevices = devices.filter(d => (d.route_count || 0) > 0);
+  if (routeDevices.length) {
+    routeDevices.slice(0, 6).forEach((d, i) => {
+      const entries = (d.history || []).filter(h => h.routes !== null && h.routes !== undefined);
+      const hist = entries.map(h => h.routes);
+      const times = entries.map(h => h.t);
+      const maxRoutes = Math.max(10, ...hist);
+      html += `<div class="panel span-4">
+        <div class="panel-header"><span class="ptitle">🧭 ${d.hostname} — Route Count</span><span class="panel-icon">${d.type}</span></div>
+        <div class="panel-body">${sparkSvg(hist, routeColors[i % routeColors.length], 0, maxRoutes, times, '')}</div>
+        <div class="legend"><span class="item"><span class="swatch" style="background:${routeColors[i % routeColors.length]}"></span>netlab_route_count{device="${d.device_id}"} = ${d.route_count}</span></div>
+      </div>`;
+    });
+  }
+
   // Table panel: device status
   let rows = devices.map(d => {
     const down = d.interfaces.filter(i => i.oper_status !== 1).length;
@@ -281,6 +301,7 @@ function render(data) {
       <td>${d.hostname}</td><td>${d.type}</td>
       <td>${d.cpu_percent !== null && d.cpu_percent !== undefined ? d.cpu_percent + '%' : '—'}</td>
       <td>${d.interfaces.length}</td>
+      <td>${d.route_count !== null && d.route_count !== undefined ? d.route_count : '—'}</td>
       <td><span class="badge ${down > 0 ? 'down' : 'up'}">${down > 0 ? down + ' DOWN' : 'ALL UP'}</span></td>
     </tr>`;
   }).join('');
@@ -288,7 +309,7 @@ function render(data) {
     <div class="panel-header"><span class="ptitle">🗒 Device Status Table</span></div>
     <div class="panel-body">
       <table class="grafana-table">
-        <thead><tr><th>Hostname</th><th>Type</th><th>CPU</th><th>Interfaces</th><th>Status</th></tr></thead>
+        <thead><tr><th>Hostname</th><th>Type</th><th>CPU</th><th>Interfaces</th><th>Routes</th><th>Status</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
