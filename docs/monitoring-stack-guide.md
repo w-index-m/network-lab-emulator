@@ -24,6 +24,22 @@ Grafana (:3000) ← Prometheus datasource
 route_injector_cli.py ──BGP/RIP──▶ FRR (bgpd/zebra) 実RIB
 ```
 
+## 監視の役割分担: メトリクス vs ログ
+
+このプロジェクトでは監視対象の性質によって2系統を使い分ける方針とする。
+
+| | メトリクス監視 | ログ監視 |
+|---|---|---|
+| 対象 | CPU使用率・インターフェース状態・経路数などの定量値 | syslogのテキストメッセージ |
+| 担当 | Prometheus + **Alertmanager** | **`tools/syslog_ai_monitor.py`** |
+| 得意なこと | 閾値ベースのアラート（`CPU >= 80%`、`ifOperStatus == 2`等）、時系列トレンド | パターン相関・フラップ検知・AI要約（Ollama/ルールベース） |
+| 判断基準 | 「今どういう状態か」を数値で継続的に見る | 「何が起きたか」をイベント単位で解釈する |
+
+Splunkのようなログ集約基盤も選択肢としてあり得るが、既にPrometheus基盤が
+あること・メトリクス中心の監視要件であることから、メトリクスは
+Alertmanager、ログは自作のAI syslogモニターで分担する構成を採用している。
+詳細: `docs/syslog-ai-monitor.md`
+
 ## 1. アプリ本体 + Prometheus Exporter
 
 ```bash
