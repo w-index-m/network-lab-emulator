@@ -151,7 +151,7 @@ function fmtAxisVal(v, unit) {
 
 // 横軸=時刻(times)、縦軸=値(unit付き)のラベルを持つチャートを描画する。
 // times が無い場合はインデックスをそのまま等間隔の時刻として扱う。
-function sparkSvg(values, color, min, max, times, unit) {
+function sparkSvg(values, color, min, max, times, unit, yStep) {
   const w = 340, h = 170;
   const leftPad = 46, rightPad = 10, topPad = 10, bottomPad = 24;
   const plotW = w - leftPad - rightPad, plotH = h - topPad - bottomPad;
@@ -172,10 +172,18 @@ function sparkSvg(values, color, min, max, times, unit) {
   const area = `${leftPad},${topPad + plotH} ` + line + ` ${leftPad + plotW},${topPad + plotH}`;
   const gradId = 'g' + Math.random().toString(36).slice(2, 8);
 
-  // Y軸: 上端(max)/中央/下端(min) の3段階でラベル表示
-  const yLabels = [hi, (hi + lo) / 2, lo].map((v, i) => {
-    const y = topPad + (plotH / 2) * i;
-    return `<text x="${leftPad - 6}" y="${y + 3}" fill="#8e9297" font-size="10" text-anchor="end">${fmtAxisVal(v, unit)}</text>
+  // Y軸: yStep指定時はhi〜loをその刻みで全段階ラベル表示（例: 10%刻み）、
+  // 未指定時は上端(max)/中央/下端(min)の3段階のみ
+  let yTicks;
+  if (yStep) {
+    yTicks = [];
+    for (let v = Math.ceil(lo / yStep) * yStep; v <= hi + 1e-9; v += yStep) yTicks.push(v);
+  } else {
+    yTicks = [hi, (hi + lo) / 2, lo];
+  }
+  const yLabels = yTicks.map(v => {
+    const y = topPad + plotH - ((v - lo) / span) * plotH;
+    return `<text x="${leftPad - 6}" y="${y + 3}" fill="#8e9297" font-size="9" text-anchor="end">${fmtAxisVal(v, unit)}</text>
             <line x1="${leftPad}" y1="${y}" x2="${w - rightPad}" y2="${y}" stroke="#22252b" stroke-width="1"/>`;
   }).join('');
 
@@ -239,7 +247,7 @@ function render(data) {
     const times = entries.map(h => h.t);
     html += `<div class="panel span-4">
       <div class="panel-header"><span class="ptitle">📈 ${d.hostname} — CPU Utilization</span><span class="panel-icon">${d.type}</span></div>
-      <div class="panel-body">${sparkSvg(hist, cpuColors[i % cpuColors.length], 0, 100, times, '%')}</div>
+      <div class="panel-body">${sparkSvg(hist, cpuColors[i % cpuColors.length], 0, 100, times, '%', 10)}</div>
       <div class="legend"><span class="item"><span class="swatch" style="background:${cpuColors[i % cpuColors.length]}"></span>cpu_percent{device="${d.device_id}"} = ${d.cpu_percent}%</span></div>
     </div>`;
   });
