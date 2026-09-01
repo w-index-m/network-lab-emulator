@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['localhost:<%= @alertmanager_port %>']
+rule_files:
+  - <%= @stack_dir %>/alert_rules.yml
+scrape_configs:
+  - job_name: 'netlab-emulator'
+    static_configs:
+      - targets: ['localhost:<%= @exporter_port %>']

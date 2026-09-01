@@ -1,0 +1,11 @@
+monitoring_stack:
+  stack_dir: /tmp/netlab-stack
+  repo_dir: /home/user/network-lab-emulator
+  app_port: 8000
+  exporter_port: 9877
+  prom_port: 9090
+  alertmanager_port: 9093
+  grafana_port: 3000
+  prom_version: "2.54.1"
+  alertmanager_version: "0.27.0"
+  grafana_release_url: "https://github.com/w-index-m/network-lab-emulator/releases/download/grafana/grafana.tar.gz"

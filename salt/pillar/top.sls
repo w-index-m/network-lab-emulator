@@ -1,0 +1,3 @@
+base:
+  '*':
+    - monitoring_stack

@@ -1,0 +1,13 @@
+---
+- name: Ensure stack directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}"
+    state: directory
+    mode: "0755"
+
+- import_tasks: app.yml
+- import_tasks: exporter.yml
+- import_tasks: prometheus.yml
+- import_tasks: alertmanager.yml
+- import_tasks: grafana.yml
+- import_tasks: frr.yml

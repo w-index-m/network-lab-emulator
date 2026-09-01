@@ -1,0 +1,5 @@
+name 'monitoring_stack'
+maintainer 'network-lab-emulator'
+version '0.1.0'
+description 'Provisions Prometheus/Alertmanager/Grafana/FRR for network-lab-emulator'
+chef_version '>= 15.0'

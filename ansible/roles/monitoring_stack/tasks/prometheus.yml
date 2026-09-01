@@ -1,0 +1,61 @@
+---
+- name: Check if Prometheus is already up
+  ansible.builtin.uri:
+    url: "http://localhost:{{ prom_port }}/-/healthy"
+    status_code: 200
+  register: prom_check
+  failed_when: false
+
+- name: Check if Prometheus binary already extracted
+  ansible.builtin.stat:
+    path: "{{ stack_dir }}/prometheus-{{ prom_version }}.linux-amd64/prometheus"
+  register: prom_bin
+
+- name: Download Prometheus release tarball
+  ansible.builtin.get_url:
+    url: "https://github.com/prometheus/prometheus/releases/download/v{{ prom_version }}/prometheus-{{ prom_version }}.linux-amd64.tar.gz"
+    dest: "{{ stack_dir }}/prometheus.tar.gz"
+  when: not prom_bin.stat.exists
+
+- name: Extract Prometheus tarball
+  ansible.builtin.unarchive:
+    src: "{{ stack_dir }}/prometheus.tar.gz"
+    dest: "{{ stack_dir }}"
+    remote_src: true
+    creates: "{{ stack_dir }}/prometheus-{{ prom_version }}.linux-amd64/prometheus"
+  when: not prom_bin.stat.exists
+
+- name: Render alert_rules.yml
+  ansible.builtin.template:
+    src: alert_rules.yml.j2
+    dest: "{{ stack_dir }}/alert_rules.yml"
+    mode: "0644"
+  when: prom_check.status | default(0) != 200
+
+- name: Render prometheus.yml
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: "{{ stack_dir }}/prometheus.yml"
+    mode: "0644"
+  when: prom_check.status | default(0) != 200
+
+- name: Start Prometheus
+  ansible.builtin.shell: >
+    nohup {{ stack_dir }}/prometheus-{{ prom_version }}.linux-amd64/prometheus
+    --config.file={{ stack_dir }}/prometheus.yml
+    --storage.tsdb.path={{ stack_dir }}/prom-data
+    --web.listen-address=0.0.0.0:{{ prom_port }}
+    > {{ stack_dir }}/prometheus.log 2>&1 &
+  args:
+    executable: /bin/bash
+  when: prom_check.status | default(0) != 200
+
+- name: Wait for Prometheus to become healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ prom_port }}/-/healthy"
+    status_code: 200
+  register: prom_wait
+  until: prom_wait.status | default(0) == 200
+  retries: 15
+  delay: 2
+  when: prom_check.status | default(0) != 200

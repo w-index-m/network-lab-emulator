@@ -1,0 +1,26 @@
+---
+- name: Check if network-lab-emulator app is already up
+  ansible.builtin.uri:
+    url: "http://localhost:{{ app_port }}/api/snmp/dashboard"
+    status_code: 200
+  register: app_check
+  failed_when: false
+
+- name: Start network-lab-emulator (uvicorn)
+  ansible.builtin.shell: >
+    cd {{ repo_dir }} &&
+    NETLAB_AUTH_DISABLE=1 nohup uvicorn app:app --host 0.0.0.0 --port {{ app_port }}
+    > {{ stack_dir }}/app.log 2>&1 &
+  args:
+    executable: /bin/bash
+  when: app_check.status | default(0) != 200
+
+- name: Wait for app to become healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ app_port }}/api/snmp/dashboard"
+    status_code: 200
+  register: app_wait
+  until: app_wait.status | default(0) == 200
+  retries: 15
+  delay: 3
+  when: app_check.status | default(0) != 200

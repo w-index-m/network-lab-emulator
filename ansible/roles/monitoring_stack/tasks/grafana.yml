@@ -1,0 +1,75 @@
+---
+- name: Check if Grafana is already up
+  ansible.builtin.uri:
+    url: "http://localhost:{{ grafana_port }}/api/health"
+    status_code: 200
+  register: grafana_check
+  failed_when: false
+
+- name: Find already-extracted Grafana directory
+  ansible.builtin.find:
+    paths: "{{ stack_dir }}"
+    patterns: "grafana-*"
+    file_type: directory
+  register: grafana_dirs
+
+- name: Download Grafana release tarball
+  ansible.builtin.get_url:
+    url: "{{ grafana_release_url }}"
+    dest: "{{ stack_dir }}/grafana.tar.gz"
+  when: grafana_dirs.matched == 0
+
+- name: Extract Grafana tarball
+  ansible.builtin.unarchive:
+    src: "{{ stack_dir }}/grafana.tar.gz"
+    dest: "{{ stack_dir }}"
+    remote_src: true
+  when: grafana_dirs.matched == 0
+
+- name: Re-find Grafana directory after extraction
+  ansible.builtin.find:
+    paths: "{{ stack_dir }}"
+    patterns: "grafana-*"
+    file_type: directory
+  register: grafana_dirs2
+
+- name: Set grafana_home fact
+  ansible.builtin.set_fact:
+    grafana_home: "{{ (grafana_dirs.matched > 0) | ternary(grafana_dirs.files[0].path, grafana_dirs2.files[0].path) }}"
+
+- name: Start Grafana
+  ansible.builtin.shell: >
+    nohup {{ grafana_home }}/bin/grafana server --homepath={{ grafana_home }}
+    --config={{ grafana_home }}/conf/defaults.ini
+    cfg:default.server.http_port={{ grafana_port }}
+    > {{ stack_dir }}/grafana.log 2>&1 &
+  args:
+    executable: /bin/bash
+  when: grafana_check.status | default(0) != 200
+
+- name: Wait for Grafana to become healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ grafana_port }}/api/health"
+    status_code: 200
+  register: grafana_wait
+  until: grafana_wait.status | default(0) == 200
+  retries: 20
+  delay: 3
+  when: grafana_check.status | default(0) != 200
+
+- name: Register Prometheus datasource in Grafana
+  ansible.builtin.uri:
+    url: "http://localhost:{{ grafana_port }}/api/datasources"
+    method: POST
+    user: admin
+    password: admin
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: Prometheus
+      type: prometheus
+      url: "http://localhost:{{ prom_port }}"
+      access: proxy
+      isDefault: true
+    status_code: [200, 409]
+  when: grafana_check.status | default(0) != 200
