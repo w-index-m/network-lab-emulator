@@ -111,8 +111,90 @@ Windows Docker Desktop環境の監視スタック（`monitoring\docker-compose.y
 | `ollama.com`（インストーラー配布元） | ❌ ブロック |
 | `registry.ollama.ai`（モデルレジストリ、`ollama pull`が使う） | ❌ ブロック |
 | `huggingface.co`（GGUF直接配布元） | ❌ ブロック |
-| `github.com/ollama/ollama/releases/download/...`（Ollama本体バイナリ） | ✅ 取得可（v0.13.0で動作確認済み、`ollama serve`起動成功） |
-| `github.com/<自リポジトリ>/releases/download/...`（GGUFモデルの回避経路） | ✅ 取得可（Grafanaと同じ経路、未検証だが同一メカニズム） |
+| `github.com/ollama/ollama/releases/download/...`（Ollama本体バイナリ） | ✅ 取得可（v0.9.6で動作確認済み、`ollama serve`起動成功） |
+| `github.com/<自リポジトリ>/releases/download/...`（GGUFモデルの回避経路） | ✅ 取得可（Grafanaと同じ経路、実際にQwen2.5で確認済み） |
 
 Ollama本体（サーバー）はこの環境でも起動できることは確認済み。
-不足しているのはモデル重みファイルのみ。
+
+## 実際に確認した動作（エンドツーエンド、実機確認済み）
+
+Windows PC側でのGGUFダウンロード → GitHub Releaseアップロード →
+このAI実行環境での取り込み・推論、という一連の流れを実際に通した。
+
+### 1. Windows PC側
+
+`https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF` から
+`Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`（約986MB、f16は2GB超で不可のため
+量子化版を選択）をダウンロードし、`w-index-m/network-lab-emulator` の
+Releaseタグ `Qwen2.5` にアセットとしてアップロード。
+
+### 2. AI実行環境側（実際に実行したコマンド）
+
+```bash
+# --- GGUFの取得とsha256検証 ---
+curl -sL -o Qwen2.5-1.5B-Instruct-Q4_K_M.gguf \
+  "https://github.com/w-index-m/network-lab-emulator/releases/download/Qwen2.5/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
+sha256sum Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
+# → 1adf0b11065d8ad2e8123ea110d1ec956dab4ab038eab665614adba04b6c337
+#   GitHub Release側のasset digestと完全一致、破損なしを確認
+
+# --- Ollama本体の取得(GitHub Releases経由、latestタグはAPI経由の解決が
+#     必要でブロックされるため、git ls-remote --tagsでタグ名を先に特定) ---
+git ls-remote --tags https://github.com/ollama/ollama | tail -5
+curl -sL --retry 3 -o ollama.tgz \
+  "https://github.com/ollama/ollama/releases/download/v0.9.6/ollama-linux-amd64.tgz"
+tar xzf ollama.tgz -C ollama_extract
+
+# --- サーバー起動(GPU無し環境のためCPUモードで自動フォールバック) ---
+export OLLAMA_MODELS=/tmp/ollama_models
+export LD_LIBRARY_PATH=/tmp/ollama_extract/lib/ollama
+nohup /tmp/ollama_extract/bin/ollama serve > /tmp/ollama_serve.log 2>&1 &
+# → "no compatible GPUs were discovered" / "inference compute" library=cpu
+#    total="15.7 GiB" available="14.4 GiB"
+
+# --- モデル取り込み ---
+cat > Modelfile << 'EOF'
+FROM ./Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ .Response }}<|im_end|>
+"""
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|im_start|>"
+EOF
+ollama create qwen2.5-1.5b -f Modelfile
+# → success
+```
+
+### 3. 実推論の確認
+
+```bash
+ollama run qwen2.5-1.5b \
+  "Catalystスイッチでインターフェースがdownしたときに確認すべきコマンドを3つ、日本語で簡潔に教えて"
+```
+
+実際の応答（CPU実行、約10秒）:
+
+```
+1. `show interfaces`
+2. `show ip interface brief`
+3. `show cdp neighbor`
+```
+
+的確な内容が日本語プロンプトに対して日本語(コマンド部分は英語)で
+返ってきており、CPUのみでも実用速度（1問あたり約10秒）で応答することを
+確認した。これで `nl_monitor_control.py` / `oscap_ai_advisor.py` /
+`cisco_router_triage.py` の `OLLAMA_MODEL=qwen2.5-1.5b` 指定での
+実運用が現実的であることが裏付けられた。
+
+**補足（つまずいた点）**:
+- `ollama/ollama` リポジトリはセッションに未接続だったため、GitHub MCP
+  経由のAPIでは`releases/latest`を解決できなかった。`git clone`/
+  `git ls-remote`は匿名でも許可されているため、タグ一覧を`git ls-remote
+  --tags`で直接取得してバージョンを特定する方法で回避した
+- `releases/download/...`への初回`curl`は転送途中で`ws_closed_mid_exchange`
+  エラーになることがあった（1.3GBの大きめアセット）。`--retry 3`を付けて
+  再実行することで解決した
