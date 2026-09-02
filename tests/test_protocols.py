@@ -482,26 +482,32 @@ class TestRouteFilter:
 # ARP テスト
 # ══════════════════════════════════════════
 class TestArp:
-    def test_arp_resolve_same_segment(self, fresh_engines):
+    """
+    arp_engine.resolve() は同期のキャッシュ参照のみで、それ自体は
+    ARP解決を行わない（テーブルが空なら常にNoneを返す）。実際の
+    ARP Request/Reply交換とテーブルへの記録は非同期の
+    resolve_with_packet() が担うため、こちらを使ってテストする。
+    """
+    async def test_arp_resolve_same_segment(self, fresh_engines):
         """同一セグメント内のIPはARP解決できる"""
         from engine.protocols import arp_engine
         e = fresh_engines
         arp_engine.tables.clear()
         e['icmp'].register_device('R1', 'R1',
                                    {'lan0': {'ip': '192.168.1.1', 'prefix': 24}})
-        mac = arp_engine.resolve('R1', '192.168.1.50')
+        mac = await arp_engine.resolve_with_packet('R1', '192.168.1.50')
         assert mac is not None, "同一セグメントのARP解決失敗"
         # テーブルに記録されている
         assert '192.168.1.50' in arp_engine.tables['R1']
 
-    def test_arp_no_resolve_other_segment(self, fresh_engines):
+    async def test_arp_no_resolve_other_segment(self, fresh_engines):
         """別セグメントのIPはARP解決できない"""
         from engine.protocols import arp_engine
         e = fresh_engines
         arp_engine.tables.clear()
         e['icmp'].register_device('R1', 'R1',
                                    {'lan0': {'ip': '192.168.1.1', 'prefix': 24}})
-        mac = arp_engine.resolve('R1', '10.99.99.99')
+        mac = await arp_engine.resolve_with_packet('R1', '10.99.99.99')
         assert mac is None, "別セグメントなのにARP解決できている"
 
     def test_arp_static_entry(self, fresh_engines):
@@ -511,15 +517,16 @@ class TestArp:
         arp_engine.add_static('R1', '192.168.1.99', '00:11:22:33:44:55')
         assert arp_engine.tables['R1']['192.168.1.99'].entry_type == 'static'
 
-    def test_arp_cache(self, fresh_engines):
+    async def test_arp_cache(self, fresh_engines):
         """一度解決したARPはキャッシュされる"""
         from engine.protocols import arp_engine
         e = fresh_engines
         arp_engine.tables.clear()
         e['icmp'].register_device('R1', 'R1',
                                    {'lan0': {'ip': '192.168.1.1', 'prefix': 24}})
-        mac1 = arp_engine.resolve('R1', '192.168.1.50')
-        mac2 = arp_engine.resolve('R1', '192.168.1.50')
+        mac1 = await arp_engine.resolve_with_packet('R1', '192.168.1.50')
+        mac2 = await arp_engine.resolve_with_packet('R1', '192.168.1.50')
+        assert mac1 is not None, "初回のARP解決に失敗した"
         assert mac1 == mac2, "ARPキャッシュが一貫していない"
 
 
@@ -1406,7 +1413,7 @@ class TestUdpPacketSend:
         async def _run():
             await d.emit('R1', 'Router1', '1.3.6.1.6.3.1.1.5.1', 'link up')
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
         t.join(timeout=2.5)
         assert len(received) >= 1, 'SnmpDispatcher からパケットが届いていない'
 
@@ -1454,6 +1461,6 @@ class TestUdpPacketSend:
             assert len(results) == 1
             assert results[0]['sent'] is True
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
         t.join(timeout=3.0)
         assert len(received) >= 1, 'NTP poll_once でパケットが届いていない'
