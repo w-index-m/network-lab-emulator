@@ -121,3 +121,50 @@ curl -G http://localhost:3100/loki/api/v1/query_range \
 Prometheusと同様、GrafanaのデータソースとしてLoki（`http://localhost:3100`）
 を追加すれば、Explore画面でLogQLクエリが実行できる。まだデータソース
 登録・ダッシュボード連携までは未実施。
+
+## 装置ログをLokiに転送する
+
+`tools/syslog_to_loki.py`: `logging host <IP>`設定による実UDP syslogを
+受信してLokiに転送するブリッジ。ただし**重要な制約**がある。
+
+### 発見した制約: `shutdown`コマンドはUDP syslogとして飛ばない
+
+network-lab-emulatorの実UDP syslog送信パイプライン
+（`engine/syslog_sender.py`の`syslog_dispatcher`）は、OSPF/RIP/BGP/STP
+ログ等、限定されたイベント種別(`msg_type`)のみを対象にしている
+（`engine/protocols.py`の該当箇所を参照）。CLIで`shutdown`/`no shutdown`
+した際に出る`%LINK-3-UPDOWN`は`show logging`の内部バッファには記録
+されるが、この実送信パイプラインの対象には含まれていないため、
+`syslog_to_loki.py`だけではインターフェースdown/upのログはLokiに
+届かない。
+
+### 対応: `tools/device_log_to_loki.py`
+
+この制約を回避するため、対象装置の`show logging`を定期ポーリングし、
+新規に増えた行だけをLokiにpushするツールを追加した。
+
+```bash
+python tools/device_log_to_loki.py --devices catalyst,nexus --interval 3
+```
+
+### 実際に確認した動作
+
+CatalystとNexusで実際にインターフェースを`shutdown`し、Lokiに転送・
+LogQLで検索できることを確認した:
+
+```bash
+curl -G http://localhost:3100/loki/api/v1/query_range \
+  --data-urlencode 'query={job="netlab-device-log"} |= "UPDOWN"' \
+  --data-urlencode 'start=<unix_nano>' --data-urlencode 'end=<unix_nano>'
+```
+
+結果（抜粋）:
+```
+nexus / nexus
+   *Sep 02 07:03:36.724: %LINK-3-UPDOWN: Interface GigabitEthernet0/0/1, changed state to down
+catalyst / Dist-SW
+   *Sep 02 07:03:31.797: %LINK-3-UPDOWN: Interface GigabitEthernet1/0/1, changed state to down
+```
+
+両装置のlink downイベントが正しくLokiに取り込まれ、LogQLで検索できる
+ことを確認済み。
