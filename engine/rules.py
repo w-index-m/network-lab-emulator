@@ -741,11 +741,12 @@ class RuleEngine:
         elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
                              "config-crypto", "config-monitor",
                              "config-cmap", "config-pmap", "config-vs-domain",
-                             "config-dhcp"):
+                             "config-dhcp", "config-sg-tacacs"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
-                         '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool'):
+                         '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool',
+                         '_aaa_group_name'):
                 if hasattr(state, attr):
                     delattr(state, attr)
         elif state.mode == "config":

@@ -627,6 +627,11 @@ async def cli_command(body: dict):
     # ── プロトコル設定コマンド検出 ──
     await handle_protocol_config(device_id, command, state)
 
+    # ── NX-OS TACACS+ / AAA 設定 ──
+    tacacs_out = _handle_nexus_tacacs_config(device_id, command, state)
+    if tacacs_out is not None:
+        return {"output": tacacs_out, "mode": state.mode, "hostname": state.hostname}
+
     # ルールベースで処理
     c_low = command.lower().strip()
 
@@ -1250,6 +1255,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             if iface:
                 vpc_engine.add_vpc_member(device_id, iface, int(m_vpc_member.group(1)))
             return
+
 
     # ── vPC / NX-OS show コマンド ──
     if re.match(r'^show\s+vpc\s+peer-keepalive', c):
@@ -2782,6 +2788,32 @@ def _build_running_config(device_id: str, state) -> str:
                 peer_ip = bn.get('_neighbor_ips', {}).get(sid, sess.neighbor_id)
                 lines.append(f'  neighbor {peer_ip} remote-as {sess.remote_as}')
             lines.append('')
+        # TACACS+ / AAA
+        if getattr(state, 'tacacs_feature_enabled', False):
+            lines.append('feature tacacs+')
+            lines.append('')
+            for h in getattr(state, 'tacacs_hosts', []):
+                key_part = ' key ****' if h.get('key') else ''
+                lines.append(f"tacacs-server host {h['host']}{key_part}")
+            if getattr(state, 'tacacs_hosts', []):
+                lines.append('')
+            for name, g in getattr(state, 'aaa_tacacs_groups', {}).items():
+                lines.append(f'aaa group server tacacs+ {name}')
+                for srv in g.get('servers', []):
+                    lines.append(f'  server {srv}')
+                lines.append('')
+            authc = getattr(state, 'aaa_authentication_login', None)
+            if authc:
+                suffix = ' local' if authc.get('local_fallback') else ''
+                lines.append(f"aaa authentication login default group {authc['group']}{suffix}")
+            authz = getattr(state, 'aaa_authorization_commands', None)
+            if authz:
+                suffix = ' local' if authz.get('local_fallback') else ''
+                lines.append(f"aaa authorization commands default group {authz['group']}{suffix}")
+            acct = getattr(state, 'aaa_accounting_commands', None)
+            if acct:
+                lines.append(f"aaa accounting commands default group {acct['group']}")
+            lines.append('')
         lines.append('! end')
         return '\n'.join(lines)
 
@@ -3056,6 +3088,125 @@ def _prefix_to_mask(prefix: int) -> str:
     """プレフィックス長をサブネットマスクに変換"""
     mask = (0xffffffff << (32 - prefix)) & 0xffffffff
     return f'{(mask>>24)&0xff}.{(mask>>16)&0xff}.{(mask>>8)&0xff}.{mask&0xff}'
+
+
+def _handle_nexus_tacacs_config(device_id: str, command: str, state: DeviceState):
+    """
+    NX-OS の TACACS+ / AAA 設定コマンドを解釈する。
+    設定コマンドを処理したら出力文字列("" 含む)を、対象外なら None を返す。
+    rule_engine.process() より前に呼ばれ、ここで処理したコマンドは
+    rule_engine側の一般設定処理と競合させないよう早期returnする
+    （state.modeの上書き競合を防ぐため）。
+    """
+    if state.device_type != 'nexus':
+        return None
+    c = command.lower().strip()
+    orig = command.strip()
+
+    # feature tacacs+ / no feature tacacs+
+    if re.match(r'^feature\s+tacacs\+?$', c):
+        state.tacacs_feature_enabled = True
+        return ""
+    if re.match(r'^no\s+feature\s+tacacs\+?$', c):
+        state.tacacs_feature_enabled = False
+        return ""
+
+    # tacacs-server host <ip> [key <key>] [port <n>]
+    m_tac_host = re.match(r'^tacacs-server\s+host\s+([\d.]+)(?:\s+key\s+(\S+))?(?:\s+port\s+(\d+))?', c)
+    if m_tac_host:
+        if not hasattr(state, 'tacacs_hosts'):
+            state.tacacs_hosts = []
+        ip = m_tac_host.group(1)
+        key = m_tac_host.group(2) or ''
+        port = int(m_tac_host.group(3)) if m_tac_host.group(3) else 49
+        existing = next((h for h in state.tacacs_hosts if h['host'] == ip), None)
+        if existing:
+            if key:
+                existing['key'] = key
+            existing['port'] = port
+        else:
+            state.tacacs_hosts.append({'host': ip, 'key': key, 'port': port})
+        return ""
+
+    # no tacacs-server host <ip>
+    m_no_tac_host = re.match(r'^no\s+tacacs-server\s+host\s+([\d.]+)', c)
+    if m_no_tac_host:
+        if hasattr(state, 'tacacs_hosts'):
+            state.tacacs_hosts = [h for h in state.tacacs_hosts if h['host'] != m_no_tac_host.group(1)]
+        return ""
+
+    # aaa group server tacacs+ <name>
+    m_aaa_group = re.match(r'^aaa\s+group\s+server\s+tacacs\+?\s+(\S+)', c)
+    if m_aaa_group:
+        if not hasattr(state, 'aaa_tacacs_groups'):
+            state.aaa_tacacs_groups = {}
+        group_name = orig.split()[-1]
+        state.aaa_tacacs_groups.setdefault(group_name, {'servers': []})
+        state.mode = 'config-sg-tacacs'
+        state._aaa_group_name = group_name
+        return ""
+
+    # config-sg-tacacs サブモード内: server <ip>
+    if state.mode == 'config-sg-tacacs':
+        m_sg_server = re.match(r'^server\s+([\d.]+)', c)
+        if m_sg_server:
+            group_name = getattr(state, '_aaa_group_name', None)
+            if group_name and hasattr(state, 'aaa_tacacs_groups'):
+                g = state.aaa_tacacs_groups.setdefault(group_name, {'servers': []})
+                if m_sg_server.group(1) not in g['servers']:
+                    g['servers'].append(m_sg_server.group(1))
+            return ""
+
+    # aaa authentication login default group <name> [local]
+    m_aaa_authc = re.match(r'^aaa\s+authentication\s+login\s+default\s+group\s+(\S+)(\s+local)?', c)
+    if m_aaa_authc:
+        m_orig = re.match(r'^aaa\s+authentication\s+login\s+default\s+group\s+(\S+)(\s+local)?', orig, re.I)
+        state.aaa_authentication_login = {
+            'group': m_orig.group(1) if m_orig else m_aaa_authc.group(1),
+            'local_fallback': bool(m_aaa_authc.group(2)),
+        }
+        return ""
+
+    # aaa authorization commands default group <name> [local]
+    m_aaa_authz = re.match(r'^aaa\s+authorization\s+commands\s+default\s+group\s+(\S+)(\s+local)?', c)
+    if m_aaa_authz:
+        m_orig = re.match(r'^aaa\s+authorization\s+commands\s+default\s+group\s+(\S+)(\s+local)?', orig, re.I)
+        state.aaa_authorization_commands = {
+            'group': m_orig.group(1) if m_orig else m_aaa_authz.group(1),
+            'local_fallback': bool(m_aaa_authz.group(2)),
+        }
+        return ""
+
+    # aaa accounting commands default group <name>
+    m_aaa_acct = re.match(r'^aaa\s+accounting\s+commands\s+default\s+group\s+(\S+)', c)
+    if m_aaa_acct:
+        m_orig = re.match(r'^aaa\s+accounting\s+commands\s+default\s+group\s+(\S+)', orig, re.I)
+        state.aaa_accounting_commands = {'group': m_orig.group(1) if m_orig else m_aaa_acct.group(1)}
+        return ""
+
+    # show tacacs-server
+    if re.match(r'^show\s+tacacs-server$', c):
+        hosts = getattr(state, 'tacacs_hosts', [])
+        if not hosts:
+            return 'No TACACS+ server configured'
+        lines = []
+        for h in hosts:
+            lines.append(f"Tacacs server: {h['host']}")
+            lines.append(f"    Port         : {h['port']}")
+            lines.append(f"    Shared secret: {'*' * len(h['key']) if h['key'] else '(none)'}")
+        return '\n'.join(lines)
+
+    # show aaa groups
+    if re.match(r'^show\s+aaa\s+groups?$', c):
+        groups = getattr(state, 'aaa_tacacs_groups', {})
+        if not groups:
+            return 'No AAA server groups configured'
+        lines = ['total number of groups:{}'.format(len(groups)), 'following groups are configured:']
+        for name in groups:
+            lines.append(f'    {name}')
+        return '\n'.join(lines)
+
+    return None
 
 
 def _handle_nat_config(device_id: str, command: str, state: DeviceState):
