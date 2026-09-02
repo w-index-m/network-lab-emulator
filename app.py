@@ -649,6 +649,15 @@ async def cli_command(body: dict):
     if command.lower() in ("cls", "clear screen"):
         return {"output": "\x0c", "mode": state.mode, "hostname": state.hostname}
 
+    # ── terminal length/width/monitor 等（実機と同様、表示設定のみで
+    # 状態には影響しない）── unicon等の自動化ツールが接続直後に必ず
+    # 送るコマンド群のため、全機種共通で受理する
+    c_lower = command.lower().strip()
+    if re.match(r'^(terminal|term)\s+(length|width|monitor|no monitor|no\s+monitor|'
+                r'pager|editing|no editing)\b', c_lower) or c_lower in (
+                    'terminal length 0', 'term length 0', 'terminal no monitor'):
+        return {"output": "", "mode": state.mode, "hostname": state.hostname}
+
     # ── ICMP: ping / traceroute（実到達性判定）──
     icmp_out = await handle_icmp(device_id, command, state)
     if icmp_out is not None:
