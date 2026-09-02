@@ -1812,6 +1812,14 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         else:
             prefix = 24
         rib_engine.remove_static_route(device_id, net, prefix)
+        # state.static_routes（rules.py側の別リスト）に残ったままだと、
+        # インターフェースイベント等での再同期時にrib_engineへ復活してしまうため
+        # こちらも合わせて削除する
+        if hasattr(state, 'static_routes'):
+            state.static_routes = [
+                r for r in state.static_routes
+                if not (r.get('dest') == net and r.get('prefix', 24) == prefix)
+            ]
         return
 
     # ── RIP ──

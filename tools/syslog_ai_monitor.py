@@ -39,7 +39,10 @@ except ImportError:
     httpx = None
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+# qwen2.5-netops: docs/qwen-network-system-prompt.md のModelfileで作成した
+# ネットワーク運用特化モデル。SYSTEMプロンプトに切り分け手順の優先度付けや
+# 緊急度判定ルールを焼き込んであるため、このツールの用途にデフォルトで直結する。
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-netops")
 
 SEVERITY_NAMES = {
     0: 'emergencies', 1: 'alerts', 2: 'critical', 3: 'errors',
