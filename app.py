@@ -198,6 +198,22 @@ def _save_config():
             crypto = getattr(state, "ipsec_crypto", {})
             if crypto:
                 dev_data["ipsec_crypto"] = crypto
+        # NX-OS TACACS+ / AAA設定を保存
+        if state.device_type == "nexus":
+            if getattr(state, "tacacs_feature_enabled", False):
+                dev_data["tacacs_feature_enabled"] = True
+            if getattr(state, "tacacs_hosts", None):
+                dev_data["tacacs_hosts"] = state.tacacs_hosts
+            if getattr(state, "aaa_tacacs_groups", None):
+                dev_data["aaa_tacacs_groups"] = state.aaa_tacacs_groups
+            if getattr(state, "aaa_authentication_login", None):
+                dev_data["aaa_authentication_login"] = state.aaa_authentication_login
+            if getattr(state, "aaa_authorization_commands", None):
+                dev_data["aaa_authorization_commands"] = state.aaa_authorization_commands
+            if getattr(state, "aaa_accounting_commands", None):
+                dev_data["aaa_accounting_commands"] = state.aaa_accounting_commands
+            if getattr(state, "aaa_accounting_exec", None):
+                dev_data["aaa_accounting_exec"] = state.aaa_accounting_exec
         data["devices"][dev_id] = dev_data
     # vnetリンク
     for a, neighbors in vnet.links.items():
@@ -289,6 +305,22 @@ def _load_config():
         # Cisco/Catalyst IPsec設定を復元
         if dev_data["type"] in ("cisco", "catalyst") and dev_data.get("ipsec_crypto"):
             state.ipsec_crypto = dev_data["ipsec_crypto"]
+        # NX-OS TACACS+ / AAA設定を復元
+        if dev_data["type"] == "nexus":
+            if dev_data.get("tacacs_feature_enabled"):
+                state.tacacs_feature_enabled = True
+            if dev_data.get("tacacs_hosts"):
+                state.tacacs_hosts = dev_data["tacacs_hosts"]
+            if dev_data.get("aaa_tacacs_groups"):
+                state.aaa_tacacs_groups = dev_data["aaa_tacacs_groups"]
+            if dev_data.get("aaa_authentication_login"):
+                state.aaa_authentication_login = dev_data["aaa_authentication_login"]
+            if dev_data.get("aaa_authorization_commands"):
+                state.aaa_authorization_commands = dev_data["aaa_authorization_commands"]
+            if dev_data.get("aaa_accounting_commands"):
+                state.aaa_accounting_commands = dev_data["aaa_accounting_commands"]
+            if dev_data.get("aaa_accounting_exec"):
+                state.aaa_accounting_exec = dev_data["aaa_accounting_exec"]
         device_sessions[dev_id] = state
         vnet.device_types[dev_id] = state.device_type
         ifaces = {name: {'ip': info.get('ip',''), 'prefix': info.get('prefix',24)}

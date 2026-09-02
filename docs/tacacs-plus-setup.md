@@ -159,6 +159,22 @@ python tools/nexus_cmd_to_tacacs.py --tacacs-host 127.0.0.1 --tacacs-key demo \
 （`show ip interface brief <cr>`等が入る）とは区別されたセッション単位の
 記録であることが分かる。
 
+## 設定の永続化
+
+Nexusに投入したTACACS+/AAA設定（`feature tacacs+`、`tacacs-server host`、
+`aaa group server tacacs+`、`aaa authentication/authorization/accounting`）は
+`saved_config.json`に保存され、アプリ再起動後も復元される
+（60秒ごとの自動保存、または`POST /api/save`で即時保存）。
+
+実際に確認した動作: 全TACACS+/AAA設定を投入 → `/api/save` →
+プロセスを完全に再起動 → `show running-config`/`show tacacs-server`で
+設定が元通り復元されることを確認済み。
+
+```bash
+pytest tests/test_nexus_tacacs_persistence.py -v
+# 3/3 成功
+```
+
 ## 制約
 
 - network-lab-emulator本体にはTACACS+クライアント機能が無いため、
