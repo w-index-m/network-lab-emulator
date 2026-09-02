@@ -2810,6 +2810,9 @@ def _build_running_config(device_id: str, state) -> str:
             if authz:
                 suffix = ' local' if authz.get('local_fallback') else ''
                 lines.append(f"aaa authorization commands default group {authz['group']}{suffix}")
+            acct_exec = getattr(state, 'aaa_accounting_exec', None)
+            if acct_exec:
+                lines.append(f"aaa accounting default group {acct_exec['group']}")
             acct = getattr(state, 'aaa_accounting_commands', None)
             if acct:
                 lines.append(f"aaa accounting commands default group {acct['group']}")
@@ -3182,6 +3185,13 @@ def _handle_nexus_tacacs_config(device_id: str, command: str, state: DeviceState
     if m_aaa_acct:
         m_orig = re.match(r'^aaa\s+accounting\s+commands\s+default\s+group\s+(\S+)', orig, re.I)
         state.aaa_accounting_commands = {'group': m_orig.group(1) if m_orig else m_aaa_acct.group(1)}
+        return ""
+
+    # aaa accounting default group <name>  (ログイン/ログアウト=EXECセッションのアカウンティング)
+    m_aaa_acct_exec = re.match(r'^aaa\s+accounting\s+default\s+group\s+(\S+)', c)
+    if m_aaa_acct_exec:
+        m_orig = re.match(r'^aaa\s+accounting\s+default\s+group\s+(\S+)', orig, re.I)
+        state.aaa_accounting_exec = {'group': m_orig.group(1) if m_orig else m_aaa_acct_exec.group(1)}
         return ""
 
     # show tacacs-server

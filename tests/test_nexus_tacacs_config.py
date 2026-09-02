@@ -111,3 +111,20 @@ def test_show_aaa_groups_lists_group_names():
     app._handle_nexus_tacacs_config('nexus', 'aaa group server tacacs+ TAC-GROUP', state)
     out = app._handle_nexus_tacacs_config('nexus', 'show aaa groups', state)
     assert 'TAC-GROUP' in out
+
+
+def test_aaa_accounting_default_group_preserves_case():
+    state = _nexus_state()
+    app._handle_nexus_tacacs_config(
+        'nexus', 'aaa accounting default group TAC-GROUP', state)
+    assert state.aaa_accounting_exec == {'group': 'TAC-GROUP'}
+
+
+def test_aaa_accounting_default_does_not_clash_with_commands_variant():
+    state = _nexus_state()
+    app._handle_nexus_tacacs_config(
+        'nexus', 'aaa accounting commands default group CMD-GROUP', state)
+    app._handle_nexus_tacacs_config(
+        'nexus', 'aaa accounting default group EXEC-GROUP', state)
+    assert state.aaa_accounting_commands == {'group': 'CMD-GROUP'}
+    assert state.aaa_accounting_exec == {'group': 'EXEC-GROUP'}

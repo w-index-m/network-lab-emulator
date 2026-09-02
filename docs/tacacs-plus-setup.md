@@ -125,6 +125,40 @@ Nexusから投入したコマンドが実際にTACACS+サーバーへ届き、�
 （permit）とアカウンティング記録（start/stop）の両方がサーバー側の
 ログファイルに正しく記録されることを確認済み。
 
+## ログイン/ログアウトのアカウンティング
+
+`aaa accounting commands default group <name>`（コマンド単位=操作ログ）
+とは別に、`aaa accounting default group <name>`（`commands`キーワード
+無し）でEXECセッション（ログイン/ログアウト）単位のアカウンティングを
+設定できる。両方共存可能で、`show running-config`にも両方反映される。
+
+```
+aaa accounting default group TAC-GROUP           ! ログイン/ログアウト
+aaa accounting commands default group TAC-GROUP  ! 個々の操作コマンド
+```
+
+`tools/nexus_cmd_to_tacacs.py`に`--session login`/`--session logout`
+オプションを追加し、実際にTACACS+サーバーへログイン/ログアウトの
+アカウンティングを送信できる:
+
+```bash
+python tools/nexus_cmd_to_tacacs.py --tacacs-host 127.0.0.1 --tacacs-key demo \
+  --device nexus --user demo --session login
+python tools/nexus_cmd_to_tacacs.py --tacacs-host 127.0.0.1 --tacacs-key demo \
+  --device nexus --user demo --session logout
+```
+
+実際に送信し、サーバー側`accounting.log`に記録されることを確認済み:
+
+```
+2026-09-02 07:36:17 +0000  127.0.0.1  demo  python_tty0  nexus  start  shell
+2026-09-02 07:36:17 +0000  127.0.0.1  demo  python_tty0  nexus  stop   shell
+```
+
+コマンド欄が空であることから、個別コマンドのアカウンティング
+（`show ip interface brief <cr>`等が入る）とは区別されたセッション単位の
+記録であることが分かる。
+
 ## 制約
 
 - network-lab-emulator本体にはTACACS+クライアント機能が無いため、
