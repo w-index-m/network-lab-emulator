@@ -198,6 +198,10 @@ def _save_config():
             crypto = getattr(state, "ipsec_crypto", {})
             if crypto:
                 dev_data["ipsec_crypto"] = crypto
+        # BGP: 設定済みneighbor（トポロジー上ピア未解決でもrunning-config
+        # に残すためのもの。実セッション状態はbgp_engine側が別途持つ）
+        if getattr(state, "_bgp_configured_neighbors", None):
+            dev_data["_bgp_configured_neighbors"] = state._bgp_configured_neighbors
         # NX-OS TACACS+ / AAA設定を保存
         if state.device_type == "nexus":
             if getattr(state, "tacacs_feature_enabled", False):
@@ -305,6 +309,9 @@ def _load_config():
         # Cisco/Catalyst IPsec設定を復元
         if dev_data["type"] in ("cisco", "catalyst") and dev_data.get("ipsec_crypto"):
             state.ipsec_crypto = dev_data["ipsec_crypto"]
+        # BGP: 設定済みneighborを復元
+        if dev_data.get("_bgp_configured_neighbors"):
+            state._bgp_configured_neighbors = dev_data["_bgp_configured_neighbors"]
         # NX-OS TACACS+ / AAA設定を復元
         if dev_data["type"] == "nexus":
             if dev_data.get("tacacs_feature_enabled"):
@@ -1319,12 +1326,14 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if re.match(r'^show\s+vpc$', c):
         return vpc_engine.format_show_vpc(device_id)
 
-    # "vlan 10" → VLANデータベース作成
+    # "vlan 10" → VLANデータベース作成 + config-vlanサブモードへ入る
     m_vlan_db = re.match(r'^vlan\s+(\d+)$', c)
     if m_vlan_db:
         vid = int(m_vlan_db.group(1))
         vlan_engine.create_vlan(device_id, vid)
         state.vlans.setdefault(vid, {'name': f'VLAN{vid:04d}', 'status': 'active', 'ports': []})
+        state.mode = 'config-vlan'
+        state._current_vlan = vid
         return
     # "vlan <id> name <name>"
     m_vlan_name = re.match(r'^vlan\s+(\d+)\s+name\s+(\S+)', orig)
@@ -1340,6 +1349,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         vid = getattr(state, '_current_vlan', None)
         if vid:
             vlan_engine.create_vlan(device_id, vid, m_name.group(1))
+            state.vlans.setdefault(vid, {})['name'] = m_name.group(1)
         return
     # "no vlan <id>"
     m_no_vlan = re.match(r'^no\s+vlan\s+(\d+)', c)
@@ -1569,6 +1579,28 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         ipfilter_engine.add_rule(device_id, num, action, proto, src, dst,
                                  dst_port=port)
         return
+    # Cisco名前付き拡張ACL: "ip access-list extended TEST_ACL" → サブモードへ
+    m_named_acl = re.match(r'^ip\s+access-list\s+extended\s+(\S+)', orig, re.I)
+    if m_named_acl:
+        state.mode = 'config-ext-nacl'
+        state._current_acl_name = m_named_acl.group(1)
+        return
+    # 名前付き拡張ACLサブモード内: "permit ip 10.0.0.0 0.0.0.255 any" 等
+    if state.mode == 'config-ext-nacl':
+        m_nacl_rule = re.match(
+            r'^(permit|deny)\s+(ip|tcp|udp|icmp)\s+'
+            r'(\S+(?:\s+[\d.]+)?)\s+(\S+(?:\s+[\d.]+)?)(?:\s+eq\s+(\S+))?', orig, re.I)
+        if m_nacl_rule:
+            acl_name = getattr(state, '_current_acl_name', None)
+            if acl_name:
+                action = m_nacl_rule.group(1).lower()
+                proto = m_nacl_rule.group(2).lower()
+                src = m_nacl_rule.group(3)
+                dst = m_nacl_rule.group(4)
+                port = m_nacl_rule.group(5)
+                ipfilter_engine.add_rule(device_id, acl_name, action, proto, src, dst,
+                                         dst_port=port)
+            return
     # Si-R形式 ACL: "acl NAME permit ip src X/Y dst Z/W"
     sir_acl = re.match(
         r'^acl\s+(\S+)\s+(permit|deny)\s+(ip|tcp|udp|icmp)\s+'
@@ -2039,6 +2071,13 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if bgp_nbr and getattr(state, '_routing_mode', '') == 'bgp':
         neighbor_ip = bgp_nbr.group(1)
         remote_as = int(bgp_nbr.group(2))
+        # 実機同様、show running-configには「設定したneighbor」がそのまま
+        # 反映される（実際にピアリング可能かどうかとは独立）。トポロジー上
+        # 実リンクが無く peer_id が解決できない場合でも、この辞書に記録して
+        # おくことでrunning-config表示には残す。
+        if not hasattr(state, '_bgp_configured_neighbors'):
+            state._bgp_configured_neighbors = {}
+        state._bgp_configured_neighbors[neighbor_ip] = remote_as
         # IPアドレスでピアを特定（複数リンクがある場合も正確に）
         peer_id = _find_peer_by_ip(device_id, neighbor_ip)
         if not peer_id:
@@ -2842,9 +2881,16 @@ def _build_running_config(device_id: str, state) -> str:
         bn = bgp_engine.nodes.get(device_id)
         if bn and bn.get('local_as'):
             lines.append(f'router bgp {bn["local_as"]}')
+            shown_neighbor_ips = set()
             for sid, sess in bn.get('sessions', {}).items():
                 peer_ip = bn.get('_neighbor_ips', {}).get(sid, sess.neighbor_id)
                 lines.append(f'  neighbor {peer_ip} remote-as {sess.remote_as}')
+                shown_neighbor_ips.add(peer_ip)
+            # トポロジー上ピアが解決できず bgp_engine のセッションには
+            # 乗らなかったneighborも、実機同様running-configには反映する
+            for nbr_ip, remote_as in getattr(state, '_bgp_configured_neighbors', {}).items():
+                if nbr_ip not in shown_neighbor_ips:
+                    lines.append(f'  neighbor {nbr_ip} remote-as {remote_as}')
             lines.append('')
         # TACACS+ / AAA
         if getattr(state, 'tacacs_feature_enabled', False):
@@ -2978,9 +3024,14 @@ def _build_running_config(device_id: str, state) -> str:
         if bn and bn.get('enabled'):
             lines.append('!')
             lines.append(f'router bgp {bn["local_as"]}')
+            shown_neighbor_ips = set()
             for nid, sess in bn['sessions'].items():
                 peer_ip = '10.0.0.2'
                 lines.append(f' neighbor {peer_ip} remote-as {sess.remote_as}')
+                shown_neighbor_ips.add(peer_ip)
+            for nbr_ip, remote_as in getattr(state, '_bgp_configured_neighbors', {}).items():
+                if nbr_ip not in shown_neighbor_ips:
+                    lines.append(f' neighbor {nbr_ip} remote-as {remote_as}')
             for net in bn.get('networks', []):
                 lines.append(f' network {net.split("/")[0]} mask {_prefix_to_mask(int(net.split("/")[1]) if "/" in net else 24)}')
         # ACL
@@ -3114,9 +3165,14 @@ def _build_running_config(device_id: str, state) -> str:
             if bn and bn.get('local_as'):
                 lines.append(f'router bgp {bn["local_as"]}')
                 neighbor_ips = bn.get('_neighbor_ips', {})
+                shown_neighbor_ips = set()
                 for sid, sess in bn.get('sessions', {}).items():
                     peer_ip = neighbor_ips.get(sid, sess.neighbor_id)
                     lines.append(f' neighbor {peer_ip} remote-as {sess.remote_as}')
+                    shown_neighbor_ips.add(peer_ip)
+                for nbr_ip, remote_as in getattr(state, '_bgp_configured_neighbors', {}).items():
+                    if nbr_ip not in shown_neighbor_ips:
+                        lines.append(f' neighbor {nbr_ip} remote-as {remote_as}')
                 for net in bn.get('networks', []):
                     lines.append(f' network {net}')
             for gid, g in sorted(vrrp_engine.vrrp.get(device_id, {}).items()):

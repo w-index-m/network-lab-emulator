@@ -47,9 +47,12 @@ def _cli(device_id, command):
 @pytest.fixture(scope='module')
 def server():
     """テスト用サーバーを起動"""
+    env = os.environ.copy()
+    env['NETLAB_AUTH_DISABLE'] = '1'
     proc = subprocess.Popen(
         [sys.executable, 'app.py'],
         cwd=os.path.join(os.path.dirname(__file__), '..'),
+        env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # サーバー起動待機
