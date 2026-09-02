@@ -739,6 +739,12 @@ async def cli_command(body: dict):
     iface_for_flap = state.current_if or ''
     if c_low in ('shutdown', 'shut') and iface_for_flap:
         vnet.interface_down(device_id, iface_for_flap)
+        # 実syslog(%LINK-3-UPDOWN) + 実SNMP trap(linkDown)を送信
+        _link_msg = f'%LINK-3-UPDOWN: Interface {iface_for_flap}, changed state to down'
+        await syslog_dispatcher.emit(device_id, state.hostname, 'warnings', _link_msg)
+        await snmp_dispatcher.emit(device_id, state.hostname,
+                                    '1.3.6.1.6.3.1.1.5.3',  # linkDown
+                                    f'{iface_for_flap} down')
         peer_ids = vnet.get_peers_on_interface(device_id, iface_for_flap)
         if peer_ids:
             await ospf_engine.interface_down(device_id, peer_ids)
@@ -767,6 +773,12 @@ async def cli_command(body: dict):
                                        f'changed state to down (全メンバーdown)'))})
     elif c_low in ('no shutdown', 'no shut') and iface_for_flap:
         vnet.interface_up(device_id, iface_for_flap)
+        # 実syslog(%LINK-3-UPDOWN) + 実SNMP trap(linkUp)を送信
+        _link_msg_up = f'%LINK-3-UPDOWN: Interface {iface_for_flap}, changed state to up'
+        await syslog_dispatcher.emit(device_id, state.hostname, 'notifications', _link_msg_up)
+        await snmp_dispatcher.emit(device_id, state.hostname,
+                                    '1.3.6.1.6.3.1.1.5.4',  # linkUp
+                                    f'{iface_for_flap} up')
         # STP: リンク回復を両端に通知（ポート再追加・再収束）
         _peers_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
         if stp_engine.nodes.get(device_id, {}).get('enabled') or any(

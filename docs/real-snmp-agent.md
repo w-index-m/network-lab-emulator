@@ -70,6 +70,37 @@ curl "http://localhost:9116/snmp?target=10.9.9.1&module=if_mib"
 これで「Prometheus本体＋`snmp_exporter`があれば実SNMPポーリングできる」
 という構成が、このリポジトリのエミュレーターに対しても実際に成立する。
 
+## SNMP trap + syslog の実送信（link down/up）
+
+これまで`logging host`/`snmp-server host`で送信先を設定していても、
+CLIの`shutdown`/`no shutdown`によるインターフェース状態変化では
+実際にはUDP送信されていなかった（`show logging`の内部バッファには
+記録されるが、実配送パイプラインには乗らない設計だった）。この制約を
+解消し、`shutdown`/`no shutdown`時に以下を実際にUDP送信するようにした:
+
+- **syslog**: `%LINK-3-UPDOWN: Interface <ifname>, changed state to down/up`
+  （RFC3164形式、`logging host`で設定した宛先へ）
+- **SNMP trap**: `linkDown`(OID `1.3.6.1.6.3.1.1.5.3`) /
+  `linkUp`(OID `1.3.6.1.6.3.1.1.5.4`)
+  （SNMPv2c trap、`snmp-server host`で設定した宛先へ）
+
+Catalyst/Cisco/Nexus/Si-R等、`shutdown`コマンドを持つ全機種で共通して
+動作する（`app.py`のインターフェース状態変化ハンドラーが機種非依存の
+ため）。
+
+実際に確認した動作（UDPパケットを自作リスナーで捕捉）:
+
+```
+[SYSLOG] from ('127.0.0.1', ...): b'<188>Sep 02 13:08:36 Dist-SW %LINK-3-UPDOWN: Interface GigabitEthernet1/0/1, changed state to down'
+[TRAP]   from ('127.0.0.1', ...): b'...public...Dist-SW: GigabitEthernet1/0/1 down'
+```
+
+`no shutdown`側もlinkUp trap + up側syslogの両方を確認済み。
+
+これでSNMP polling(GET/WALK)・SNMP trap送信・syslog送信の3つが揃い、
+PRTG/SolarWinds/Zabbix/LibreNMS等の標準SNMP監視ツールから本物の
+ネットワーク機器として扱える状態になった。
+
 ## 制約
 
 - 現状8/10台のみ実エージェントが起動する。`sir-b`/`apresia`は
@@ -85,4 +116,7 @@ curl "http://localhost:9116/snmp?target=10.9.9.1&module=if_mib"
 ```bash
 pytest tests/test_snmp_udp_agent.py -v
 # 8/8 成功（BER符号化/復号の単体テスト）
+
+pytest tests/test_link_trap_syslog.py -v
+# 3/3 成功（shutdown/no shutdown時のsyslog+trap実送信テスト）
 ```
