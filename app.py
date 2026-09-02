@@ -383,6 +383,12 @@ async def lifespan(app: FastAPI):
     _load_config()
     # 定期自動保存タスク（60秒ごと）
     auto_save_task = asyncio.create_task(_auto_save_loop())
+    # 実SNMP(UDP/161, v2c)エージェントを各装置ごとに起動
+    from engine.snmp_udp_agent import start_all_snmp_agents
+    from engine.protocols import snmp_agent as _snmp_agent_instance
+    snmp_transports = await start_all_snmp_agents(device_sessions, _snmp_agent_instance)
+    print(f"[SNMP] 実UDPエージェント起動: {len(snmp_transports)}台 "
+          f"({', '.join(f'{d}={ip}' for d, (_, ip) in snmp_transports.items())})")
     yield
     auto_save_task.cancel()
     try:
