@@ -789,6 +789,10 @@ async def cli_command(body: dict):
         await snmp_dispatcher.emit(device_id, state.hostname,
                                     '1.3.6.1.6.3.1.1.5.3',  # linkDown
                                     f'{iface_for_flap} down')
+        # VRRP/HSRP: このIF上の冗長化グループをInitへ落とす
+        # （落とさないと、切れた側がMaster/Activeを名乗ったまま残り、
+        #   対向がDead Timerで昇格して両系Master/Activeになる）
+        await vrrp_engine.interface_down(device_id, iface_for_flap)
         peer_ids = vnet.get_peers_on_interface(device_id, iface_for_flap)
         if peer_ids:
             await ospf_engine.interface_down(device_id, peer_ids)
@@ -823,6 +827,8 @@ async def cli_command(body: dict):
         await snmp_dispatcher.emit(device_id, state.hostname,
                                     '1.3.6.1.6.3.1.1.5.4',  # linkUp
                                     f'{iface_for_flap} up')
+        # VRRP/HSRP: 復旧したIF上のグループを再選出させる
+        await vrrp_engine.interface_up(device_id, iface_for_flap)
         # STP: リンク回復を両端に通知（ポート再追加・再収束）
         _peers_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
         if stp_engine.nodes.get(device_id, {}).get('enabled') or any(

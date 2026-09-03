@@ -257,6 +257,15 @@ class VirtualNetwork:
         elif msg_type == 'stp_bpdu':
             await stp_engine.receive_bpdu(device_id, msg)
             return
+        elif msg_type == 'vrrp_advert':
+            await vrrp_engine.vrrp_receive_advert(device_id, msg)
+            return
+        elif msg_type == 'hsrp_hello':
+            # VRRP/HSRPのHelloがここでエンジンへ渡されないと、送信側の
+            # hello_loopがパケットを撒いても受信側は誰も処理せず、
+            # 両系ともMaster/Activeのまま（スプリットブレイン）になる
+            await vrrp_engine.hsrp_receive_hello(device_id, msg)
+            return
         elif msg_type == 'bgp_open' or msg_type == 'bgp_update':
             # BGPはエンジン側で直接相手ノードを操作するのでスキップ
             pass
@@ -388,7 +397,13 @@ class VirtualNetwork:
         for peer_id in list(self.links.get(src_id, set())):
             if exclude and peer_id in exclude:
                 continue
-            # shutdownされているインターフェース経由のピアには送信しない
+            # shutdownされているインターフェース経由のピアには送信しない。
+            # 送信側だけでなく受信側のIFがdownしている場合も届かない
+            # （_edge_upが両端を見る。これを送信側だけの判定にしていると、
+            #   自分のIFをshutdownした装置が対向からのHello等を受信し続けてしまい、
+            #   例えばHSRP/VRRPがInitに落ちた直後に再選出されてActiveへ戻る）
+            if not self._edge_up(src_id, peer_id):
+                continue
             if down:
                 connecting_iface = self.interface_links.get(src_id, {}).get(peer_id)
                 if connecting_iface and connecting_iface in down:
@@ -5808,6 +5823,11 @@ class VrrpGroup:
     hello_task: Optional[Any] = None
     dead_task: Optional[Any] = None
     advert_time: Optional[float] = None
+    # 相手側の情報（Advertisement受信時に記録する）。これが無いと
+    # show vrrp が常に "Master Router is (unknown)" になってしまう
+    peer_id: str = ''
+    peer_ip: str = ''
+    peer_priority: int = 0
 
 @dataclass
 class HsrpGroup:
@@ -5822,6 +5842,10 @@ class HsrpGroup:
     virtual_mac: str = ''
     hello_task: Optional[Any] = None
     dead_task: Optional[Any] = None
+    # 相手側の情報（Hello受信時に記録する）
+    peer_id: str = ''
+    peer_ip: str = ''
+    peer_priority: int = 0
 
 
 class VrrpEngine:
@@ -5900,6 +5924,12 @@ class VrrpEngine:
         if not g:
             return
 
+        # 相手を記録（show vrrp で対向Masterを表示するため）
+        if src_id:
+            g.peer_id = src_id
+            g.peer_ip = self._get_device_ip_for_vip(src_id, g.vip) or ''
+            g.peer_priority = peer_priority
+
         my_priority = g.priority
         prev_state = g.state
 
@@ -5915,8 +5945,8 @@ class VrrpEngine:
                                             f'より高いpriority({peer_priority})を検出')
             elif peer_priority == my_priority:
                 # IP比較（大きい方がMaster）
-                my_ip = self._get_device_ip(receiver_id)
-                peer_ip = self._get_device_ip(src_id)
+                my_ip = self._get_device_ip_for_vip(receiver_id, g.vip)
+                peer_ip = self._get_device_ip_for_vip(src_id, g.vip)
                 if peer_ip and my_ip and peer_ip > my_ip:
                     g.state = 'Backup'
                     await self._vrrp_log_change(receiver_id, group_id, 'Master', 'Backup',
@@ -5986,6 +6016,30 @@ class VrrpEngine:
         info = icmp_engine.device_ips.get(device_id, {})
         ips = list(info.get('ips', {}).keys())
         return sorted(ips)[-1] if ips else None
+
+    def _get_device_ip_for_vip(self, device_id: str, vip: str) -> Optional[str]:
+        """VIPと同じサブネット上にある、その装置のIPを返す。
+
+        _get_device_ip() は装置が持つIPのうち単に一番大きいものを返すため、
+        複数セグメントに足を持つ装置では VRRP/HSRP を組んでいるセグメント
+        とは無関係のIPが選ばれてしまう（show standby の対向表示が
+        別セグメントのIPになる）。冗長化グループの相手は必ずVIPと同じ
+        サブネットに居るので、それを手掛かりに選ぶ。"""
+        info = icmp_engine.device_ips.get(device_id, {})
+        ips = info.get('ips', {})
+        try:
+            vip_int = vnet._ip_to_int(vip)
+        except Exception:
+            vip_int = None
+        if vip_int is not None:
+            for ip, prefix in sorted(ips.items()):
+                try:
+                    mask = (0xffffffff << (32 - int(prefix))) & 0xffffffff
+                    if (vnet._ip_to_int(ip) & mask) == (vip_int & mask):
+                        return ip
+                except Exception:
+                    continue
+        return self._get_device_ip(device_id)
 
     async def _vrrp_log_change(self, device_id: str, group_id: int,
                                 from_state: str, to_state: str, reason: str):
@@ -6078,6 +6132,12 @@ class VrrpEngine:
         if not g:
             return
 
+        # 相手を記録（show standby で対向を表示するため）
+        if src_id:
+            g.peer_id = src_id
+            g.peer_ip = self._get_device_ip_for_vip(src_id, g.vip) or ''
+            g.peer_priority = peer_priority
+
         if g.state == 'Init':
             await self._hsrp_elect(receiver_id, group_id, src_id, peer_priority)
         elif g.state == 'Active':
@@ -6159,6 +6219,69 @@ class VrrpEngine:
                                      '対向Active障害 → 即昇格')
 
     # ── show コマンド ─────────────────────
+    async def interface_down(self, device_id: str, iface: str):
+        """インターフェースshutdown時、そのIF上のVRRP/HSRPグループをInitへ落とす。
+
+        実機では冗長化グループのインターフェースがdownすると、その装置は
+        Master/Activeを名乗れなくなる（Init状態）。これを実装しないと、
+        リンクが切れた側がMaster/Activeのまま残り、対向がDead Timerで
+        昇格した結果、両系がMaster/Activeを主張する状態になる。
+        """
+        for gid, g in list(self.vrrp.get(device_id, {}).items()):
+            if g.interface and g.interface != iface:
+                continue
+            if g.state != 'Init':
+                prev = g.state
+                g.state = 'Init'
+                g.peer_id = ''
+                g.peer_ip = ''
+                g.peer_priority = 0
+                if g.dead_task:
+                    g.dead_task.cancel()
+                    g.dead_task = None
+                await self._vrrp_log_change(device_id, gid, prev, 'Init',
+                                            f'インターフェース {iface} がdown')
+        for gid, g in list(self.hsrp.get(device_id, {}).items()):
+            if g.interface and g.interface != iface:
+                continue
+            if g.state != 'Init':
+                prev = g.state
+                g.state = 'Init'
+                g.peer_id = ''
+                g.peer_ip = ''
+                g.peer_priority = 0
+                if g.dead_task:
+                    g.dead_task.cancel()
+                    g.dead_task = None
+                await self._hsrp_log(device_id, gid, prev, 'Init',
+                                     f'インターフェース {iface} がdown')
+
+    async def interface_up(self, device_id: str, iface: str):
+        """インターフェース復旧時、Initのままのグループを再選出させる。
+
+        対向が居ればHello/Advert受信で選出されるが、対向が居ない
+        （単独構成、または対向もdown）場合は自分がMaster/Activeになる。
+        """
+        await asyncio.sleep(0)
+        for gid, g in list(self.vrrp.get(device_id, {}).items()):
+            if (g.interface and g.interface != iface) or g.state != 'Init':
+                continue
+            peer_found = any(
+                self.vrrp.get(p, {}).get(gid) for p in vnet.get_neighbors(device_id))
+            if not peer_found:
+                g.state = 'Master'
+                await self._vrrp_log_change(device_id, gid, 'Init', 'Master',
+                                            f'インターフェース {iface} がup（対向なし）')
+        for gid, g in list(self.hsrp.get(device_id, {}).items()):
+            if (g.interface and g.interface != iface) or g.state != 'Init':
+                continue
+            peer_found = any(
+                self.hsrp.get(p, {}).get(gid) for p in vnet.get_neighbors(device_id))
+            if not peer_found:
+                g.state = 'Active'
+                await self._hsrp_log(device_id, gid, 'Init', 'Active',
+                                     f'インターフェース {iface} がup（対向なし）')
+
     def format_show_vrrp(self, device_id: str) -> str:
         groups = self.vrrp.get(device_id, {})
         if not groups:
@@ -6177,6 +6300,9 @@ class VrrpEngine:
                 lines.append(f'  Master Router is {device_id} (local), priority is {g.priority}')
                 lines.append(f'  Master Advertisement interval is {g.hello_interval} sec')
                 lines.append(f'  Master Down interval is {g.dead_interval} sec')
+            elif g.peer_id:
+                lines.append(f'  Master Router is {g.peer_ip or g.peer_id}, '
+                             f'priority is {g.peer_priority}')
             else:
                 lines.append(f'  Master Router is (unknown)')
             lines.append('')
@@ -6213,11 +6339,13 @@ class VrrpEngine:
             lines.append(f'  Hello time {g.hello_interval} sec, hold time {g.hold_time} sec')
             lines.append(f'  Preemption {"enabled" if g.preempt else "disabled"}')
             lines.append(f'  Priority {g.priority} (configured {g.priority})')
+            peer_desc = (f'{g.peer_ip or g.peer_id}, priority {g.peer_priority}'
+                         if g.peer_id else 'unknown')
             if g.state == 'Active':
                 lines.append(f'  Active router is local')
-                lines.append(f'  Standby router is unknown')
+                lines.append(f'  Standby router is {peer_desc}')
             else:
-                lines.append(f'  Active router is unknown')
+                lines.append(f'  Active router is {peer_desc}')
                 lines.append(f'  Standby router is local')
             lines.append('')
         return '\n'.join(lines)
