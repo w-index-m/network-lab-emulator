@@ -242,10 +242,43 @@ vPC Peer-Link                      : port-channel1 (down)   ← down に変化
 実際にアプリを停止→起動して、手順2のみの再投入で復旧することを
 確認済み（2026-09-03）。
 
+## Peer-Keepalive の宛先ミスは検出される
+
+`peer-keepalive destination` を打ち間違えると、実機同様に上がらない。
+
+```
+N9K-1(config-vpc-domain)# peer-keepalive destination 192.168.100.9 source 192.168.100.1
+                                                                ^ 本来は .2
+
+N9K-1# show vpc peer-keepalive
+vPC keep-alive status              : pending
+--Destination                      : 192.168.100.9
+
+N9K-1# show vpc brief
+Peer status                        : pending
+vPC role                           : none
+vPC Peer-Link                      : port-channel1 (down)
+  vPC 10  : port-channel10 (down)
+```
+
+Keepaliveは `vnet.send_to()` で相手に配送され、受け取った側の
+`VpcEngine.receive_keepalive()` が呼ばれて初めて `alive` になる。
+送信しただけでは `alive` にならず、受信が `keepalive timeout` の間
+途絶えれば `dead` に落ちる。
+
+> 以前は送信側が自分で `alive` を代入しており、しかも
+> `vnet.send_to()` に `vpc_keepalive` のディスパッチが無かったので
+> パケットは誰にも届いていなかった。宛先IPを間違えても `alive` と
+> 表示されるため、vPCで最も多い障害パターンの練習ができなかった。
+> （2026-09-03 修正）
+
 ## ハマりどころ
 
 - **2台目の装置を作るのを忘れない**。1台だけだと keepalive の相手が
   居らず `Peer status : pending` のまま上がらない。
+- **`destination` と `source` は両機で襷掛けに合わせる**。片方の
+  `destination` がもう片方の `source` と一致しないとペアにならない
+  （VRFも一致が必要）。
 - **`/api/link` でリンクを張る**こと。`show cdp neighbors` 等の表示だけ
   合っていても `vnet.links` に載っていないとキープアライブが流れない
   （`docs/cdp-topology-consistency.md` 参照）。

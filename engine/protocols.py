@@ -266,6 +266,11 @@ class VirtualNetwork:
             # 両系ともMaster/Activeのまま（スプリットブレイン）になる
             await vrrp_engine.hsrp_receive_hello(device_id, msg)
             return
+        elif msg_type == 'vpc_keepalive':
+            # ここが無いとPeer-Keepaliveは誰にも届かず、送信側が
+            # 自分でaliveを名乗るだけになる（宛先を間違えても気づけない）
+            await vpc_engine.receive_keepalive(device_id, msg)
+            return
         elif msg_type == 'bgp_open' or msg_type == 'bgp_update':
             # BGPはエンジン側で直接相手ノードを操作するのでスキップ
             pass
@@ -6979,6 +6984,8 @@ class VpcDomain:
     keepalive_interval: int = 1000   # ms
     keepalive_timeout: int = 5
     keepalive_state: str = 'pending'  # pending / alive / dead
+    # 最後にピアからKeepaliveを「受信」した時刻。送信しただけでは進まない
+    last_keepalive: float = 0.0
     # Peer-Link
     peer_link_if: str = ''
     peer_link_state: str = 'down'    # down / up
@@ -7065,46 +7072,96 @@ class VpcEngine:
         if not d:
             return
         # 対向装置を探してピア関係を確立
-        peer_id = self.peers.get(device_id)
-        if not peer_id:
-            # Keepalive宛先IPからピアを探す
-            for peer, dom in self.domains.items():
-                if peer == device_id:
-                    continue
-                if dom.keepalive_dest == d.keepalive_src or \
-                   d.keepalive_dest == dom.keepalive_src or \
-                   dom.keepalive_dest and d.keepalive_dest:
-                    # 同じvPCドメインIDなら自動ペアリング
-                    if dom.domain_id == d.domain_id:
-                        self.peers[device_id] = peer
-                        self.peers[peer] = device_id
-                        peer_id = peer
-                        break
-
-        if peer_id:
-            d.keepalive_state = 'alive'
-            peer_dom = self.domains.get(peer_id)
-            if peer_dom:
-                peer_dom.keepalive_state = 'alive'
-            # ロール選出
-            await self._elect_role(device_id, peer_id)
+        self._find_peer(device_id)
 
         while True:
             await asyncio.sleep(d.keepalive_interval / 1000.0)
             d = self.domains.get(device_id)
             if not d:
                 break
-            peer_id = self.peers.get(device_id)
+            peer_id = self._find_peer(device_id)
             if peer_id and peer_id in self.domains:
-                d.keepalive_state = 'alive'
-                pkt = {
+                # 送信するだけ。alive になるかどうかは相手からの
+                # Keepaliveを receive_keepalive() で受け取れたかで決まる
+                await vnet.send_to(peer_id, {
                     'type': 'vpc_keepalive',
                     'src_id': device_id,
                     'domain_id': d.domain_id,
+                    'dest': d.keepalive_dest,
+                    'src': d.keepalive_src,
+                    'vrf': d.keepalive_vrf,
                     'role': d.role,
                     'role_priority': d.role_priority,
-                }
-                await vnet.send_to(peer_id, pkt)
+                })
+            # 受信が途絶えたら dead に落とす
+            if d.keepalive_state == 'alive' and \
+                    time.time() - d.last_keepalive > d.keepalive_timeout:
+                d.keepalive_state = 'dead'
+                await vnet.send_to(device_id, {
+                    'type': 'vpc_log',
+                    'message': (f'%VPC-3-PEER_KEEPALIVE_RECV_FAIL: '
+                                f'vPC domain {d.domain_id}: '
+                                f'Peer keepalive is not received'),
+                })
+
+    def _find_peer(self, device_id: str) -> Optional[str]:
+        """
+        Keepaliveの宛先/送信元アドレスが実際に噛み合う相手だけをピアにする。
+
+        以前は「双方が宛先を何か設定していれば」ペアにしていたため、
+        peer-keepalive destination を打ち間違えても show vpc は alive を
+        返していた（実機なら peer is not alive になる場面）。
+        """
+        peer_id = self.peers.get(device_id)
+        if peer_id:
+            return peer_id
+        d = self.domains.get(device_id)
+        if not d or not d.keepalive_dest or not d.keepalive_src:
+            return None
+        for peer, dom in self.domains.items():
+            if peer == device_id or dom.domain_id != d.domain_id:
+                continue
+            # 宛先が相手の送信元、相手の宛先が自分の送信元、の双方向一致
+            if dom.keepalive_dest == d.keepalive_src and \
+                    d.keepalive_dest == dom.keepalive_src and \
+                    dom.keepalive_vrf == d.keepalive_vrf:
+                self.peers[device_id] = peer
+                self.peers[peer] = device_id
+                return peer
+        return None
+
+    async def receive_keepalive(self, device_id: str, msg: dict):
+        """
+        ピアからのPeer-Keepalive受信。
+
+        これが呼ばれて初めて keepalive_state が alive になる。
+        vnet.send_to() のディスパッチに 'vpc_keepalive' が無かった頃は
+        誰も受け取らず、送信側が自分で alive を代入していた。
+        """
+        d = self.domains.get(device_id)
+        if not d:
+            return
+        # 別ドメイン／宛先が自分宛でないKeepaliveは捨てる
+        if msg.get('domain_id') != d.domain_id:
+            return
+        if msg.get('dest') and d.keepalive_src and \
+                msg['dest'] != d.keepalive_src:
+            return
+        peer_id = msg.get('src_id')
+        if peer_id:
+            self.peers.setdefault(device_id, peer_id)
+        was = d.keepalive_state
+        d.keepalive_state = 'alive'
+        d.last_keepalive = time.time()
+        if was != 'alive' and peer_id:
+            await vnet.send_to(device_id, {
+                'type': 'vpc_log',
+                'message': (f'%VPC-6-PEER_KEEPALIVE_RECV_SUCCESS: '
+                            f'vPC domain {d.domain_id}: '
+                            f'Received peer keepalive from '
+                            f'{msg.get("src", "peer")}'),
+            })
+            await self._elect_role(device_id, peer_id)
 
     async def _elect_role(self, dev_a: str, dev_b: str):
         """

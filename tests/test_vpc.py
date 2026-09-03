@@ -154,3 +154,85 @@ async def test_single_switch_stays_pending(two_nexus):
     # "keep-alive" という語自体に 'alive' が含まれるため、値の行で判定する
     assert 'Peer status                        : pending' in out, out
     assert 'vPC keep-alive status              : pending' in out, out
+
+
+# ── Peer-Keepalive が実際に届いているかの検証 ──────────────
+
+@pytest.mark.asyncio
+async def test_keepalive_is_only_alive_after_receiving(two_nexus):
+    """alive は「受信できた」ことの結果であること
+
+    以前は送信側が自分で keepalive_state='alive' を代入しており、
+    vnet.send_to() に 'vpc_keepalive' のディスパッチが無いので
+    パケットは誰にも届いていなかった。届いていないのに alive を
+    名乗る状態だったため、受信時刻が進んでいることで検証する。
+    """
+    e = two_nexus
+    await _setup_vpc(e)
+
+    d1 = e.domains['n1']
+    assert d1.keepalive_state == 'alive'
+    assert d1.last_keepalive > 0, 'Keepaliveを一度も受信していないのにalive'
+
+    first = d1.last_keepalive
+    await asyncio.sleep(1.5)
+    assert d1.last_keepalive > first, '受信時刻が更新されていない'
+
+
+@pytest.mark.asyncio
+async def test_mismatched_keepalive_destination_never_comes_up(two_nexus):
+    """peer-keepalive destination を打ち間違えたら alive にならない
+
+    実機なら "peer is not alive" になる場面。以前は双方が宛先を
+    何か設定してさえいればペアリングしていたため、誤ったIPでも
+    alive と表示されていた。
+    """
+    e = two_nexus
+    for dev, prio, dest, src in (
+        ('n1', 100, '192.168.100.9', '192.168.100.1'),   # 宛先が誤り
+        ('n2', 200, '192.168.100.1', '192.168.100.2'),
+    ):
+        e.create_domain(dev, 10)
+        e.set_role_priority(dev, prio)
+        e.set_keepalive(dev, dest, src)
+        e.set_peer_link(dev, 'port-channel1')
+    await asyncio.sleep(2)
+
+    assert e.domains['n1'].keepalive_state != 'alive', \
+        f"宛先が誤っているのに上がった: {e.domains['n1'].keepalive_state}"
+    # ラベルの "keep-alive" に引っかからないよう値そのものを見る
+    status = e.format_show_vpc_keepalive('n1').splitlines()[0].split(':')[-1]
+    assert status.strip() == 'pending', status
+
+
+@pytest.mark.asyncio
+async def test_keepalive_goes_dead_when_peer_stops_sending(two_nexus):
+    """ピアが送信を止めたら timeout 後に dead へ落ちる"""
+    e = two_nexus
+    await _setup_vpc(e)
+    assert e.domains['n1'].keepalive_state == 'alive'
+
+    # n2 の送信だけを止める（n1側は何も触らない）
+    d2 = e.domains['n2']
+    if d2.keepalive_task:
+        d2.keepalive_task.cancel()
+    e.domains['n1'].keepalive_timeout = 1
+
+    await asyncio.sleep(3)
+    assert e.domains['n1'].keepalive_state == 'dead', \
+        'ピアが送信を止めてもaliveのまま'
+
+
+@pytest.mark.asyncio
+async def test_keepalive_from_other_domain_is_ignored(two_nexus):
+    """別ドメインIDのKeepaliveでは上がらない"""
+    e = two_nexus
+    e.create_domain('n1', 10)
+    e.set_keepalive('n1', '192.168.100.2', '192.168.100.1')
+    await asyncio.sleep(0.2)
+
+    await e.receive_keepalive('n1', {
+        'type': 'vpc_keepalive', 'src_id': 'n2', 'domain_id': 99,
+        'dest': '192.168.100.1', 'src': '192.168.100.2',
+    })
+    assert e.domains['n1'].keepalive_state != 'alive'
