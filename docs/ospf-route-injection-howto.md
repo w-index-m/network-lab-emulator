@@ -257,6 +257,9 @@ NX-OS の `router ospf` 配下に `network` 文は無く、参加させる
 インターフェースで直接指定する。IOS形式の `network` しか受け付けて
 いなかったため、実機と違う書き方を強いていた。
 
+`feature ospf` を入れるまで `router ospf` / `ip router ospf` は
+コマンド自体が存在しない（実機同様 `% Invalid command at '^' marker.`）。
+
 ```
 configure terminal
 feature ospf
@@ -293,3 +296,5 @@ OSPFから外せる。IOS形式の `network` も従来どおり使えるので�
 `GigabitEthernet0/0/0 / 192.168.1.1/24` を決め打ちで出していた。
 `network` に載っている実インターフェースだけを出すようにし、
 1本も無ければ `% OSPF is not enabled on any interface.` を返す。
+
+`show running-config` の `feature` 行は実機同様に先頭へまとめて出す。

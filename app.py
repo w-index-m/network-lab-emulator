@@ -1985,7 +1985,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
 
     # ── OSPF ──
     ospf_m = re.match(r'^router\s+ospf\s+(\d+)', c)
-    if ospf_m:
+    if ospf_m and not (state.device_type == 'nexus' and
+                       'ospf' not in getattr(state, 'nx_features', set())):
         state._routing_mode = 'ospf'
         state._ospf_process = int(ospf_m.group(1))
         state._ospf_networks = getattr(state, '_ospf_networks', [])
@@ -2031,6 +2032,9 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     nx_ospf_if = re.match(
         r'^(no\s+)?ip\s+router\s+ospf\s+(\S+)\s+area\s+(\S+)', c)
     if nx_ospf_if and state.mode == 'config-if':
+        if state.device_type == 'nexus' and \
+                'ospf' not in getattr(state, 'nx_features', set()):
+            return ''
         iface = getattr(state, 'current_if', '') or ''
         info = state.interfaces.get(iface, {})
         ip = info.get('ip')
@@ -2967,6 +2971,9 @@ def _build_running_config(device_id: str, state) -> str:
                  state.startup_time.strftime('%a %b %d %H:%M:%S %Y'), '',
                  'version 10.2(7)M', '']
         # feature
+        # 実機は feature 行を先頭にまとめて出す
+        if getattr(state, 'tacacs_feature_enabled', False):
+            lines.append('feature tacacs+')
         if vpc_engine.feature_enabled.get(device_id):
             lines.append('feature vpc')
         _on_feat = ospf_engine.nodes.get(device_id)
@@ -3029,8 +3036,6 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append('')
         # TACACS+ / AAA
         if getattr(state, 'tacacs_feature_enabled', False):
-            lines.append('feature tacacs+')
-            lines.append('')
             for h in getattr(state, 'tacacs_hosts', []):
                 key_part = ' key ****' if h.get('key') else ''
                 lines.append(f"tacacs-server host {h['host']}{key_part}")

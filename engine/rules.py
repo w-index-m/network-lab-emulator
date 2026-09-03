@@ -828,6 +828,10 @@ class RuleEngine:
         # router ospf <process> → ospf.process に保存
         m_ospf = re.match(r'^router\s+ospf\s+(\d+)', c)
         if m_ospf:
+            # NX-OSは feature ospf を入れるまでコマンド自体が存在しない
+            if state.device_type == 'nexus' and \
+                    'ospf' not in getattr(state, 'nx_features', set()):
+                return self._cmd_error(cmd, state, reason='invalid', position=0)
             pid = int(m_ospf.group(1))
             if not hasattr(state, 'ospf') or not isinstance(state.ospf, dict):
                 state.ospf = {"process": pid, "router_id": "", "area": "0.0.0.0", "neighbors": []}
@@ -4066,6 +4070,12 @@ Configuration Revision            : 5"""
         if m:
             state.hostname = m.group(1)
             return ""
+
+        # NX-OS: feature ospf が入るまで "ip router ospf" は存在しない
+        if state.device_type == 'nexus' and \
+                re.match(r'^(no\s+)?ip\s+router\s+ospf\s+', c) and \
+                'ospf' not in getattr(state, 'nx_features', set()):
+            return self._cmd_error(cmd, state, reason='invalid', position=0)
 
         # NX-OS: feature <name> / no feature <name>（show feature に反映）
         if state.device_type == 'nexus':

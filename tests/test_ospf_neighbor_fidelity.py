@@ -144,3 +144,43 @@ def test_ospf_interface_says_so_when_no_interface_participates():
               'area_id': '0.0.0.0', 'process_id': 1, 'router_id': '1.1.1.1'})
     assert 'not enabled on any interface' in \
         e.format_show_ospf_interface('nx-none')
+
+
+# ── ⑤ NX-OS の feature ospf ゲート ────────────────────────
+
+def _nexus():
+    from engine.rules import DeviceState, RuleEngine
+    state = DeviceState('nexus', 'N9K-1')
+    state.mode = 'config'
+    return RuleEngine(), state
+
+
+def test_router_ospf_requires_feature_ospf():
+    """feature ospf を入れるまでコマンド自体が存在しない（実機同様）"""
+    engine, state = _nexus()
+    out = engine.process('router ospf 1', state)
+    assert "Invalid command at '^' marker" in out, out
+
+
+def test_ip_router_ospf_requires_feature_ospf():
+    engine, state = _nexus()
+    state.mode = 'config-if'
+    out = engine.process('ip router ospf 1 area 0.0.0.0', state)
+    assert "Invalid command at '^' marker" in out, out
+
+
+def test_router_ospf_accepted_after_feature_ospf():
+    engine, state = _nexus()
+    engine.process('feature ospf', state)
+    out = engine.process('router ospf 1', state)
+    assert "Invalid command" not in out, out
+
+
+def test_feature_gate_does_not_apply_to_ios_devices():
+    """Catalyst/ciscoには feature の概念が無いので従来どおり通る"""
+    from engine.rules import DeviceState, RuleEngine
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'SW')
+    state.mode = 'config'
+    out = engine.process('router ospf 1', state)
+    assert 'Invalid' not in out, out
