@@ -91,3 +91,43 @@ def test_shutdown_without_configured_targets_sends_nothing(client, capture_dispa
     nexus_trap = [c for c in capture_dispatches['trap'] if c[3] == 'nexus']
     assert nexus_syslog == []
     assert nexus_trap == []
+
+
+def test_snmp_trap_udp_port_can_be_specified(client, capture_dispatches):
+    """snmp-server host ... udp-port <n> で送信先ポートを変えられる
+
+    以前は udp-port 構文自体が無く、常に162番固定だったため、
+    root権限なしにtrap受信の検証ができなかった。
+    """
+    _cli(client, 'catalyst', 'configure terminal')
+    _cli(client, 'catalyst', 'snmp-server host 127.0.0.1 udp-port 11162 traps version 2c public')
+    _cli(client, 'catalyst', 'interface GigabitEthernet1/0/1')
+    _cli(client, 'catalyst', 'shutdown')
+    _cli(client, 'catalyst', 'end')
+
+    ports = {c[1] for c in capture_dispatches['trap']}
+    assert 11162 in ports, f'udp-portで指定したポートに送信されていない: {ports}'
+
+
+def test_reconfiguring_same_host_updates_port(client, capture_dispatches):
+    """同じホストを別ポートで再設定したら上書きされる
+
+    以前は「既に同じhostがあれば何もしない」実装だったため、一度誤った
+    ポートで登録すると設定し直しても直せなかった。
+    """
+    _cli(client, 'catalyst', 'configure terminal')
+    # まず誤ったポートで登録し、その後正しいポートで設定し直す
+    _cli(client, 'catalyst', 'logging host 127.0.0.1 9999')
+    _cli(client, 'catalyst', 'snmp-server host 127.0.0.1 udp-port 9999 traps version 2c public')
+    _cli(client, 'catalyst', 'logging host 127.0.0.1 5514')
+    _cli(client, 'catalyst', 'snmp-server host 127.0.0.1 udp-port 11162 traps version 2c public')
+    _cli(client, 'catalyst', 'interface GigabitEthernet1/0/1')
+    _cli(client, 'catalyst', 'shutdown')
+    _cli(client, 'catalyst', 'end')
+
+    syslog_ports = {c[1] for c in capture_dispatches['syslog']}
+    trap_ports = {c[1] for c in capture_dispatches['trap']}
+    assert 5514 in syslog_ports, f'syslogのポートが更新されていない: {syslog_ports}'
+    assert 9999 not in syslog_ports, f'古いポートに送信され続けている: {syslog_ports}'
+    assert 11162 in trap_ports, f'trapのポートが更新されていない: {trap_ports}'
+    assert 9999 not in trap_ports, f'古いポートに送信され続けている: {trap_ports}'

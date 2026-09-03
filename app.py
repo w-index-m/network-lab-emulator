@@ -1704,7 +1704,12 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         ip = log_host.group(1)
         port = int(log_host.group(2)) if log_host.group(2) else 514
         existing = next((s for s in state.syslog_servers if s['host'] == ip), None)
-        if not existing:
+        if existing:
+            # 同じホストを再設定した場合はポート等を更新する。更新しないと、
+            # 一度誤ったポートで登録してしまうと設定し直しても直せない
+            existing['port'] = port
+            existing['level'] = state.logging_level
+        else:
             state.syslog_servers.append({'host': ip, 'port': port,
                                          'facility': 'local7', 'level': state.logging_level})
         syslog_dispatcher.register(device_id, state.syslog_servers)
@@ -1773,20 +1778,31 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         return
     # Cisco: "snmp-server host 192.168.1.200 traps public"
     snmp_host = re.match(r'^snmp-server\s+host\s+([\d.]+)'
+                         r'(?:\s+udp-port\s+(\d+))?'
                          r'(?:\s+(traps?|informs?))?\s*(?:version\s+(1|2c|3)\s+)?(\S+)?', c)
     if snmp_host:
         ip = snmp_host.group(1)
-        trap_type = snmp_host.group(2) or 'traps'
-        version = snmp_host.group(3) or '2c'
-        community = snmp_host.group(4) or 'public'
-        if not any(h['host'] == ip for h in state.snmp_hosts):
+        # 実機同様 udp-port で送信先ポートを指定できるようにする
+        # （162以外へ飛ばせないと、trap受信の検証が root 権限必須になる）
+        trap_port = int(snmp_host.group(2)) if snmp_host.group(2) else 162
+        trap_type = snmp_host.group(3) or 'traps'
+        version = snmp_host.group(4) or '2c'
+        community = snmp_host.group(5) or 'public'
+        entry = next((h for h in state.snmp_hosts if h['host'] == ip), None)
+        if entry:
+            # 同じホストを再設定した場合は上書きする（syslogと同様）
+            entry.update({'community': community, 'version': version,
+                          'traps': trap_type, 'port': trap_port})
+        else:
             state.snmp_hosts.append({'host': ip, 'community': community,
-                                     'version': version, 'traps': trap_type})
+                                     'version': version, 'traps': trap_type,
+                                     'port': trap_port})
         # snmp_dispatcherに即時登録
         snmp_dispatcher.register(device_id, state.snmp_hosts)
         buf = proto_log_buffer.setdefault(device_id, [])
         buf.append({'type': 'snmp_cfg',
-                    'message': f'SNMP trap送信先を設定: {ip} (community={community} v{version})'})
+                    'message': (f'SNMP trap送信先を設定: {ip}:{trap_port} '
+                                f'(community={community} v{version})')})
         return
     # Cisco: "snmp-server location ..."
     snmp_loc = re.match(r'^snmp-server\s+location\s+(.+)', orig)
