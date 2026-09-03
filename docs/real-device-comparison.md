@@ -190,11 +190,34 @@ Capability Codes は対応済み。）
 `show ip interface`（brief でないもの）は実機の tech-support に
 含まれていなかったため、リファレンスが取れるまで未実装のまま。
 
+## 第3ラウンド: 残りのプラットフォーム系コマンド
+
+| コマンド | 以前 | 対応内容 |
+|---|---|---|
+| `show inventory` | 未実装 | 5エントリ。実機と**バイト単位で一致** |
+| `show environment all` | 未実装 | FAN/温度/電源の表。実機と**一致** |
+| `show sdm prefer` | 未実装 | Advanced テンプレート32項目＋末尾の注記。実機と**一致** |
+| `show license summary` | 未実装 | Smart Licensing。実機と**一致** |
+| `show platform resources` | 未実装 | CPU/DRAM/TMPFS。実機と**一致** |
+| `show switch detail` | 桁位置・行構成が違う | `- Local Mac Address` / `Mac persistency wait time` を追加、区切り線を85桁に、値の桁位置を実機に合わせた |
+| `show logging` | 5行欠落・1行目が折り返し・件数が空 | 下記 |
+
+`show logging` の食い違い:
+
+- 1行目を折り返していた（Genieのパーサーは1行前提）
+- `Logging Exception size (...)` → 実機は `Exception Logging: size (...)`
+- `File logging: disabled` / `No active filter modules.` /
+  `Trap logging: level ...` / `Logging Source-Interface:  VRF Name:` が欠落
+- `Buffer logging:  level debugging, messages logged` と**件数が空**
+- バッファサイズが 4096 → 実機は 102400
+
+差分は実機固有の値（rate-limited件数、ログ本文）だけになった。
+
 ## テスト
 
 ```bash
 pytest tests/test_show_version_fidelity.py -v   # 17件
-pytest tests/test_show_output_fidelity.py -v    # 34件
+pytest tests/test_show_output_fidelity.py -v    # 48件
 ```
 
 Genie本体はこのリポジトリ側の実行環境に無いため、パーサーが手掛かりに

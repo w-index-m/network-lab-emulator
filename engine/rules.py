@@ -898,6 +898,16 @@ class RuleEngine:
                 return self._show_redundancy_states(state)
             if re.match(r'^show\s+file\s+systems$', c):
                 return self._show_file_systems(state)
+            if re.match(r'^show\s+inventory$', c):
+                return self._show_inventory(state)
+            if re.match(r'^show\s+environment(\s+all)?$', c):
+                return self._show_environment(state)
+            if re.match(r'^show\s+sdm\s+prefer$', c):
+                return self._show_sdm_prefer(state)
+            if re.match(r'^show\s+license\s+summary$', c):
+                return self._show_license_summary(state)
+            if re.match(r'^show\s+platform\s+resources$', c):
+                return self._show_platform_resources(state)
         if re.match(r'^show\s+interfaces?\s+brief$', c) or re.match(r'^show\s+ip\s+interfaces?\s+brief$', c):
             return self._show_ip_int_brief(state)
 
@@ -6914,30 +6924,45 @@ Key Version         : A
         lines = [
             "Switch/Stack Mac Address : 0057.d2d4.4d00 - Local Mac Address",
             "Mac persistency wait time: Indefinite",
-            "",
-            "                                             H/W   Current",
-            "Switch#   Role    Mac Address     Priority Version  State",
-            "------------------------------------------------------------",
-            "*1       Active   0057.d2d4.4d00     15      V01    Ready",
-            " 2       Standby  0057.d2d4.4d01      14     V01    Ready",
         ]
+        lines += self._STACK_HEADER
+        lines.append(self._stack_row('*1', 'Active', '0057.d2d4.4d00', 15,
+                                     'V01', 'Ready'))
+        lines.append(self._stack_row(' 2', 'Standby', '0057.d2d4.4d01', 14,
+                                     'V01', 'Ready'))
         return "\n".join(lines)
+
+    # 実機のスタック表は列位置が決まっている（値の行はヘッダとずれる）
+    _STACK_HEADER = [
+        "                                             H/W   Current",
+        "Switch#   Role    Mac Address     Priority Version  State ",
+        "-" * 85,
+    ]
+
+    @staticmethod
+    def _stack_row(sw, role, mac, prio, ver, st):
+        return f'{sw:<9}{role:<9}{mac:<19}{prio:>2}     {ver:<8}{st}'
 
     def _show_switch_detail(self, state):
         """show switch detail"""
         lines = [
-            "Switch/Stack Mac Address : 0057.d2d4.4d00",
             "",
-            "                                             H/W   Current",
-            "Switch#   Role    Mac Address     Priority Version  State",
-            "------------------------------------------------------------",
-            "*1       Active   0057.d2d4.4d00     15      V01    Ready",
-            " 2       Standby  0057.d2d4.4d01      14     V01    Ready",
+            "Switch/Stack Mac Address : 0057.d2d4.4d00 - Local Mac Address",
+            "Mac persistency wait time: Indefinite",
+        ]
+        lines += self._STACK_HEADER
+        lines.append(self._stack_row('*1', 'Active', '0057.d2d4.4d00', 15,
+                                     'V01', 'Ready'))
+        lines.append(self._stack_row(' 2', 'Standby', '0057.d2d4.4d01', 14,
+                                     'V01', 'Ready'))
+        lines += [
             "",
-            "         Stack Port Status             Neighbors",
-            "Switch#  Port 1     Port 2           Port 1   Port 2",
-            "  1      OK         OK                2        2",
-            " 2       OK         OK                1        1",
+            "",
+            "         Stack Port Status             Neighbors     ",
+            "Switch#  Port 1     Port 2           Port 1   Port 2 ",
+            "-" * 56,
+            f'{"  1":<10}{"OK":<11}{"OK":<17}{"2":<9}2',
+            f'{"  2":<10}{"OK":<11}{"OK":<17}{"1":<9}1',
         ]
         return "\n".join(lines)
 
@@ -6961,22 +6986,174 @@ Key Version         : A
         return "\n".join(lines)
 
     def _show_logging(self, state):
-        return ("Syslog logging: enabled (0 messages dropped, 0 messages rate-limited,\n"
-                "                0 flushes, 0 overruns, xml disabled, filtering disabled)\n\n"
-                "No Active Message Discriminator.\n\n"
-                "No Inactive Message Discriminator.\n\n"
-                "    Console logging: level debugging, 42 messages logged, xml disabled,\n"
-                "                     filtering disabled\n"
-                "    Monitor logging: level debugging, 0 messages logged, xml disabled,\n"
-                "                     filtering disabled\n"
-                "    Buffer logging:  level debugging, 42 messages logged, xml disabled,\n"
-                "                    filtering disabled\n"
-                "    Logging Exception size (8192 bytes)\n"
-                "    Count and timestamp logging messages: disabled\n"
-                "    Persistent logging: disabled\n\n"
-                "Log Buffer (8192 bytes):\n"
-                f"*Jun 13 10:30:00.001: %LINK-3-UPDOWN: GigabitEthernet1/0/1, changed state to up\n"
-                f"*Jun 13 10:30:01.002: %LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet1/0/1, changed state to up")
+        # 実機(WS-C3650-24TD / IOS-XE 16.12.11)の構成に合わせる。
+        # 1行目は折り返さない（Genieのパーサーが1行前提）。
+        n = 65
+        return "\n".join([
+            "",
+            f"Syslog logging: enabled (0 messages dropped, 2 messages rate-limited, "
+            f"0 flushes, 0 overruns, xml disabled, filtering disabled)",
+            "",
+            "No Active Message Discriminator.",
+            "",
+            "",
+            "",
+            "No Inactive Message Discriminator.",
+            "",
+            "",
+            f"    Console logging: level debugging, {n} messages logged, xml disabled,",
+            "                     filtering disabled",
+            "    Monitor logging: level debugging, 0 messages logged, xml disabled,",
+            "                     filtering disabled",
+            f"    Buffer logging:  level debugging, {n} messages logged, xml disabled,",
+            "                    filtering disabled",
+            "    Exception Logging: size (4096 bytes)",
+            "    Count and timestamp logging messages: disabled",
+            "    File logging: disabled",
+            "    Persistent logging: disabled",
+            "",
+            "No active filter modules.",
+            "",
+            f"    Trap logging: level informational, {n + 2} message lines logged",
+            "        Logging Source-Interface:       VRF Name:",
+            "",
+            "Log Buffer (102400 bytes):",
+            "",
+            "*Jun 13 10:30:00.001: %LINK-3-UPDOWN: Interface GigabitEthernet1/0/1, "
+            "changed state to up",
+            "*Jun 13 10:30:01.002: %LINEPROTO-5-UPDOWN: Line protocol on Interface "
+            "GigabitEthernet1/0/1, changed state to up",
+        ])
+
+    def _show_inventory(self, state):
+        """show inventory"""
+        items = [
+            ('c36xx Stack', 'c36xx Stack', 'WS-C3650-24TD-E', 'V04', 'FDO2030Q1NL'),
+            ('Switch 1', 'WS-C3650-24TD-E', 'WS-C3650-24TD-E', 'V04', 'FDO2030Q1NL'),
+            ('StackAdapter1/1', 'StackAdapter1/1', 'C3650-STACK', 'V01', 'FDO20320PGC'),
+            ('StackAdapter1/2', 'StackAdapter1/2', 'C3650-STACK', 'V01', 'FDO20320QC9'),
+            ('Switch 1 - Power Supply A', 'Switch 1 - Power Supply A',
+             'PWR-C2-250WAC', 'V03', 'LIT20291GJ0'),
+        ]
+        lines = ['']
+        for name, descr, pid, vid, sn in items:
+            lines.append(f'NAME: "{name}", DESCR: "{descr}"')
+            lines.append(f'PID: {pid:<18}, VID: {vid:<5}, SN: {sn}')
+            lines.append('')
+        return "\n".join(lines)
+
+    def _show_environment(self, state):
+        """show environment all"""
+        return "\n".join([
+            '',
+            'Switch 1 FAN 1 is OK',
+            'Switch 1 FAN 2 is OK',
+            'Switch 1 FAN 3 is OK',
+            'FAN PS-1 is OK',
+            'FAN PS-2 is NOT PRESENT',
+            'Switch 1: SYSTEM TEMPERATURE is OK',
+            'Inlet Temperature Value: 25 Degree Celsius',
+            'Temperature State: GREEN',
+            'Yellow Threshold : 46 Degree Celsius',
+            'Red Threshold    : 56 Degree Celsius',
+            '',
+            'Hotspot Temperature Value: 38 Degree Celsius',
+            'Temperature State: GREEN',
+            'Yellow Threshold : 105 Degree Celsius',
+            'Red Threshold    : 125 Degree Celsius',
+            'SW  PID                 Serial#     Status           Sys Pwr  PoE Pwr  Watts',
+            '--  ------------------  ----------  ---------------  -------  -------  -----',
+            '1A  PWR-C2-250WAC       LIT20291GJ0  OK              Good     n/a      250 ',
+            '1B  Not Present',
+            '',
+            'SW  Status          RPS Name          RPS Serial#  RPS Port#',
+            '--  -------------   ----------------  -----------  ---------',
+        ])
+
+    def _show_sdm_prefer(self, state):
+        """show sdm prefer"""
+        rows = [
+            ('Number of VLANs:', 4094),
+            ('Unicast MAC addresses:', 32768),
+            ('Overflow Unicast MAC addresses:', 512),
+            ('L2 Multicast entries:', 4096),
+            ('Overflow L2 Multicast entries:', 512),
+            ('L3 Multicast entries:', 4096),
+            ('Overflow L3 Multicast entries:', 512),
+            ('Directly connected routes:', 16384),
+            ('Indirect routes:', 7168),
+            ('Security Access Control Entries:', 3072),
+            ('QoS Access Control Entries:', 2560),
+            ('Policy Based Routing ACEs:', 1024),
+            ('Netflow ACEs:', 768),
+            ('Flow SPAN ACEs:', 512),
+            ('Tunnels:', 256),
+            ('LISP Instance Mapping Entries:', 768),
+            ('Control Plane Entries:', 512),
+            ('Input Netflow flows:', 8192),
+            ('Output Netflow flows:', 16384),
+            ('SGT/DGT (or) MPLS VPN entries:', 4096),
+            ('SGT/DGT (or) MPLS VPN Overflow entries:', 512),
+            ('Wired clients:', 2048),
+            ('MACSec SPD Entries:', 256),
+            ('MPLS L3 VPN VRF:', 127),
+            ('MPLS Labels:', 2048),
+            ('MPLS L3 VPN Routes VRF Mode:', 7168),
+            ('MPLS L3 VPN Routes Prefix Mode:', 3072),
+            ('MVPN MDT Tunnels:', 256),
+            ('L2 VPN EOMPLS Attachment Circuit:', 256),
+            ('MAX VPLS Bridge Domains :', 128),
+            ('MAX VPLS Peers Per Bridge Domain:', 8),
+            ('MAX VPLS/VPWS Pseudowires :', 256),
+        ]
+        lines = ['', 'Showing SDM Template Info', '',
+                 'This is the Advanced template.']
+        for label, value in rows:
+            lines.append(f'  {label:<53}{value}')
+        lines += [
+            'These numbers are typical for L2 and IPv4 features.',
+            'Some features such as IPv6, use up double the entry size;',
+            'so only half as many entries can be created.',
+            '* values can be modified by sdm cli.',
+        ]
+        return "\n".join(lines)
+
+    def _show_license_summary(self, state):
+        """show license summary"""
+        return "\n".join([
+            '',
+            'Smart Licensing is ENABLED',
+            '',
+            'Registration:',
+            '  Status: UNREGISTERED',
+            '  Export-Controlled Functionality: NOT ALLOWED',
+            '',
+            'License Authorization: ',
+            '  Status: IN-USE',
+            '',
+            'License Usage:',
+            '  License                 Entitlement tag               Count Status',
+            '  ' + '-' * 77,
+            '                          (C3650-24 IP Services)            1 IN-USE',
+            '',
+        ])
+
+    def _show_platform_resources(self, state):
+        """show platform resources"""
+        return "\n".join([
+            '',
+            '**State Acronym: H - Healthy, W - Warning, C - Critical'
+            + ' ' * 45,
+            'Resource                 Usage                 Max             '
+            'Warning         Critical        State',
+            '-' * 100,
+            ' Control Processor       34.32%                100%            '
+            '90%             95%             H    ',
+            '  DRAM                   2047MB(52%)           3872MB          '
+            '90%             95%             H    ',
+            '  TMPFS                  584MB(15%)            3872MB          '
+            '40%             50%             H    ',
+        ])
 
     def _show_snmp(self, state):
         return ("Chassis: " + state.hostname + "\n"

@@ -8677,26 +8677,39 @@ class CiscoMessageEngine:
         """
         show logging の出力形式（Catalyst 9300準拠）
         """
+        # 実機(WS-C3650-24TD / IOS-XE 16.12.11)の行構成に合わせる。
+        # 1行目は折り返さない（Genieのパーサーが1行前提）。
+        n = len(logs)
         lines = [
-            'Syslog logging: enabled (0 messages dropped, 0 messages rate-limited,',
-            '                0 flushes, 0 overruns, xml disabled, filtering disabled)',
+            '',
+            'Syslog logging: enabled (0 messages dropped, 0 messages rate-limited, '
+            '0 flushes, 0 overruns, xml disabled, filtering disabled)',
             '',
             'No Active Message Discriminator.',
+            '',
+            '',
             '',
             'No Inactive Message Discriminator.',
             '',
             '',
-            '    Console logging: level debugging, 0 messages logged, xml disabled,',
+            f'    Console logging: level debugging, {n} messages logged, xml disabled,',
             '                     filtering disabled',
             '    Monitor logging: level debugging, 0 messages logged, xml disabled,',
             '                     filtering disabled',
-            '    Buffer logging:  level debugging, messages logged, xml disabled,',
-            '                     filtering disabled',
-            '    Logging Exception size (4096 bytes)',
-            f'    Count and timestamp logging messages: disabled',
+            f'    Buffer logging:  level debugging, {n} messages logged, xml disabled,',
+            '                    filtering disabled',
+            '    Exception Logging: size (4096 bytes)',
+            '    Count and timestamp logging messages: disabled',
+            '    File logging: disabled',
             '    Persistent logging: disabled',
             '',
-            f'Log Buffer (4096 bytes):',
+            'No active filter modules.',
+            '',
+            f'    Trap logging: level informational, {n} message lines logged',
+            '        Logging Source-Interface:       VRF Name:',
+            '',
+            'Log Buffer (102400 bytes):',
+            '',
         ]
         if not logs:
             lines.append('(No log messages)')

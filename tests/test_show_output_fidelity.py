@@ -432,3 +432,86 @@ def test_show_interfaces_trunk_prints_nothing_without_trunks():
         iface.pop('vlan', None)
     out = engine.process('show interfaces trunk', state)
     assert out.strip() == '', repr(out)
+
+
+# ── show tech-support 由来の残りコマンド ──────────────────
+
+@pytest.mark.parametrize('command, needle', [
+    ('show inventory', 'PID: WS-C3650-24TD-E   , VID: V04  , SN: FDO2030Q1NL'),
+    ('show environment all', 'Switch 1: SYSTEM TEMPERATURE is OK'),
+    ('show environment all', 'Inlet Temperature Value: 25 Degree Celsius'),
+    ('show sdm prefer', 'This is the Advanced template.'),
+    ('show sdm prefer', '* values can be modified by sdm cli.'),
+    ('show license summary', 'Smart Licensing is ENABLED'),
+    ('show license summary', '  Export-Controlled Functionality: NOT ALLOWED'),
+    ('show platform resources',
+     '**State Acronym: H - Healthy, W - Warning, C - Critical'),
+])
+def test_platform_show_commands_match_real_lines(command, needle):
+    """実機の show tech-support にあった行がそのまま出ること"""
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    state.mode = 'exec'
+    out = engine.process(command, state)
+    assert 'Invalid input' not in out, out
+    assert needle in out, out
+
+
+def test_sdm_prefer_column_position_matches_real():
+    """値の桁位置が実機と一致すること"""
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    out = engine.process('show sdm prefer', state)
+    assert '  Number of VLANs:                                     4094' in out, out
+
+
+def test_switch_detail_has_local_mac_and_persistency_lines():
+    """実機は "- Local Mac Address" と persistency 行を出す"""
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    out = engine.process('show switch detail', state)
+    assert '- Local Mac Address' in out, out
+    assert 'Mac persistency wait time: Indefinite' in out, out
+    # スタックポート表にも区切り線がある
+    assert out.count('-' * 56) >= 1, out
+
+
+def test_switch_detail_row_columns_match_real():
+    """スタック表の値の桁位置が実機と一致すること"""
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    out = engine.process('show switch detail', state)
+    row = next(l for l in out.splitlines() if l.startswith('*1'))
+    assert row.index('Active') == 9, (row.index('Active'), repr(row))
+    assert row.index('V01') == 44, (row.index('V01'), repr(row))
+    assert row.index('Ready') == 52, (row.index('Ready'), repr(row))
+
+
+def test_show_logging_first_line_is_not_wrapped():
+    """1行目を折り返さない（Genieのパーサーが1行前提）"""
+    from engine.protocols import cisco_msg
+    out = cisco_msg.format_show_logging([])
+    first = next(l for l in out.splitlines() if l.startswith('Syslog logging:'))
+    assert first.endswith('filtering disabled)'), repr(first)
+    assert 'flushes' in first, repr(first)
+
+
+def test_show_logging_has_the_lines_a_real_switch_prints():
+    """実機にあってエミュレーターに無かった行"""
+    from engine.protocols import cisco_msg
+    out = cisco_msg.format_show_logging([])
+    for line in ('    Exception Logging: size (4096 bytes)',
+                 '    File logging: disabled',
+                 'No active filter modules.',
+                 '        Logging Source-Interface:       VRF Name:',
+                 'Log Buffer (102400 bytes):'):
+        assert line in out, (line, out)
+    # "Logging Exception size" は実機に無い綴り
+    assert 'Logging Exception size' not in out, out
+
+
+def test_show_logging_buffer_count_is_filled_in():
+    """件数が抜けて "level debugging, messages logged" になっていた"""
+    from engine.protocols import cisco_msg
+    out = cisco_msg.format_show_logging(['a', 'b', 'c'])
+    assert 'Buffer logging:  level debugging, 3 messages logged' in out, out
