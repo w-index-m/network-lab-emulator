@@ -125,19 +125,21 @@ def test_ports_wrap_like_real_device(vlan):
 # ── 実機比較で見つかった追加の食い違い ────────────────────
 
 def test_mac_table_has_no_explanatory_text():
-    """空のMACテーブルに説明文を混ぜない（実機はヘッダと合計行だけ）
+    """MACテーブルに説明文を混ぜない（装置の出力として成立させる）
 
-    以前は日本語の案内文が装置の出力に混ざっており、
+    以前は学習が0件のとき日本語の案内文が装置の出力に混ざっており、
     パーサーが解釈できない行になっていた。
     """
     from engine.protocols import DataPlaneEngine
 
-    out = DataPlaneEngine().format_mac_table('d')
+    out = DataPlaneEngine().format_mac_table('mactest-empty')
     assert '動的に学習' not in out, out
-    assert 'Total Mac Addresses for this criterion: 0' in out
-    body = [l for l in out.splitlines()
-            if l and not l.startswith((' ', '-', 'Vlan', 'Total'))]
-    assert body == [], f'ヘッダ以外の行が出ている: {body}'
+    # 行はヘッダ・区切り・エントリ・合計のいずれかに限られる
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        ok = line.startswith((' ', '-', 'Vlan', 'Total')) or 'Mac Address Table' in line
+        assert ok, f'想定外の行が出ている: {line!r}'
 
 
 def test_lldp_reports_not_enabled_until_lldp_run():
@@ -205,3 +207,66 @@ def test_spanning_tree_priority_includes_sys_id_ext():
     for line in out.splitlines():
         if 'Address' in line:
             assert ':' not in line, f'コロン区切りのMACが残っている: {line}'
+
+
+# ── 実機比較 第3弾（CPUエントリ / Flags / Capability Codes）──────
+
+def test_mac_table_has_cpu_reserved_entries():
+    """実機は学習が0件でも予約マルチキャストMACを21件持つ
+
+    0100.0ccc.cccc(CDP/VTP)、0180.c200.000x(STP/LLDP等)、
+    ffff.ffff.ffff(broadcast) が STATIC/CPU として常に載る。
+    """
+    from engine.protocols import DataPlaneEngine
+
+    # icmp_engineはモジュール共有のため、他テストがSVIを登録していない
+    # 装置IDを使う（登録済みIDだとSVI分がエントリ数に加わる）
+    out = DataPlaneEngine().format_mac_table('mactest-empty')
+    for mac in ('0100.0ccc.cccc', '0100.0ccc.cccd',
+                '0180.c200.0000', '0180.c200.0010',
+                '0180.c200.0021', 'ffff.ffff.ffff'):
+        assert mac in out, f'{mac} が無い:\n{out}'
+    assert out.count('STATIC      CPU') == 21, out
+    assert 'Total Mac Addresses for this criterion: 21' in out
+
+
+def test_mac_table_column_widths_match_real_device():
+    """列幅が実機と一致すること（Vlanは右寄せ、MACは左18、Typeは左12）"""
+    from engine.protocols import DataPlaneEngine
+
+    out = DataPlaneEngine().format_mac_table('mactest-empty')
+    row = [l for l in out.splitlines() if '0100.0ccc.cccc' in l][0]
+    assert row == ' All    0100.0ccc.cccc    STATIC      CPU', repr(row)
+
+
+def test_etherchannel_summary_has_full_flag_legend():
+    """Flags説明が実機と同じ項目を持つ（以前は2行しか無かった）"""
+    from engine.protocols import LacpEngine
+
+    out = LacpEngine().format_etherchannel_summary('d')
+    for flag in ('H - Hot-standby (LACP only)', 'R - Layer3', 'S - Layer2',
+                 'U - in use', 'f - failed to allocate aggregator',
+                 'M - not in use, minimum links not met',
+                 'u - unsuitable for bundling',
+                 'w - waiting to be aggregated',
+                 'd - default port', 'A - formed by Auto LAG'):
+        assert flag in out, f'{flag!r} が無い:\n{out}'
+
+
+def test_etherchannel_summary_shows_group_header_when_empty():
+    """チャネルが0個でも実機はGroupテーブルのヘッダを出す"""
+    from engine.protocols import LacpEngine
+
+    out = LacpEngine().format_etherchannel_summary('d')
+    assert 'Number of channel-groups in use: 0' in out
+    assert 'Group  Port-channel  Protocol    Ports' in out, out
+    assert '------+-------------+-----------+' in out, out
+
+
+def test_cdp_capability_codes_has_three_lines():
+    """Capability Codes が実機同様3行（P/D/C/M の説明を含む）"""
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    out = engine.process('show cdp neighbors', state)
+    assert 'P - Phone' in out, out
+    assert 'D - Remote, C - CVTA, M - Two-port Mac Relay' in out, out

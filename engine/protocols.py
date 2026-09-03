@@ -4972,6 +4972,25 @@ class DataPlaneEngine:
             k: v for k, v in self.mac_tables[device_id].items()
             if v.entry_type != 'DYNAMIC'}
 
+    # 実機のCatalystが必ず持つ予約マルチキャストMAC（CPUに落ちるもの）。
+    # 実機の show mac address-table は学習エントリが0件でもこれらを
+    # STATIC/CPU として21件表示する（実機との突き合わせで判明）
+    _CPU_RESERVED_MACS = (
+        ['0100.0ccc.cccc', '0100.0ccc.cccd']                      # CDP/VTP, PVST+
+        + [f'0180.c200.{i:04x}' for i in range(0x11)]             # STP/LLDP/802.1x等
+        + ['0180.c200.0021', 'ffff.ffff.ffff']                    # LLDP, broadcast
+    )
+
+    @staticmethod
+    def _short_port(name: str) -> str:
+        """MACテーブルのPorts列は実機同様に短縮表記（Vlan1 -> Vl1）"""
+        for full, abbr in (('TenGigabitEthernet', 'Te'), ('GigabitEthernet', 'Gi'),
+                           ('FastEthernet', 'Fa'), ('Port-channel', 'Po'),
+                           ('Vlan', 'Vl')):
+            if name.startswith(full):
+                return abbr + name[len(full):]
+        return name
+
     def format_mac_table(self, device_id: str) -> str:
         entries = list(self.mac_tables.get(device_id, {}).values())
         lines = ["          Mac Address Table",
@@ -4979,14 +4998,43 @@ class DataPlaneEngine:
                  "",
                  "Vlan    Mac Address       Type        Ports",
                  "----    -----------       --------    -----"]
-        # 実機は学習エントリが無ければヘッダと合計行だけを出す。
-        # ここに説明文を混ぜると装置の出力ではなくなり、
-        # Genie等のパーサーが壊れる（実機との突き合わせで判明）
+
+        def row(vlan, mac, etype, port):
+            # 実機の列幅: Vlan=右寄せ4+空白4 / MAC=左18 / Type=左12
+            return f'{str(vlan):>4}    {mac:<18}{etype:<12}{port}'
+
+        total = 0
+        # CPUに落ちる予約MAC（実機は常に存在する）
+        for mac in self._CPU_RESERVED_MACS:
+            lines.append(row('All', mac, 'STATIC', 'CPU'))
+            total += 1
+        # SVI自身のMACは STATIC としてそのVLANに載る
+        for svi, vlan_id in self._svi_macs(device_id):
+            lines.append(row(vlan_id, svi, 'STATIC', self._short_port(f'Vlan{vlan_id}')))
+            total += 1
+        # 学習エントリ
         for e in sorted(entries, key=lambda x: (x.vlan, x.port)):
-            lines.append(
-                f" {e.vlan:<8}{cisco_mac(e.mac):<20}{e.entry_type:<12}{e.port}")
-        lines.append(f"Total Mac Addresses for this criterion: {len(entries)}")
+            lines.append(row(e.vlan, cisco_mac(e.mac), e.entry_type,
+                             self._short_port(e.port)))
+            total += 1
+        lines.append(f"Total Mac Addresses for this criterion: {total}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _svi_macs(device_id: str):
+        """SVI(Vlanインターフェース)のMACと所属VLANを返す"""
+        ifaces = icmp_engine.device_ips.get(device_id, {}).get('interfaces', {})
+        out = []
+        for name in sorted(ifaces):
+            if not name.startswith('Vlan'):
+                continue
+            try:
+                vlan_id = int(name[4:])
+            except ValueError:
+                continue
+            h = abs(hash(f'{device_id}:{name}')) % (16 ** 6)
+            out.append((cisco_mac(f'00a6ca{h:06x}'), vlan_id))
+        return out
 
     # ── インターフェースカウンタ ──
     def _ctr(self, device_id: str, iface: str) -> dict:
@@ -5717,26 +5765,47 @@ class LacpEngine:
         bundled = sum(1 for x in ch['members'] if x.state == 'bundled')
         return po_num, bundled
 
+    # 実機(IOS-XE)の show etherchannel summary が出すFlags説明。
+    # 以前は2行しか無く、H/R/S/U/f/M/u/w/d/A の説明が欠けていた
+    _ETHERCHANNEL_FLAGS = (
+        'Flags:  D - down        P - bundled in port-channel\n'
+        '        I - stand-alone s - suspended\n'
+        '        H - Hot-standby (LACP only)\n'
+        '        R - Layer3      S - Layer2\n'
+        '        U - in use      f - failed to allocate aggregator\n'
+        '\n'
+        '        M - not in use, minimum links not met\n'
+        '        u - unsuitable for bundling\n'
+        '        w - waiting to be aggregated\n'
+        '        d - default port\n'
+        '\n'
+        '        A - formed by Auto LAG\n'
+    )
+    # Groupテーブルのヘッダ。実機はチャネルが0個でも必ず出す
+    _ETHERCHANNEL_HEADER = (
+        'Group  Port-channel  Protocol    Ports\n'
+        '------+-------------+-----------+'
+        '-----------------------------------------------'
+    )
+
     def format_etherchannel_summary(self, device_id: str) -> str:
         """show etherchannel summary の出力（Cisco/Catalyst用）"""
         chans = self.channels.get(device_id, {})
         if not chans:
-            return ('Flags:  D - down        P - bundled in port-channel\n'
-                    '        I - stand-alone s - suspended\n'
-                    '\n'
-                    'Number of channel-groups in use: 0\n'
-                    'Number of aggregators:           0')
+            # 実機はチャネルが0個でもFlags説明とGroupヘッダを出す
+            return (self._ETHERCHANNEL_FLAGS
+                    + '\n'
+                    + 'Number of channel-groups in use: 0\n'
+                    + 'Number of aggregators:           0\n'
+                    + '\n'
+                    + self._ETHERCHANNEL_HEADER)
         lines = [
-            'Flags:  D - down        P - bundled in port-channel',
-            '        I - stand-alone s - suspended',
-            '        R - Layer3      S - Layer2',
-            '        U - in use      f - failed to allocate aggregator',
+            self._ETHERCHANNEL_FLAGS.rstrip('\n'),
             '',
             f'Number of channel-groups in use: {len(chans)}',
             f'Number of aggregators:           {len(chans)}',
             '',
-            'Group  Port-channel  Protocol    Ports',
-            '------+-------------+-----------+-----------------------------------',
+            self._ETHERCHANNEL_HEADER,
         ]
         for po_num, ch in sorted(chans.items()):
             any_bundled = any(m.state == 'bundled' for m in ch['members'])

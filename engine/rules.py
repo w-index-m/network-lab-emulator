@@ -1896,8 +1896,10 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
         return s.ljust(width) if len(s) < width else s + ' '
 
     def _show_cdp(self, state):
+        # 実機(IOS-XE)は3行。P/D/C/M の説明が欠けていた
         lines = ["Capability Codes: R - Router, T - Trans Bridge, B - Source Route Bridge",
-                 "                  S - Switch, H - Host, I - IGMP, r - Repeater",
+                 "                  S - Switch, H - Host, I - IGMP, r - Repeater, P - Phone,",
+                 "                  D - Remote, C - CVTA, M - Two-port Mac Relay",
                  "",
                  "Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID"]
         for n in state.cdp_neighbors:
