@@ -203,6 +203,15 @@ O     192.168.200.0/24 [110/20] via 10.9.9.50, lan0
 
 **ハマった点（重要）**:
 
+- **`faker.start()` を必ず使うこと。** `_send_hello()` を自前のループで
+  呼ぶだけの書き方をすると、Hello交換は進むが**DBDescの再送スレッド
+  (`_rxmt_loop`) が動かない**。OSPFのMaster/Slaveネゴシエーションは
+  `rxmt_interval`（既定5秒）ごとの再送で収束する設計のため、再送が
+  無いと DBDesc が一度でも取りこぼされた時点で ExStart から永久に
+  進まなくなる（実際にこれで「OSPFが不安定でたまにしかFullにならない」
+  と誤診しかけた）。`start()` は sniff / hello / rxmt の3スレッドを
+  正しく起動する。`full_event.wait(timeout=...)` でFull到達を待てる。
+  正しく `start()` を使えば **1〜2秒でFullに到達する**。
 - OSPFの `my_ip` に使うIPは**必ず未使用のものを新規に用意する**こと。
   同じIPで複数回テストを実行すると、`DeviceOspfResponder`（サーバー
   側）はプロセスが生きている限り**1インスタンス=1ネイバー**の状態を
@@ -211,15 +220,35 @@ O     192.168.200.0/24 [110/20] via 10.9.9.50, lan0
   テストプロセスと通信しようとして ExStart で永久にスタックする
   （実機でも隣接ルータが再起動した直後、Dead Timerが切れるまで同様の
   ことが起こりうる）。
-- DBDesc のMaster/Slaveネゴシエーションは、双方の `rxmt_interval`
-  （デフォルト5秒）に依存した再送によって収束するため、**Hello交換
-  開始からFull到達まで数十秒かかることがある**（今回の検証では最短
-  約5秒、最長で約70秒かかるケースがあった）。短いタイムアウトで
-  「NG」と判断しないよう注意。
+- Full到達までの時間は「Helloが相手に届いてから」1〜2秒程度。
+  ただし装置側のHello送出間隔（既定10秒）を待つ必要があるため、
+  テスト開始からは最大でその1周期分が加わる。数分待っても
+  ExStartのままの場合は、上記の `start()` 未使用（再送スレッド無し）
+  か、IP使い回しによる状態不整合を疑うこと。
 - `show ip ospf neighbor` はこの実リスナー経由のネイバーを表示しない
   （`ospf_engine.nodes[...]['neighbors']` を更新していないため）。
   ただし学習した経路は正しく `_learned_external` 経由で
   `show ip route` に反映される。これは既知の制約（下記）。
+
+## 自動テスト（回帰防止）
+
+手作業の検証内容は `tests/test_real_routing_integration.py` に
+**pytestの結合テストとして自動化済み**（実装が壊れたら気付けるように
+するため）。アプリ全体（app.py）は起動せず、リスナーのモジュールを
+直接ソケットにbindして、`tools/route_injector_cli.py` が組み立てる
+本物のパケットを流し込んで検証する。
+
+```bash
+# RIP・BGP: 非特権ポート(15520/11179)を使うのでroot不要・数秒で完了
+pytest tests/test_real_routing_integration.py -v
+
+# OSPF: raw socket(IP protocol 89)とscapyが必要でroot権限が要るため
+# 既定ではスキップされる。実行するには環境変数で有効化する
+NETLAB_OSPF_WIRE_TEST=1 pytest tests/test_real_routing_integration.py -v
+```
+
+パケットのパースロジック単体のテストは
+`tests/test_real_routing_listeners.py`（ソケット不使用、高速）。
 
 ## 既知の制約
 
@@ -238,6 +267,25 @@ O     192.168.200.0/24 [110/20] via 10.9.9.50, lan0
   `saved_config.json` に永続化されないため、アプリ再起動後は
   CLIで再設定する必要がある（`vnet.links` などのトポロジー情報とは
   異なる）。
+
+## 全ベンダー単体（1台 vs route_injector）検証結果
+
+| 装置 | RIP | BGP | OSPF | 学習された経路の例 |
+|---|---|---|---|---|
+| Catalyst (`catalyst`) | OK | OK | OK | `R 172.16.50.0/24`, `B 172.16.60.0/24`, `O 192.168.200.0/24` |
+| Si-R (`sir-a`) | OK | OK | OK | `R 172.16.70.0/24`, `B 172.20.60.0/24`, `O 172.20.70.0/24` |
+| Apresia (`apresia`) | OK | OK | OK | `R 172.30.50.0/24`, `B 172.30.60.0/24`, `O 172.30.70.0/24` |
+
+Apresia は下記のIP重複を解消（`Vlan10` を 192.168.20.1 に変更）した上で
+検証している。
+
+**Apresiaでの注意**: Apresia の CLI では `router rip` 配下の
+`version 2` / `network ...` が `% Unknown command.` と表示されるが、
+これは表示を生成する `rule_engine`（装置ごとのCLIシミュレーター）が
+その構文を知らないだけで、**内部のプロトコルエンジンには
+`handle_protocol_config()` が先に処理して正しく反映されている**
+（`show ip route` に学習経路が出ることで確認済み）。表示上のエラーに
+惑わされないこと。
 
 ### 装置非依存であることの確認（Si-R = `sir-a`）
 
@@ -264,7 +312,7 @@ R     172.16.70.0/24 [120/2] via 127.0.0.5, lan0
 → 実リスナーはCatalyst固有の実装ではなく、`device_sessions` の
 全装置に対して汎用的に動作することを確認した。
 
-### 既知のブロッカー: `apresia` 装置の management IP 重複
+### 解消済みのブロッカー: `apresia` 装置の management IP 重複
 
 `saved_config.json` には同じ management IP を持つ装置が複数存在する
 （例: `apresia`（hostname sw1, 192.168.10.1）と `srs`（hostname
@@ -282,8 +330,19 @@ Core-SW, 192.168.10.1）が重複、`sir`（hostname SiR-Router）と
 ```
 
 Apresiaに対する実ワイヤプロトコル試験を行うには、まずこのIP重複を
-解消する必要がある（`apresia` に別のmanagement IPを割り当てるか、
-`srs` 側を変更する）。今回のセッションでは未対応。
+解消する必要がある。**対応済み**: `saved_config.json` の `apresia` の
+`Vlan10` を `192.168.20.1` に変更し、重複を解消した。これにより
+apresiaでも実RIP/BGP/OSPFリスナーが正常に起動する。
+
+なお `sir`（hostname SiR-Router, 192.168.1.1）と `cat`（hostname
+Catalyst-SW, 192.168.10.1）、`cisco-test`（203.0.113.2）の重複は
+未解消のまま（これらの装置では実リスナーが起動しない）。同様に
+management IP を一意にすれば解消できる。
+
+**注意**: `saved_config.json` を直接編集する場合は、必ず先に
+`app.py` のプロセスを完全に停止すること。アプリはシャットダウン時に
+`_save_config()` でメモリ上の状態をファイルへ書き戻すため、
+稼働中に編集すると終了時に上書きで消える。
 
 ## 未着手（今後の検討事項）
 
@@ -295,7 +354,5 @@ Apresiaに対する実ワイヤプロトコル試験を行うには、まずこ�
   含むOSPF/RIP/BGP試験を行う（現状の実装は前述の通りOSPFがP2P限定の
   ため、ブロードキャストセグメントでの複数ネイバー対応には設計変更
   が必要）。
-- Si-R / Apresia 単体に対する、上記と同じ実ワイヤプロトコル試験
-  （Catalystで確認した手順と同じ方法で、`_pick_management_ip` が
-  各装置のmanagement IPを解決できることを前提に動くはずだが、実際に
-  Si-R/Apresiaで動作確認はまだ行っていない）。
+- （対応済み）Si-R / Apresia 単体に対する実ワイヤプロトコル試験は
+  上記の表のとおり3プロトコルとも確認済み。
