@@ -258,6 +258,7 @@ def _load_config():
             ifaces = {name: {'ip': info['ip'], 'prefix': info.get('prefix', 24)}
                       for name, info in state.interfaces.items() if info.get('ip')}
             icmp_engine.register_device(dev_id, state.hostname, ifaces)
+            vlan_engine.register_ports(dev_id, list(state.interfaces.keys()))
             snmp_agent.register(dev_id, state.device_type, state.hostname)
         return
 
@@ -333,6 +334,7 @@ def _load_config():
         ifaces = {name: {'ip': info.get('ip',''), 'prefix': info.get('prefix',24)}
                   for name, info in state.interfaces.items() if info.get('ip')}
         icmp_engine.register_device(dev_id, state.hostname, ifaces)
+        vlan_engine.register_ports(dev_id, list(state.interfaces.keys()))
         snmp_agent.register(dev_id, state.device_type, state.hostname)
 
     # リンクを復元
@@ -4041,6 +4043,10 @@ def _register_icmp(device_id: str):
             interfaces[ifname] = {'ip': info['ip'],
                                   'prefix': info.get('prefix', 24)}
     icmp_engine.register_device(device_id, state.hostname, interfaces)
+    # VLANエンジンには物理ポート一覧を渡す（IPの有無に関わらず全ポート）。
+    # 実機は未割当のaccessポートをVLAN1に置くため、これが無いと
+    # show vlan brief のVLAN1が空欄のままになり実機と食い違う
+    vlan_engine.register_ports(device_id, list(state.interfaces.keys()))
     # SNMPエージェントにも登録（polling応答用）
     _comm = 'public'
     _sc = getattr(state, 'snmp_community', [])

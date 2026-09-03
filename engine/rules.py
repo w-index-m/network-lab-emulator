@@ -1503,14 +1503,47 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             for r in state.routes:
                 lines.append(f"{r['fp']:<3} {r['dest']:<19}{r['gw']:<16}{str(r['dist']):<9}00:01:23  {r['iface']}")
         else:
-            lines = ["Codes: C - connected, S - static, R - RIP, O - OSPF, B - BGP",
-                     "       D - EIGRP, EX - EIGRP external, i - IS-IS",
-                     "       * - candidate default",
+            # 実機(IOS-XE)準拠:
+            #  - connected/local は "[AD/metric] via ..." を付けず
+            #    "is directly connected, <IF>" と出す
+            #    （以前は静的経路と同じ書式で描画していたため、
+            #      gw='directly' がそのまま "via directly" という
+            #      実機に存在しない表記になっていた）
+            #  - 各インターフェースIPに対する L(local) /32 経路を出す
+            #  - デフォルトルートの有無を "Gateway of last resort" で示す
+            lines = ["Codes: L - local, C - connected, S - static, R - RIP,",
+                     "       B - BGP, D - EIGRP, EX - EIGRP external, O - OSPF,",
+                     "       IA - OSPF inter area, i - IS-IS,",
+                     "       * - candidate default, U - per-user static route",
                      ""]
+            default_gw = next((r for r in state.routes
+                               if r.get('dest') == '0.0.0.0/0'), None)
+            if default_gw:
+                lines.append('Gateway of last resort is '
+                             f"{default_gw.get('gw')} to network 0.0.0.0")
+            else:
+                lines.append('Gateway of last resort is not set')
+            lines.append('')
             for r in state.routes:
-                code = r.get("code","C")
-                lines.append(f"{code}     {r['dest']} [{r['dist']}/0] via {r['gw']}, {r['iface']}")
+                code = r.get("code", "C")
+                if code == 'C' or r.get('gw') == 'directly':
+                    lines.append(f"C        {r['dest']} is directly connected, {r['iface']}")
+                    # 実機は接続ネットワークごとに自分のIPの/32をL経路として持つ
+                    local_ip = self._local_ip_for_route(state, r)
+                    if local_ip:
+                        lines.append(f"L        {local_ip}/32 is directly connected, {r['iface']}")
+                else:
+                    star = '*' if r.get('dest') == '0.0.0.0/0' else ' '
+                    lines.append(f"{code}{star}       {r['dest']} "
+                                 f"[{r['dist']}/0] via {r['gw']}, {r['iface']}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _local_ip_for_route(state, route):
+        """connected経路のインターフェースに付いているIPを返す（L経路用）"""
+        info = getattr(state, 'interfaces', {}).get(route.get('iface'), {})
+        ip = info.get('ip') if isinstance(info, dict) else None
+        return ip or None
 
     # ─── show arp ─────────────────────────────
     def _show_arp(self, state):

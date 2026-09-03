@@ -3479,10 +3479,21 @@ class RibEngine:
         if n:
             for r in n['static_routes']:
                 if r.active:
+                    # インターフェースの直結ネットワークは
+                    # _register_icmp が ad=0 / next_hop='0.0.0.0' で登録する。
+                    # これをstatic扱いのままにすると実機なら
+                    # "C ... is directly connected" と出る経路が
+                    # "S ... via 0.0.0.0" と表示されてしまう
+                    is_connected = (r.ad == 0 and r.next_hop in ('0.0.0.0', ''))
+                    iface = r.iface
+                    if is_connected and not iface:
+                        iface = self._iface_for_network(
+                            device_id, r.network, r.prefix) or ''
                     candidates.append({
                         'network': r.network, 'prefix': r.prefix,
                         'next_hop': r.next_hop, 'ad': r.ad,
-                        'source': 'static', 'metric': 0, 'iface': r.iface,
+                        'source': 'connected' if is_connected else 'static',
+                        'metric': 0, 'iface': iface,
                     })
 
         # RIP
@@ -3602,25 +3613,86 @@ class RibEngine:
         code_map = {'connected': 'C', 'static': 'S', 'rip': 'R',
                     'ospf': 'O', 'bgp': 'B'}
         lines = [
-            'Codes: C - connected, S - static, R - RIP, O - OSPF, B - BGP',
-            '       * - candidate default',
+            'Codes: L - local, C - connected, S - static, R - RIP, B - BGP,',
+            '       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area,',
+            '       i - IS-IS, * - candidate default, U - per-user static route',
             '',
         ]
         if not routes:
             lines.append('(No routes - configure routing or static routes)')
             return '\n'.join(lines)
+        # 実機は既定経路の有無を必ず先頭で示す
+        default_route = next((r for r in routes
+                              if r['network'] == '0.0.0.0' and r['prefix'] == 0), None)
+        if default_route:
+            lines.append('Gateway of last resort is '
+                         f"{default_route['next_hop']} to network 0.0.0.0")
+        else:
+            lines.append('Gateway of last resort is not set')
+        lines.append('')
         # connected → static → 動的の順で表示
         order = {'connected': 0, 'static': 1, 'bgp': 2, 'ospf': 3, 'rip': 4}
         for r in sorted(routes, key=lambda x: (order.get(x['source'], 9), x['network'])):
             code = code_map.get(r['source'], '?')
             net = f"{r['network']}/{r['prefix']}"
             if r['source'] == 'connected':
-                lines.append(f"{code}     {net} is directly connected, {r['iface']}")
+                lines.append(f"C        {net} is directly connected, {r['iface']}")
+                # 実機は接続ネットワークごとに自分のIPの /32 を L 経路で持つ
+                local_ip = self._local_ip_on(device_id, r)
+                if local_ip:
+                    lines.append(
+                        f"L        {local_ip}/32 is directly connected, {r['iface']}")
             else:
+                star = '*' if net == '0.0.0.0/0' else ' '
                 lines.append(
-                    f"{code}     {net} [{r['ad']}/{r['metric']}] via {r['next_hop']}, {r['iface']}"
+                    f"{code}{star}       {net} [{r['ad']}/{r['metric']}] "
+                    f"via {r['next_hop']}, {r['iface']}"
                 )
         return '\n'.join(lines)
+
+    @staticmethod
+    def _iface_for_network(device_id: str, network: str,
+                           prefix: int) -> Optional[str]:
+        """そのネットワークに属するIPを持つインターフェース名を返す"""
+        ifaces = icmp_engine.device_ips.get(device_id, {}).get('interfaces', {})
+        try:
+            mask = (0xffffffff << (32 - int(prefix))) & 0xffffffff if prefix else 0
+            net_int = vnet._ip_to_int(network) & mask
+        except Exception:
+            return None
+        for name, info in ifaces.items():
+            ip = info.get('ip') if isinstance(info, dict) else None
+            if not ip:
+                continue
+            try:
+                if (vnet._ip_to_int(ip) & mask) == net_int:
+                    return name
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _local_ip_on(device_id: str, route: dict) -> Optional[str]:
+        """connected経路のネットワーク上にある自分のIPを返す（L経路用）。
+
+        実機は接続インターフェースのIPを /32 の local 経路として
+        ルーティングテーブルに持つ。これが無いと実機出力と比べたときに
+        L 経路が丸ごと欠ける。
+        """
+        ips = icmp_engine.device_ips.get(device_id, {}).get('ips', {})
+        try:
+            prefix = int(route['prefix'])
+            mask = (0xffffffff << (32 - prefix)) & 0xffffffff if prefix else 0
+            net_int = vnet._ip_to_int(route['network']) & mask
+        except Exception:
+            return None
+        for ip in ips:
+            try:
+                if (vnet._ip_to_int(ip) & mask) == net_int:
+                    return ip
+            except Exception:
+                continue
+        return None
 
     def format_show_static(self, device_id: str) -> str:
         """スタティックルート一覧（フローティング状態込み）"""
@@ -6463,6 +6535,10 @@ class VlanEngine:
         self.ports: Dict[str, Dict[str, VlanPort]] = defaultdict(dict)
         # device_id -> {vlan_id -> VlanInfo}
         self.vlans: Dict[str, Dict[int, VlanInfo]] = defaultdict(dict)
+        # device_id -> [物理ポート名]。実機は未割当のaccessポートを
+        # すべてVLAN1に置くため、show vlan でVLAN1の欄を埋めるのに使う
+        # （IPを持つIFしか登録されないicmp_engineでは代用できない）
+        self.port_inventory: Dict[str, List[str]] = defaultdict(list)
 
     # ── VLAN データベース管理 ──────────────
     def create_vlan(self, device_id: str, vlan_id: int, name: str = '') -> VlanInfo:
@@ -6599,12 +6675,73 @@ class VlanEngine:
         return b_ok
 
     # ── show コマンド ──────────────────────
+    # 実機が常に持つ既定VLAN（削除不可・act/unsup で表示される）
+    _DEFAULT_VLANS = (
+        (1002, 'fddi-default'),
+        (1003, 'token-ring-default'),
+        (1004, 'fddinet-default'),
+        (1005, 'trnet-default'),
+    )
+
+    @staticmethod
+    def _abbrev_port(name: str) -> str:
+        """show vlan のポート表記に合わせて短縮する（GigabitEthernet1/0/1 -> Gi1/0/1）"""
+        for full, abbr in (('TenGigabitEthernet', 'Te'), ('GigabitEthernet', 'Gi'),
+                           ('FastEthernet', 'Fa'), ('Ethernet', 'Et')):
+            if name.startswith(full):
+                return abbr + name[len(full):]
+        return name
+
+    def register_ports(self, device_id: str, port_names: List[str]):
+        """装置の物理ポート一覧を登録する（show vlan のVLAN1表示用）"""
+        self.port_inventory[device_id] = list(port_names)
+
+    def _unassigned_access_ports(self, device_id: str, assigned: set) -> List[str]:
+        """どのVLANにも割り当てられていない物理ポートを返す。
+
+        実機では access ポートは既定でVLAN1に所属するため、
+        これを補わないと `show vlan brief` のVLAN1が常に空欄になり、
+        実機と食い違う（Genieの vlans.1.interfaces も取れない）。
+        """
+        ifaces = self.port_inventory.get(device_id) or list(
+            icmp_engine.device_ips.get(device_id, {}).get('interfaces', {}))
+        out = []
+        for name in ifaces:
+            # SVI・論理インターフェースはVLANのメンバーポートではない
+            if name.startswith(('Vlan', 'vlan', 'Port-channel', 'Loopback',
+                                'Tunnel', 'mgmt', 'lan', 'wan')):
+                continue
+            short = self._abbrev_port(name)
+            if short in assigned or name in assigned:
+                continue
+            out.append(short)
+        return out
+
+    @staticmethod
+    def _wrap_ports(ports: List[str], width: int = 31, indent: int = 48) -> List[str]:
+        """実機同様、Ports列の幅で折り返して継続行にする"""
+        if not ports:
+            return ['']
+        rows, cur = [], ''
+        for p in ports:
+            cand = f'{cur}, {p}' if cur else p
+            if len(cand) > width and cur:
+                rows.append(cur)
+                cur = p
+            else:
+                cur = cand
+        rows.append(cur)
+        return [rows[0]] + [' ' * indent + r for r in rows[1:]]
+
     def format_show_vlan(self, device_id: str, brief: bool = False) -> str:
         """show vlan [brief]"""
         vdb = dict(self.vlans[device_id])
         # VLAN1は常に存在
         if 1 not in vdb:
             vdb[1] = VlanInfo(vlan_id=1, name='default', state='active')
+
+        assigned = {p for vid, v in vdb.items() if vid != 1 for p in v.ports}
+        vlan1_extra = self._unassigned_access_ports(device_id, assigned | set(vdb[1].ports))
 
         lines = [
             'VLAN Name                             Status    Ports',
@@ -6613,10 +6750,16 @@ class VlanEngine:
         for vid in sorted(vdb.keys()):
             v = vdb[vid]
             name = v.name[:32] if v.name else f'VLAN{vid:04d}'
-            ports_str = ', '.join(v.ports[:6])
-            if len(v.ports) > 6:
-                ports_str += ', ...'
-            lines.append(f'{vid:<5}{name:<33}{v.state:<10}{ports_str}')
+            ports = [self._abbrev_port(p) for p in v.ports]
+            if vid == 1:
+                ports = ports + vlan1_extra
+            wrapped = self._wrap_ports(ports)
+            lines.append(f'{vid:<5}{name:<33}{v.state:<10}{wrapped[0]}')
+            lines.extend(wrapped[1:])
+        # 実機が必ず持つ既定VLAN
+        for vid, name in self._DEFAULT_VLANS:
+            if vid not in vdb:
+                lines.append(f'{vid:<5}{name:<33}{"act/unsup":<10}')
 
         if not brief:
             lines.extend(['', 'VLAN Type  SAID       MTU   Parent RingNo BridgeNo Stp  BrdgMode Trans1 Trans2'])
