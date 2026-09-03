@@ -1732,10 +1732,14 @@ class OspfEngine:
             m = int((dead_left % 3600) // 60)
             s_ = int(dead_left % 60)
             dead_str = f'{h:02d}:{m:02d}:{s_:02d}'
-            # ネイバーIPは相手ノードのIPから推定（実IPがあれば使用）
+            # ネイバーIPは相手ノードのIPから推定（実IPがあれば使用）。
+            # 実OSPFリスナー(engine/real_ospf_agent.py)経由の外部ピアは
+            # ospf_engine.nodes に登録が無いので、ネイバー自身が持つ
+            # 実IPを優先する
             peer_node = self.nodes.get(nid, {})
             peer_ips = list(peer_node.get('_peer_ips', {}).values())
-            peer_ip = peer_ips[0] if peer_ips else f'10.0.{abs(hash(nid))%200+1}.1'
+            peer_ip = (getattr(nbr, 'ip', None)
+                       or (peer_ips[0] if peer_ips else f'10.0.{abs(hash(nid))%200+1}.1'))
             iface = nbr.iface if hasattr(nbr, 'iface') and nbr.iface else 'GigabitEthernet0/0/0'
             lines.append(
                 f'{nbr.router_id:<16}{pri:<6}{state_str:<16}{dead_str:<12}'

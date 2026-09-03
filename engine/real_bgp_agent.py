@@ -120,6 +120,10 @@ class BgpSessionHandler:
         self.writer = writer
         self.peer_addr = writer.get_extra_info('peername')
         self.state = 'Idle'
+        # bgp_engine.nodes[...]['sessions'] のキー。内部シミュレーションでは
+        # device_id を使うが、外部ピアは装置IDを持たないのでIPをキーにする
+        self.peer_key = self.peer_addr[0] if self.peer_addr else 'external'
+        self.peer_as = None
 
     async def _recv_exact(self, n: int) -> bytes:
         return await self.reader.readexactly(n)
@@ -136,6 +140,10 @@ class BgpSessionHandler:
                 body = await self._recv_exact(body_len) if body_len > 0 else b""
 
                 if mtype == 1:  # OPEN
+                    if len(body) >= 9:
+                        _ver, peer_as, _hold, _bgpid = struct.unpack("!BHH4s", body[:9])
+                        self.peer_as = peer_as
+                    self._sync_session('OpenConfirm')
                     self.writer.write(_build_open(local_as, 180, router_id))
                     self.writer.write(_build_keepalive())
                     await self.writer.drain()
@@ -143,6 +151,7 @@ class BgpSessionHandler:
                 elif mtype == 4:  # KEEPALIVE
                     if self.state == 'OpenConfirm':
                         self.state = 'Established'
+                        self._sync_session('Established')
                     self.writer.write(_build_keepalive())
                     await self.writer.drain()
                 elif mtype == 2:  # UPDATE
@@ -154,15 +163,48 @@ class BgpSessionHandler:
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
         finally:
+            # セッション断は状態に反映する（Establishedのまま残さない）
+            self._sync_session('Idle')
             try:
                 self.writer.close()
             except Exception:
                 pass
 
+    def _sync_session(self, state: str):
+        """実TCPセッションの状態を bgp_engine の sessions に反映する。
+
+        これをやらないと、経路は loc_rib に入って show ip route には出るのに
+        show ip bgp summary にはネイバー行が1つも出ない、という食い違いに
+        なる（OSPFの show ip ospf neighbor で踏んだのと同じ問題）。
+        """
+        from engine.protocols import BgpSession
+        import time as _time
+        n = self.bgp_engine._node(self.device_id)
+        sessions = n.setdefault('sessions', {})
+        sess = sessions.get(self.peer_key)
+        if sess is None:
+            sess = BgpSession(
+                neighbor_id=self.peer_key,
+                hostname=f'external({self.peer_key})',
+                remote_as=self.peer_as or 0,
+            )
+            sess.neighbor_ip = self.peer_key
+            sessions[self.peer_key] = sess
+        if self.peer_as:
+            sess.remote_as = self.peer_as
+        sess.state = state
+        if state == 'Established' and not sess.uptime:
+            sess.uptime = _time.time()
+        elif state == 'Idle':
+            sess.uptime = None
+
     def _apply_update(self, parsed: dict):
-        # bgp_engine.nodes[...]['loc_rib'] は BgpRoute ではなく dict のリスト
-        # として扱われる（engine/protocols.py 2281行目のBgpEngine内部実装に
-        # 合わせる。show ip route 等はキーアクセス r['prefix'] 等で読む）
+        # loc_rib は BgpRoute ではなく dict のリストとして扱われる
+        # （engine/protocols.py 2281行目のBgpEngine内部実装に合わせる。
+        #   show ip route 等はキーアクセス r['prefix'] で読む）。
+        # 一方 rib_in は BgpRoute のリストで属性アクセスされるため、
+        # 同じ経路でも入れる型が異なる点に注意
+        from engine.protocols import BgpRoute
         n = self.bgp_engine._node(self.device_id)
         peer_ip = self.peer_addr[0] if self.peer_addr else 'external'
         next_hop = parsed['next_hop'] or peer_ip
@@ -181,6 +223,23 @@ class BgpSessionHandler:
                 'learned_from': peer_ip,
                 'learned_from_hostname': f'external({peer_ip})',
             })
+            # rib_in（受信した生の経路）にも入れる。show ip bgp summary の
+            # State/PfxRcd 列は rib_in を learned_from で数えるため、
+            # ここに入れないと経路を受け取っているのに 0 と表示される
+            n['rib_in'] = [r for r in n.get('rib_in', [])
+                           if not (r.prefix == network and r.prefix_len == prefix_len
+                                   and r.learned_from == peer_ip)]
+            n['rib_in'].append(BgpRoute(
+                prefix=network, prefix_len=prefix_len, next_hop=next_hop,
+                local_pref=parsed['local_pref'], med=parsed['med'],
+                as_path=list(parsed['as_path']), origin=parsed['origin'],
+                learned_from=peer_ip,
+                learned_from_hostname=f'external({peer_ip})',
+            ))
+        sess = n.get('sessions', {}).get(self.peer_key)
+        if sess is not None:
+            sess.prefixes_received = sum(
+                1 for r in n.get('rib_in', []) if r.learned_from == peer_ip)
 
 
 async def start_all_bgp_agents(device_sessions: dict, bgp_engine, port: int = BGP_PORT):

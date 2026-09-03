@@ -225,10 +225,18 @@ O     192.168.200.0/24 [110/20] via 10.9.9.50, lan0
   テスト開始からは最大でその1周期分が加わる。数分待っても
   ExStartのままの場合は、上記の `start()` 未使用（再送スレッド無し）
   か、IP使い回しによる状態不整合を疑うこと。
-- `show ip ospf neighbor` はこの実リスナー経由のネイバーを表示しない
-  （`ospf_engine.nodes[...]['neighbors']` を更新していないため）。
-  ただし学習した経路は正しく `_learned_external` 経由で
-  `show ip route` に反映される。これは既知の制約（下記）。
+- （解消済み）`show ip ospf neighbor` に実リスナー経由のネイバーが
+  表示されなかった問題は修正済み。`DeviceOspfResponder._set_state()`
+  が状態遷移のたびに `ospf_engine.nodes[...]['neighbors']` を同期する。
+  外部ピアは `ospf_engine.nodes` に登録が無い（nodesは自装置の登録簿で、
+  そこへ偽ノードを足すと全ノード走査処理が壊れる）ため、表示用の
+  対向IPはネイバーオブジェクト側(`nbr.ip`)に持たせている。
+
+```
+catalyst# show ip ospf neighbor
+Neighbor ID     Pri   State           Dead Time   Address         Interface
+10.9.9.77       1     Full/DROTHER    00:00:13    10.9.9.77       lo
+```
 
 ## RIPv1 のクラスフルマスク（発見したバグと修正）
 
@@ -290,8 +298,6 @@ NETLAB_OSPF_WIRE_TEST=1 pytest tests/test_real_routing_integration.py -v
   扱えない（ブロードキャストセグメント上での複数ネイバー・DR/BDR
   選出には非対応）。RIP/BGPは複数ピアに対応できる設計（UDP/TCPの
   接続ごとに独立処理）。
-- `show ip ospf neighbor` に実リスナー経由のネイバーは表示されない
-  （経路自体は正しく学習・表示される）。
 - 各装置の management IP が重複していると（`saved_config.json` に
   複数装置が同じIPを持つケースがある）、その装置分のリスナーは
   起動に失敗する（ログに `起動失敗: could not bind to local_addr`

@@ -139,6 +139,22 @@ async def test_real_bgp_listener_learns_route():
         assert learned[0]['next_hop'] == '10.9.9.100'
         # loc_rib は dict のリストである必要がある（show ip route がキー参照するため）
         assert isinstance(learned[0], dict)
+
+        # show ip bgp summary はsessionsとrib_inを見るので、そちらにも
+        # 反映されていること（経路だけ入ってネイバーが表示されない、
+        # という食い違いを防ぐ）
+        sessions = bgp_engine.nodes[device_id]['sessions']
+        assert sessions, 'BGPセッションがsessionsに登録されていない'
+        sess = list(sessions.values())[0]
+        assert sess.state == 'Established', f'セッション状態が不正: {sess.state}'
+        assert sess.remote_as == 65001, f'remote_asが不正: {sess.remote_as}'
+        assert any(r.prefix == '172.16.60.0'
+                   for r in bgp_engine.nodes[device_id]['rib_in']), \
+            'rib_inに入っていない（show ip bgp summaryのPfxRcdが0になる）'
+
+        summary = bgp_engine.format_show_bgp_summary(device_id)
+        assert 'Established' not in summary  # Established時は受信prefix数を表示
+        assert sess.neighbor_ip in summary, f'ネイバー行が出ていない:\n{summary}'
     finally:
         speaker.close(send_cease=False)
         server.close()

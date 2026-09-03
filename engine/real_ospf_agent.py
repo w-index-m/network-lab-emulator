@@ -58,6 +58,51 @@ class DeviceOspfResponder(OSPFNeighborFaker):
     def _on_log(self, msg: str):
         print(f"[OSPF:{self.device_id}] {msg}")
 
+    # OSPFNeighborFakerの状態名 → OspfEngineが使う状態名
+    _STATE_MAP = {
+        'DOWN': 'Down', 'INIT': 'Init', '2-WAY': 'TwoWay',
+        'EXSTART': 'ExStart', 'EXCHANGE': 'Exchange', 'FULL': 'Full',
+    }
+
+    def _set_state(self, new_state):
+        super()._set_state(new_state)
+        # 実リスナー経由のネイバーを ospf_engine 側のネイバーテーブルにも
+        # 反映する。これをやらないと、実際にはFullで隣接が成立して経路も
+        # 学習しているのに show ip ospf neighbor が (No neighbors) のままで、
+        # 「表示は繋がっていないのに経路だけ来ている」という食い違いになる
+        try:
+            self._sync_neighbor_to_engine()
+        except Exception as e:
+            print(f"[OSPF:{self.device_id}] [WARN] ネイバー同期失敗: {e}")
+
+    def _sync_neighbor_to_engine(self):
+        if not self.peer_router_id:
+            return
+        from engine.protocols import OspfNeighbor
+        n = self.ospf_engine._node(self.device_id)
+        state = self._STATE_MAP.get(self.state, self.state)
+        nbrs = n.setdefault('neighbors', {})
+        nid = self.peer_router_id
+        if self.state == self.STATE_DOWN:
+            nbrs.pop(nid, None)
+            return
+        existing = nbrs.get(nid)
+        if existing is not None:
+            existing.state = state
+        else:
+            nbr = OspfNeighbor(
+                neighbor_id=nid, router_id=nid,
+                hostname=f'external({nid})', state=state,
+            )
+            nbrs[nid] = nbr
+        # 表示用の付加情報。外部ピアは ospf_engine.nodes に登録が無い
+        # （nodesは自装置の登録簿であり、そこへ偽のノードを足すと
+        #   全ノードを走査する処理が壊れる）ため、ネイバー側に持たせる
+        nbr = nbrs[nid]
+        nbr.iface = self.iface
+        if self.peer_ip:
+            nbr.ip = self.peer_ip
+
     def _on_packet(self, pkt):
         try:
             super()._on_packet(pkt)
