@@ -1464,3 +1464,58 @@ class TestUdpPacketSend:
         asyncio.run(_run())
         t.join(timeout=3.0)
         assert len(received) >= 1, 'NTP poll_once でパケットが届いていない'
+
+
+def test_floating_static_route_preserves_admin_distance():
+    """ip route ... <AD> のADが保持される（フローティングスタティック）
+
+    以前は engine/rules.py の `ip route` 正規表現がADを取り込まず、
+    app.py 側の再同期ループ（設定コマンドのたびに走る）が AD=1 固定で
+    add_static_route を呼び直していたため、AD 200 を指定しても
+    show ip route が [1/0] と表示され、通常のスタティックと区別が
+    付かなかった。
+    """
+    from engine.protocols import RibEngine
+
+    e = RibEngine()
+    e.add_static_route('d', 'h', '10.210.1.0', 24, '10.9.9.2', 1)
+    e.add_static_route('d', 'h', '10.210.2.0', 24, '10.9.9.2', 200)
+
+    best = {r['network']: r['ad'] for r in e.get_best_routes('d')}
+    assert best['10.210.1.0'] == 1
+    assert best['10.210.2.0'] == 200
+
+    out = e.format_show_ip_route('d')
+    assert '10.210.2.0/24 [200/0]' in out, out
+
+
+def test_rules_ip_route_captures_admin_distance():
+    """engine/rules.py が ip route の末尾ADを state.static_routes に残す"""
+    from engine.rules import DeviceState, RuleEngine
+
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    state.mode = 'config'
+
+    engine.process('ip route 10.210.1.0 255.255.255.0 10.9.9.2', state)
+    engine.process('ip route 10.210.2.0 255.255.255.0 10.9.9.2 200', state)
+
+    by_dest = {r['dest']: r.get('ad') for r in state.static_routes}
+    assert by_dest['10.210.1.0'] == 1, f'既定ADが1でない: {by_dest}'
+    assert by_dest['10.210.2.0'] == 200, f'指定したAD200が保持されていない: {by_dest}'
+
+
+def test_reentering_route_with_new_distance_updates_it():
+    """同じ経路をADだけ変えて再投入すると上書きされる（実機準拠）"""
+    from engine.rules import DeviceState, RuleEngine
+
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    state.mode = 'config'
+
+    engine.process('ip route 10.210.3.0 255.255.255.0 10.9.9.2', state)
+    engine.process('ip route 10.210.3.0 255.255.255.0 10.9.9.2 250', state)
+
+    matching = [r for r in state.static_routes if r['dest'] == '10.210.3.0']
+    assert len(matching) == 1, f'重複エントリができている: {matching}'
+    assert matching[0]['ad'] == 250

@@ -4081,13 +4081,18 @@ def _register_icmp(device_id: str):
                                         '0.0.0.0', 0, gw, 1)
 
     # ルーター系: 静的ルート（remote N ip route / ip route）をrib_engineに登録
+    # ADは設定時の値を引き継ぐ。ここで固定値1にしてしまうと、
+    # `ip route <dst> <mask> <gw> 200` のようなフローティングスタティックが
+    # この再同期（設定コマンドのたびに走る）でAD=1に上書きされ、
+    # 通常のスタティックと区別が付かなくなる
     for route in getattr(state, 'static_routes', []):
         dest   = route.get('dest', '')
         prefix = route.get('prefix', 0)
         gw     = route.get('gw', '0.0.0.0')
+        ad     = route.get('ad', 1)
         if dest:
             rib_engine.add_static_route(device_id, state.hostname,
-                                        dest, prefix, gw, 1)
+                                        dest, prefix, gw, ad)
 
     # IPsecトンネル: ipsec_crypto の crypto_maps / crypto_map_interface からpeer登録
     icmp_engine.clear_ipsec(device_id)

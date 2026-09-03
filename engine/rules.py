@@ -4086,12 +4086,17 @@ Configuration Revision            : 5"""
                 state.routes.append(entry)
             return ""
 
-        # ip route <dst> <mask> <gw>  (Si-R / Cisco IOS 共通)
-        m_ip_route = re.match(r'^ip\s+route\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)', c)
+        # ip route <dst> <mask> <gw> [<AD>]  (Si-R / Cisco IOS 共通)
+        # 末尾のADはフローティングスタティック（バックアップ経路）で使う。
+        # ここで取り込まないと、app.py側の再同期でAD=1に上書きされてしまい
+        # 通常のスタティックと区別が付かなくなる
+        m_ip_route = re.match(
+            r'^ip\s+route\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s+(\d+))?', c)
         if m_ip_route and state.device_type in ('sir', 'srs', 'cisco', 'catalyst'):
             dest = m_ip_route.group(1)
             mask = m_ip_route.group(2)
             gw   = m_ip_route.group(3)
+            ad   = int(m_ip_route.group(4)) if m_ip_route.group(4) else 1
             if not _valid_ip(dest):
                 return f"% Invalid input: IP address '{dest}' is not valid"
             if not _valid_mask(mask):
@@ -4099,8 +4104,15 @@ Configuration Revision            : 5"""
             if not _valid_ip(gw):
                 return f"% Invalid input: IP address '{gw}' is not valid"
             prefix = sum(bin(int(o)).count('1') for o in mask.split('.'))
-            entry = {'dest': dest, 'prefix': prefix, 'gw': gw}
-            if entry not in getattr(state, 'static_routes', []):
+            entry = {'dest': dest, 'prefix': prefix, 'gw': gw, 'ad': ad}
+            # 同じ宛先/next-hopをADだけ変えて入れ直した場合は上書きする
+            # （実機でも同じ経路の再投入はADの変更として扱われる）
+            existing = next((r for r in getattr(state, 'static_routes', [])
+                             if r.get('dest') == dest and r.get('prefix') == prefix
+                             and r.get('gw') == gw), None)
+            if existing:
+                existing['ad'] = ad
+            else:
                 state.static_routes.append(entry)
             return ""
 

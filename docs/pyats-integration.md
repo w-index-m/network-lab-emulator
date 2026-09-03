@@ -92,6 +92,74 @@ dev.disconnect()
 区別できずにパースできた」ことを意味しており、このラボのCLI出力が
 実機フォーマットに十分忠実であることの裏付けにもなっている。
 
+## スタティックルートの設定と確認（2026-09-03 確認）
+
+`show` 系の `execute` / `parse` だけでなく、**config モードでの設定投入
+(`dev.configure()`) も動作する**ことを確認した。
+
+```python
+from pyats.topology import loader
+
+tb = loader.load('testbed.yaml')
+dev = tb.devices['catalyst']
+dev.connect(log_stdout=False, learn_hostname=True)
+
+# 設定投入（configure terminal / exit は unicon が自動で行う）
+dev.configure([
+    'ip route 10.220.1.0 255.255.255.0 10.9.9.2',
+    'ip route 10.220.2.0 255.255.255.0 10.9.9.2',
+    'ip route 10.220.3.0 255.255.255.0 10.9.9.2 200',   # フローティングスタティック
+])
+
+# 構造化パースで検証
+parsed = dev.parse('show ip route')
+routes = parsed['vrf']['default']['address_family']['ipv4']['routes']
+assert routes['10.220.3.0/24']['route_preference'] == 200
+assert routes['10.220.3.0/24']['source_protocol'] == 'static'
+
+dev.disconnect()
+```
+
+投入前後の `show ip route`:
+
+```
+（投入前）
+C     192.168.10.0/24 [0/0] via directly, Vlan10
+S     0.0.0.0/0 [1/0] via 203.0.113.1, GigabitEthernet1/0/24
+
+（投入後）
+S     10.220.1.0/24 [1/0] via 10.9.9.2,
+S     10.220.2.0/24 [1/0] via 10.9.9.2,
+S     10.220.3.0/24 [200/0] via 10.9.9.2,     ← AD 200 が反映
+```
+
+Genieパーサーでの検証結果:
+
+| 経路 | source_protocol | route_preference | next_hop |
+|---|---|---|---|
+| `10.220.1.0/24` | static | 1 | 10.9.9.2 |
+| `10.220.2.0/24` | static | 1 | 10.9.9.2 |
+| `10.220.3.0/24` | static | **200** | 10.9.9.2 |
+
+### この検証で見つかった実バグ（修正済み）
+
+**フローティングスタティックのADが失われていた。**
+`ip route <dst> <mask> <gw> 200` と指定しても `show ip route` は
+`[1/0]` と表示され、通常のスタティックと区別が付かなかった。
+
+原因は2箇所:
+
+1. `engine/rules.py` の `ip route` 正規表現が末尾のADを取り込んで
+   おらず、`state.static_routes` にADが残らなかった
+2. `app.py` の再同期ループ（**設定コマンドのたびに走る**）が
+   `add_static_route(..., ad=1)` とAD固定で呼び直しており、
+   ハンドラが正しく登録したAD200のエントリを上書きしていた
+
+エンジン単体（`RibEngine`）は最初から正しくADを扱えており、
+`app.py`／`rules.py` 側でADが落ちていた。回帰テストは
+`tests/test_protocols.py` の
+`test_floating_static_route_preserves_admin_distance` ほか2件。
+
 ## つまずいた点（実装中に見つけた実バグ含む）
 
 - **`os: iosxe`だと接続に失敗する**: uniconのiosxe接続確立処理は、
