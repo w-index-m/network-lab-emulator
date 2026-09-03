@@ -2680,7 +2680,10 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
 
     # STP
     if re.match(r'^show\s+spanning-tree\s+summary', c):
-        return stp_engine.format_show_spanning_tree_summary(device_id)
+        # STPエンジンに登録が無い機器は、実機同様のデフォルト出力を
+        # ルールエンジン側で組み立てる（実機は必ずSTPが動いている）
+        if stp_engine.nodes.get(device_id):
+            return stp_engine.format_show_spanning_tree_summary(device_id)
     m_stp_vlan = re.match(r'^show\s+spanning-tree\s+vlan\s+(\d+)', c)
     if m_stp_vlan:
         return stp_engine.format_show_spanning_tree_vlan(device_id, int(m_stp_vlan.group(1)))

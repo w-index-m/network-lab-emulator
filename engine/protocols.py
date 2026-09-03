@@ -6877,7 +6877,8 @@ class VlanEngine:
         trunk_ports = {p: info for p, info in self.ports[device_id].items()
                        if info.mode == 'trunk'}
         if not trunk_ports:
-            return '(No trunk ports configured)'
+            # 実機はトランクが1本も無いと何も出力しない
+            return ''
 
         def short(name):
             return (name.replace('GigabitEthernet', 'Gi')

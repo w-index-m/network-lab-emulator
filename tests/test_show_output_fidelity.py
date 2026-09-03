@@ -320,3 +320,115 @@ def test_interfaces_counter_block_order(intf_output):
                     if needle in l and i > pos), None)
         assert idx is not None, f'{needle!r} の行が無い:\n{intf_output}'
         pos = idx
+
+
+# ── show tech-support 由来の未実装コマンド ────────────────
+
+@pytest.fixture
+def cat():
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    state.mode = 'exec'
+    return engine, state
+
+
+def test_show_interfaces_counters_has_two_tables(cat):
+    """実機は In と Out の2テーブルを出す（以前は未実装でエラー）"""
+    engine, state = cat
+    out = engine.process('show interfaces counters', state)
+    assert 'Invalid input' not in out, out
+    assert 'InOctets' in out and 'OutOctets' in out, out
+    heads = [l for l in out.splitlines() if l.startswith('Port')]
+    assert len(heads) == 2, heads
+
+
+def test_show_interfaces_counters_column_positions_match_real(cat):
+    """桁位置が実機(WS-C3650-24TD)と一致すること"""
+    engine, state = cat
+    out = engine.process('show interfaces counters', state)
+    lines = out.splitlines()
+    assert lines[1] == ('Port               InOctets    InUcastPkts'
+                        '    InMcastPkts    InBcastPkts '), repr(lines[1])
+    row = next(l for l in lines if l.startswith('Gi'))
+    # 実機の値は 27 / 42 / 57 / 72 桁目で終わる
+    ends = [i + 1 for i, ch in enumerate(row)
+            if ch.isdigit() and not row[i + 1:i + 2].isdigit()]
+    assert ends[-4:] == [27, 42, 57, 72], (ends, repr(row))
+
+
+def test_show_interfaces_switchport_block_format(cat):
+    """ポート単位ブロックが実機と同じ行構成であること"""
+    engine, state = cat
+    out = engine.process('show interfaces switchport', state)
+    assert 'Invalid input' not in out, out
+    assert out.count('Switchport: Enabled') >= 1, out
+    for line in ('Administrative Trunking Encapsulation: dot1q',
+                 'Pruning VLANs Enabled: 2-1001',
+                 'Capture Mode Disabled',
+                 'Appliance trust: none'):
+        assert line in out, (line, out[:400])
+
+
+def test_switchport_down_port_has_no_operational_encapsulation():
+    """downポートに Operational Trunking Encapsulation 行は出ない
+
+    実機の未接続ポートは dynamic auto / Operational Mode: down で、
+    この行を持たない。
+    """
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    for iface in state.interfaces.values():
+        iface['status'] = 'notconnect'
+        iface.pop('vlan', None)
+    out = engine.process('show interfaces switchport', state)
+    assert 'Administrative Mode: dynamic auto' in out, out[:400]
+    assert 'Operational Mode: down' in out, out[:400]
+    assert 'Operational Trunking Encapsulation' not in out, out[:400]
+    assert 'Negotiation of Trunking: On' in out, out[:400]
+
+
+def test_show_spanning_tree_summary_is_not_an_error(cat):
+    """実機は必ずSTPが動いており "not configured" とは言わない"""
+    engine, state = cat
+    out = engine.process('show spanning-tree summary', state)
+    assert 'not configured' not in out, out
+    assert 'Switch is in rapid-pvst mode' in out, out
+    assert 'Configured Pathcost method used is short' in out, out
+
+
+def test_stp_summary_counter_columns_match_real(cat):
+    """集計行の桁位置が実機と一致すること（実機はヘッダと1桁ずれる）"""
+    engine, state = cat
+    out = engine.process('show spanning-tree summary', state)
+    row = next(l for l in out.splitlines() if l.startswith('VLAN0001'))
+    ends = [i for i, ch in enumerate(row)
+            if ch.isdigit() and not row[i + 1:i + 2].isdigit()]
+    assert ends[-5:] == [29, 39, 48, 59, 70], (ends, repr(row))
+
+
+def test_show_file_systems_marks_flash_as_default(cat):
+    engine, state = cat
+    out = engine.process('show file systems', state)
+    assert 'Invalid input' not in out, out
+    assert '       Size(b)       Free(b)      Type  Flags  Prefixes' in out, out
+    flash = next(l for l in out.splitlines() if l.endswith('flash:'))
+    assert flash.startswith('*'), repr(flash)
+
+
+def test_show_redundancy_states_reports_simplex(cat):
+    """スタンドアロン機は Simplex / Non-redundant"""
+    engine, state = cat
+    out = engine.process('show redundancy states', state)
+    assert 'Invalid input' not in out, out
+    assert 'Mode = Simplex' in out, out
+    assert 'Redundancy Mode (Operational) = Non-redundant' in out, out
+
+
+def test_show_interfaces_trunk_prints_nothing_without_trunks():
+    """トランクが無いとき実機は日本語メッセージではなく無出力"""
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    for iface in state.interfaces.values():
+        iface.pop('vlan', None)
+    out = engine.process('show interfaces trunk', state)
+    assert out.strip() == '', repr(out)

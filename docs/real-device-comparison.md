@@ -172,11 +172,29 @@ Capability Codes は対応済み。）
 未検証のコマンド（`show tech-support`、`show interfaces counters`、
 `show ip interface <IF>` 等）はまだ比較していない。
 
+## 第2ラウンド: show tech-support 由来のコマンド
+
+実機の `show tech-support` を突き合わせたところ、以下は
+エミュレーター側が **そもそも未実装**（`% Invalid input detected`）
+だった。実機の出力をリファレンスにして実装した。
+
+| コマンド | 以前 | 対応内容 |
+|---|---|---|
+| `show interfaces counters` | 未実装 | In/Out の2テーブル。桁位置(27/42/57/72)を実機に一致させ、値はデータプレーンの実カウンタから引く |
+| `show interfaces switchport` | 未実装 | ポート単位ブロック。down ポートは実機同様 `dynamic auto` / `Operational Mode: down` で `Operational Trunking Encapsulation` 行を出さない |
+| `show spanning-tree summary` | `% Spanning tree is not configured.` | 実機は必ずSTPが動いているので、STPエンジン未登録機はルールエンジン側のデフォルト出力にフォールバック。集計行は実機同様ヘッダと1桁ずれる(29/39/48/59/70) |
+| `show file systems` | 未実装 | 17行のファイルシステム表。`flash:` に `*` |
+| `show redundancy states` | 未実装 | スタンドアロン機の Simplex / Non-redundant 出力 |
+| `show interfaces trunk` | `(No trunk ports configured)` / 日本語メッセージ | 実機はトランクが無いと無出力 |
+
+`show ip interface`（brief でないもの）は実機の tech-support に
+含まれていなかったため、リファレンスが取れるまで未実装のまま。
+
 ## テスト
 
 ```bash
 pytest tests/test_show_version_fidelity.py -v   # 17件
-pytest tests/test_show_output_fidelity.py -v    # 17件
+pytest tests/test_show_output_fidelity.py -v    # 34件
 ```
 
 Genie本体はこのリポジトリ側の実行環境に無いため、パーサーが手掛かりに

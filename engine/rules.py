@@ -883,6 +883,17 @@ class RuleEngine:
             return self._show_int_transceiver(state)
         if re.match(r'^show\s+interfaces?\s+counters\s+errors$', c):
             return self._show_int_counters_errors(state)
+        if dt in ('cisco', 'catalyst', 'srs'):
+            if re.match(r'^show\s+interfaces?\s+counters$', c):
+                return self._show_int_counters(state)
+            if re.match(r'^show\s+interfaces?\s+switchport$', c):
+                return self._show_int_switchport(state)
+            if re.match(r'^show\s+spanning-tree\s+summary$', c):
+                return self._show_stp_summary(state)
+            if re.match(r'^show\s+redundancy\s+states$', c):
+                return self._show_redundancy_states(state)
+            if re.match(r'^show\s+file\s+systems$', c):
+                return self._show_file_systems(state)
         if re.match(r'^show\s+interfaces?\s+brief$', c) or re.match(r'^show\s+ip\s+interfaces?\s+brief$', c):
             return self._show_ip_int_brief(state)
 
@@ -1339,7 +1350,8 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         trunks = [(n,i) for n,i in state.interfaces.items()
                   if i.get("vlan")=="trunk" and i.get("status")=="connected"]
         if not trunks:
-            return "(トランクポートでconnectedのものはありません)"
+            # 実機はトランクが1本も無いと何も出力しない
+            return ""
         lines = ["", "Port        Mode             Encapsulation  Status        Native vlan"]
         for name, iface in trunks:
             short = name.replace("GigabitEthernet","Gi").replace("Port-channel","Po")
@@ -1409,6 +1421,187 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             short = name.replace("GigabitEthernet","Gi")
             lines.append(f"{short:<10}{'0':<12}{'0':<11}{'0':<11}{'0':<12}{'0':<11}{'0':<11}0")
         return "\n".join(lines)
+
+    @staticmethod
+    def _abbrev_if(name: str) -> str:
+        """実機の短縮表記（GigabitEthernet1/0/1 -> Gi1/0/1）"""
+        for full, abbr in (('TenGigabitEthernet', 'Te'), ('GigabitEthernet', 'Gi'),
+                           ('FastEthernet', 'Fa'), ('Port-channel', 'Po'),
+                           ('Vlan', 'Vl')):
+            if name.startswith(full):
+                return abbr + name[len(full):]
+        return name
+
+    def _phys_ports(self, state):
+        """カウンタ／switchport系が対象にする物理ポート"""
+        return [(n, i) for n, i in state.interfaces.items()
+                if n.startswith(('GigabitEthernet', 'TenGigabitEthernet',
+                                 'FastEthernet'))]
+
+    def _show_int_counters(self, state):
+        """show interfaces counters（実機同様 In/Out の2テーブル）"""
+        ctrs = {}
+        try:
+            from engine.protocols import dp_engine as _dp
+            did = getattr(state, '_device_id', None)
+            if did:
+                ctrs = _dp.counters.get(did, {})
+        except Exception:
+            ctrs = {}
+
+        def table(head, keys):
+            L = ['', f'{"Port":<18}{head[0]:>9}{head[1]:>15}{head[2]:>15}{head[3]:>15} ']
+            for name, _ in self._phys_ports(state):
+                c = ctrs.get(name) or {}
+                octets = c.get(keys[0], 0)
+                pkts = c.get(keys[1], 0)
+                # ユニキャスト/マルチキャスト/ブロードキャストの内訳は保持していない
+                # ため、実機同様に合計をユニキャスト列へ寄せる
+                L.append(f'{self._abbrev_if(name):<18}{octets:>9}{pkts:>15}'
+                         f'{0:>15}{0:>15} ')
+            return L
+
+        lines = table(('InOctets', 'InUcastPkts', 'InMcastPkts', 'InBcastPkts'),
+                      ('in_bytes', 'in_pkts'))
+        lines += table(('OutOctets', 'OutUcastPkts', 'OutMcastPkts', 'OutBcastPkts'),
+                       ('out_bytes', 'out_pkts'))
+        return "\n".join(lines)
+
+    def _show_int_switchport(self, state):
+        """show interfaces switchport（実機のポート単位ブロック）"""
+        blocks = []
+        for name, iface in self._phys_ports(state):
+            vlan = iface.get('vlan')
+            trunk = vlan == 'trunk'
+            up = iface.get('status') in ('up', 'connected')
+            if trunk:
+                admin, oper = 'trunk', ('trunk' if up else 'down')
+            elif vlan:
+                admin, oper = 'static access', ('static access' if up else 'down')
+            else:
+                admin, oper = 'dynamic auto', ('static access' if up else 'down')
+            access = '1 (default)' if vlan in (None, '', 'trunk', 1, '1') else str(vlan)
+            native = iface.get('native_vlan', '1')
+            native = '1 (default)' if str(native) == '1' else str(native)
+            b = [f'Name: {self._abbrev_if(name)}',
+                 'Switchport: Enabled',
+                 f'Administrative Mode: {admin}',
+                 f'Operational Mode: {oper}',
+                 'Administrative Trunking Encapsulation: dot1q']
+            # 実機は Operational 行を「トランク稼働中」のときだけ出す
+            if oper in ('static access', 'trunk'):
+                b.append('Operational Trunking Encapsulation: '
+                         + ('dot1q' if oper == 'trunk' else 'native'))
+            b += [f'Negotiation of Trunking: {"Off" if admin != "dynamic auto" else "On"}',
+                  f'Access Mode VLAN: {access}',
+                  f'Trunking Native Mode VLAN: {native}',
+                  'Administrative Native VLAN tagging: disabled',
+                  'Voice VLAN: none',
+                  'Administrative private-vlan host-association: none ',
+                  'Administrative private-vlan mapping: none ',
+                  'Administrative private-vlan trunk native VLAN: none',
+                  'Administrative private-vlan trunk Native VLAN tagging: enabled',
+                  'Administrative private-vlan trunk encapsulation: dot1q',
+                  'Administrative private-vlan trunk normal VLANs: none',
+                  'Administrative private-vlan trunk associations: none',
+                  'Administrative private-vlan trunk mappings: none',
+                  'Operational private-vlan: none',
+                  f'Trunking VLANs Enabled: {iface.get("allowed_vlan", "ALL") if trunk else "ALL"}',
+                  'Pruning VLANs Enabled: 2-1001',
+                  'Capture Mode Disabled',
+                  'Capture VLANs Allowed: ALL',
+                  '',
+                  'Protected: false',
+                  'Unknown unicast blocked: disabled',
+                  'Unknown multicast blocked: disabled',
+                  'Vepa Enabled: false',
+                  'Appliance trust: none']
+            blocks.append("\n".join(b))
+        if not blocks:
+            return ""
+        return "\n" + "\n\n".join(blocks)
+
+    def _show_stp_summary(self, state):
+        """show spanning-tree summary"""
+        vlans = sorted({int(i.get('vlan')) for i in state.interfaces.values()
+                        if str(i.get('vlan', '')).isdigit()} | {1})
+        mode = getattr(state, 'stp_mode', None) or 'rapid-pvst'
+        L = [f'Switch is in {mode} mode',
+             'Root bridge for: ' + ', '.join(f'VLAN{v:04d}' for v in vlans),
+             'EtherChannel misconfig guard            is enabled',
+             'Extended system ID                      is enabled',
+             'Portfast Default                        is disabled',
+             'PortFast BPDU Guard Default            is disabled',
+             'Portfast BPDU Filter Default           is disabled',
+             'Loopguard Default                      is disabled',
+             'UplinkFast                              is disabled',
+             'BackboneFast                            is disabled',
+             'Configured Pathcost method used is short',
+             '',
+             'Name                   Blocking Listening Learning Forwarding STP Active',
+             '---------------------- -------- --------- -------- ---------- ----------']
+        total = 0
+        for v in vlans:
+            fwd = sum(1 for n, i in self._phys_ports(state)
+                      if i.get('status') in ('up', 'connected')
+                      and str(i.get('vlan', 1)) in (str(v), 'trunk'))
+            total += fwd
+            # 実機は値の行がヘッダより1桁ずれる。実機の桁位置に合わせる
+            L.append(f'{"VLAN%04d" % v:<21}{0:>9}{0:>10}{0:>9}{fwd:>11}{fwd:>11}')
+        L.append('---------------------- -------- --------- -------- ---------- ----------')
+        n = len(vlans)
+        L.append(f'{"%d vlan%s" % (n, "" if n == 1 else "s"):<21}'
+                 f'{0:>9}{0:>10}{0:>9}{total:>11}{total:>11}')
+        return "\n".join(L)
+
+    def _show_redundancy_states(self, state):
+        """show redundancy states（スタンドアロン機のSimplex出力）"""
+        return "\n".join([
+            '       my state = 13 -ACTIVE ',
+            '     peer state = 1  -DISABLED ',
+            '           Mode = Simplex',
+            '           Unit = Primary',
+            '        Unit ID = 1',
+            '',
+            'Redundancy Mode (Operational) = Non-redundant',
+            'Redundancy Mode (Configured)  = sso',
+            'Redundancy State              = Non Redundant',
+            '     Maintenance Mode = Disabled',
+            '    Manual Swact = disabled (system is simplex (no peer unit))',
+            ' Communications = Down      Reason: Simplex mode',
+            '',
+            '   client count = 113',
+            ' client_notification_TMR = 30000 milliseconds',
+            '           RF debug mask = 0x0   ',
+        ])
+
+    def _show_file_systems(self, state):
+        """show file systems"""
+        rows = [
+            ('-', '-', 'opaque', 'rw', 'system:'),
+            ('-', '-', 'opaque', 'rw', 'tmpsys:'),
+            ('248354816', '221928448', 'disk', 'rw', 'crashinfo:'),
+            ('1621966848', '742158336', 'disk', 'rw', 'flash:'),
+            ('1773764608', '1699446784', 'disk', 'ro', 'webui:'),
+            ('-', '-', 'opaque', 'rw', 'null:'),
+            ('-', '-', 'opaque', 'ro', 'tar:'),
+            ('-', '-', 'network', 'rw', 'tftp:'),
+            ('2097152', '2073422', 'nvram', 'rw', 'nvram:'),
+            ('-', '-', 'opaque', 'wo', 'syslog:'),
+            ('-', '-', 'network', 'rw', 'rcp:'),
+            ('-', '-', 'network', 'rw', 'http:'),
+            ('-', '-', 'network', 'rw', 'ftp:'),
+            ('-', '-', 'network', 'rw', 'scp:'),
+            ('-', '-', 'network', 'rw', 'sftp:'),
+            ('-', '-', 'network', 'rw', 'https:'),
+            ('-', '-', 'opaque', 'ro', 'cns:'),
+        ]
+        L = ['', 'File Systems:', '',
+             '       Size(b)       Free(b)      Type  Flags  Prefixes']
+        for size, free, typ, flags, pfx in rows:
+            star = '*' if pfx == 'flash:' else ' '
+            L.append(f'{star}{size:>13}{free:>14}{typ:>10}{flags:>7}   {pfx}')
+        return "\n".join(L)
 
     def _show_ip_int_brief(self, state):
         lines = ["Interface              IP-Address      OK? Method Status                Protocol"]
