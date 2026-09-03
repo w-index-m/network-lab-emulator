@@ -273,6 +273,7 @@ NETLAB_OSPF_WIRE_TEST=1 pytest tests/test_real_routing_integration.py -v
 | 装置 | RIP | BGP | OSPF | 学習された経路の例 |
 |---|---|---|---|---|
 | Catalyst (`catalyst`) | OK | OK | OK | `R 172.16.50.0/24`, `B 172.16.60.0/24`, `O 192.168.200.0/24` |
+| Cisco (`cisco`) | OK | OK | OK | `R 172.40.50.0/24`, `B 172.40.60.0/24`, `O 172.40.70.0/24` |
 | Si-R (`sir-a`) | OK | OK | OK | `R 172.16.70.0/24`, `B 172.20.60.0/24`, `O 172.20.70.0/24` |
 | Apresia (`apresia`) | OK | OK | OK | `R 172.30.50.0/24`, `B 172.30.60.0/24`, `O 172.30.70.0/24` |
 
