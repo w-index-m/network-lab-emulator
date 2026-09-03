@@ -160,6 +160,61 @@ Genieパーサーでの検証結果:
 `tests/test_protocols.py` の
 `test_floating_static_route_preserves_admin_distance` ほか2件。
 
+## 実機との突き合わせ（2026-09-03）
+
+実機 **Cisco Catalyst WS-C3650-24TD / IOS-XE 16.12.11** の
+`show version` 出力を入手できたので、**同じGenieパーサー
+(`genie.libs.parser.iosxe.show_platform.ShowVersion`) に実機出力と
+エミュレーター出力の両方を通し、抽出されるキーを差分比較**した。
+
+この方法なら実機に接続できない環境でも突き合わせができる:
+
+```python
+from unittest.mock import Mock
+from genie.libs.parser.iosxe.show_platform import ShowVersion
+
+dev = Mock()
+dev.execute = Mock(return_value=open('real_show_version.txt').read())
+parsed = ShowVersion(device=dev).parse()
+```
+
+### 結果: エミュレーターに27キー分の欠落があった
+
+機種違い（実機3650 / エミュレーターC9300）による値の差は当然あるが、
+問題は**機種に依らずIOS-XEなら必ず出力される項目が丸ごと無かった**こと:
+
+| 欠けていたキー | 元になる行 |
+|---|---|
+| `system_image` | `System image file is "..."` |
+| `rom` / `bootldr` | `ROM:` / `BOOTLDR:` |
+| `compiled_date` / `compiled_by` | `Compiled <日付> by <人>` |
+| `last_reload_reason` / `returned_to_rom_by` | `Last reload reason:` 等 |
+| `uptime_this_cp` | `Uptime for this control processor is` |
+| `license_package.*` | `Technology Package License Information:` ブロック |
+| `disks.*` | `NNNK bytes of Flash at flash:.` |
+| `next_config_register` | `Configuration register is 0x102 (will be 0x102 at next reload)` |
+| `switch_num.*.mb_sn` / `model_num` 等 | `Motherboard Serial Number` 等 |
+
+さらに **`version.os` が実機 `IOS-XE` に対しエミュレーターは `IOS`**
+になっていた。`Cisco IOS-XE software, Copyright (c) ...` の行が無いと
+Genieがそう判定するため。OSで分岐する自動化スクリプトの挙動が変わる。
+
+### 修正後
+
+`engine/rules.py` の catalyst 用 `show version` に上記の行を追加した
+（機種はC9300のまま。3650を騙るのではなく、IOS-XE共通の項目を揃える）。
+
+| | 修正前 | 修正後 |
+|---|---|---|
+| 実機だけが持つキー | 27 | **9**（うち機種固有: `webui:`ディスク、`Ten Gigabit Ethernet`、ライセンス名） |
+| 両方にあるキー | 24 | **41** |
+
+残る9件はすべて3650固有の値であり、機種非依存の欠落はゼロになった。
+
+回帰テストは `tests/test_show_version_fidelity.py`（17件）。Genie本体は
+このリポジトリ側の環境に無いため、パーサーが手掛かりにする「行」が
+出力に含まれるかを直接検証している。
+
 ## つまずいた点（実装中に見つけた実バグ含む）
 
 - **`os: iosxe`だと接続に失敗する**: uniconのiosxe接続確立処理は、

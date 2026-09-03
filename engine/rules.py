@@ -1166,26 +1166,78 @@ Last reset at 123456 usecs after  Mon Jan  1 00:00:00 2024
 plugin
   Core Plugin, Ethernet Plugin"""
         elif state.device_type == "catalyst":
+            # 実機(WS-C3650-24TD / IOS-XE 16.12.11)の show version と
+            # Genieパーサーの抽出キーを突き合わせて、機種に依らず
+            # IOS-XEなら必ず出力される項目を揃えている。
+            # 以前は ROM/BOOTLDR、Compiled行、System image file、
+            # Last reload reason、ライセンス情報、ディスク情報、
+            # 次回リロード時のconfig registerが無く、
+            # dev.parse('show version') が27キーを取りこぼしていた。
+            # （`Cisco IOS-XE software, Copyright` 行が無いと
+            #   Genieは os を 'IOS-XE' ではなく 'IOS' と判定する）
             return f"""Cisco IOS XE Software, Version 17.09.01
-Cisco IOS Software [Cupertino], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.1
+Cisco IOS Software [Cupertino], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.1, RELEASE SOFTWARE (fc4)
 Technical Support: http://www.cisco.com/techsupport
 Copyright (c) 1986-2022 by Cisco Systems, Inc.
+Compiled Thu 04-Aug-22 15:47 by mcpre
+
+
+Cisco IOS-XE software, Copyright (c) 2005-2022 by cisco Systems, Inc.
+All rights reserved.  Certain components of Cisco IOS-XE software are
+licensed under the GNU General Public License ("GPL") Version 2.0.  The
+software code licensed under GPL Version 2.0 is free software that comes
+with ABSOLUTELY NO WARRANTY.  You can redistribute and/or modify such
+GPL code under the terms of GPL Version 2.0.  For more details, see the
+documentation or "License Notice" file accompanying the IOS-XE software,
+or the applicable URL provided on the flyer accompanying the IOS-XE
+software.
+
+
+ROM: IOS-XE ROMMON
+BOOTLDR: System Bootstrap, Version 17.9.1r, RELEASE SOFTWARE (P)
+
+{state.hostname} uptime is {state.uptime_str()}
+Uptime for this control processor is {state.uptime_str()}
+System returned to ROM by Reload Command
+System image file is "flash:cat9k_iosxe.17.09.01.SPA.bin"
+Last reload reason: Reload Command
+
+
+Technology Package License Information:
+
+------------------------------------------------------------------------------
+Technology-package                                     Technology-package
+Current                        Type                       Next reboot
+------------------------------------------------------------------------------
+network-advantage       Smart License                    network-advantage
+dna-advantage           Subscription Smart License       dna-advantage
+
+Smart Licensing Status: UNREGISTERED/EVAL MODE
 
 cisco C9300-24T (X86) processor with 1474560K/6147K bytes of memory.
 Processor board ID FCW2xxx0001
-
 8 Virtual Ethernet interfaces
 56 Gigabit Ethernet interfaces
 2048K bytes of non-volatile configuration memory.
 4194304K bytes of physical memory.
+1638400K bytes of Crash Files at crashinfo:.
+11264000K bytes of Flash at flash:.
 
 Base Ethernet MAC Address          : 00:0e:0e:f1:42:00
 Motherboard Assembly Number        : 73-18506-04
-System serial number               : FCW2xxx0001
+Motherboard Serial Number          : FCW2xxx0001
+Model Revision Number              : A0
+Motherboard Revision Number        : A0
+Model Number                       : C9300-24T
+System Serial Number               : FCW2xxx0001
 
-Configuration register is 0x102
 
-{state.hostname} uptime is {state.uptime_str()}"""
+Switch Ports Model              SW Version        SW Image              Mode
+------ ----- -----              ----------        ----------            ----
+*    1 32    C9300-24T          17.09.01          CAT9K_IOSXE           INSTALL
+
+
+Configuration register is 0x102 (will be 0x102 at next reload)"""
         else:
             return f"""Cisco IOS Software [Cupertino], ISR Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 17.9.1
 Technical Support: http://www.cisco.com/techsupport
