@@ -2648,6 +2648,14 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
         n = bgp_engine.nodes.get(device_id)
         if n and n.get('enabled'):
             return bgp_engine.format_show_bgp_summary(device_id)
+    # "show ip bgp neighbors [<ip>]" — ネイバー詳細
+    # summaryのState/PfxRcd列は実機同様Established時にprefix数を出すため、
+    # 「Established」という状態名を確認できるのはこのコマンドだけ
+    m_bgp_nei = re.match(r'^show\s+(?:ip\s+)?bgp\s+neighbors?(?:\s+([\d.]+))?\s*$', c)
+    if m_bgp_nei:
+        n = bgp_engine.nodes.get(device_id)
+        if n and n.get('enabled'):
+            return bgp_engine.format_show_bgp_neighbors(device_id, m_bgp_nei.group(1))
     # Si-R: show ip bgp status (= summary相当)
     if re.match(r'^show\s+ip\s+bgp\s+status', c):
         n = bgp_engine.nodes.get(device_id)

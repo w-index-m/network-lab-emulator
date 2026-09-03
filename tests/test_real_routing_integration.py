@@ -153,8 +153,16 @@ async def test_real_bgp_listener_learns_route():
             'rib_inに入っていない（show ip bgp summaryのPfxRcdが0になる）'
 
         summary = bgp_engine.format_show_bgp_summary(device_id)
-        assert 'Established' not in summary  # Established時は受信prefix数を表示
+        # 実機IOS同様、summaryのState/PfxRcd列はEstablished時に状態名では
+        # なく受信prefix数を出す。状態名を確認できるのは詳細表示のほう
+        assert 'Established' not in summary
         assert sess.neighbor_ip in summary, f'ネイバー行が出ていない:\n{summary}'
+
+        detail = bgp_engine.format_show_bgp_neighbors(device_id)
+        assert 'BGP state = Established' in detail, \
+            f'show ip bgp neighbors に Established が出ていない:\n{detail}'
+        assert 'remote AS 65001' in detail
+        assert '1 received' in detail, f'受信prefix数が出ていない:\n{detail}'
     finally:
         speaker.close(send_cease=False)
         server.close()
@@ -215,3 +223,62 @@ async def test_real_ospf_listener_learns_external_route():
     finally:
         responder.stop()
         peer.stop()
+
+
+@pytest.mark.asyncio
+async def test_bgp_session_state_progresses_through_fsm():
+    """BGPセッションの状態が Active→OpenSent→OpenConfirm→Established→Idle
+    と段階的に遷移し、show ip bgp summary に反映されること
+
+    以前はセッション自体が登録されておらず、経路だけ入って
+    show ip bgp summary にはネイバーが1行も出なかった。
+    """
+    bgp_engine = BgpEngine()
+    device_id = 'test-dev'
+    await bgp_engine.start(device_id, 'TestDev', 65099)
+
+    port = BGP_TEST_PORT + 1
+    sessions_cfg = {device_id: _FakeDeviceState(LISTEN_IP)}
+    started = await start_all_bgp_agents(sessions_cfg, bgp_engine, port=port)
+    server, _ip = started[device_id]
+
+    def _state():
+        s = bgp_engine.nodes[device_id].get('sessions', {})
+        return list(s.values())[0].state if s else None
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.connect((LISTEN_IP, port))
+        # TCPは張れたがOPENはまだ → Active
+        for _ in range(30):
+            await asyncio.sleep(0.05)
+            if _state() == 'Active':
+                break
+        assert _state() == 'Active', f'TCP接続直後の状態が不正: {_state()}'
+
+        sock.sendall(injector.bgp_build_open(65001, 180, '10.9.9.180'))
+        # OPEN受信 → 自分のOPEN/KEEPALIVEを返して OpenConfirm へ
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if _state() == 'OpenConfirm':
+                break
+        assert _state() == 'OpenConfirm', f'OPEN受信後の状態が不正: {_state()}'
+
+        sock.sendall(injector.bgp_build_keepalive())
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if _state() == 'Established':
+                break
+        assert _state() == 'Established', f'KEEPALIVE受信後の状態が不正: {_state()}'
+    finally:
+        sock.close()
+
+    # 切断したら Established のまま残さず Idle へ戻る
+    for _ in range(40):
+        await asyncio.sleep(0.05)
+        if _state() == 'Idle':
+            break
+    assert _state() == 'Idle', f'切断後もセッションが残っている: {_state()}'
+
+    server.close()
+    await server.wait_closed()

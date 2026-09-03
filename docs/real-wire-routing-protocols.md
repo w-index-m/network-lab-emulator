@@ -271,6 +271,48 @@ R     172.16.80.0/16 [120/2] via 127.0.0.5, lan0
 
 （修正前はここが `/0` になっていた）
 
+## ネイバー状態の確認方法（BGP）
+
+BGPセッションの状態は実機同様に段階的に遷移する。パッシブ側（装置側）の
+遷移は次のとおり:
+
+| クライアント側の動作 | 装置側のセッション状態 |
+|---|---|
+| （未接続） | セッション無し／`Idle` |
+| TCP接続のみ | `Active` |
+| OPEN 送信 | `OpenSent` → `OpenConfirm` |
+| KEEPALIVE 送信 | `Established` |
+| 切断 | `Idle` |
+
+`OpenSent` はOPENとKEEPALIVEを続けて送るため一瞬しか滞在しない。
+
+### `Established` を確認するコマンド
+
+| コマンド | `Established` の表示 |
+|---|---|
+| `show ip bgp summary` | **出ない**。実機IOS同様、`State/PfxRcd` 列はEstablished時に状態名ではなく**受信prefix数**を表示するため |
+| `show ip bgp neighbors` | **出る**（`BGP state = Established, up for HH:MM:SS`） |
+
+```
+catalyst# show ip bgp neighbors
+BGP neighbor is 10.9.9.1,  remote AS 65001, external link
+  BGP version 4, remote router ID 10.9.9.1
+  BGP state = Established, up for 00:00:09
+  ...
+    Prefixes Current:  0 sent, 1 received
+  Connection state is Established, connection established
+```
+
+切断すると `BGP state = Idle` / `0 active` に変わる。
+
+なお `show ip bgp neighbors` は元々未実装（`% Invalid input detected`）
+だったため、今回追加した。
+
+ループバック経由だとハンドシェイク全体が1秒未満で完了するため、
+状態遷移を目視するには各フェーズで待機するクライアントが必要
+（`tests/test_real_routing_integration.py` の
+`test_bgp_session_state_progresses_through_fsm` が同じことを自動で行う）。
+
 ## 自動テスト（回帰防止）
 
 手作業の検証内容は `tests/test_real_routing_integration.py` に

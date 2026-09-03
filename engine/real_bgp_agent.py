@@ -132,6 +132,10 @@ class BgpSessionHandler:
         n = self.bgp_engine._node(self.device_id)
         local_as = n.get('local_as') or 65000
         router_id = n.get('router_id') or '10.1.0.1'
+        # TCPは張れたがまだOPENを受け取っていない状態。実機のパッシブ側は
+        # ここが Active（接続は来たがOPEN待ち）にあたる
+        self.state = 'Active'
+        self._sync_session('Active')
         try:
             while True:
                 header = await self._recv_exact(19)
@@ -143,11 +147,17 @@ class BgpSessionHandler:
                     if len(body) >= 9:
                         _ver, peer_as, _hold, _bgpid = struct.unpack("!BHH4s", body[:9])
                         self.peer_as = peer_as
-                    self._sync_session('OpenConfirm')
+                    # 実機同様に OpenSent → OpenConfirm と段階を踏む
+                    # （自分のOPENを送った時点がOpenSent、KEEPALIVEも送って
+                    #   相手のKEEPALIVE待ちになった時点がOpenConfirm）
+                    self.state = 'OpenSent'
+                    self._sync_session('OpenSent')
                     self.writer.write(_build_open(local_as, 180, router_id))
+                    await self.writer.drain()
                     self.writer.write(_build_keepalive())
                     await self.writer.drain()
                     self.state = 'OpenConfirm'
+                    self._sync_session('OpenConfirm')
                 elif mtype == 4:  # KEEPALIVE
                     if self.state == 'OpenConfirm':
                         self.state = 'Established'

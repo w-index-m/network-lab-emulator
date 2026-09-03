@@ -2379,6 +2379,58 @@ class BgpEngine:
                      f'min_rx {cfg["min_rx"]}ms multiplier {cfg["multiplier"]}')
         return '\n'.join(lines)
 
+    def format_show_bgp_neighbors(self, device_id: str,
+                                   neighbor_ip: Optional[str] = None) -> str:
+        """show ip bgp neighbors（ネイバー詳細）
+
+        show ip bgp summary の State/PfxRcd 列は実機同様、Established時は
+        状態名ではなく受信prefix数を表示する。そのため「Established」を
+        文字で確認できるのはこのコマンドだけになる。
+        """
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return '% BGP is not configured.'
+        sessions = n.get('sessions', {})
+        if not sessions:
+            return '% No BGP neighbors configured.'
+
+        blocks = []
+        for nid, s in sessions.items():
+            addr = s.neighbor_ip or nid
+            if neighbor_ip and addr != neighbor_ip:
+                continue
+            link = 'internal' if s.remote_as == n['local_as'] else 'external'
+            uptime_str = 'never'
+            if s.uptime:
+                el = int(time.time() - s.uptime)
+                uptime_str = f'{el // 3600:02d}:{(el % 3600) // 60:02d}:{el % 60:02d}'
+            state_line = (f'  BGP state = {s.state}, up for {uptime_str}'
+                          if s.state == 'Established' else
+                          f'  BGP state = {s.state}')
+            rcvd = sum(1 for r in n.get('rib_in', []) if r.learned_from == nid)
+            sent = len(n.get('networks', []))
+            blocks.append('\n'.join([
+                f'BGP neighbor is {addr},  remote AS {s.remote_as}, {link} link',
+                f'  BGP version 4, remote router ID {addr}',
+                state_line,
+                f'  Last read 00:00:00, last write 00:00:00, hold time is 180, '
+                f'keepalive interval is 60 seconds',
+                f'  Neighbor sessions:',
+                f'    {1 if s.state == "Established" else 0} active, '
+                f'is not multisession capable (disabled)',
+                f'  Message statistics:',
+                f'    InQ depth is 0',
+                f'    OutQ depth is 0',
+                f'  For address family: IPv4 Unicast',
+                f'    Prefixes Current:  {sent} sent, {rcvd} received',
+                f'  Connection state is {s.state}, '
+                f'{"connection established" if s.state == "Established" else "not established"}',
+                '',
+            ]))
+        if not blocks:
+            return f'% BGP neighbor {neighbor_ip} not found.'
+        return '\n'.join(blocks)
+
     def format_show_bgp_summary(self, device_id: str) -> str:
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
