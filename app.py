@@ -396,6 +396,27 @@ async def lifespan(app: FastAPI):
     snmp_transports = await start_all_snmp_agents(device_sessions, _snmp_agent_instance)
     print(f"[SNMP] 実UDPエージェント起動: {len(snmp_transports)}台 "
           f"({', '.join(f'{d}={ip}' for d, (_, ip) in snmp_transports.items())})")
+
+    # 実RIP(UDP/520)・実BGP(TCP/179)・実OSPF(raw proto 89)リスナーを起動
+    # (外部ツール tools/route_injector_cli.py 等から本物のワイヤプロトコルで
+    # ネイバー確立・経路交換できるようにするための実リスナー)
+    from engine.real_rip_agent import start_all_rip_agents
+    from engine.real_bgp_agent import start_all_bgp_agents
+    from engine.real_ospf_agent import start_all_ospf_agents
+    from engine.protocols import rip_engine as _rip_engine_instance
+    from engine.protocols import bgp_engine as _bgp_engine_instance
+    from engine.protocols import ospf_engine as _ospf_engine_instance
+
+    rip_transports = await start_all_rip_agents(device_sessions, _rip_engine_instance)
+    print(f"[RIP] 実UDPリスナー起動: {len(rip_transports)}台 "
+          f"({', '.join(f'{d}={ip}' for d, (_, ip) in rip_transports.items())})")
+    bgp_transports = await start_all_bgp_agents(device_sessions, _bgp_engine_instance)
+    print(f"[BGP] 実TCPリスナー起動: {len(bgp_transports)}台 "
+          f"({', '.join(f'{d}={ip}' for d, (_, ip) in bgp_transports.items())})")
+    ospf_responders = start_all_ospf_agents(device_sessions, _ospf_engine_instance)
+    print(f"[OSPF] 実リスナー起動: {len(ospf_responders)}台 "
+          f"({', '.join(ospf_responders.keys())})")
+
     yield
     auto_save_task.cancel()
     try:
@@ -1971,6 +1992,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                  getattr(state, '_ospf_process', 1),
                                  state._ospf_networks,
                                  getattr(state, '_ospf_area', '0.0.0.0'))
+        from engine.real_ospf_agent import ensure_ospf_agent
+        ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
     # "network 10.0.0.0 0.0.0.255 area 0" (Cisco IOS形式)
     ospf_net = re.match(r'^network\s+([\d.]+)\s+([\d.]+)\s+area\s+(\S+)', c)
@@ -1996,6 +2019,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                  getattr(state, '_ospf_process', 1),
                                  state._ospf_networks,
                                  state._ospf_area)
+        from engine.real_ospf_agent import ensure_ospf_agent
+        ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
         net_ip = ospf_net.group(1)
         wildcard = ospf_net.group(2)
@@ -2012,6 +2037,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         await ospf_engine.start(device_id, hostname,
                                  getattr(state, '_ospf_process', 1),
                                  state._ospf_networks, area)
+        from engine.real_ospf_agent import ensure_ospf_agent
+        ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
     # "ip ospf priority <n>" / "ospf priority <n>" — DR選出優先度
     ospf_pri = re.match(r'^(?:ip\s+)?ospf\s+priority\s+(\d+)', c)
