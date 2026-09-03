@@ -187,3 +187,66 @@ pytest tests/test_real_routing_integration.py -v
 # OSPF: raw socketが要るので既定ではスキップ。有効化して実行する
 NETLAB_OSPF_WIRE_TEST=1 pytest tests/test_real_routing_integration.py -v
 ```
+
+## Si-R / Nexus での確認（2026-09-03）
+
+Catalystと同じ手順を Si-R (`sir-a`) と Nexus (`nexus`) でも実施し、
+4件の食い違いを修正した。
+
+### 装置側の設定
+
+```
+# Si-R
+configure
+lan 0 ip address 10.20.20.1/24 1
+ospf use on
+ospf area 0.0.0.0
+lan 0 ip ospf use on
+save
+
+# Nexus
+configure terminal
+interface GigabitEthernet0/0/1
+ no shutdown
+ ip address 10.30.30.1 255.255.255.0
+exit
+router ospf 1
+ network 10.30.30.0 0.0.0.255 area 0
+end
+```
+
+### 結果
+
+```
+sir-a# show ip ospf neighbor
+Neighbor ID     Pri   State           Dead Time   Address         Interface
+10.20.20.77     1     Full/DROTHER    00:00:30    10.20.20.77     lo
+
+sir-a# show ip route
+O        172.31.10.0/24 [110/20] via 10.20.20.77, lan0
+O        172.31.20.0/24 [110/20] via 10.20.20.77, lan0
+
+nexus# show ip ospf neighbor
+Neighbor ID     Pri   State           Dead Time   Address         Interface
+10.30.30.77     1     Full/DROTHER    00:00:25    10.30.30.77     lo
+
+nexus# show ip route
+O        172.30.10.0/24 [110/20] via 10.30.30.77, GigabitEthernet0/0/1
+O        172.30.20.0/24 [110/20] via 10.30.30.77, GigabitEthernet0/0/1
+```
+
+### 見つかった食い違い
+
+1. **実リスナーが mgmt0 に張り付く**。`_pick_management_ip` は管理IPを
+   優先するため、mgmt0を持つNexusではOSPFセグメントのHelloを一切
+   受け取れなかった。`_pick_ospf_ip()` で `network` に載っている
+   インターフェースを選ぶように変更。
+2. **セグメントの違う装置がネイバーに出る**。全装置の実リスナーが `lo`
+   を共有しているので 224.0.0.5 宛Helloが他セグメントにも届く。
+   Si-R (10.20.20.0/24) が Nexus (10.30.30.0/24) をネイバー表示して
+   いた。`DeviceOspfResponder._on_packet()` で同一セグメント判定を追加。
+3. **経路は入るのにネイバーが ExStart のまま**。装置側Helloは10秒間隔、
+   注入側は2秒間隔なので、注入側が先にFullへ抜けてこちらのDBDescを
+   無視する。LSUpdを受け取った時点でFullへ進めるようにした。
+4. **学習経路の出力IFが `lan0` 固定**。Si-R以外では実在しない
+   インターフェース名が出ていた。ネクストホップから解決するように変更。

@@ -103,7 +103,27 @@ class DeviceOspfResponder(OSPFNeighborFaker):
         if self.peer_ip:
             nbr.ip = self.peer_ip
 
+    def _same_subnet(self, src_ip: str) -> bool:
+        """送信元が自分と同じOSPFセグメントに居るか"""
+        import ipaddress
+        try:
+            net = ipaddress.ip_network(f'{self.my_ip}/{self.mask}', strict=False)
+            return ipaddress.ip_address(src_ip) in net
+        except ValueError:
+            return True
+
     def _on_packet(self, pkt):
+        # 全装置の実リスナーが lo を共有しているため、224.0.0.5宛のHelloは
+        # セグメントの違う装置にも届いてしまう。実機のOSPFは同一セグメント
+        # の相手としか隣接しないので、ここで落とす。
+        # これが無いと、10.20.20.0/24 の装置が 10.30.30.0/24 の装置を
+        # ネイバーとして表示する（実際には繋がっていない相手が出る）。
+        try:
+            from scapy.all import IP
+            if IP in pkt and not self._same_subnet(pkt[IP].src):
+                return
+        except Exception:
+            pass
         try:
             super()._on_packet(pkt)
         except Exception as e:
@@ -112,6 +132,15 @@ class DeviceOspfResponder(OSPFNeighborFaker):
             traceback.print_exc()
 
     def _handle_lsupd(self, lsupd):
+        # 相手がLSUpdを送ってきたということは、相手側では既に隣接がFull。
+        # 装置側のHelloは10秒間隔なので、2秒間隔の相手が先にFullへ抜けて
+        # しまい、こちらが後から送ったDBDescが無視されてExStartのまま
+        # 取り残されることがある。経路は学習できているのに
+        # show ip ospf neighbor だけ ExStart という食い違いになるため、
+        # LSAをやり取りできている時点でFullへ進める。
+        if self.state not in (self.STATE_DOWN, self.STATE_FULL):
+            self._set_state(self.STATE_FULL)
+            self._log('LSAを受信したためFullへ遷移(相手は既にFull)')
         super()._handle_lsupd(lsupd)
         for lsa in lsupd.lsalist:
             # OSPF_External_LSA は type=5。scapyのASN1的レイヤ名を
@@ -140,6 +169,40 @@ class DeviceOspfResponder(OSPFNeighborFaker):
 _running_agents: dict = {}
 
 
+def _pick_ospf_ip(state, node) -> Optional[str]:
+    """
+    OSPFを喋らせるインターフェースのIPを選ぶ。
+
+    OSPFは `network` で指定したセグメントの上で動くので、そのセグメント
+    に載っているインターフェースのIPで待ち受けなければならない。
+    管理IP優先の _pick_management_ip をそのまま使うと、mgmt0を持つ
+    Nexusでは管理アドレスに張り付いてしまい、OSPFセグメントのHelloを
+    一切受け取れずネイバーが上がらない。
+    """
+    from engine.snmp_udp_agent import _pick_management_ip
+    import ipaddress
+
+    ifaces = getattr(state, 'interfaces', {}) or {}
+    nets = []
+    for net in (node.get('networks') or []):
+        try:
+            nets.append(ipaddress.ip_network(net, strict=False))
+        except ValueError:
+            continue
+    for name, info in ifaces.items():
+        ip = info.get('ip') if isinstance(info, dict) else None
+        if not ip:
+            continue
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if any(addr in net for net in nets):
+            return ip
+    # networkが未設定など、判断できないときは従来どおり管理IP
+    return _pick_management_ip(state)
+
+
 def ensure_ospf_agent(device_id: str, device_sessions: dict, ospf_engine):
     """指定装置のOSPFが有効化された直後に呼び出す。既に実リスナーが
     起動済みならなにもしない（CLIで router ospf が設定された時点で
@@ -157,8 +220,8 @@ def ensure_ospf_agent(device_id: str, device_sessions: dict, ospf_engine):
     if not n or not n.get('enabled'):
         return
 
-    from engine.snmp_udp_agent import _ensure_loopback_alias, _pick_management_ip
-    ip = _pick_management_ip(state)
+    from engine.snmp_udp_agent import _ensure_loopback_alias
+    ip = _pick_ospf_ip(state, n)
     if not ip:
         return
     _ensure_loopback_alias(ip)
@@ -190,7 +253,7 @@ def start_all_ospf_agents(device_sessions: dict, ospf_engine):
         print("[OSPF] scapyが利用できないため実OSPFリスナーは起動しません")
         return {}
 
-    from engine.snmp_udp_agent import _ensure_loopback_alias, _pick_management_ip
+    from engine.snmp_udp_agent import _ensure_loopback_alias
 
     loop = asyncio.get_event_loop()
     started = {}
@@ -198,7 +261,7 @@ def start_all_ospf_agents(device_sessions: dict, ospf_engine):
         n = ospf_engine.nodes.get(device_id)
         if not n or not n.get('enabled'):
             continue
-        ip = _pick_management_ip(state)
+        ip = _pick_ospf_ip(state, n)
         if not ip:
             continue
         _ensure_loopback_alias(ip)

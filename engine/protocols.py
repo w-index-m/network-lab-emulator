@@ -3526,7 +3526,9 @@ class RibEngine:
                     'network': r.network, 'prefix': r.prefix,
                     'next_hop': r.next_hop if r.learned_from != 'direct' else '0.0.0.0',
                     'ad': ad, 'source': src, 'metric': r.metric,
-                    'iface': 'lan0',
+                    'iface': self._iface_for_nexthop(device_id, r.next_hop)
+                             or self._iface_for_network(device_id, r.network,
+                                                        r.prefix) or '',
                 })
 
         # OSPF
@@ -3539,7 +3541,10 @@ class RibEngine:
                     'network': r['network'], 'prefix': int(r['prefix']),
                     'next_hop': r.get('next_hop', '0.0.0.0'),
                     'ad': ad, 'source': src, 'metric': r['metric'],
-                    'iface': 'lan0',
+                    'iface': self._iface_for_nexthop(
+                        device_id, r.get('next_hop', ''))
+                        or self._iface_for_network(device_id, r['network'],
+                                                   int(r['prefix'])) or '',
                 })
 
         # BGP
@@ -3550,7 +3555,9 @@ class RibEngine:
                     'network': r['prefix'], 'prefix': r['prefix_len'],
                     'next_hop': r['next_hop'], 'ad': AD_VALUES['bgp_ext'],
                     'source': 'bgp', 'metric': r.get('med', 0),
-                    'iface': 'lan0',
+                    'iface': self._iface_for_nexthop(device_id, r['next_hop'])
+                             or self._iface_for_network(device_id, r['prefix'],
+                                                        r['prefix_len']) or '',
                 })
 
         # 宛先ごとにAD最小（同ADならmetric最小）を選択
@@ -3690,6 +3697,34 @@ class RibEngine:
             except Exception:
                 continue
         return None
+
+    @staticmethod
+    def _iface_for_nexthop(device_id: str, next_hop: str) -> str:
+        """
+        ネクストホップと同じセグメントに載っているインターフェース名を返す。
+
+        RIP/OSPF/BGPで学習した経路の出力インターフェースは 'lan0' 固定
+        だったため、Si-R以外（Catalyst/Nexus/cisco）では実在しない
+        インターフェース名が show ip route に出ていた。
+        """
+        if not next_hop or next_hop in ('0.0.0.0', ''):
+            return ''
+        ifaces = icmp_engine.device_ips.get(device_id, {}).get('interfaces', {})
+        try:
+            nh = vnet._ip_to_int(next_hop)
+        except Exception:
+            return ''
+        for name, info in ifaces.items():
+            if not isinstance(info, dict) or not info.get('ip'):
+                continue
+            prefix = int(info.get('prefix', 24))
+            mask = (0xffffffff << (32 - prefix)) & 0xffffffff if prefix else 0
+            try:
+                if (vnet._ip_to_int(info['ip']) & mask) == (nh & mask):
+                    return name
+            except Exception:
+                continue
+        return ''
 
     @staticmethod
     def _local_ip_on(device_id: str, route: dict) -> Optional[str]:
