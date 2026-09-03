@@ -136,15 +136,41 @@ LLDPは実機では既定で無効。`lldp run` / `no lldp run` を実装し、
 VLAN10なら 32778 になるべきところ、Root IDは空欄、Bridge IDは
 VLAN番号を足していなかった。
 
+### `show interfaces <IF>` — 出力側ブロードキャスト行の欠落
+
+Genieパーサーで比較したところ、**実機だけが持つキーは
+`counters.out_broadcast_pkts` だけ**だった。原因は1行の欠落:
+
+```
+実機  :      430 packets output, 36656 bytes, 0 underruns
+             Output 33 broadcasts (0 multicasts)      ← この行が無かった
+             0 output errors, 0 collisions, 2 interface resets
+```
+
+入力側には `Received N broadcasts (M multicasts)` があったが、
+出力側の対応する行が実装されていなかった。
+
+あわせて**入力キューの上限**も実機に合わせた。Catalystスイッチは
+2000、ルーター系(ISR等)は75。エミュレーターは機種によらず75だった。
+
+```
+実機  : Input queue: 0/2000/0/0 (size/max/drops/flushes)
+修正前: Input queue: 0/75/0/0 (size/max/drops/flushes)
+```
+
+修正後、Genieの抽出キーは**76件が一致し、実機だけが持つキーはゼロ**
+（エミュレーター側の `description` は設定してあるかどうかの差なので
+食い違いではない）。
+
 ## まだ直していない差（優先度低）
 
-- `show mac address-table` の **STATIC / CPU エントリ**（実機は
-  `0100.0ccc.cccc`(CDP)、`0180.c200.000x`(STP/LLDP) 等の予約
-  マルチキャストMACを21件持つ）
-- `show etherchannel summary` の Flags 説明が実機9行に対し2行。
-  `Group Port-channel Protocol Ports` のヘッダ行も無い
-- `show cdp neighbors` の Capability Codes が実機3行に対し2行
-  （`P - Phone, D - Remote, C - CVTA, M - Two-port Mac Relay` が不足）
+（当初残していた MACテーブルのSTATIC/CPUエントリ、
+`show etherchannel summary` のFlags、`show cdp neighbors` の
+Capability Codes は対応済み。）
+
+現時点で実機と突き合わせた範囲の食い違いはすべて解消している。
+未検証のコマンド（`show tech-support`、`show interfaces counters`、
+`show ip interface <IF>` 等）はまだ比較していない。
 
 ## テスト
 

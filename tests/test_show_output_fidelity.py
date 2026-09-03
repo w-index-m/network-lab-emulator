@@ -270,3 +270,53 @@ def test_cdp_capability_codes_has_three_lines():
     out = engine.process('show cdp neighbors', state)
     assert 'P - Phone' in out, out
     assert 'D - Remote, C - CVTA, M - Two-port Mac Relay' in out, out
+
+
+# ── show interfaces の実機比較 ────────────────────────────
+
+@pytest.fixture
+def intf_output():
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    state.mode = 'exec'
+    return engine.process('show interfaces GigabitEthernet1/0/1', state)
+
+
+def test_interfaces_has_output_broadcast_line(intf_output):
+    """出力側のブロードキャスト内訳行があること
+
+    実機は "Output N broadcasts (M multicasts)" を必ず出す。
+    この1行だけが丸ごと欠けており、Genieの
+    counters.out_broadcast_pkts が取れなかった。
+    """
+    assert 'Output ' in intf_output and 'broadcasts (' in intf_output, intf_output
+    lines = intf_output.splitlines()
+    out_idx = next(i for i, l in enumerate(lines) if 'packets output' in l)
+    # 実機では packets output の直後に来る
+    assert 'broadcasts' in lines[out_idx + 1], lines[out_idx:out_idx + 3]
+
+
+def test_switch_input_queue_size_matches_platform(intf_output):
+    """Catalystの入力キュー上限は2000（ルーター系の75ではない）"""
+    assert 'Input queue: 0/2000/0/0' in intf_output, intf_output
+
+    router = RuleEngine().process(
+        'show interfaces GigabitEthernet0/0/0', DeviceState('cisco', 'ISR'))
+    assert 'Input queue: 0/75/0/0' in router, router
+
+
+def test_interfaces_counter_block_order(intf_output):
+    """カウンタ行の並びが実機と同じであること"""
+    expected = [
+        'packets input', 'Received', 'runts', 'input errors', 'watchdog',
+        'dribble condition', 'packets output', 'Output', 'output errors',
+        'unknown protocol drops', 'babbles', 'lost carrier',
+        'output buffer failures',
+    ]
+    lines = intf_output.splitlines()
+    pos = -1
+    for needle in expected:
+        idx = next((i for i, l in enumerate(lines)
+                    if needle in l and i > pos), None)
+        assert idx is not None, f'{needle!r} の行が無い:\n{intf_output}'
+        pos = idx

@@ -1470,7 +1470,11 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         L.append("  ARP type: ARPA, ARP Timeout 04:00:00")
         L.append("  Last input 00:00:01, output 00:00:01, output hang never")
         L.append('  Last clearing of "show interface" counters never')
-        L.append("  Input queue: 0/75/0/0 (size/max/drops/flushes); Total output drops: 0")
+        # 入力キューの上限はプラットフォーム依存。Catalystスイッチは2000、
+        # ルーター系(ISR等)は75（実機のCatalyst 3650で2000を確認）
+        _inq_max = 2000 if state.device_type in ('catalyst', 'srs', 'nexus') else 75
+        L.append(f"  Input queue: 0/{_inq_max}/0/0 (size/max/drops/flushes); "
+                 f"Total output drops: 0")
         L.append("  Queueing strategy: fifo")
         L.append("  Output queue: 0/40 (size/max)")
         # データプレーンの実カウンタを反映（無ければ0）
@@ -1493,6 +1497,9 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         L.append("     0 watchdog, 0 multicast, 0 pause input")
         L.append("     0 input packets with dribble condition detected")
         L.append(f"     {_outp} packets output, {_outb} bytes, 0 underruns")
+        # 実機は出力側にもブロードキャスト/マルチキャストの内訳行を出す
+        # （実機比較でこの1行だけが丸ごと欠けていた）
+        L.append(f"     Output {_outp} broadcasts (0 multicasts)")
         L.append("     0 output errors, 0 collisions, 1 interface resets")
         L.append("     0 unknown protocol drops")
         L.append("     0 babbles, 0 late collision, 0 deferred")
