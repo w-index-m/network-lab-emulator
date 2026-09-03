@@ -25,6 +25,21 @@ RIP_HEADER_FMT = '!BBH'
 RIP_ENTRY_FMT = '!HH4s4s4sI'  # afi, route_tag, address, mask, next_hop, metric
 
 
+def _classful_prefix(network: str) -> int:
+    """RIPv1にはサブネットマスク欄が無いため、アドレスクラスから
+    プレフィックス長を導出する（RFC 1058）。
+    クラスA:/8  クラスB:/16  クラスC:/24"""
+    try:
+        first = int(network.split('.')[0])
+    except (ValueError, IndexError):
+        return 24
+    if first < 128:
+        return 8
+    if first < 192:
+        return 16
+    return 24
+
+
 def parse_rip_packet(data: bytes) -> Optional[dict]:
     if len(data) < 4:
         return None
@@ -39,7 +54,14 @@ def parse_rip_packet(data: bytes) -> Optional[dict]:
             continue
         network = '.'.join(str(b) for b in addr)
         mask_int = struct.unpack('!I', mask)[0]
-        prefix = bin(mask_int).count('1') if mask_int else 0
+        if mask_int:
+            prefix = bin(mask_int).count('1')
+        else:
+            # RIPv1（マスク欄が常に0）や、RIPv2でもマスク未指定の場合は
+            # クラスフルマスクとして解釈する。ここで0を返すと /0 の
+            # 経路として学習され、デフォルトルート同然の誤った経路が
+            # 入ってしまう
+            prefix = _classful_prefix(network)
         entries.append({
             'network': network,
             'prefix': prefix,

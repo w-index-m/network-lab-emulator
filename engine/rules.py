@@ -244,23 +244,24 @@ class DeviceState:
             100: {"name":"Server",     "status":"active","ports":[]},
         }
         self.stp = {"mode":"rapid-pvst","root":"8001.00:0e:0e:f1:00:01","priority":32768,"root_port":"Gi1/0/24"}
-        self.cdp_neighbors = [
-            {"device":"Core-SW",  "local_if":"Gi1/0/24","hold":150,"cap":"S","platform":"SR-S324TR1","port":"ether 10"},
-            {"device":"GW-Router","local_if":"Gi1/0/1", "hold":120,"cap":"R","platform":"ISR4321",   "port":"Gi0/0/0"},
-        ]
-        self.lldp_neighbors = [
-            {"local_if": "Gi1/0/24", "chassis_id": "00:0e:0e:f1:00:01",
-             "system_name": "Core-SW",   "port_id": "ether 10",     "ttl": 120, "cap": "B", "platform": "SR-S324TR1"},
-            {"local_if": "Gi1/0/1",  "chassis_id": "00:1a:2b:3c:4d:5e",
-             "system_name": "GW-Router", "port_id": "Gi0/0/0",      "ttl": 120, "cap": "R", "platform": "ISR4321"},
-        ]
+        # CDP/LLDPのネイバーは実トポロジー(vnet.links)から
+        # app.py の _rebuild_all_neighbors() / _update_neighbors() が構築する。
+        # ここでサンプルの隣接装置を埋めてしまうと、リンクが張られていない
+        # のに show cdp neighbors には隣接装置が見える状態になり、
+        # 「CDPでは繋がって見えるのにOSPF/RIPのパケットが一切流れない」
+        # という切り分けが極めて困難な食い違いを生むため、空で初期化する。
+        self.cdp_neighbors = []
+        self.lldp_neighbors = []
         self.hsrp = {"group":1,"vip":"192.168.1.254","priority":110,"state":"Active","preempt":True,"iface":"GigabitEthernet1/0/1"}
         self.ospf = {"process":1,"router_id":"10.0.0.1","area":"0.0.0.0",
             "neighbors":[{"id":"10.0.0.2","state":"FULL","iface":"Gi1/0/24","dead":"00:00:35"}]}
         self.bgp = {"asn":65001,"router_id":"10.1.0.1",
             "neighbors":[{"ip":"10.1.0.2","asn":65002,"state":"Established","uptime":"01:23:45","pfx":12}]}
-        self.eigrp = {"asn":100,
-            "neighbors":[{"ip":"10.0.0.2","iface":"Gi0/0/0","hold":12,"uptime":"01:23:45","srtt":5,"rto":200}]}
+        # EIGRPは設定コマンド(router eigrp)・プロトコルエンジンとも未実装。
+        # enabled=False の間、show ip eigrp 系は「未設定」と応答する
+        # （固定のサンプルネイバーを表示すると、実際には通信していないのに
+        #   隣接が確立しているように見えてしまうため）
+        self.eigrp = {"enabled": False, "asn": 100, "neighbors": []}
 
         # syslog / SNMP trap 設定（全機種共通）
         self.syslog_servers  = []   # [{"host":"x.x.x.x","port":514,"facility":"local7","level":"informational"}]
@@ -1753,13 +1754,39 @@ Gi1/0/2             Desgn FWD 4         128.2    P2p
 Gi1/0/24            Root  FWD 4         128.24   P2p"""
 
     # ─── show cdp ─────────────────────────────
+    @staticmethod
+    def _cdp_abbrev_if(name: str) -> str:
+        """実機IOSの show cdp neighbors と同様にインターフェース名を
+        短縮する（GigabitEthernet1/0/1 -> Gig 1/0/1）。短縮しないと
+        列幅を超えて隣の列と繋がって表示されてしまう。"""
+        if not name:
+            return ''
+        for full, abbr in (('TenGigabitEthernet', 'Ten '), ('GigabitEthernet', 'Gig '),
+                           ('FastEthernet', 'Fas '), ('Ethernet', 'Eth ')):
+            if name.startswith(full):
+                return abbr + name[len(full):]
+        return name
+
+    @staticmethod
+    def _pad(value, width: int) -> str:
+        """幅widthで左詰め。widthを超える場合も必ず1つ以上の空白を空ける
+        （列同士がくっついて読めなくなるのを防ぐ）"""
+        s = str(value)
+        return s.ljust(width) if len(s) < width else s + ' '
+
     def _show_cdp(self, state):
         lines = ["Capability Codes: R - Router, T - Trans Bridge, B - Source Route Bridge",
                  "                  S - Switch, H - Host, I - IGMP, r - Repeater",
                  "",
                  "Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID"]
         for n in state.cdp_neighbors:
-            lines.append(f"{n['device']:<17}{n['local_if']:<18}{n['hold']:<11}{n['cap']:<14}{n['platform']:<10}{n['port']}")
+            lines.append(
+                self._pad(n['device'], 17)
+                + self._pad(self._cdp_abbrev_if(n['local_if']), 18)
+                + self._pad(n['hold'], 11)
+                + self._pad(n['cap'], 12)
+                + self._pad(n['platform'], 10)
+                + self._cdp_abbrev_if(n['port']))
         lines.append(f"\nTotal cdp entries displayed : {len(state.cdp_neighbors)}")
         return "\n".join(lines)
 
@@ -1996,6 +2023,13 @@ Link ID         ADV Router      Age         Seq#       Checksum Link count
     # ─── show eigrp ───────────────────────────
     def _show_eigrp_neighbors(self, state):
         e = state.eigrp
+        # EIGRPは設定コマンド(router eigrp)を実装していないため、
+        # 未設定の装置では実機同様「何も動いていない」ことを示す。
+        # ここで固定のサンプルネイバーを表示すると、CDPで踏んだのと同じ
+        # 「表示上は隣接が見えるのに実際には一切通信していない」という
+        # 切り分け困難な食い違いになる
+        if not e.get('enabled'):
+            return "% EIGRP is not configured on this device."
         lines = [f"EIGRP-IPv4 Neighbors for AS({e['asn']})",
                  "H   Address         Interface         Hold Uptime   SRTT   RTO  Q  Seq",
                  "                                      (sec)         (ms)       Cnt Num"]
@@ -2005,6 +2039,8 @@ Link ID         ADV Router      Age         Seq#       Checksum Link count
 
     def _show_eigrp_topology(self, state):
         e = state.eigrp
+        if not e.get('enabled'):
+            return "% EIGRP is not configured on this device."
         return f"""EIGRP-IPv4 Topology Table for AS({e['asn']})/ID(10.2.0.1)
 Codes: P - Passive, A - Active, U - Update, Q - Query, R - Reply
 

@@ -47,6 +47,24 @@ def _link(e, a, b):
     e['vnet'].add_link(a, b)
 
 
+async def _wait_for_routes(e, routers, network, timeout=15.0):
+    """指定ルータ全員が network を学習するまで待つ。
+
+    固定の asyncio.sleep() で待つと、ルータ台数が増えたときに
+    最後の1台の収束が間に合わずランダムに失敗する（実際に
+    test_multiple_backbone_routers_all_learn_other_areas が
+    5回に1回程度落ちるフレーキーテストになっていた）。
+    収束をポーリングして待つことで、速いときは即座に進み、
+    遅いときも取りこぼさない。
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if all(any(r['network'] == network for r in e['ospf'].nodes[rid]['routes'])
+               for rid in routers):
+            return
+        await asyncio.sleep(0.25)
+
+
 class TestAbrMultiAreaRegistration:
     """ABR: 複数エリアのネットワーク登録・ABRフラグ"""
 
@@ -104,7 +122,7 @@ class TestBackboneLearnsOtherAreas:
         e['ospf'].add_network('ABR', '10.1.0.0/24', '0.0.0.1')
         await e['ospf'].start('R0', 'R0', 1, ['10.0.0.0/24'], '0.0.0.0')
 
-        await asyncio.sleep(5)
+        await _wait_for_routes(e, ['R0'], '10.1.0.0')
 
         r0_learned = {r['network'] for r in e['ospf'].nodes['R0']['routes']}
         assert '10.1.0.0' in r0_learned, \
@@ -124,7 +142,8 @@ class TestBackboneLearnsOtherAreas:
         e['ospf'].add_network('ABR', '10.2.0.0/24', '0.0.0.2')
         await e['ospf'].start('BB', 'BB', 1, ['10.0.1.0/24'], '0.0.0.0')
 
-        await asyncio.sleep(5)
+        await _wait_for_routes(e, ['BB'], '10.1.0.0')
+        await _wait_for_routes(e, ['BB'], '10.2.0.0')
 
         bb_learned = {r['network'] for r in e['ospf'].nodes['BB']['routes']}
         assert '10.1.0.0' in bb_learned, \
@@ -149,7 +168,7 @@ class TestBackboneLearnsOtherAreas:
         for bb in ['BB1', 'BB2', 'BB3']:
             await e['ospf'].start(bb, bb, 1, [f'10.0.{ord(bb[-1])}.0/24'], '0.0.0.0')
 
-        await asyncio.sleep(5)
+        await _wait_for_routes(e, ['BB1', 'BB2', 'BB3'], '10.1.0.0')
 
         for bb in ['BB1', 'BB2', 'BB3']:
             learned = {r['network'] for r in e['ospf'].nodes[bb]['routes']}

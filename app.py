@@ -369,6 +369,13 @@ def _load_config():
             iface_b = _find_linked_iface(b, a)
             vnet.add_link(a, b, iface_a, iface_b)
 
+    # CDP/LLDPのネイバーテーブルを実トポロジー(vnet.links)から作り直す。
+    # DeviceState.__init__ は装置生成時に固定のサンプルネイバーを持たせる
+    # ため、これを呼ばないと「show cdp neighbors には隣接装置が見えるのに
+    # vnet.links には存在せず、OSPF/RIP等のパケットが一切流れない」という
+    # 食い違いが起きる（実際にcatalyst↔ciscoでこの状態を踏んだ）。
+    _rebuild_all_neighbors()
+
     print(f"[Config] 設定をロードしました: {len(data.get('devices',{}))} devices, "
           f"{len(data.get('links',[]))} links")
 
@@ -4214,8 +4221,12 @@ def _update_neighbors(a_id: str, b_id: str, add: bool):
 
     pairs = [(a_state, a_id, b_state, b_id), (b_state, b_id, a_state, a_id)]
     for local_st, local_id, peer_st, peer_id in pairs:
-        local_if = _first_if(local_st)
-        peer_if  = _first_if(peer_st)
+        # 実際にリンクが張られているインターフェースを vnet から取得する。
+        # vnet.interface_links に無い場合のみ「最初のインターフェース」に
+        # フォールバックする（CDP/LLDPの表示が実トポロジーと食い違わない
+        # ようにするため）
+        local_if = vnet.interface_links.get(local_id, {}).get(peer_id) or _first_if(local_st)
+        peer_if  = vnet.interface_links.get(peer_id, {}).get(local_id) or _first_if(peer_st)
         mac      = _device_mac(peer_id, peer_st.device_type)
         cap      = _cap_code(peer_st.device_type)
 
