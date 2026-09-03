@@ -120,3 +120,88 @@ def test_ports_wrap_like_real_device(vlan):
     assert len(body) > 1, f'折り返されていない:\n{out}'
     # 継続行はPorts列までインデントされる
     assert body[1].startswith(' ' * 48), repr(body[1])
+
+
+# ── 実機比較で見つかった追加の食い違い ────────────────────
+
+def test_mac_table_has_no_explanatory_text():
+    """空のMACテーブルに説明文を混ぜない（実機はヘッダと合計行だけ）
+
+    以前は日本語の案内文が装置の出力に混ざっており、
+    パーサーが解釈できない行になっていた。
+    """
+    from engine.protocols import DataPlaneEngine
+
+    out = DataPlaneEngine().format_mac_table('d')
+    assert '動的に学習' not in out, out
+    assert 'Total Mac Addresses for this criterion: 0' in out
+    body = [l for l in out.splitlines()
+            if l and not l.startswith((' ', '-', 'Vlan', 'Total'))]
+    assert body == [], f'ヘッダ以外の行が出ている: {body}'
+
+
+def test_lldp_reports_not_enabled_until_lldp_run():
+    """LLDPは実機同様、lldp run を入れるまで無効
+
+    有効化していないのに隣接テーブルを表示すると、機能が動いて
+    いるように見えてしまう（EIGRPの幽霊ネイバーと同じ問題）。
+    """
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+
+    assert engine.process('show lldp neighbors', state) == '% LLDP is not enabled'
+    assert engine.process('show lldp detail', state) == '% LLDP is not enabled'
+
+    state.mode = 'config'
+    engine.process('lldp run', state)
+    assert engine.process('show lldp neighbors', state) != '% LLDP is not enabled'
+
+    engine.process('no lldp run', state)
+    assert engine.process('show lldp neighbors', state) == '% LLDP is not enabled'
+
+
+@pytest.mark.parametrize('raw,expected', [
+    ('00:a6:ca:54:36:00', '00a6.ca54.3600'),
+    ('00-a6-ca-54-36-00', '00a6.ca54.3600'),
+    ('00a6.ca54.3600',    '00a6.ca54.3600'),
+])
+def test_cisco_mac_formatting(raw, expected):
+    """MACはCisco表記(ドット区切り)にする。コロン区切りは実機に無い"""
+    from engine.protocols import cisco_mac
+    assert cisco_mac(raw) == expected
+    assert RuleEngine.cisco_mac(raw) == expected
+
+
+def test_cisco_mac_leaves_unparseable_value_alone():
+    from engine.protocols import cisco_mac
+    assert cisco_mac('') == ''
+    assert cisco_mac('CPU') == 'CPU'
+
+
+def test_arp_output_uses_dotted_mac():
+    """show ip arp のMACがドット区切りで、列がずれないこと"""
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    out = engine.process('show ip arp', state)
+    assert ':' not in out.replace('Age (min)', ''), out
+    assert '.' in out
+
+
+def test_spanning_tree_priority_includes_sys_id_ext():
+    """Root ID の Priority が空欄にならず、VLAN番号が加算されること
+
+    実機は "priority + sys-id-ext" を表示する（VLAN10 なら 32778）。
+    以前は Root ID の Priority が空欄で、Bridge ID もVLAN番号を
+    足していなかった。
+    """
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    out = engine.process('show spanning-tree', state)
+
+    assert 'Root ID    Priority    32778' in out, out
+    assert 'Bridge ID  Priority    32778  (priority 32768 sys-id-ext 10)' in out, out
+    # MACはドット区切り。優先度プレフィックス(8001.)が残っていないこと
+    assert '8001.' not in out, out
+    for line in out.splitlines():
+        if 'Address' in line:
+            assert ':' not in line, f'コロン区切りのMACが残っている: {line}'

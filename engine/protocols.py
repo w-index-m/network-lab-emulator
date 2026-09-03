@@ -3348,7 +3348,7 @@ class StpEngine:
             f'VLAN{vlan:04d}',
             f'  Spanning tree enabled protocol {mode}',
             f'  Root ID    Priority    {root_pri_ext}',
-            f'             Address     {root_mac}',
+            f'             Address     {cisco_mac(root_mac)}',
         ]
         if is_root:
             lines.append('             This bridge is the root')
@@ -3358,7 +3358,7 @@ class StpEngine:
         lines += [
             '',
             f'  Bridge ID  Priority    {pri + vlan}  (priority {pri} sys-id-ext {vlan})',
-            f'             Address     {mac}',
+            f'             Address     {cisco_mac(mac)}',
             f'             Hello Time  {"1" if mode == "rstp" else "2"} sec  '
             f'Max Age 20 sec  Forward Delay 15 sec',
             f'             Topology Change count  {tc_count}',
@@ -3393,6 +3393,21 @@ class StaticRoute:
     iface: str = ''
     active: bool = True
     description: str = ''
+
+def cisco_mac(mac: str) -> str:
+    """MACをCisco表記(ドット区切り 4桁3組)に変換する。
+
+    実機のCisco機器は 00a6.ca54.3600 の形式で出力する。
+    コロン区切りはCiscoの出力には存在せず、17文字と14文字で
+    桁数も違うため show ip arp 等で列がずれる。
+    """
+    if not mac:
+        return mac
+    hexs = str(mac).replace(':', '').replace('-', '').replace('.', '').lower()
+    if len(hexs) != 12:
+        return str(mac)
+    return f'{hexs[0:4]}.{hexs[4:8]}.{hexs[8:12]}'
+
 
 # Administrative Distance 値（Cisco IOS 準拠）
 AD_VALUES = {
@@ -4888,13 +4903,14 @@ class ArpEngine:
             lines = ['Protocol  Address          Age (min)  Hardware Addr   Type   Interface']
             # 自分のIP
             for ip, prefix in own.get('ips', {}).items():
-                mac = self._gen_mac(device_id, ip)
+                mac = cisco_mac(self._gen_mac(device_id, ip))
                 iface = self._iface_for_ip(device_id, ip)
                 lines.append(f'Internet  {ip:<16} {"-":<10} {mac}  ARPA   {iface}')
             # 学習したエントリ
             for ip, e in table.items():
                 age = int((time.time() - e.age) / 60) if e.entry_type == 'dynamic' else '-'
-                lines.append(f'Internet  {ip:<16} {str(age):<10} {e.mac}  ARPA   {e.iface}')
+                lines.append(
+                    f'Internet  {ip:<16} {str(age):<10} {cisco_mac(e.mac)}  ARPA   {e.iface}')
             return '\n'.join(lines)
         else:
             # Si-R形式
@@ -4963,10 +4979,12 @@ class DataPlaneEngine:
                  "",
                  "Vlan    Mac Address       Type        Ports",
                  "----    -----------       --------    -----"]
-        if not entries:
-            lines.append("(動的に学習されたエントリはありません — pingやトラフィックで学習されます)")
+        # 実機は学習エントリが無ければヘッダと合計行だけを出す。
+        # ここに説明文を混ぜると装置の出力ではなくなり、
+        # Genie等のパーサーが壊れる（実機との突き合わせで判明）
         for e in sorted(entries, key=lambda x: (x.vlan, x.port)):
-            lines.append(f" {e.vlan:<8}{e.mac:<20}{e.entry_type:<12}{e.port}")
+            lines.append(
+                f" {e.vlan:<8}{cisco_mac(e.mac):<20}{e.entry_type:<12}{e.port}")
         lines.append(f"Total Mac Addresses for this criterion: {len(entries)}")
         return "\n".join(lines)
 

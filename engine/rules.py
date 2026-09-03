@@ -252,6 +252,11 @@ class DeviceState:
         # という切り分けが極めて困難な食い違いを生むため、空で初期化する。
         self.cdp_neighbors = []
         self.lldp_neighbors = []
+        # LLDPは実機(Catalyst/IOS-XE)では既定で無効。`lldp run` を
+        # 入れるまで show lldp 系は "% LLDP is not enabled" を返す。
+        # 有効でもないのに隣接テーブルを表示すると、機能が動いている
+        # ように見えてしまう（EIGRPの幽霊ネイバーと同じ問題）
+        self.lldp_enabled = False
         self.hsrp = {"group":1,"vip":"192.168.1.254","priority":110,"state":"Active","preempt":True,"iface":"GigabitEthernet1/0/1"}
         self.ospf = {"process":1,"router_id":"10.0.0.1","area":"0.0.0.0",
             "neighbors":[{"id":"10.0.0.2","state":"FULL","iface":"Gi1/0/24","dead":"00:00:35"}]}
@@ -1556,7 +1561,8 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         else:
             lines = ["Protocol  Address          Age (min)  Hardware Addr   Type   Interface"]
             for a in state.arp_table:
-                lines.append(f"Internet  {a['ip']:<17}{a['age']:<11}{a['mac']:<16}ARPA   {a['iface']}")
+                mac = self.cisco_mac(a['mac'])
+                lines.append(f"Internet  {a['ip']:<17}{a['age']:<11}{mac:<16}ARPA   {a['iface']}")
         return "\n".join(lines)
 
     # ─── show ether (Si-R / SR-S) ─────────────
@@ -1741,6 +1747,9 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
 
     # ─── show lldp local ──────────────────
     def _show_lldp_local(self, state):
+        if state.device_type in ('cisco', 'catalyst', 'nexus') and not getattr(
+                state, 'lldp_enabled', False):
+            return '% LLDP is not enabled'
         dt = state.device_type
         mgmt_ip = ''
         for name, iface in state.interfaces.items():
@@ -1820,15 +1829,28 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         stp = getattr(state, 'stp', None) or {
             'mode': 'rapid-pvst', 'root': '00:0e:0e:f1:00:01',
             'priority': 32768, 'root_port': ''}
-        return f"""VLAN0010
+        # 実機は Priority に "設定値 + sys-id-ext(VLAN番号)" を出す。
+        # 以前は Root ID の Priority が空欄になり、Bridge ID も
+        # VLAN番号を足していなかった。MACもドット区切りにする。
+        vlan_id = 10
+        base_pri = int(stp.get('priority', 32768) or 32768)
+        pri_ext = base_pri + vlan_id
+        # stp['root'] は "8001.00:0e:0e:f1:00:01" のような
+        # "優先度.MAC" 形式のブリッジID。MAC部分だけを取り出す
+        raw_root = str(stp.get('root', ''))
+        if '.' in raw_root and ':' in raw_root:
+            raw_root = raw_root.split('.', 1)[1]
+        root_mac = self.cisco_mac(raw_root)
+        bridge_mac = self.cisco_mac('00:0e:0e:f1:42:00')
+        return f"""VLAN{vlan_id:04d}
   Spanning tree enabled protocol {stp['mode']}
-  Root ID    Priority    {state.vlans.get(10,{}).get('name','')and 32768}
-             Address     {stp['root']}
+  Root ID    Priority    {pri_ext}
+             Address     {root_mac}
              This bridge is the root
              Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
 
-  Bridge ID  Priority    32768 (priority 32768 sys-id-ext 10)
-             Address     00:0e:0e:f1:42:00
+  Bridge ID  Priority    {pri_ext}  (priority {base_pri} sys-id-ext {vlan_id})
+             Address     {bridge_mac}
              Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
              Aging Time  300 sec
 
@@ -1851,6 +1873,20 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
             if name.startswith(full):
                 return abbr + name[len(full):]
         return name
+
+    @staticmethod
+    def cisco_mac(mac: str) -> str:
+        """MACをCisco表記(ドット区切り 4桁3組)に変換する。
+
+        実機は 00a6.ca54.3600 の形式で出す。コロン区切りは
+        Cisco機器の出力には存在せず、桁数も違うため列がずれる。
+        """
+        if not mac:
+            return mac
+        hexs = mac.replace(':', '').replace('-', '').replace('.', '').lower()
+        if len(hexs) != 12:
+            return mac
+        return f'{hexs[0:4]}.{hexs[4:8]}.{hexs[8:12]}'
 
     @staticmethod
     def _pad(value, width: int) -> str:
@@ -1889,8 +1925,12 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
 
     # ─── show lldp neighbors ──────────────────
     def _show_lldp(self, state):
-        neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
         dt = state.device_type
+        # Cisco系は lldp run が無ければ機能自体が動いていない
+        if dt in ('cisco', 'catalyst', 'nexus') and not getattr(
+                state, 'lldp_enabled', False):
+            return '% LLDP is not enabled'
+        neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
 
         # SR-S / Si-R: 富士通フォーマット
         if dt in ('srs', 'sir'):
@@ -1930,6 +1970,9 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
         return "\n".join(lines)
 
     def _show_lldp_detail(self, state):
+        if state.device_type in ('cisco', 'catalyst', 'nexus') and not getattr(
+                state, 'lldp_enabled', False):
+            return '% LLDP is not enabled'
         neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
         dt = state.device_type
 
@@ -4169,6 +4212,14 @@ Configuration Revision            : 5"""
             entry = {'code': 'S', 'dest': f"{dest}/{prefix}", 'gw': gw, 'dist': 1, 'iface': ''}
             if not any(r.get('dest') == entry['dest'] for r in state.routes):
                 state.routes.append(entry)
+            return ""
+
+        # lldp run / no lldp run （実機は既定で無効）
+        if c == 'lldp run':
+            state.lldp_enabled = True
+            return ""
+        if c == 'no lldp run':
+            state.lldp_enabled = False
             return ""
 
         # ip route <dst> <mask> <gw> [<AD>]  (Si-R / Cisco IOS 共通)
