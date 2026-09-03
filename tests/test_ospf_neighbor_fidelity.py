@@ -106,3 +106,41 @@ def test_next_hop_outside_every_segment_yields_no_iface(rib_nexus):
 
 def test_directly_connected_next_hop_yields_no_iface(rib_nexus):
     assert rib_nexus._iface_for_nexthop('nx', '0.0.0.0') == ''
+
+
+# ── ④ show ip ospf interface が実インターフェースを出す ──────
+
+def test_ospf_interface_lists_the_real_participating_interface():
+    """決め打ちの GigabitEthernet0/0/0 / 192.168.1.1 を出さないこと
+
+    以前は装置に関係なく同じ1ブロックをハードコードしており、
+    そのインターフェースを持たない装置でも同じ内容が出ていた。
+    """
+    from engine.protocols import OspfEngine
+    icmp_engine.register_device('nx-oi', 'N9K', {
+        'mgmt0': {'ip': '192.168.100.1', 'prefix': 24},
+        'GigabitEthernet0/0/1': {'ip': '10.30.30.1', 'prefix': 24},
+    })
+    e = OspfEngine()
+    n = e._node('nx-oi')
+    n.update({'enabled': True, 'networks': ['10.30.30.0/24'],
+              'area_id': '0.0.0.0', 'process_id': 1,
+              'router_id': '10.30.30.1'})
+    out = e.format_show_ospf_interface('nx-oi')
+    assert out.startswith('GigabitEthernet0/0/1 is up'), out
+    assert 'Internet Address 10.30.30.1/24' in out, out
+    # OSPFに参加していないmgmt0は出さない
+    assert 'mgmt0' not in out, out
+    assert '192.168.1.1' not in out, out
+
+
+def test_ospf_interface_says_so_when_no_interface_participates():
+    from engine.protocols import OspfEngine
+    icmp_engine.register_device('nx-none', 'N9K',
+                                {'mgmt0': {'ip': '192.168.100.5', 'prefix': 24}})
+    e = OspfEngine()
+    n = e._node('nx-none')
+    n.update({'enabled': True, 'networks': ['10.30.30.0/24'],
+              'area_id': '0.0.0.0', 'process_id': 1, 'router_id': '1.1.1.1'})
+    assert 'not enabled on any interface' in \
+        e.format_show_ospf_interface('nx-none')

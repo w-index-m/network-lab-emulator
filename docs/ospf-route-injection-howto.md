@@ -250,3 +250,46 @@ O        172.30.20.0/24 [110/20] via 10.30.30.77, GigabitEthernet0/0/1
    無視する。LSUpdを受け取った時点でFullへ進めるようにした。
 4. **学習経路の出力IFが `lan0` 固定**。Si-R以外では実在しない
    インターフェース名が出ていた。ネクストホップから解決するように変更。
+
+## Nexus は NX-OS 本来の書き方で設定する（2026-09-03）
+
+NX-OS の `router ospf` 配下に `network` 文は無く、参加させる
+インターフェースで直接指定する。IOS形式の `network` しか受け付けて
+いなかったため、実機と違う書き方を強いていた。
+
+```
+configure terminal
+feature ospf
+router ospf 1
+exit
+interface GigabitEthernet0/0/1
+ no shutdown
+ ip address 10.30.30.1 255.255.255.0
+ ip router ospf 1 area 0.0.0.0
+end
+```
+
+`show running-config` も実機同様の形になる。
+
+```
+feature ospf
+feature lacp
+
+interface GigabitEthernet0/0/1
+  ip address 10.30.30.1/24
+  ip router ospf 1 area 0.0.0.0
+  no shutdown
+
+router ospf 1
+```
+
+`no ip router ospf <tag> area <area>` でそのインターフェースを
+OSPFから外せる。IOS形式の `network` も従来どおり使えるので、
+既存の手順はそのまま動く。
+
+### あわせて直したもの
+
+`show ip ospf interface` は装置に関係なく
+`GigabitEthernet0/0/0 / 192.168.1.1/24` を決め打ちで出していた。
+`network` に載っている実インターフェースだけを出すようにし、
+1本も無ければ `% OSPF is not enabled on any interface.` を返す。

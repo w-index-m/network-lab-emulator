@@ -803,13 +803,21 @@ class TestOspfAdvanced:
 
     @pytest.mark.asyncio
     async def test_show_ospf_interface(self, fresh_engines):
-        """show ip ospf interface にCost/Priority/DR状態が出る"""
+        """show ip ospf interface にCost/Priority/DR状態が出る
+
+        出力は network に載っている実インターフェースから組み立てる
+        ため、装置にインターフェースIPを登録しておく必要がある。
+        """
         e = fresh_engines
         _link(e,'R1','R2')
+        e['icmp'].register_device(
+            'R1', 'R1', {'GigabitEthernet0/0': {'ip': '10.0.1.1', 'prefix': 24}})
         await e['ospf'].start('R1','R1',1,['10.0.1.0/24'],'0.0.0.0')
         await e['ospf'].start('R2','R2',1,['10.0.2.0/24'],'0.0.0.0')
         await asyncio.sleep(2)
         out = e['ospf'].format_show_ospf_interface('R1')
+        assert 'GigabitEthernet0/0 is up' in out, out
+        assert 'Internet Address 10.0.1.1/24' in out, out
         assert 'Cost:' in out
         assert 'Priority' in out
         assert 'Hello' in out

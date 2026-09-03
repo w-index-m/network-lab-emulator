@@ -2026,6 +2026,40 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         from engine.real_ospf_agent import ensure_ospf_agent
         ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
+    # NX-OS: インターフェース配下の "ip router ospf <tag> area <area>"
+    # NX-OSは network 文を持たず、参加させるインターフェースで直接指定する。
+    nx_ospf_if = re.match(
+        r'^(no\s+)?ip\s+router\s+ospf\s+(\S+)\s+area\s+(\S+)', c)
+    if nx_ospf_if and state.mode == 'config-if':
+        iface = getattr(state, 'current_if', '') or ''
+        info = state.interfaces.get(iface, {})
+        ip = info.get('ip')
+        if not ip:
+            return ('ERROR: Cannot configure OSPF on an interface '
+                    'without an IP address')
+        net = _network_address(ip, int(info.get('prefix', 24)))
+        if not hasattr(state, '_ospf_networks'):
+            state._ospf_networks = []
+        if nx_ospf_if.group(1):
+            if net in state._ospf_networks:
+                state._ospf_networks.remove(net)
+            return ''
+        state._routing_mode = 'ospf'
+        state._ospf_process = nx_ospf_if.group(2)
+        state._ospf_area = nx_ospf_if.group(3)
+        if net not in state._ospf_networks:
+            state._ospf_networks.append(net)
+        # 参加させたインターフェースを覚えておく（running-config再現用）
+        info['ospf_area'] = state._ospf_area
+        info['ospf_process'] = state._ospf_process
+        await ospf_engine.start(device_id, hostname,
+                                state._ospf_process,
+                                state._ospf_networks,
+                                state._ospf_area)
+        from engine.real_ospf_agent import ensure_ospf_agent
+        ensure_ospf_agent(device_id, device_sessions, ospf_engine)
+        return ''
+
     # "network 10.0.0.0 0.0.0.255 area 0" (Cisco IOS形式)
     ospf_net = re.match(r'^network\s+([\d.]+)\s+([\d.]+)\s+area\s+(\S+)', c)
     if ospf_net and getattr(state, '_routing_mode', '') == 'ospf':
@@ -2935,6 +2969,9 @@ def _build_running_config(device_id: str, state) -> str:
         # feature
         if vpc_engine.feature_enabled.get(device_id):
             lines.append('feature vpc')
+        _on_feat = ospf_engine.nodes.get(device_id)
+        if _on_feat and _on_feat.get('enabled'):
+            lines.append('feature ospf')
         lines.append('feature lacp')
         lines.append('')
         lines.append(f'hostname {state.hostname}')
@@ -2948,12 +2985,32 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append('')
         # vPC domain
         lines.extend(vpc_engine.get_running_config(device_id))
+        # インターフェース
+        # NX-OSはOSPFへの参加をインターフェース配下の
+        # "ip router ospf <tag> area <area>" で指定するため、
+        # インターフェース節が無いとOSPF設定を再現できない
+        for ifname, iinfo in (getattr(state, 'interfaces', {}) or {}).items():
+            body = []
+            if iinfo.get('description'):
+                body.append(f'  description {iinfo["description"]}')
+            if iinfo.get('ip'):
+                body.append(
+                    f'  ip address {iinfo["ip"]}/{iinfo.get("prefix", 24)}')
+            if iinfo.get('ospf_area'):
+                body.append(f'  ip router ospf {iinfo.get("ospf_process", 1)} '
+                            f'area {iinfo["ospf_area"]}')
+            if not body:
+                continue
+            lines.append(f'interface {ifname}')
+            lines.extend(body)
+            if iinfo.get('status') in ('up', 'connected'):
+                lines.append('  no shutdown')
+            lines.append('')
         # OSPF
+        # NX-OSの router ospf 配下には network 文が無い（IOSとの違い）
         on = ospf_engine.nodes.get(device_id)
         if on and on.get('enabled'):
             lines.append(f'router ospf {on["process_id"]}')
-            for net in on.get('networks', []):
-                lines.append(f'  network {net} area {on["area_id"]}')
             lines.append('')
         # BGP
         bn = bgp_engine.nodes.get(device_id)

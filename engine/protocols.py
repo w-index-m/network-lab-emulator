@@ -1881,17 +1881,51 @@ class OspfEngine:
         is_dr = (n['dr'] == device_id)
         is_bdr = (n['bdr'] == device_id)
         role = 'DR' if is_dr else ('BDR' if is_bdr else 'DROther')
-        lines = [f'GigabitEthernet0/0/0 is up, line protocol is up']
-        lines.append(f'  Internet Address 192.168.1.1/24, Area {n["area_id"]}')
-        lines.append(f'  Process ID {n["process_id"]}, Router ID {n["router_id"]}, Network Type BROADCAST, Cost: {n["interface_cost"]}')
-        lines.append(f'  Transmit Delay is 1 sec, State {role}, Priority {n["priority"]}')
-        lines.append(f'  Designated Router (ID) {n["router_id"]}, Interface address 192.168.1.1')
-        if is_bdr or not is_dr:
-            lines.append(f'  Backup Designated router (ID) {n["router_id"]}')
-        lines.append(f'  Timer intervals configured, Hello {n["hello_interval"]}, Dead {n["dead_interval"]}, Retransmit 5')
-        if passive:
-            lines.append(f'  No Hellos (Passive interface)')
-        lines.append(f'  Neighbor Count is {len(n["neighbors"])}, Adjacent neighbor count is {len(n["neighbors"])}')
+        # network に載っている実インターフェースだけを出す。
+        # 以前は GigabitEthernet0/0/0 / 192.168.1.1 が決め打ちで、
+        # そんなインターフェースを持たない装置でも同じ内容を出していた。
+        import ipaddress
+        nets = []
+        for net in (n.get('networks') or []):
+            try:
+                nets.append(ipaddress.ip_network(net, strict=False))
+            except ValueError:
+                continue
+        members = []
+        ifaces = icmp_engine.device_ips.get(device_id, {}).get('interfaces', {})
+        for name, info in ifaces.items():
+            ip = info.get('ip') if isinstance(info, dict) else None
+            if not ip:
+                continue
+            try:
+                if any(ipaddress.ip_address(ip) in net for net in nets):
+                    members.append((name, ip, int(info.get('prefix', 24))))
+            except ValueError:
+                continue
+        if not members:
+            return '% OSPF is not enabled on any interface.'
+
+        lines = []
+        for name, ip, prefix in members:
+            down = name in vnet.down_interfaces.get(device_id, set())
+            state_str = 'administratively down' if down else 'up'
+            proto = 'down' if down else 'up'
+            lines.append(f'{name} is {state_str}, line protocol is {proto}')
+            lines.append(f'  Internet Address {ip}/{prefix}, Area {n["area_id"]}')
+            lines.append(f'  Process ID {n["process_id"]}, Router ID {n["router_id"]}, '
+                         f'Network Type BROADCAST, Cost: {n["interface_cost"]}')
+            lines.append(f'  Transmit Delay is 1 sec, State {role}, '
+                         f'Priority {n["priority"]}')
+            lines.append(f'  Designated Router (ID) {n["router_id"]}, '
+                         f'Interface address {ip}')
+            if is_bdr or not is_dr:
+                lines.append(f'  Backup Designated router (ID) {n["router_id"]}')
+            lines.append(f'  Timer intervals configured, Hello {n["hello_interval"]}, '
+                         f'Dead {n["dead_interval"]}, Retransmit 5')
+            if name in passive:
+                lines.append('  No Hellos (Passive interface)')
+            lines.append(f'  Neighbor Count is {len(n["neighbors"])}, '
+                         f'Adjacent neighbor count is {len(n["neighbors"])}')
         return '\n'.join(lines)
 
 # ══════════════════════════════════════════
