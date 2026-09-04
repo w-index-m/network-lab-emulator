@@ -2000,6 +2000,11 @@ class BgpEngine:
                 s.route_map_in = name
             else:
                 s.route_map_out = name
+            # セッション確立後にroute-mapを設定/変更しても、それだけでは
+            # 既に交換済みの経路に反映されない（次に何か別の変化が起きる
+            # まで古い属性のまま）。実機のsoft-reconfigurationに相当する
+            # 挙動として、設定直後に再伝播させる。
+            self._propagate_bgp()
 
     def set_neighbor_prefix_list(self, device_id: str, neighbor_id: str,
                                  name: str, direction: str):
@@ -2011,6 +2016,7 @@ class BgpEngine:
                 s.prefix_list_in = name
             else:
                 s.prefix_list_out = name
+            self._propagate_bgp()
 
     def set_neighbor_bfd(self, device_id: str, neighbor_id: str, enabled: bool):
         s = self._node(device_id)['sessions'].get(neighbor_id)
@@ -2021,12 +2027,16 @@ class BgpEngine:
         s = self._node(device_id)['sessions'].get(neighbor_id)
         if s:
             s.send_community = enabled
+            # route-mapと同様、既存経路への反映には再伝播が要る
+            self._propagate_bgp()
 
     def add_route_map(self, device_id: str, name: str, prepend=None,
-                      local_pref=None, med=None, communities=None):
+                      local_pref=None, med=None, communities=None,
+                      communities_additive=False):
         n = self._node(device_id)
         rm = n['route_maps'].setdefault(name, {
-            'prepend': [], 'local_pref': None, 'med': None, 'communities': []
+            'prepend': [], 'local_pref': None, 'med': None, 'communities': [],
+            'communities_additive': False,
         })
         if prepend:
             rm['prepend'] = list(prepend)
@@ -2036,6 +2046,7 @@ class BgpEngine:
             rm['med'] = med
         if communities:
             rm['communities'] = list(communities)
+            rm['communities_additive'] = communities_additive
 
     def _apply_route_map(self, device_id: str, rm_name: str, route: 'BgpRoute'):
         """route-mapのset句を経路に適用（as-path prepend / local-preference / metric / community）"""
@@ -2050,7 +2061,15 @@ class BgpEngine:
         if rm.get('med') is not None:
             route.med = rm['med']
         if rm.get('communities'):
-            route.communities = list(rm['communities'])
+            if rm.get('communities_additive'):
+                # additive: 既存communityを保持したまま追加（重複は除く）
+                merged = list(route.communities)
+                for c in rm['communities']:
+                    if c not in merged:
+                        merged.append(c)
+                route.communities = merged
+            else:
+                route.communities = list(rm['communities'])
         return route
 
     async def start(self, device_id: str, hostname: str, local_as: int):
@@ -2224,7 +2243,8 @@ class BgpEngine:
                 prefix=lr['prefix'], prefix_len=lr['prefix_len'],
                 next_hop=device_id, med=lr.get('med', 0), origin=lr.get('origin', 'i'),
                 as_path=new_path, learned_from='',
-                learned_from_hostname=n['hostname']))
+                learned_from_hostname=n['hostname'],
+                communities=list(lr.get('communities', []))))
         # アウトバウンド route-map 適用
         if session.route_map_out:
             out = [self._apply_route_map(device_id, session.route_map_out, r) for r in out]
@@ -2232,6 +2252,11 @@ class BgpEngine:
         if session.prefix_list_out:
             out = [r for r in out if filter_engine.check_prefix_list(
                 device_id, session.prefix_list_out, r.prefix, r.prefix_len)]
+        # send-community が無効なピアには community 属性を送らない
+        # （実機の既定動作。有効化しない限りcommunityは一切広告されない）
+        if not session.send_community:
+            for r in out:
+                r.communities = []
         return out
 
     async def _send_update(self, device_id: str, neighbor_id: str):
@@ -2288,7 +2313,8 @@ class BgpEngine:
                         rr = BgpRoute(prefix=r.prefix, prefix_len=r.prefix_len,
                                       next_hop=dev, local_pref=100, med=r.med,
                                       as_path=list(r.as_path), origin=r.origin,
-                                      learned_from=dev, learned_from_hostname=n['hostname'])
+                                      learned_from=dev, learned_from_hostname=n['hostname'],
+                                      communities=list(r.communities))
                         if nbr_session and nbr_session.route_map_in:
                             rr = self._apply_route_map(nid, nbr_session.route_map_in, rr)
                         wanted[(rr.prefix, rr.prefix_len)] = rr
@@ -2307,10 +2333,15 @@ class BgpEngine:
                             nbr['rib_in'].append(rr)
                             changed = True
                         elif (cur.as_path != rr.as_path or cur.local_pref != rr.local_pref
-                              or cur.med != rr.med):
+                              or cur.med != rr.med or cur.communities != rr.communities):
+                            # communitiesの比較/更新が無かったため、route-mapで
+                            # community を後から設定/変更しても既存経路には
+                            # 反映されなかった（as-path/local-pref/medだけが
+                            # 更新対象になっていた）
                             cur.as_path = rr.as_path
                             cur.local_pref = rr.local_pref
                             cur.med = rr.med
+                            cur.communities = rr.communities
                             changed = True
                     nbr['prefixes_received'] = len(nbr['rib_in'])
             # 各ノードのベスト経路を再計算（次の反復の _compute_adverts に反映）
@@ -2340,7 +2371,10 @@ class BgpEngine:
                           'next_hop': r.next_hop, 'local_pref': r.local_pref,
                           'med': r.med, 'as_path': r.as_path, 'origin': r.origin,
                           'learned_from': r.learned_from,
-                          'learned_from_hostname': r.learned_from_hostname}
+                          'learned_from_hostname': r.learned_from_hostname,
+                          # 以前はここでcommunitiesを落としていたため、route-mapで
+                          # 付与したcommunityがベストパス再計算のたびに消えていた
+                          'communities': list(r.communities)}
                          for r in best.values()]
 
     async def advertise_network(self, device_id: str, network: str):
@@ -2539,6 +2573,104 @@ class BgpEngine:
                 f'{r.med:>6} {r.local_pref:>6} {0:>6} '
                 f'{" ".join(str(a) for a in r.as_path)} {r.origin}'
             )
+        return '\n'.join(lines)
+
+    def format_show_bgp_community(self, device_id: str, community: str) -> str:
+        """show ip bgp community <community>
+
+        指定communityを持つベストパスだけを show ip bgp と同じ書式で
+        表示する。実機同様、communityはベストパス（loc_rib）にのみ
+        適用され、rib_inの非ベスト経路は対象にしない。
+        """
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return '% BGP is not configured.'
+        lines = [
+            f'BGP table version is 1, local router ID is {n["router_id"]}',
+            'Status codes: s suppressed, d damped, h history, * valid, > best, i - internal',
+            'Origin codes: i - IGP, e - EGP, ? - incomplete',
+            '',
+            '   Network          Next Hop            Metric LocPrf Weight Path',
+        ]
+
+        def _nh_ip(learned_from):
+            s = n['sessions'].get(learned_from)
+            return s.neighbor_ip if (s and s.neighbor_ip) else '0.0.0.0'
+
+        matched = [r for r in n['loc_rib'] if community in r.get('communities', [])]
+        for r in matched:
+            key = f'{r["prefix"]}/{r["prefix_len"]}'
+            lf = r.get('learned_from', '')
+            weight = 32768 if not lf else 0
+            lines.append(
+                f'*> {key:<18} {_nh_ip(lf) if lf else "0.0.0.0":<20} '
+                f'{str(r["med"]):>6} {str(r["local_pref"]):>6} {weight:>6} '
+                f'{" ".join(str(a) for a in r["as_path"])} {r["origin"]}'
+            )
+        return '\n'.join(lines)
+
+    def format_show_bgp_prefix(self, device_id: str, prefix: str,
+                               prefix_len: Optional[int] = None) -> str:
+        """show ip bgp <prefix>[/<len>] — 特定経路の詳細（community等の属性を表示）
+
+        show ip bgp のテーブル形式にはcommunityが出ない（実機同様）ため、
+        route-mapで付与したcommunityを確認できるのは実質このコマンドだけ。
+        長さを省略した場合は prefix が一致する経路をすべて対象にする
+        （実機の "show ip bgp <ip>" もプレフィックス長を問わず一致する）。
+        """
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return '% BGP is not configured.'
+
+        def _matches(p, plen):
+            if p != prefix:
+                return False
+            return prefix_len is None or plen == prefix_len
+
+        best = next((r for r in n['loc_rib'] if _matches(r['prefix'], r['prefix_len'])),
+                    None)
+        candidates = [r for r in n['rib_in'] if _matches(r.prefix, r.prefix_len)]
+        if not best and not candidates:
+            return f'% Network not in table'
+        key = f'{best["prefix"]}/{best["prefix_len"]}' if best else \
+            f'{candidates[0].prefix}/{candidates[0].prefix_len}'
+
+        lines = [f'BGP routing table entry for {key}, version {len(n["loc_rib"])}',
+                 f'Paths: ({max(len(candidates), 1)} available, best #1, table default)']
+
+        def _path_block(as_path, learned_from, learned_from_hostname, med,
+                        local_pref, origin, communities, is_best):
+            s = n['sessions'].get(learned_from) if learned_from else None
+            src_ip = s.neighbor_ip if (s and s.neighbor_ip) else (learned_from or 'local')
+            block = []
+            if not learned_from:
+                block.append('  Not advertised to any peer')
+            block.append('  ' + ' '.join(str(a) for a in as_path) if as_path else '  Local')
+            router_id = (self.nodes.get(learned_from, {}).get('router_id', src_ip)
+                        if learned_from else n['router_id'])
+            block.append(f'    {src_ip} from {src_ip} ({router_id})')
+            origin_name = {'i': 'IGP', 'e': 'EGP', '?': 'incomplete'}.get(origin, origin)
+            flags = f'Origin {origin_name}, metric {med}, localpref {local_pref}, valid'
+            flags += ', external' if learned_from else ', local'
+            if is_best:
+                flags += ', best'
+            block.append(f'      {flags}')
+            if communities:
+                block.append(f'      Community: {" ".join(communities)}')
+            return '\n'.join(block)
+
+        if best:
+            lines.append(_path_block(
+                best['as_path'], best.get('learned_from', ''),
+                best.get('learned_from_hostname', ''), best['med'],
+                best['local_pref'], best['origin'],
+                best.get('communities', []), True))
+        for r in candidates:
+            if best and r.learned_from == best.get('learned_from'):
+                continue
+            lines.append(_path_block(
+                r.as_path, r.learned_from, r.learned_from_hostname, r.med,
+                r.local_pref, r.origin, r.communities, False))
         return '\n'.join(lines)
 
 
@@ -6142,6 +6274,13 @@ class HsrpGroup:
     peer_id: str = ''
     peer_ip: str = ''
     peer_priority: int = 0
+    # ── object tracking（standby track）──
+    # 設定priorityの原本。トラック対象復旧時にここまで戻す
+    base_priority: int = 100
+    # トラック対象インターフェース -> decrement値
+    track: Dict[str, int] = field(default_factory=dict)
+    # 現在down判定中（decrement適用中）のトラック対象
+    tracked_down: set = field(default_factory=set)
 
 
 class VrrpEngine:
@@ -6381,10 +6520,15 @@ class VrrpEngine:
     async def hsrp_start(self, device_id: str, group_id: int, vip: str,
                           priority: int = 100, preempt: bool = False,
                           interface: str = ''):
+        # 既にトラックが設定済みなら維持する（standby ip の再投入で消えないように）
+        existing = self.hsrp.get(device_id, {}).get(group_id)
+        track = dict(existing.track) if existing else {}
+        tracked_down = set(existing.tracked_down) if existing else set()
         g = HsrpGroup(
             group_id=group_id, vip=vip, priority=priority,
             preempt=preempt, state='Init', interface=interface,
             virtual_mac=self._hsrp_vmac(group_id),
+            base_priority=priority, track=track, tracked_down=tracked_down,
         )
         self.hsrp[device_id][group_id] = g
         await vnet.send_to(device_id, {
@@ -6514,6 +6658,67 @@ class VrrpEngine:
                 await self._hsrp_log(nbr_id, group_id, 'Standby', 'Active',
                                      '対向Active障害 → 即昇格')
 
+    # ── object tracking（standby <group> track <interface> [decrement <n>]）──
+    def hsrp_set_track(self, device_id: str, group_id: int, iface: str,
+                       decrement: int = 10):
+        g = self.hsrp.get(device_id, {}).get(group_id)
+        if not g:
+            return
+        g.track[iface] = decrement
+
+    def hsrp_remove_track(self, device_id: str, group_id: int, iface: str):
+        g = self.hsrp.get(device_id, {}).get(group_id)
+        if not g:
+            return
+        g.track.pop(iface, None)
+        if iface in g.tracked_down:
+            g.tracked_down.discard(iface)
+            g.priority = max(0, g.base_priority -
+                             sum(g.track.get(i, 0) for i in g.tracked_down))
+
+    async def hsrp_track_down(self, device_id: str, iface: str):
+        """トラック対象インターフェースがdownした際にpriorityを下げる。
+
+        実機はActiveのまま居座る（対向がpreempt+高priorityでない限り
+        自発的に降格しない）ので、ここでは状態は変えずpriorityだけ
+        減算し、Helloを即時再送してその変化を対向に伝える。
+        """
+        for gid, g in list(self.hsrp.get(device_id, {}).items()):
+            if iface not in g.track or iface in g.tracked_down:
+                continue
+            g.tracked_down.add(iface)
+            old = g.priority
+            # 複数トラック対象の合計decrementをbase_priorityから引く
+            # （個別に減算/加算を繰り返すと、順序次第で丸め誤差が出るため）
+            g.priority = max(0, g.base_priority -
+                             sum(g.track.get(i, 0) for i in g.tracked_down))
+            await vnet.send_to(device_id, {
+                'type': 'hsrp_log',
+                'message': (f'%TRACK-6-STATE: interface {iface} tracked object Down\n'
+                            f'%HSRP-5-STATECHANGE: Grp {gid} priority '
+                            f'{old} -> {g.priority} (track {iface} down)')
+            })
+            if g.state != 'Init':
+                await self._hsrp_send_hello(device_id, gid)
+
+    async def hsrp_track_up(self, device_id: str, iface: str):
+        """トラック対象インターフェースが復旧した際にpriorityを戻す。"""
+        for gid, g in list(self.hsrp.get(device_id, {}).items()):
+            if iface not in g.track or iface not in g.tracked_down:
+                continue
+            g.tracked_down.discard(iface)
+            old = g.priority
+            g.priority = max(0, g.base_priority -
+                             sum(g.track.get(i, 0) for i in g.tracked_down))
+            await vnet.send_to(device_id, {
+                'type': 'hsrp_log',
+                'message': (f'%TRACK-6-STATE: interface {iface} tracked object Up\n'
+                            f'%HSRP-5-STATECHANGE: Grp {gid} priority '
+                            f'{old} -> {g.priority} (track {iface} up)')
+            })
+            if g.state != 'Init':
+                await self._hsrp_send_hello(device_id, gid)
+
     # ── show コマンド ─────────────────────
     async def interface_down(self, device_id: str, iface: str):
         """インターフェースshutdown時、そのIF上のVRRP/HSRPグループをInitへ落とす。
@@ -6634,7 +6839,10 @@ class VrrpEngine:
             lines.append(f'    Local virtual MAC address is {g.virtual_mac} (v1 default)')
             lines.append(f'  Hello time {g.hello_interval} sec, hold time {g.hold_time} sec')
             lines.append(f'  Preemption {"enabled" if g.preempt else "disabled"}')
-            lines.append(f'  Priority {g.priority} (configured {g.priority})')
+            lines.append(f'  Priority {g.priority} (configured {g.base_priority})')
+            for track_if, dec in sorted(g.track.items()):
+                st = 'Down' if track_if in g.tracked_down else 'Up'
+                lines.append(f'    Track interface {track_if} state {st} decrement {dec}')
             peer_desc = (f'{g.peer_ip or g.peer_id}, priority {g.peer_priority}'
                          if g.peer_id else 'unknown')
             if g.state == 'Active':

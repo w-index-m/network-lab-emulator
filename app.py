@@ -795,6 +795,9 @@ async def cli_command(body: dict):
         # （落とさないと、切れた側がMaster/Activeを名乗ったまま残り、
         #   対向がDead Timerで昇格して両系Master/Activeになる）
         await vrrp_engine.interface_down(device_id, iface_for_flap)
+        # HSRP object tracking: このIFをtrack対象にしているグループがあれば
+        # priorityを下げる（グループ自体のIFがdownする場合とは別経路）
+        await vrrp_engine.hsrp_track_down(device_id, iface_for_flap)
         peer_ids = vnet.get_peers_on_interface(device_id, iface_for_flap)
         if peer_ids:
             await ospf_engine.interface_down(device_id, peer_ids)
@@ -831,6 +834,8 @@ async def cli_command(body: dict):
                                     f'{iface_for_flap} up')
         # VRRP/HSRP: 復旧したIF上のグループを再選出させる
         await vrrp_engine.interface_up(device_id, iface_for_flap)
+        # HSRP object tracking: 復旧したのでpriorityを戻す
+        await vrrp_engine.hsrp_track_up(device_id, iface_for_flap)
         # STP: リンク回復を両端に通知（ポート再追加・再収束）
         _peers_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
         if stp_engine.nodes.get(device_id, {}).get('enabled') or any(
@@ -1119,12 +1124,14 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         bgp_engine.add_route_map(device_id, state._current_route_map,
                                  med=int(rm_med.group(1)))
         return
-    # route-map内 "set community 65000:100" or "set community 65000:100 65001:200"
+    # route-map内 "set community 65000:100" / "... 65001:200 additive"
     rm_comm = re.match(r'^set\s+community\s+(.+)$', c)
     if rm_comm and getattr(state, '_current_route_map', None):
-        comms = rm_comm.group(1).strip().split()
+        tokens = rm_comm.group(1).strip().split()
+        additive = tokens and tokens[-1].lower() == 'additive'
+        comms = tokens[:-1] if additive else tokens
         bgp_engine.add_route_map(device_id, state._current_route_map,
-                                 communities=comms)
+                                 communities=comms, communities_additive=additive)
         return
     # ── BFDインターバル（neighbor fall-over bfd用パラメータ）──
     bfd_int = re.match(r'^bfd\s+interval\s+(\d+)\s+min[_-]?rx\s+(\d+)\s+multiplier\s+(\d+)', c)
@@ -1519,10 +1526,16 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if hsrp_ip:
         gid, vip = int(hsrp_ip.group(1)), hsrp_ip.group(2)
         existing = vrrp_engine.hsrp.get(device_id, {}).get(gid)
-        pri = existing.priority if existing else 100
+        # トラックで下がっている最中でも、再設定時は「設定値」を維持する
+        pri = existing.base_priority if existing else 100
         pre = existing.preempt if existing else False
         await vrrp_engine.hsrp_start(device_id, gid, vip, pri, pre,
                                       interface=getattr(state,'current_if',''))
+        # トラック対象が既にdown中なら、再設定後もその分を引いた値に戻す
+        g_new = vrrp_engine.hsrp.get(device_id, {}).get(gid)
+        if g_new and g_new.tracked_down:
+            g_new.priority = max(0, g_new.base_priority -
+                                 sum(g_new.track.get(i, 0) for i in g_new.tracked_down))
         for peer_id in vnet.get_neighbors(device_id):
             peer_g = vrrp_engine.hsrp.get(peer_id, {}).get(gid)
             if peer_g:
@@ -1539,6 +1552,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         g = vrrp_engine.hsrp.get(device_id, {}).get(gid)
         if g:
             g.priority = pri
+            g.base_priority = pri
+            g.tracked_down.clear()
             for peer_id in vnet.get_neighbors(device_id):
                 peer_g = vrrp_engine.hsrp.get(peer_id, {}).get(gid)
                 if peer_g:
@@ -1553,6 +1568,22 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         m = re.match(r'^standby\s+(\d+)\s+preempt', c)
         g = vrrp_engine.hsrp.get(device_id, {}).get(int(m.group(1)))
         if g: g.preempt = True
+        return
+    # "standby 1 track GigabitEthernet0/0/1 [decrement 20]" — object tracking
+    hsrp_track = re.match(
+        r'^standby\s+(\d+)\s+track\s+(\S+)(?:\s+decrement\s+(\d+))?', c)
+    if hsrp_track:
+        gid = int(hsrp_track.group(1))
+        track_if = orig.split()[3] if len(orig.split()) > 3 else hsrp_track.group(2)
+        decrement = int(hsrp_track.group(3)) if hsrp_track.group(3) else 10
+        vrrp_engine.hsrp_set_track(device_id, gid, track_if, decrement)
+        return
+    # "no standby 1 track GigabitEthernet0/0/1"
+    hsrp_no_track = re.match(r'^no\s+standby\s+(\d+)\s+track\s+(\S+)', c)
+    if hsrp_no_track:
+        gid = int(hsrp_no_track.group(1))
+        track_if = orig.split()[4] if len(orig.split()) > 4 else hsrp_no_track.group(2)
+        vrrp_engine.hsrp_remove_track(device_id, gid, track_if)
         return
 
     # ── VRRP/HSRP フェイルオーバーシミュレーション ──
@@ -2706,6 +2737,20 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
         n = bgp_engine.nodes.get(device_id)
         if n and n.get('enabled'):
             return bgp_engine.format_show_bgp_table(device_id)
+    # "show ip bgp community <community>" — 指定communityを持つベストパスのみ
+    m_bgp_comm = re.match(r'^show\s+(?:ip\s+)?bgp\s+community\s+(\S+)', c)
+    if m_bgp_comm:
+        n = bgp_engine.nodes.get(device_id)
+        if n and n.get('enabled'):
+            return bgp_engine.format_show_bgp_community(device_id, m_bgp_comm.group(1))
+    # "show ip bgp <prefix>[/<len>]" — 経路詳細（community等）
+    m_bgp_prefix = re.match(r'^show\s+(?:ip\s+)?bgp\s+([\d.]+)(?:/(\d+))?\s*$', c)
+    if m_bgp_prefix:
+        n = bgp_engine.nodes.get(device_id)
+        if n and n.get('enabled'):
+            plen = int(m_bgp_prefix.group(2)) if m_bgp_prefix.group(2) else None
+            return bgp_engine.format_show_bgp_prefix(
+                device_id, m_bgp_prefix.group(1), plen)
     if re.match(r'^show\s+(ip\s+)?bgp$', c):
         n = bgp_engine.nodes.get(device_id)
         if n and n.get('enabled'):
@@ -3215,9 +3260,12 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append('!')
             lines.append(f'interface {iface}')
             lines.append(f' standby {gid} ip {g.vip}')
-            lines.append(f' standby {gid} priority {g.priority}')
+            # トラックによる現在値ではなく設定値(base_priority)を出す
+            lines.append(f' standby {gid} priority {g.base_priority}')
             if g.preempt:
                 lines.append(f' standby {gid} preempt')
+            for track_if, dec in sorted(g.track.items()):
+                lines.append(f' standby {gid} track {track_if} decrement {dec}')
         # line con / line vty
         lines.append('!')
         lines.append('line con 0')

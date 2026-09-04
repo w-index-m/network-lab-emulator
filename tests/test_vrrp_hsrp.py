@@ -174,3 +174,110 @@ async def test_shutdown_blocks_reception_not_only_transmission(two_routers):
     await _settle(5)
     assert e.hsrp['A'][1].state == 'Init', \
         'downしているIFで対向のHelloを受信して再選出されている'
+
+
+# ── HSRP object tracking（standby track） ────────────────────
+
+@pytest.mark.asyncio
+async def test_track_down_lowers_priority_and_triggers_preempt(two_routers):
+    """トラック対象IFがdownするとpriorityが下がり、対向がpreemptで昇格する
+
+    実機はActive自身が自発的に降格するのではなく、priorityが下がった
+    ことをHelloで知った対向がpreemptで奪い取る、という順序で動く。
+    """
+    e = two_routers
+    await e.hsrp_start('A', 1, '10.9.9.254', priority=110, preempt=True,
+                       interface='Gi0/0')
+    await e.hsrp_start('B', 1, '10.9.9.254', priority=100, preempt=True,
+                       interface='Gi0/0')
+    await _settle()
+    assert e.hsrp['A'][1].state == 'Active'
+
+    e.hsrp_set_track('A', 1, 'Gi0/1', decrement=20)
+    await e.hsrp_track_down('A', 'Gi0/1')
+    await _settle(3)
+
+    assert e.hsrp['A'][1].priority == 90, e.hsrp['A'][1].priority
+    assert e.hsrp['B'][1].state == 'Active', \
+        'priority低下後もBがpreemptで昇格していない'
+    assert e.hsrp['A'][1].state == 'Standby'
+
+
+@pytest.mark.asyncio
+async def test_track_up_restores_priority_and_preempt_takes_it_back(two_routers):
+    """トラック対象IF復旧でpriorityが戻り、preemptでActiveを奪還する"""
+    e = two_routers
+    await e.hsrp_start('A', 1, '10.9.9.254', priority=110, preempt=True,
+                       interface='Gi0/0')
+    await e.hsrp_start('B', 1, '10.9.9.254', priority=100, preempt=True,
+                       interface='Gi0/0')
+    await _settle()
+    e.hsrp_set_track('A', 1, 'Gi0/1', decrement=20)
+    await e.hsrp_track_down('A', 'Gi0/1')
+    await _settle(3)
+    assert e.hsrp['B'][1].state == 'Active'
+
+    await e.hsrp_track_up('A', 'Gi0/1')
+    await _settle(3)
+
+    assert e.hsrp['A'][1].priority == 110
+    assert e.hsrp['A'][1].state == 'Active', 'priority復元後もpreemptで奪還していない'
+    assert e.hsrp['B'][1].state == 'Standby'
+
+
+@pytest.mark.asyncio
+async def test_track_priority_never_goes_negative(two_routers):
+    """decrementの合計が元のpriorityを超えても0未満にならない"""
+    e = two_routers
+    await e.hsrp_start('A', 1, '10.9.9.254', priority=15, interface='Gi0/0')
+    await e.hsrp_start('B', 1, '10.9.9.254', priority=5, interface='Gi0/0')
+    await _settle()
+
+    e.hsrp_set_track('A', 1, 'Gi0/1', decrement=30)
+    await e.hsrp_track_down('A', 'Gi0/1')
+    await _settle(1)
+
+    assert e.hsrp['A'][1].priority == 0, e.hsrp['A'][1].priority
+
+
+@pytest.mark.asyncio
+async def test_track_show_standby_reports_state_and_decrement(two_routers):
+    """show standby にトラック対象・状態・decrementが表示される"""
+    e = two_routers
+    await e.hsrp_start('A', 1, '10.9.9.254', priority=110, interface='Gi0/0')
+    await e.hsrp_start('B', 1, '10.9.9.254', priority=100, interface='Gi0/0')
+    await _settle()
+
+    e.hsrp_set_track('A', 1, 'Gi0/1', decrement=20)
+    out_before = e.format_show_standby('A')
+    assert 'Track interface Gi0/1 state Up decrement 20' in out_before, out_before
+
+    await e.hsrp_track_down('A', 'Gi0/1')
+    await _settle(1)
+    out_after = e.format_show_standby('A')
+    assert 'Track interface Gi0/1 state Down decrement 20' in out_after, out_after
+    assert 'Priority 90 (configured 110)' in out_after, out_after
+
+
+@pytest.mark.asyncio
+async def test_multiple_tracked_interfaces_decrement_cumulatively(two_routers):
+    """複数トラック対象がdownすると合計decrement分だけ下がる（累積誤差なし）"""
+    e = two_routers
+    await e.hsrp_start('A', 1, '10.9.9.254', priority=110, interface='Gi0/0')
+    await e.hsrp_start('B', 1, '10.9.9.254', priority=100, interface='Gi0/0')
+    await _settle()
+
+    e.hsrp_set_track('A', 1, 'Gi0/1', decrement=10)
+    e.hsrp_set_track('A', 1, 'Gi0/2', decrement=15)
+    await e.hsrp_track_down('A', 'Gi0/1')
+    await e.hsrp_track_down('A', 'Gi0/2')
+    await _settle(1)
+    assert e.hsrp['A'][1].priority == 85, e.hsrp['A'][1].priority
+
+    await e.hsrp_track_up('A', 'Gi0/1')
+    await _settle(1)
+    assert e.hsrp['A'][1].priority == 95, e.hsrp['A'][1].priority
+
+    await e.hsrp_track_up('A', 'Gi0/2')
+    await _settle(1)
+    assert e.hsrp['A'][1].priority == 110, e.hsrp['A'][1].priority

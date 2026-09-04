@@ -1567,3 +1567,195 @@ class TestStpPortRecoveryNoCollision:
 
         for d in ('A', 'B', 'C'):
             e['stp'].stop(d)
+
+
+# ══════════════════════════════════════════
+# BGP community テスト
+# ══════════════════════════════════════════
+class TestBgpCommunity:
+    @pytest.mark.asyncio
+    async def test_community_propagates_to_peer_when_send_community_enabled(
+            self, fresh_engines):
+        """route-mapで付与したcommunityが、send-community有効なピアに届く"""
+        e = fresh_engines
+        _link(e, 'B1', 'B2')
+        await e['bgp'].start('B1', 'R1', 65001)
+        await e['bgp'].start('B2', 'R2', 65002)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await e['bgp'].add_neighbor('B1', 'B2', 'R2', 65002)
+        await e['bgp'].add_neighbor('B2', 'B1', 'R1', 65001)
+        await asyncio.sleep(3)
+
+        e['bgp'].add_route_map('B1', 'SET-COMM', communities=['65001:100'])
+        e['bgp'].set_neighbor_route_map('B1', 'B2', 'SET-COMM', 'out')
+        e['bgp'].set_neighbor_send_community('B1', 'B2', True)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(3)
+
+        rib = [r for r in e['bgp'].nodes['B2']['rib_in'] if r.prefix == '172.20.0.0']
+        assert rib and rib[0].communities == ['65001:100'], \
+            f'communityが対向に伝わっていない: {[r.communities for r in rib]}'
+
+    @pytest.mark.asyncio
+    async def test_community_update_after_route_already_exists(self, fresh_engines):
+        """既に確立済みの経路にcommunityを後から設定しても反映される
+
+        _propagate_bgp() の差分更新が as-path/local-pref/med しか比較して
+        おらず、community だけが変化してもpeer側の既存レコードが
+        更新されない不具合があった（"changed"にならず伝播が止まる）。
+        """
+        e = fresh_engines
+        _link(e, 'B1', 'B2')
+        await e['bgp'].start('B1', 'R1', 65001)
+        await e['bgp'].start('B2', 'R2', 65002)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await e['bgp'].add_neighbor('B1', 'B2', 'R2', 65002)
+        await e['bgp'].add_neighbor('B2', 'B1', 'R1', 65001)
+        await asyncio.sleep(3)
+        # この時点でB2は既にcommunityの無い経路を学習済み
+        before = [r for r in e['bgp'].nodes['B2']['rib_in'] if r.prefix == '172.20.0.0']
+        assert before[0].communities == []
+
+        e['bgp'].add_route_map('B1', 'SET-COMM', communities=['65001:100'])
+        e['bgp'].set_neighbor_route_map('B1', 'B2', 'SET-COMM', 'out')
+        e['bgp'].set_neighbor_send_community('B1', 'B2', True)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(3)
+
+        after = [r for r in e['bgp'].nodes['B2']['rib_in'] if r.prefix == '172.20.0.0']
+        assert after[0].communities == ['65001:100'], \
+            f'既存経路のcommunityが後から更新されていない: {after[0].communities}'
+
+    @pytest.mark.asyncio
+    async def test_community_not_sent_without_send_community(self, fresh_engines):
+        """send-communityが無効（既定）なら、route-mapでcommunityを
+        付けてもpeerには一切届かない（実機の既定動作）"""
+        e = fresh_engines
+        _link(e, 'B1', 'B2')
+        await e['bgp'].start('B1', 'R1', 65001)
+        await e['bgp'].start('B2', 'R2', 65002)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await e['bgp'].add_neighbor('B1', 'B2', 'R2', 65002)
+        await e['bgp'].add_neighbor('B2', 'B1', 'R1', 65001)
+        await asyncio.sleep(3)
+
+        e['bgp'].add_route_map('B1', 'SET-COMM', communities=['65001:100'])
+        e['bgp'].set_neighbor_route_map('B1', 'B2', 'SET-COMM', 'out')
+        # send-community は付けない（既定 False）
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(3)
+
+        rib = [r for r in e['bgp'].nodes['B2']['rib_in'] if r.prefix == '172.20.0.0']
+        assert rib[0].communities == [], \
+            f'send-community未設定なのにcommunityが届いている: {rib[0].communities}'
+
+    @pytest.mark.asyncio
+    async def test_send_community_disabled_strips_previously_sent_community(
+            self, fresh_engines):
+        """send-communityを後から無効化すると、既に届いていたcommunityも
+        次のUpdateで撤回される"""
+        e = fresh_engines
+        _link(e, 'B1', 'B2')
+        await e['bgp'].start('B1', 'R1', 65001)
+        await e['bgp'].start('B2', 'R2', 65002)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await e['bgp'].add_neighbor('B1', 'B2', 'R2', 65002)
+        await e['bgp'].add_neighbor('B2', 'B1', 'R1', 65001)
+        await asyncio.sleep(3)
+
+        e['bgp'].add_route_map('B1', 'SET-COMM', communities=['65001:100'])
+        e['bgp'].set_neighbor_route_map('B1', 'B2', 'SET-COMM', 'out')
+        e['bgp'].set_neighbor_send_community('B1', 'B2', True)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(3)
+        assert [r for r in e['bgp'].nodes['B2']['rib_in']
+               if r.prefix == '172.20.0.0'][0].communities == ['65001:100']
+
+        e['bgp'].set_neighbor_send_community('B1', 'B2', False)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(3)
+        after = [r for r in e['bgp'].nodes['B2']['rib_in'] if r.prefix == '172.20.0.0']
+        assert after[0].communities == [], \
+            f'send-community無効化後もcommunityが残っている: {after[0].communities}'
+
+    @pytest.mark.asyncio
+    async def test_transit_route_carries_community_through_a_third_router(
+            self, fresh_engines):
+        """B1 -> B2 -> B3 と多段中継してもcommunityが引き継がれる
+
+        _compute_adverts の transit（loc_ribからの再広告）経路で
+        communities を loc_rib から引いていなかったバグの回帰。
+        """
+        e = fresh_engines
+        e['vnet'].register('B1', e['noop']); e['vnet'].register('B2', e['noop'])
+        e['vnet'].register('B3', e['noop'])
+        e['vnet'].add_link('B1', 'B2')
+        e['vnet'].add_link('B2', 'B3')
+        await e['bgp'].start('B1', 'R1', 65001)
+        await e['bgp'].start('B2', 'R2', 65002)
+        await e['bgp'].start('B3', 'R3', 65003)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await e['bgp'].add_neighbor('B1', 'B2', 'R2', 65002)
+        await e['bgp'].add_neighbor('B2', 'B1', 'R1', 65001)
+        await e['bgp'].add_neighbor('B2', 'B3', 'R3', 65003)
+        await e['bgp'].add_neighbor('B3', 'B2', 'R2', 65002)
+        await asyncio.sleep(3)
+
+        e['bgp'].add_route_map('B1', 'SET-COMM', communities=['65001:100'])
+        e['bgp'].set_neighbor_route_map('B1', 'B2', 'SET-COMM', 'out')
+        e['bgp'].set_neighbor_send_community('B1', 'B2', True)
+        e['bgp'].set_neighbor_send_community('B2', 'B3', True)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(4)
+
+        rib_b3 = [r for r in e['bgp'].nodes['B3']['rib_in'] if r.prefix == '172.20.0.0']
+        assert rib_b3 and rib_b3[0].communities == ['65001:100'], \
+            f'B3までcommunityが中継されていない: {[r.communities for r in rib_b3]}'
+
+    @pytest.mark.asyncio
+    async def test_route_map_additive_keeps_existing_community(self, fresh_engines):
+        """set community X additive は既存communityを消さず追加する"""
+        e = fresh_engines
+        route = proto.BgpRoute(prefix='10.0.0.0', prefix_len=24, next_hop='B1',
+                               communities=['65001:100'])
+        e['bgp'].add_route_map('B1', 'ADD-COMM', communities=['65001:200'],
+                               communities_additive=True)
+        out = e['bgp']._apply_route_map('B1', 'ADD-COMM', route)
+        assert set(out.communities) == {'65001:100', '65001:200'}, out.communities
+
+    @pytest.mark.asyncio
+    async def test_route_map_community_without_additive_replaces(self, fresh_engines):
+        """additiveを付けない set community は既存communityを置き換える"""
+        e = fresh_engines
+        route = proto.BgpRoute(prefix='10.0.0.0', prefix_len=24, next_hop='B1',
+                               communities=['65001:100'])
+        e['bgp'].add_route_map('B1', 'REPLACE-COMM', communities=['65001:200'])
+        out = e['bgp']._apply_route_map('B1', 'REPLACE-COMM', route)
+        assert out.communities == ['65001:200'], out.communities
+
+    @pytest.mark.asyncio
+    async def test_show_bgp_community_filters_matching_routes_only(self, fresh_engines):
+        """show ip bgp community <val> は該当communityの経路だけ出す"""
+        e = fresh_engines
+        n = e['bgp']._node('B1')
+        n['enabled'] = True
+        n['loc_rib'] = [
+            {'prefix': '10.0.0.0', 'prefix_len': 24, 'next_hop': 'x', 'local_pref': 100,
+             'med': 0, 'as_path': [65001], 'origin': 'i', 'learned_from': 'peer',
+             'learned_from_hostname': 'peer', 'communities': ['65001:100']},
+            {'prefix': '10.0.1.0', 'prefix_len': 24, 'next_hop': 'x', 'local_pref': 100,
+             'med': 0, 'as_path': [65001], 'origin': 'i', 'learned_from': 'peer',
+             'learned_from_hostname': 'peer', 'communities': []},
+        ]
+        out = e['bgp'].format_show_bgp_community('B1', '65001:100')
+        assert '10.0.0.0/24' in out
+        assert '10.0.1.0/24' not in out
+
+    @pytest.mark.asyncio
+    async def test_show_bgp_prefix_reports_not_in_table_for_unknown_prefix(
+            self, fresh_engines):
+        e = fresh_engines
+        n = e['bgp']._node('B1')
+        n['enabled'] = True
+        out = e['bgp'].format_show_bgp_prefix('B1', '203.0.113.0', 24)
+        assert 'not in table' in out

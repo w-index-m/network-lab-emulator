@@ -600,7 +600,7 @@
   - Prefix-list管理
   - Access-list管理
   - Route-map管理
-  - distribute-list (計画中)
+  - distribute-list（RIP/OSPF双方向、Si-Rのroute-manageと共用）
 
 ✅ 処理:
   - BGP 隣接フィルタ
@@ -759,8 +759,6 @@
 ### 計画中の機能
 
 ```
-⬜ HSRP の詳細実装
-⬜ distribute-list
 ⬜ BGP community
 ⬜ OSPF NSSA
 ⬜ QoS (Queuing/Shaping)
