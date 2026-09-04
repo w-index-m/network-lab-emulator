@@ -2541,6 +2541,29 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     if re.match(r'^show\s+(nat-table|ip\s+napt)', c) and state.device_type in ('sir', 'srs'):
         return nat_engine.format_show_translations(device_id)
 
+    # Si-R: show vlan / show interface / show bridge / show bridgegroup
+    if state.device_type in ('sir', 'srs'):
+        if re.match(r'^show\s+vlan\s*$', c):
+            return rule_engine._sir_show_vlan(state)
+        if re.match(r'^show\s+interface\s+brief\s*$', c):
+            return rule_engine._sir_show_interface(state, brief=True)
+        if re.match(r'^show\s+interface\s+summary\s*$', c):
+            return rule_engine._sir_show_interface(state, summary=True)
+        if re.match(r'^show\s+interface\s+detail\s*$', c):
+            return rule_engine._sir_show_interface(state, detail=True)
+        if re.match(r'^show\s+interface\s+statistics\s*$', c):
+            return rule_engine._sir_show_interface(state, detail=True)
+        if re.match(r'^show\s+interface\s*$', c):
+            return rule_engine._sir_show_interface(state)
+        if re.match(r'^show\s+bridge\s+summary\s*$', c):
+            return rule_engine._sir_show_bridge(state, summary=True)
+        if re.match(r'^show\s+bridge\s*$', c):
+            return rule_engine._sir_show_bridge(state)
+        if re.match(r'^show\s+bridgegroup\s+status(\s+group)?\s*$', c):
+            return rule_engine._sir_show_bridgegroup(state, status=True)
+        if re.match(r'^show\s+bridgegroup\s*$', c):
+            return rule_engine._sir_show_bridgegroup(state)
+
     # ── syslog / SNMP 設定確認（state反映版）──
     if re.match(r'^show\s+logging', c):
         return _format_show_logging(state)

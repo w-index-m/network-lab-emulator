@@ -220,6 +220,11 @@ class DeviceState:
             "GigabitEthernet0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
         }
 
+        if device_type == "sir":
+            # ether <slot> <port> vlan untag <vid>（実機のfactory-default）
+            self.sir_ether_vlan = {(1, 1): 1, (2, 1): 2, (2, 2): 2, (2, 3): 2, (2, 4): 2}
+            self.sir_vlan_desc = {1: 'default', 2: 'v2'}
+
         self.routes = [
             {"fp":"*C","dest":"192.168.1.0/24","gw":"192.168.1.1","dist":0, "iface":"lan0"},
             {"fp":"*S","dest":"0.0.0.0/0",     "gw":"203.0.113.1","dist":200,"iface":"wan1"},
@@ -1435,6 +1440,150 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             short = name.replace("GigabitEthernet","Gi")
             lines.append(f"{short:<10}{'0':<12}{'0':<11}{'0':<11}{'0':<12}{'0':<11}{'0':<11}0")
         return "\n".join(lines)
+
+    def _sir_show_vlan(self, state):
+        """Si-R: show vlan（ether <slot> <port> vlan untag <vid> の実機出力）"""
+        by_vid = {}
+        for (slot, port), vid in sorted(state.sir_ether_vlan.items()):
+            by_vid.setdefault(vid, []).append(f"ether {slot} {port}")
+        lines = [
+            "",
+            "VID  Interface          Tag           Type     Description                      ",
+            "---- ------------------ ------------- -------- -------------------------------- ",
+        ]
+        for vid in sorted(by_vid):
+            desc = state.sir_vlan_desc.get(vid, "")
+            for i, iface in enumerate(by_vid[vid]):
+                if i == 0:
+                    lines.append(f"{vid:<4} {iface:<18} untagged      port     {desc:<32} ")
+                else:
+                    lines.append(f"     {iface:<18} untagged                                                ")
+        lines.append("")
+        lines.append(f"Total Count : {len(by_vid):>3}  ")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _sir_ifaces(self, state):
+        """Si-R: show interface系で列挙する対象（lan0/lan1/wan1 + lo0）"""
+        order = [n for n in ("lan0", "lan1", "wan1") if n in state.interfaces]
+        return order
+
+    def _sir_vlan_id_for(self, name):
+        if name == "lan0":
+            return 1
+        if name in ("lan1", "wan1"):
+            return 2
+        return None
+
+    def _sir_show_interface(self, state, brief=False, summary=False, detail=False):
+        names = self._sir_ifaces(state)
+        if summary:
+            up = sum(1 for n in names if state.interfaces[n]["status"] == "up") + 1
+            portvlan_up = sum(1 for n in names if state.interfaces[n]["status"] == "up")
+            total = len(names) + 1
+            lines = [
+                f"There are {total} interfaces (up status {up} interfaces)",
+                f"    Loopback interface      :     1 (up status     1 interfaces)",
+                f"    Port VLAN interface     : {len(names):>5} (up status {portvlan_up:>5} interfaces)",
+                f"    Pseudo P2P interface    :     0 (up status     0 interfaces)",
+                f"    Template P2P interface  :     0 (up status     0 interfaces)",
+            ]
+            return "\n".join(lines)
+
+        if brief:
+            lines = [
+                "Interface        Status     Type",
+                "---------------- ---------- ----------------------",
+            ]
+            for n in names:
+                status = state.interfaces[n]["status"]
+                lines.append(f"{n:<17}{status:<11}port vlan")
+            lines.append(f"{'lo0':<17}{'up':<11}loopback")
+            return "\n".join(lines)
+
+        lines = []
+        for n in names:
+            iface = state.interfaces[n]
+            status = iface["status"]
+            vlan_id = self._sir_vlan_id_for(n)
+            lines.append(f"{n:<15}MTU 1500    <UP,BROADCAST,SIMPLEX,MULTICAST>")
+            lines.append("    Description: ")
+            lines.append("    Type: port vlan")
+            if vlan_id is not None:
+                lines.append(f"    VLAN ID is {vlan_id}")
+            lines.append(f"    MAC address: {iface.get('mac', '')}")
+            lines.append(f"    Status: {status}")
+            if iface.get("ip"):
+                bcast = self._broadcast_addr(iface["ip"], iface.get("prefix", 24))
+                lines.append("    IP address/masklen:")
+                lines.append(f"      {iface['ip']}/{iface.get('prefix', 24)}       Broadcast {bcast}")
+            lines.append("    ICMP redirect: enabled")
+            lines.append("    Proxy ARP: enabled")
+            if detail:
+                lines.append("    statistics:")
+                lines.append("      in packets:                       0 out packets:                       0")
+                lines.append("         bytes:                         0     bytes:                         0")
+                lines.append("         unicasts:                      0     unicasts:                      0")
+                lines.append("         multicasts/broadcasts:         0     multicasts/broadcasts:         0")
+                lines.append("         discards:                      0     discards:                      0")
+                lines.append("                                              drop:                          0")
+        lines.append("lo0            MTU 16384   <UP,LOOPBACK,RUNNING,MULTICAST>")
+        lines.append("    Type: loopback")
+        lines.append("    Status: up")
+        lines.append("    IP address/masklen:")
+        lines.append("      127.0.0.1/32")
+        lines.append("    IPv6 address/prefixlen:")
+        lines.append("      fe80::1/64")
+        lines.append("      ::1/128")
+        if detail:
+            lines.append("    statistics:")
+            lines.append("      in packets:                       0 out packets:                       0")
+            lines.append("         bytes:                         0     bytes:                         0")
+            lines.append("         unicasts:                      0     unicasts:                      0")
+            lines.append("         multicasts/broadcasts:         0     multicasts/broadcasts:         0")
+            lines.append("         discards:                      0     discards:                      0")
+            lines.append("                                              drop:                          0")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _broadcast_addr(ip, prefix):
+        try:
+            import ipaddress
+            net = ipaddress.ip_network(f"{ip}/{prefix}", strict=False)
+            return str(net.broadcast_address)
+        except Exception:
+            return ""
+
+    def _sir_show_bridge(self, state, summary=False):
+        if summary:
+            n = len(state.sir_vlan_desc)
+            lines = [
+                f"Registered station blocks : {n:>5}",
+                f"     Dynamic entry        : {0:>5}",
+                f"     Static  entry        : {n:>5}",
+                f"     Authenticated entry  : {0:>5}",
+                f"     System  entry        : {0:>5}",
+                f"Free station blocks       : {8192 - n:>5}",
+            ]
+            return "\n".join(lines)
+
+        lines = [
+            "Codes: D - Dynamic entry, S - Static entry, A - Authenticated entry",
+            "Address           VLAN Interface          Status",
+            "----------------- ---- ------------------ ------",
+        ]
+        for i, vid in enumerate(sorted(state.sir_vlan_desc)):
+            mac = state.interfaces.get("lan0" if vid == 1 else "lan1", {}).get("mac", "")
+            lines.append(f"{mac:<17} {vid:<4} cpu {i:<15} S     ")
+        return "\n".join(lines)
+
+    def _sir_show_bridgegroup(self, state, status=False):
+        if status:
+            lines = ["Name     Group   Status  IPv4     IPv6     D_if        In     Out"]
+            for vid in sorted(state.sir_vlan_desc):
+                lines.append(f"vlan{vid:<5} {0:<6} invalid Routing  Routing               0       0")
+            return "\n".join(lines)
+        return "Address             Group   Interface   Status      Remain time "
 
     @staticmethod
     def _abbrev_if(name: str) -> str:
