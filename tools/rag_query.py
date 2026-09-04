@@ -15,6 +15,9 @@ RAG（検索拡張生成） — docs/*.md を検索対象にしたQwen問い合�
 使い方:
   python tools/rag_query.py "PowerDNSでIPv6のエラーが出たときの対処法は？"
   python tools/rag_query.py "Zabbixのビルドでハマった点は？" --show-context
+
+  # チャット形式（会話履歴を保持して連続で相談する）
+  python tools/rag_query.py --chat
 """
 
 import argparse
@@ -95,8 +98,7 @@ RAG_SYSTEM = """あなたはこのネットワークラボプロジェクトの�
 """
 
 
-def ask(query: str, top_k: int = 4, show_context: bool = False) -> str:
-    bm25, chunks = build_index()
+def _build_context(query: str, bm25, chunks, top_k: int, show_context: bool) -> str:
     results = retrieve(query, bm25, chunks, top_k=top_k)
 
     if not results:
@@ -113,14 +115,13 @@ def ask(query: str, top_k: int = 4, show_context: bool = False) -> str:
         print(context)
         print("=" * 70)
 
-    prompt = f"参考資料:\n{context}\n\n質問: {query}"
+    return context
 
+
+def _call_ollama(messages: list) -> str:
     r = httpx.post(f"{OLLAMA_URL}/api/chat", json={
         "model": OLLAMA_MODEL,
-        "messages": [
-            {"role": "system", "content": RAG_SYSTEM},
-            {"role": "user", "content": prompt},
-        ],
+        "messages": messages,
         "stream": False,
         "options": {"temperature": 0.1},
     }, timeout=180.0)
@@ -128,12 +129,80 @@ def ask(query: str, top_k: int = 4, show_context: bool = False) -> str:
     return r.json()["message"]["content"]
 
 
+def ask(query: str, top_k: int = 4, show_context: bool = False) -> str:
+    """1問1答（履歴なし）。従来どおりの挙動。"""
+    bm25, chunks = build_index()
+    context = _build_context(query, bm25, chunks, top_k, show_context)
+    prompt = f"参考資料:\n{context}\n\n質問: {query}"
+    return _call_ollama([
+        {"role": "system", "content": RAG_SYSTEM},
+        {"role": "user", "content": prompt},
+    ])
+
+
+def ask_turn(query: str, history: list, bm25, chunks,
+             top_k: int = 4, show_context: bool = False) -> str:
+    """チャット用の1ターン。過去の会話履歴(history)を踏まえて回答する。
+
+    検索は毎ターンその質問文だけで行う（履歴全体で検索すると、
+    過去の話題に引きずられて直近の質問と無関係な資料を拾いやすい
+    ため）。参考資料は当該ターンの質問にだけ埋め込み、履歴には
+    生の質問と回答だけを積む。
+    """
+    context = _build_context(query, bm25, chunks, top_k, show_context)
+    prompt = f"参考資料:\n{context}\n\n質問: {query}"
+    messages = [{"role": "system", "content": RAG_SYSTEM}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": prompt})
+    answer = _call_ollama(messages)
+    # 履歴には参考資料を含めない生の質問文だけ積む（次ターンの検索や
+    # コンテキストが肥大化しないよう、埋め込んだ参考資料は使い捨てる）
+    history.append({"role": "user", "content": query})
+    history.append({"role": "assistant", "content": answer})
+    return answer
+
+
+def run_chat(top_k: int = 4, show_context: bool = False):
+    """会話履歴を保持しながら連続で質問できる対話モード。"""
+    print("RAGチャット（docs/*.md検索拡張・Qwen）")
+    print("終了するには exit / quit / Ctrl-D")
+    print("=" * 70)
+    bm25, chunks = build_index()
+    history = []
+    while True:
+        try:
+            query = input("\nあなた> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not query:
+            continue
+        if query.lower() in ("exit", "quit"):
+            break
+        try:
+            answer = ask_turn(query, history, bm25, chunks,
+                              top_k=top_k, show_context=show_context)
+        except httpx.HTTPError as e:
+            print(f"[エラー] Ollamaへの問い合わせに失敗しました: {e}")
+            continue
+        print(f"\nQwen> {answer}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='RAG（docs/*.md検索拡張）でQwenに質問する')
-    parser.add_argument('query', help='質問文')
+    parser.add_argument('query', nargs='?', help='質問文（--chat指定時は不要）')
     parser.add_argument('--top-k', type=int, default=4)
     parser.add_argument('--show-context', action='store_true', help='検索結果も表示する')
+    parser.add_argument('--chat', action='store_true',
+                        help='会話履歴を保持する対話モードで起動する')
     args = parser.parse_args()
+
+    if args.chat:
+        run_chat(top_k=args.top_k, show_context=args.show_context)
+        return
+
+    if not args.query:
+        parser.error('質問文を指定するか --chat を付けてください')
 
     answer = ask(args.query, top_k=args.top_k, show_context=args.show_context)
     print('\n=== Qwen の回答 ===')
