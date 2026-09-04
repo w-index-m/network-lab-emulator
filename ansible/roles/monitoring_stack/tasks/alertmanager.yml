@@ -1,0 +1,55 @@
+---
+- name: Check if Alertmanager is already up
+  ansible.builtin.uri:
+    url: "http://localhost:{{ alertmanager_port }}/"
+    status_code: 200
+  register: am_check
+  failed_when: false
+
+- name: Check if Alertmanager binary already extracted
+  ansible.builtin.stat:
+    path: "{{ stack_dir }}/alertmanager-{{ alertmanager_version }}.linux-amd64/alertmanager"
+  register: am_bin
+
+- name: Download Alertmanager release tarball
+  ansible.builtin.get_url:
+    url: "https://github.com/prometheus/alertmanager/releases/download/v{{ alertmanager_version }}/alertmanager-{{ alertmanager_version }}.linux-amd64.tar.gz"
+    dest: "{{ stack_dir }}/alertmanager.tar.gz"
+  when: not am_bin.stat.exists
+
+- name: Extract Alertmanager tarball
+  ansible.builtin.unarchive:
+    src: "{{ stack_dir }}/alertmanager.tar.gz"
+    dest: "{{ stack_dir }}"
+    remote_src: true
+    creates: "{{ stack_dir }}/alertmanager-{{ alertmanager_version }}.linux-amd64/alertmanager"
+  when: not am_bin.stat.exists
+
+- name: Render alertmanager.yml
+  ansible.builtin.template:
+    src: alertmanager.yml.j2
+    dest: "{{ stack_dir }}/alertmanager.yml"
+    mode: "0644"
+  when: am_check.status | default(0) != 200
+
+- name: Start Alertmanager
+  ansible.builtin.shell: >
+    nohup {{ stack_dir }}/alertmanager-{{ alertmanager_version }}.linux-amd64/alertmanager
+    --config.file={{ stack_dir }}/alertmanager.yml
+    --storage.path={{ stack_dir }}/alertmanager-data
+    --web.listen-address=0.0.0.0:{{ alertmanager_port }}
+    --cluster.listen-address=""
+    > {{ stack_dir }}/alertmanager.log 2>&1 &
+  args:
+    executable: /bin/bash
+  when: am_check.status | default(0) != 200
+
+- name: Wait for Alertmanager to become healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ alertmanager_port }}/"
+    status_code: 200
+  register: am_wait
+  until: am_wait.status | default(0) == 200
+  retries: 15
+  delay: 2
+  when: am_check.status | default(0) != 200

@@ -54,7 +54,7 @@ def send_syslog(host: str, port: int, facility: str, severity: str,
 
 async def send_syslog_async(host: str, port: int, facility: str, severity: str,
                              hostname: str, msg: str) -> bool:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None, send_syslog, host, port, facility, severity, hostname, msg
     )
@@ -168,7 +168,7 @@ def send_snmp_trap(host: str, port: int, community: str,
 
 async def send_snmp_trap_async(host: str, port: int, community: str,
                                 hostname: str, trap_oid: str, description: str) -> bool:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None, send_snmp_trap, host, port, community, hostname, trap_oid, description
     )
@@ -220,7 +220,7 @@ def send_ntp_request(host: str, port: int = 123) -> bool:
 
 
 async def send_ntp_request_async(host: str, port: int = 123) -> bool:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, send_ntp_request, host, port)
 
 
@@ -323,7 +323,7 @@ class NtpClient:
         """NTPサーバー全員にリクエストを1回送信、結果リストを返す"""
         servers = self._servers.get(device_id, [])
         results = []
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         for s in servers:
             ok = await send_ntp_request_async(s['host'], s.get('port', 123))
             results.append({'host': s['host'], 'sent': ok})

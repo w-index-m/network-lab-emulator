@@ -220,6 +220,11 @@ class DeviceState:
             "GigabitEthernet0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
         }
 
+        if device_type == "sir":
+            # ether <slot> <port> vlan untag <vid>（実機のfactory-default）
+            self.sir_ether_vlan = {(1, 1): 1, (2, 1): 2, (2, 2): 2, (2, 3): 2, (2, 4): 2}
+            self.sir_vlan_desc = {1: 'default', 2: 'v2'}
+
         self.routes = [
             {"fp":"*C","dest":"192.168.1.0/24","gw":"192.168.1.1","dist":0, "iface":"lan0"},
             {"fp":"*S","dest":"0.0.0.0/0",     "gw":"203.0.113.1","dist":200,"iface":"wan1"},
@@ -244,23 +249,29 @@ class DeviceState:
             100: {"name":"Server",     "status":"active","ports":[]},
         }
         self.stp = {"mode":"rapid-pvst","root":"8001.00:0e:0e:f1:00:01","priority":32768,"root_port":"Gi1/0/24"}
-        self.cdp_neighbors = [
-            {"device":"Core-SW",  "local_if":"Gi1/0/24","hold":150,"cap":"S","platform":"SR-S324TR1","port":"ether 10"},
-            {"device":"GW-Router","local_if":"Gi1/0/1", "hold":120,"cap":"R","platform":"ISR4321",   "port":"Gi0/0/0"},
-        ]
-        self.lldp_neighbors = [
-            {"local_if": "Gi1/0/24", "chassis_id": "00:0e:0e:f1:00:01",
-             "system_name": "Core-SW",   "port_id": "ether 10",     "ttl": 120, "cap": "B", "platform": "SR-S324TR1"},
-            {"local_if": "Gi1/0/1",  "chassis_id": "00:1a:2b:3c:4d:5e",
-             "system_name": "GW-Router", "port_id": "Gi0/0/0",      "ttl": 120, "cap": "R", "platform": "ISR4321"},
-        ]
+        # CDP/LLDPのネイバーは実トポロジー(vnet.links)から
+        # app.py の _rebuild_all_neighbors() / _update_neighbors() が構築する。
+        # ここでサンプルの隣接装置を埋めてしまうと、リンクが張られていない
+        # のに show cdp neighbors には隣接装置が見える状態になり、
+        # 「CDPでは繋がって見えるのにOSPF/RIPのパケットが一切流れない」
+        # という切り分けが極めて困難な食い違いを生むため、空で初期化する。
+        self.cdp_neighbors = []
+        self.lldp_neighbors = []
+        # LLDPは実機(Catalyst/IOS-XE)では既定で無効。`lldp run` を
+        # 入れるまで show lldp 系は "% LLDP is not enabled" を返す。
+        # 有効でもないのに隣接テーブルを表示すると、機能が動いている
+        # ように見えてしまう（EIGRPの幽霊ネイバーと同じ問題）
+        self.lldp_enabled = False
         self.hsrp = {"group":1,"vip":"192.168.1.254","priority":110,"state":"Active","preempt":True,"iface":"GigabitEthernet1/0/1"}
         self.ospf = {"process":1,"router_id":"10.0.0.1","area":"0.0.0.0",
             "neighbors":[{"id":"10.0.0.2","state":"FULL","iface":"Gi1/0/24","dead":"00:00:35"}]}
         self.bgp = {"asn":65001,"router_id":"10.1.0.1",
             "neighbors":[{"ip":"10.1.0.2","asn":65002,"state":"Established","uptime":"01:23:45","pfx":12}]}
-        self.eigrp = {"asn":100,
-            "neighbors":[{"ip":"10.0.0.2","iface":"Gi0/0/0","hold":12,"uptime":"01:23:45","srtt":5,"rto":200}]}
+        # EIGRPは設定コマンド(router eigrp)・プロトコルエンジンとも未実装。
+        # enabled=False の間、show ip eigrp 系は「未設定」と応答する
+        # （固定のサンプルネイバーを表示すると、実際には通信していないのに
+        #   隣接が確立しているように見えてしまうため）
+        self.eigrp = {"enabled": False, "asn": 100, "neighbors": []}
 
         # syslog / SNMP trap 設定（全機種共通）
         self.syslog_servers  = []   # [{"host":"x.x.x.x","port":514,"facility":"local7","level":"informational"}]
@@ -741,11 +752,12 @@ class RuleEngine:
         elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
                              "config-crypto", "config-monitor",
                              "config-cmap", "config-pmap", "config-vs-domain",
-                             "config-dhcp"):
+                             "config-dhcp", "config-sg-tacacs", "config-ext-nacl"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
-                         '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool'):
+                         '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool',
+                         '_aaa_group_name', '_current_acl_name'):
                 if hasattr(state, attr):
                     delattr(state, attr)
         elif state.mode == "config":
@@ -821,6 +833,10 @@ class RuleEngine:
         # router ospf <process> → ospf.process に保存
         m_ospf = re.match(r'^router\s+ospf\s+(\d+)', c)
         if m_ospf:
+            # NX-OSは feature ospf を入れるまでコマンド自体が存在しない
+            if state.device_type == 'nexus' and \
+                    'ospf' not in getattr(state, 'nx_features', set()):
+                return self._cmd_error(cmd, state, reason='invalid', position=0)
             pid = int(m_ospf.group(1))
             if not hasattr(state, 'ospf') or not isinstance(state.ospf, dict):
                 state.ospf = {"process": pid, "router_id": "", "area": "0.0.0.0", "neighbors": []}
@@ -876,6 +892,27 @@ class RuleEngine:
             return self._show_int_transceiver(state)
         if re.match(r'^show\s+interfaces?\s+counters\s+errors$', c):
             return self._show_int_counters_errors(state)
+        if dt in ('cisco', 'catalyst', 'srs'):
+            if re.match(r'^show\s+interfaces?\s+counters$', c):
+                return self._show_int_counters(state)
+            if re.match(r'^show\s+interfaces?\s+switchport$', c):
+                return self._show_int_switchport(state)
+            if re.match(r'^show\s+spanning-tree\s+summary$', c):
+                return self._show_stp_summary(state)
+            if re.match(r'^show\s+redundancy\s+states$', c):
+                return self._show_redundancy_states(state)
+            if re.match(r'^show\s+file\s+systems$', c):
+                return self._show_file_systems(state)
+            if re.match(r'^show\s+inventory$', c):
+                return self._show_inventory(state)
+            if re.match(r'^show\s+environment(\s+all)?$', c):
+                return self._show_environment(state)
+            if re.match(r'^show\s+sdm\s+prefer$', c):
+                return self._show_sdm_prefer(state)
+            if re.match(r'^show\s+license\s+summary$', c):
+                return self._show_license_summary(state)
+            if re.match(r'^show\s+platform\s+resources$', c):
+                return self._show_platform_resources(state)
         if re.match(r'^show\s+interfaces?\s+brief$', c) or re.match(r'^show\s+ip\s+interfaces?\s+brief$', c):
             return self._show_ip_int_brief(state)
 
@@ -1164,26 +1201,78 @@ Last reset at 123456 usecs after  Mon Jan  1 00:00:00 2024
 plugin
   Core Plugin, Ethernet Plugin"""
         elif state.device_type == "catalyst":
+            # 実機(WS-C3650-24TD / IOS-XE 16.12.11)の show version と
+            # Genieパーサーの抽出キーを突き合わせて、機種に依らず
+            # IOS-XEなら必ず出力される項目を揃えている。
+            # 以前は ROM/BOOTLDR、Compiled行、System image file、
+            # Last reload reason、ライセンス情報、ディスク情報、
+            # 次回リロード時のconfig registerが無く、
+            # dev.parse('show version') が27キーを取りこぼしていた。
+            # （`Cisco IOS-XE software, Copyright` 行が無いと
+            #   Genieは os を 'IOS-XE' ではなく 'IOS' と判定する）
             return f"""Cisco IOS XE Software, Version 17.09.01
-Cisco IOS Software [Cupertino], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.1
+Cisco IOS Software [Cupertino], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.1, RELEASE SOFTWARE (fc4)
 Technical Support: http://www.cisco.com/techsupport
 Copyright (c) 1986-2022 by Cisco Systems, Inc.
+Compiled Thu 04-Aug-22 15:47 by mcpre
+
+
+Cisco IOS-XE software, Copyright (c) 2005-2022 by cisco Systems, Inc.
+All rights reserved.  Certain components of Cisco IOS-XE software are
+licensed under the GNU General Public License ("GPL") Version 2.0.  The
+software code licensed under GPL Version 2.0 is free software that comes
+with ABSOLUTELY NO WARRANTY.  You can redistribute and/or modify such
+GPL code under the terms of GPL Version 2.0.  For more details, see the
+documentation or "License Notice" file accompanying the IOS-XE software,
+or the applicable URL provided on the flyer accompanying the IOS-XE
+software.
+
+
+ROM: IOS-XE ROMMON
+BOOTLDR: System Bootstrap, Version 17.9.1r, RELEASE SOFTWARE (P)
+
+{state.hostname} uptime is {state.uptime_str()}
+Uptime for this control processor is {state.uptime_str()}
+System returned to ROM by Reload Command
+System image file is "flash:cat9k_iosxe.17.09.01.SPA.bin"
+Last reload reason: Reload Command
+
+
+Technology Package License Information:
+
+------------------------------------------------------------------------------
+Technology-package                                     Technology-package
+Current                        Type                       Next reboot
+------------------------------------------------------------------------------
+network-advantage       Smart License                    network-advantage
+dna-advantage           Subscription Smart License       dna-advantage
+
+Smart Licensing Status: UNREGISTERED/EVAL MODE
 
 cisco C9300-24T (X86) processor with 1474560K/6147K bytes of memory.
 Processor board ID FCW2xxx0001
-
 8 Virtual Ethernet interfaces
 56 Gigabit Ethernet interfaces
 2048K bytes of non-volatile configuration memory.
 4194304K bytes of physical memory.
+1638400K bytes of Crash Files at crashinfo:.
+11264000K bytes of Flash at flash:.
 
 Base Ethernet MAC Address          : 00:0e:0e:f1:42:00
 Motherboard Assembly Number        : 73-18506-04
-System serial number               : FCW2xxx0001
+Motherboard Serial Number          : FCW2xxx0001
+Model Revision Number              : A0
+Motherboard Revision Number        : A0
+Model Number                       : C9300-24T
+System Serial Number               : FCW2xxx0001
 
-Configuration register is 0x102
 
-{state.hostname} uptime is {state.uptime_str()}"""
+Switch Ports Model              SW Version        SW Image              Mode
+------ ----- -----              ----------        ----------            ----
+*    1 32    C9300-24T          17.09.01          CAT9K_IOSXE           INSTALL
+
+
+Configuration register is 0x102 (will be 0x102 at next reload)"""
         else:
             return f"""Cisco IOS Software [Cupertino], ISR Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 17.9.1
 Technical Support: http://www.cisco.com/techsupport
@@ -1280,7 +1369,8 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         trunks = [(n,i) for n,i in state.interfaces.items()
                   if i.get("vlan")=="trunk" and i.get("status")=="connected"]
         if not trunks:
-            return "(トランクポートでconnectedのものはありません)"
+            # 実機はトランクが1本も無いと何も出力しない
+            return ""
         lines = ["", "Port        Mode             Encapsulation  Status        Native vlan"]
         for name, iface in trunks:
             short = name.replace("GigabitEthernet","Gi").replace("Port-channel","Po")
@@ -1351,6 +1441,331 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             lines.append(f"{short:<10}{'0':<12}{'0':<11}{'0':<11}{'0':<12}{'0':<11}{'0':<11}0")
         return "\n".join(lines)
 
+    def _sir_show_vlan(self, state):
+        """Si-R: show vlan（ether <slot> <port> vlan untag <vid> の実機出力）"""
+        by_vid = {}
+        for (slot, port), vid in sorted(state.sir_ether_vlan.items()):
+            by_vid.setdefault(vid, []).append(f"ether {slot} {port}")
+        lines = [
+            "",
+            "VID  Interface          Tag           Type     Description                      ",
+            "---- ------------------ ------------- -------- -------------------------------- ",
+        ]
+        for vid in sorted(by_vid):
+            desc = state.sir_vlan_desc.get(vid, "")
+            for i, iface in enumerate(by_vid[vid]):
+                if i == 0:
+                    lines.append(f"{vid:<4} {iface:<18} untagged      port     {desc:<32} ")
+                else:
+                    lines.append(f"     {iface:<18} untagged                                                ")
+        lines.append("")
+        lines.append(f"Total Count : {len(by_vid):>3}  ")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _sir_ifaces(self, state):
+        """Si-R: show interface系で列挙する対象（lan0/lan1/wan1 + lo0）"""
+        order = [n for n in ("lan0", "lan1", "wan1") if n in state.interfaces]
+        return order
+
+    def _sir_vlan_id_for(self, name):
+        if name == "lan0":
+            return 1
+        if name in ("lan1", "wan1"):
+            return 2
+        return None
+
+    def _sir_show_interface(self, state, brief=False, summary=False, detail=False):
+        names = self._sir_ifaces(state)
+        if summary:
+            up = sum(1 for n in names if state.interfaces[n]["status"] == "up") + 1
+            portvlan_up = sum(1 for n in names if state.interfaces[n]["status"] == "up")
+            total = len(names) + 1
+            lines = [
+                f"There are {total} interfaces (up status {up} interfaces)",
+                f"    Loopback interface      :     1 (up status     1 interfaces)",
+                f"    Port VLAN interface     : {len(names):>5} (up status {portvlan_up:>5} interfaces)",
+                f"    Pseudo P2P interface    :     0 (up status     0 interfaces)",
+                f"    Template P2P interface  :     0 (up status     0 interfaces)",
+            ]
+            return "\n".join(lines)
+
+        if brief:
+            lines = [
+                "Interface        Status     Type",
+                "---------------- ---------- ----------------------",
+            ]
+            for n in names:
+                status = state.interfaces[n]["status"]
+                lines.append(f"{n:<17}{status:<11}port vlan")
+            lines.append(f"{'lo0':<17}{'up':<11}loopback")
+            return "\n".join(lines)
+
+        lines = []
+        for n in names:
+            iface = state.interfaces[n]
+            status = iface["status"]
+            vlan_id = self._sir_vlan_id_for(n)
+            lines.append(f"{n:<15}MTU 1500    <UP,BROADCAST,SIMPLEX,MULTICAST>")
+            lines.append("    Description: ")
+            lines.append("    Type: port vlan")
+            if vlan_id is not None:
+                lines.append(f"    VLAN ID is {vlan_id}")
+            lines.append(f"    MAC address: {iface.get('mac', '')}")
+            lines.append(f"    Status: {status}")
+            if iface.get("ip"):
+                bcast = self._broadcast_addr(iface["ip"], iface.get("prefix", 24))
+                lines.append("    IP address/masklen:")
+                lines.append(f"      {iface['ip']}/{iface.get('prefix', 24)}       Broadcast {bcast}")
+            lines.append("    ICMP redirect: enabled")
+            lines.append("    Proxy ARP: enabled")
+            if detail:
+                lines.append("    statistics:")
+                lines.append("      in packets:                       0 out packets:                       0")
+                lines.append("         bytes:                         0     bytes:                         0")
+                lines.append("         unicasts:                      0     unicasts:                      0")
+                lines.append("         multicasts/broadcasts:         0     multicasts/broadcasts:         0")
+                lines.append("         discards:                      0     discards:                      0")
+                lines.append("                                              drop:                          0")
+        lines.append("lo0            MTU 16384   <UP,LOOPBACK,RUNNING,MULTICAST>")
+        lines.append("    Type: loopback")
+        lines.append("    Status: up")
+        lines.append("    IP address/masklen:")
+        lines.append("      127.0.0.1/32")
+        lines.append("    IPv6 address/prefixlen:")
+        lines.append("      fe80::1/64")
+        lines.append("      ::1/128")
+        if detail:
+            lines.append("    statistics:")
+            lines.append("      in packets:                       0 out packets:                       0")
+            lines.append("         bytes:                         0     bytes:                         0")
+            lines.append("         unicasts:                      0     unicasts:                      0")
+            lines.append("         multicasts/broadcasts:         0     multicasts/broadcasts:         0")
+            lines.append("         discards:                      0     discards:                      0")
+            lines.append("                                              drop:                          0")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _broadcast_addr(ip, prefix):
+        try:
+            import ipaddress
+            net = ipaddress.ip_network(f"{ip}/{prefix}", strict=False)
+            return str(net.broadcast_address)
+        except Exception:
+            return ""
+
+    def _sir_show_bridge(self, state, summary=False):
+        if summary:
+            n = len(state.sir_vlan_desc)
+            lines = [
+                f"Registered station blocks : {n:>5}",
+                f"     Dynamic entry        : {0:>5}",
+                f"     Static  entry        : {n:>5}",
+                f"     Authenticated entry  : {0:>5}",
+                f"     System  entry        : {0:>5}",
+                f"Free station blocks       : {8192 - n:>5}",
+            ]
+            return "\n".join(lines)
+
+        lines = [
+            "Codes: D - Dynamic entry, S - Static entry, A - Authenticated entry",
+            "Address           VLAN Interface          Status",
+            "----------------- ---- ------------------ ------",
+        ]
+        for i, vid in enumerate(sorted(state.sir_vlan_desc)):
+            mac = state.interfaces.get("lan0" if vid == 1 else "lan1", {}).get("mac", "")
+            lines.append(f"{mac:<17} {vid:<4} cpu {i:<15} S     ")
+        return "\n".join(lines)
+
+    def _sir_show_bridgegroup(self, state, status=False):
+        if status:
+            lines = ["Name     Group   Status  IPv4     IPv6     D_if        In     Out"]
+            for vid in sorted(state.sir_vlan_desc):
+                lines.append(f"vlan{vid:<5} {0:<6} invalid Routing  Routing               0       0")
+            return "\n".join(lines)
+        return "Address             Group   Interface   Status      Remain time "
+
+    @staticmethod
+    def _abbrev_if(name: str) -> str:
+        """実機の短縮表記（GigabitEthernet1/0/1 -> Gi1/0/1）"""
+        for full, abbr in (('TenGigabitEthernet', 'Te'), ('GigabitEthernet', 'Gi'),
+                           ('FastEthernet', 'Fa'), ('Port-channel', 'Po'),
+                           ('Vlan', 'Vl')):
+            if name.startswith(full):
+                return abbr + name[len(full):]
+        return name
+
+    def _phys_ports(self, state):
+        """カウンタ／switchport系が対象にする物理ポート"""
+        return [(n, i) for n, i in state.interfaces.items()
+                if n.startswith(('GigabitEthernet', 'TenGigabitEthernet',
+                                 'FastEthernet'))]
+
+    def _show_int_counters(self, state):
+        """show interfaces counters（実機同様 In/Out の2テーブル）"""
+        ctrs = {}
+        try:
+            from engine.protocols import dp_engine as _dp
+            did = getattr(state, '_device_id', None)
+            if did:
+                ctrs = _dp.counters.get(did, {})
+        except Exception:
+            ctrs = {}
+
+        def table(head, keys):
+            L = ['', f'{"Port":<18}{head[0]:>9}{head[1]:>15}{head[2]:>15}{head[3]:>15} ']
+            for name, _ in self._phys_ports(state):
+                c = ctrs.get(name) or {}
+                octets = c.get(keys[0], 0)
+                pkts = c.get(keys[1], 0)
+                # ユニキャスト/マルチキャスト/ブロードキャストの内訳は保持していない
+                # ため、実機同様に合計をユニキャスト列へ寄せる
+                L.append(f'{self._abbrev_if(name):<18}{octets:>9}{pkts:>15}'
+                         f'{0:>15}{0:>15} ')
+            return L
+
+        lines = table(('InOctets', 'InUcastPkts', 'InMcastPkts', 'InBcastPkts'),
+                      ('in_bytes', 'in_pkts'))
+        lines += table(('OutOctets', 'OutUcastPkts', 'OutMcastPkts', 'OutBcastPkts'),
+                       ('out_bytes', 'out_pkts'))
+        return "\n".join(lines)
+
+    def _show_int_switchport(self, state):
+        """show interfaces switchport（実機のポート単位ブロック）"""
+        blocks = []
+        for name, iface in self._phys_ports(state):
+            vlan = iface.get('vlan')
+            trunk = vlan == 'trunk'
+            up = iface.get('status') in ('up', 'connected')
+            if trunk:
+                admin, oper = 'trunk', ('trunk' if up else 'down')
+            elif vlan:
+                admin, oper = 'static access', ('static access' if up else 'down')
+            else:
+                admin, oper = 'dynamic auto', ('static access' if up else 'down')
+            access = '1 (default)' if vlan in (None, '', 'trunk', 1, '1') else str(vlan)
+            native = iface.get('native_vlan', '1')
+            native = '1 (default)' if str(native) == '1' else str(native)
+            b = [f'Name: {self._abbrev_if(name)}',
+                 'Switchport: Enabled',
+                 f'Administrative Mode: {admin}',
+                 f'Operational Mode: {oper}',
+                 'Administrative Trunking Encapsulation: dot1q']
+            # 実機は Operational 行を「トランク稼働中」のときだけ出す
+            if oper in ('static access', 'trunk'):
+                b.append('Operational Trunking Encapsulation: '
+                         + ('dot1q' if oper == 'trunk' else 'native'))
+            b += [f'Negotiation of Trunking: {"Off" if admin != "dynamic auto" else "On"}',
+                  f'Access Mode VLAN: {access}',
+                  f'Trunking Native Mode VLAN: {native}',
+                  'Administrative Native VLAN tagging: disabled',
+                  'Voice VLAN: none',
+                  'Administrative private-vlan host-association: none ',
+                  'Administrative private-vlan mapping: none ',
+                  'Administrative private-vlan trunk native VLAN: none',
+                  'Administrative private-vlan trunk Native VLAN tagging: enabled',
+                  'Administrative private-vlan trunk encapsulation: dot1q',
+                  'Administrative private-vlan trunk normal VLANs: none',
+                  'Administrative private-vlan trunk associations: none',
+                  'Administrative private-vlan trunk mappings: none',
+                  'Operational private-vlan: none',
+                  f'Trunking VLANs Enabled: {iface.get("allowed_vlan", "ALL") if trunk else "ALL"}',
+                  'Pruning VLANs Enabled: 2-1001',
+                  'Capture Mode Disabled',
+                  'Capture VLANs Allowed: ALL',
+                  '',
+                  'Protected: false',
+                  'Unknown unicast blocked: disabled',
+                  'Unknown multicast blocked: disabled',
+                  'Vepa Enabled: false',
+                  'Appliance trust: none']
+            blocks.append("\n".join(b))
+        if not blocks:
+            return ""
+        return "\n" + "\n\n".join(blocks)
+
+    def _show_stp_summary(self, state):
+        """show spanning-tree summary"""
+        vlans = sorted({int(i.get('vlan')) for i in state.interfaces.values()
+                        if str(i.get('vlan', '')).isdigit()} | {1})
+        mode = getattr(state, 'stp_mode', None) or 'rapid-pvst'
+        L = [f'Switch is in {mode} mode',
+             'Root bridge for: ' + ', '.join(f'VLAN{v:04d}' for v in vlans),
+             'EtherChannel misconfig guard            is enabled',
+             'Extended system ID                      is enabled',
+             'Portfast Default                        is disabled',
+             'PortFast BPDU Guard Default            is disabled',
+             'Portfast BPDU Filter Default           is disabled',
+             'Loopguard Default                      is disabled',
+             'UplinkFast                              is disabled',
+             'BackboneFast                            is disabled',
+             'Configured Pathcost method used is short',
+             '',
+             'Name                   Blocking Listening Learning Forwarding STP Active',
+             '---------------------- -------- --------- -------- ---------- ----------']
+        total = 0
+        for v in vlans:
+            fwd = sum(1 for n, i in self._phys_ports(state)
+                      if i.get('status') in ('up', 'connected')
+                      and str(i.get('vlan', 1)) in (str(v), 'trunk'))
+            total += fwd
+            # 実機は値の行がヘッダより1桁ずれる。実機の桁位置に合わせる
+            L.append(f'{"VLAN%04d" % v:<21}{0:>9}{0:>10}{0:>9}{fwd:>11}{fwd:>11}')
+        L.append('---------------------- -------- --------- -------- ---------- ----------')
+        n = len(vlans)
+        L.append(f'{"%d vlan%s" % (n, "" if n == 1 else "s"):<21}'
+                 f'{0:>9}{0:>10}{0:>9}{total:>11}{total:>11}')
+        return "\n".join(L)
+
+    def _show_redundancy_states(self, state):
+        """show redundancy states（スタンドアロン機のSimplex出力）"""
+        return "\n".join([
+            '       my state = 13 -ACTIVE ',
+            '     peer state = 1  -DISABLED ',
+            '           Mode = Simplex',
+            '           Unit = Primary',
+            '        Unit ID = 1',
+            '',
+            'Redundancy Mode (Operational) = Non-redundant',
+            'Redundancy Mode (Configured)  = sso',
+            'Redundancy State              = Non Redundant',
+            '     Maintenance Mode = Disabled',
+            '    Manual Swact = disabled (system is simplex (no peer unit))',
+            ' Communications = Down      Reason: Simplex mode',
+            '',
+            '   client count = 113',
+            ' client_notification_TMR = 30000 milliseconds',
+            '           RF debug mask = 0x0   ',
+        ])
+
+    def _show_file_systems(self, state):
+        """show file systems"""
+        rows = [
+            ('-', '-', 'opaque', 'rw', 'system:'),
+            ('-', '-', 'opaque', 'rw', 'tmpsys:'),
+            ('248354816', '221928448', 'disk', 'rw', 'crashinfo:'),
+            ('1621966848', '742158336', 'disk', 'rw', 'flash:'),
+            ('1773764608', '1699446784', 'disk', 'ro', 'webui:'),
+            ('-', '-', 'opaque', 'rw', 'null:'),
+            ('-', '-', 'opaque', 'ro', 'tar:'),
+            ('-', '-', 'network', 'rw', 'tftp:'),
+            ('2097152', '2073422', 'nvram', 'rw', 'nvram:'),
+            ('-', '-', 'opaque', 'wo', 'syslog:'),
+            ('-', '-', 'network', 'rw', 'rcp:'),
+            ('-', '-', 'network', 'rw', 'http:'),
+            ('-', '-', 'network', 'rw', 'ftp:'),
+            ('-', '-', 'network', 'rw', 'scp:'),
+            ('-', '-', 'network', 'rw', 'sftp:'),
+            ('-', '-', 'network', 'rw', 'https:'),
+            ('-', '-', 'opaque', 'ro', 'cns:'),
+        ]
+        L = ['', 'File Systems:', '',
+             '       Size(b)       Free(b)      Type  Flags  Prefixes']
+        for size, free, typ, flags, pfx in rows:
+            star = '*' if pfx == 'flash:' else ' '
+            L.append(f'{star}{size:>13}{free:>14}{typ:>10}{flags:>7}   {pfx}')
+        return "\n".join(L)
+
     def _show_ip_int_brief(self, state):
         lines = ["Interface              IP-Address      OK? Method Status                Protocol"]
         for name, iface in state.interfaces.items():
@@ -1411,7 +1826,11 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         L.append("  ARP type: ARPA, ARP Timeout 04:00:00")
         L.append("  Last input 00:00:01, output 00:00:01, output hang never")
         L.append('  Last clearing of "show interface" counters never')
-        L.append("  Input queue: 0/75/0/0 (size/max/drops/flushes); Total output drops: 0")
+        # 入力キューの上限はプラットフォーム依存。Catalystスイッチは2000、
+        # ルーター系(ISR等)は75（実機のCatalyst 3650で2000を確認）
+        _inq_max = 2000 if state.device_type in ('catalyst', 'srs', 'nexus') else 75
+        L.append(f"  Input queue: 0/{_inq_max}/0/0 (size/max/drops/flushes); "
+                 f"Total output drops: 0")
         L.append("  Queueing strategy: fifo")
         L.append("  Output queue: 0/40 (size/max)")
         # データプレーンの実カウンタを反映（無ければ0）
@@ -1434,6 +1853,9 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         L.append("     0 watchdog, 0 multicast, 0 pause input")
         L.append("     0 input packets with dribble condition detected")
         L.append(f"     {_outp} packets output, {_outb} bytes, 0 underruns")
+        # 実機は出力側にもブロードキャスト/マルチキャストの内訳行を出す
+        # （実機比較でこの1行だけが丸ごと欠けていた）
+        L.append(f"     Output {_outp} broadcasts (0 multicasts)")
         L.append("     0 output errors, 0 collisions, 1 interface resets")
         L.append("     0 unknown protocol drops")
         L.append("     0 babbles, 0 late collision, 0 deferred")
@@ -1449,14 +1871,47 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             for r in state.routes:
                 lines.append(f"{r['fp']:<3} {r['dest']:<19}{r['gw']:<16}{str(r['dist']):<9}00:01:23  {r['iface']}")
         else:
-            lines = ["Codes: C - connected, S - static, R - RIP, O - OSPF, B - BGP",
-                     "       D - EIGRP, EX - EIGRP external, i - IS-IS",
-                     "       * - candidate default",
+            # 実機(IOS-XE)準拠:
+            #  - connected/local は "[AD/metric] via ..." を付けず
+            #    "is directly connected, <IF>" と出す
+            #    （以前は静的経路と同じ書式で描画していたため、
+            #      gw='directly' がそのまま "via directly" という
+            #      実機に存在しない表記になっていた）
+            #  - 各インターフェースIPに対する L(local) /32 経路を出す
+            #  - デフォルトルートの有無を "Gateway of last resort" で示す
+            lines = ["Codes: L - local, C - connected, S - static, R - RIP,",
+                     "       B - BGP, D - EIGRP, EX - EIGRP external, O - OSPF,",
+                     "       IA - OSPF inter area, i - IS-IS,",
+                     "       * - candidate default, U - per-user static route",
                      ""]
+            default_gw = next((r for r in state.routes
+                               if r.get('dest') == '0.0.0.0/0'), None)
+            if default_gw:
+                lines.append('Gateway of last resort is '
+                             f"{default_gw.get('gw')} to network 0.0.0.0")
+            else:
+                lines.append('Gateway of last resort is not set')
+            lines.append('')
             for r in state.routes:
-                code = r.get("code","C")
-                lines.append(f"{code}     {r['dest']} [{r['dist']}/0] via {r['gw']}, {r['iface']}")
+                code = r.get("code", "C")
+                if code == 'C' or r.get('gw') == 'directly':
+                    lines.append(f"C        {r['dest']} is directly connected, {r['iface']}")
+                    # 実機は接続ネットワークごとに自分のIPの/32をL経路として持つ
+                    local_ip = self._local_ip_for_route(state, r)
+                    if local_ip:
+                        lines.append(f"L        {local_ip}/32 is directly connected, {r['iface']}")
+                else:
+                    star = '*' if r.get('dest') == '0.0.0.0/0' else ' '
+                    lines.append(f"{code}{star}       {r['dest']} "
+                                 f"[{r['dist']}/0] via {r['gw']}, {r['iface']}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _local_ip_for_route(state, route):
+        """connected経路のインターフェースに付いているIPを返す（L経路用）"""
+        info = getattr(state, 'interfaces', {}).get(route.get('iface'), {})
+        ip = info.get('ip') if isinstance(info, dict) else None
+        return ip or None
 
     # ─── show arp ─────────────────────────────
     def _show_arp(self, state):
@@ -1469,7 +1924,8 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         else:
             lines = ["Protocol  Address          Age (min)  Hardware Addr   Type   Interface"]
             for a in state.arp_table:
-                lines.append(f"Internet  {a['ip']:<17}{a['age']:<11}{a['mac']:<16}ARPA   {a['iface']}")
+                mac = self.cisco_mac(a['mac'])
+                lines.append(f"Internet  {a['ip']:<17}{a['age']:<11}{mac:<16}ARPA   {a['iface']}")
         return "\n".join(lines)
 
     # ─── show ether (Si-R / SR-S) ─────────────
@@ -1654,6 +2110,9 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
 
     # ─── show lldp local ──────────────────
     def _show_lldp_local(self, state):
+        if state.device_type in ('cisco', 'catalyst', 'nexus') and not getattr(
+                state, 'lldp_enabled', False):
+            return '% LLDP is not enabled'
         dt = state.device_type
         mgmt_ip = ''
         for name, iface in state.interfaces.items():
@@ -1733,15 +2192,28 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         stp = getattr(state, 'stp', None) or {
             'mode': 'rapid-pvst', 'root': '00:0e:0e:f1:00:01',
             'priority': 32768, 'root_port': ''}
-        return f"""VLAN0010
+        # 実機は Priority に "設定値 + sys-id-ext(VLAN番号)" を出す。
+        # 以前は Root ID の Priority が空欄になり、Bridge ID も
+        # VLAN番号を足していなかった。MACもドット区切りにする。
+        vlan_id = 10
+        base_pri = int(stp.get('priority', 32768) or 32768)
+        pri_ext = base_pri + vlan_id
+        # stp['root'] は "8001.00:0e:0e:f1:00:01" のような
+        # "優先度.MAC" 形式のブリッジID。MAC部分だけを取り出す
+        raw_root = str(stp.get('root', ''))
+        if '.' in raw_root and ':' in raw_root:
+            raw_root = raw_root.split('.', 1)[1]
+        root_mac = self.cisco_mac(raw_root)
+        bridge_mac = self.cisco_mac('00:0e:0e:f1:42:00')
+        return f"""VLAN{vlan_id:04d}
   Spanning tree enabled protocol {stp['mode']}
-  Root ID    Priority    {state.vlans.get(10,{}).get('name','')and 32768}
-             Address     {stp['root']}
+  Root ID    Priority    {pri_ext}
+             Address     {root_mac}
              This bridge is the root
              Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
 
-  Bridge ID  Priority    32768 (priority 32768 sys-id-ext 10)
-             Address     00:0e:0e:f1:42:00
+  Bridge ID  Priority    {pri_ext}  (priority {base_pri} sys-id-ext {vlan_id})
+             Address     {bridge_mac}
              Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec
              Aging Time  300 sec
 
@@ -1752,13 +2224,55 @@ Gi1/0/2             Desgn FWD 4         128.2    P2p
 Gi1/0/24            Root  FWD 4         128.24   P2p"""
 
     # ─── show cdp ─────────────────────────────
+    @staticmethod
+    def _cdp_abbrev_if(name: str) -> str:
+        """実機IOSの show cdp neighbors と同様にインターフェース名を
+        短縮する（GigabitEthernet1/0/1 -> Gig 1/0/1）。短縮しないと
+        列幅を超えて隣の列と繋がって表示されてしまう。"""
+        if not name:
+            return ''
+        for full, abbr in (('TenGigabitEthernet', 'Ten '), ('GigabitEthernet', 'Gig '),
+                           ('FastEthernet', 'Fas '), ('Ethernet', 'Eth ')):
+            if name.startswith(full):
+                return abbr + name[len(full):]
+        return name
+
+    @staticmethod
+    def cisco_mac(mac: str) -> str:
+        """MACをCisco表記(ドット区切り 4桁3組)に変換する。
+
+        実機は 00a6.ca54.3600 の形式で出す。コロン区切りは
+        Cisco機器の出力には存在せず、桁数も違うため列がずれる。
+        """
+        if not mac:
+            return mac
+        hexs = mac.replace(':', '').replace('-', '').replace('.', '').lower()
+        if len(hexs) != 12:
+            return mac
+        return f'{hexs[0:4]}.{hexs[4:8]}.{hexs[8:12]}'
+
+    @staticmethod
+    def _pad(value, width: int) -> str:
+        """幅widthで左詰め。widthを超える場合も必ず1つ以上の空白を空ける
+        （列同士がくっついて読めなくなるのを防ぐ）"""
+        s = str(value)
+        return s.ljust(width) if len(s) < width else s + ' '
+
     def _show_cdp(self, state):
+        # 実機(IOS-XE)は3行。P/D/C/M の説明が欠けていた
         lines = ["Capability Codes: R - Router, T - Trans Bridge, B - Source Route Bridge",
-                 "                  S - Switch, H - Host, I - IGMP, r - Repeater",
+                 "                  S - Switch, H - Host, I - IGMP, r - Repeater, P - Phone,",
+                 "                  D - Remote, C - CVTA, M - Two-port Mac Relay",
                  "",
                  "Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID"]
         for n in state.cdp_neighbors:
-            lines.append(f"{n['device']:<17}{n['local_if']:<18}{n['hold']:<11}{n['cap']:<14}{n['platform']:<10}{n['port']}")
+            lines.append(
+                self._pad(n['device'], 17)
+                + self._pad(self._cdp_abbrev_if(n['local_if']), 18)
+                + self._pad(n['hold'], 11)
+                + self._pad(n['cap'], 12)
+                + self._pad(n['platform'], 10)
+                + self._cdp_abbrev_if(n['port']))
         lines.append(f"\nTotal cdp entries displayed : {len(state.cdp_neighbors)}")
         return "\n".join(lines)
 
@@ -1776,8 +2290,12 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
 
     # ─── show lldp neighbors ──────────────────
     def _show_lldp(self, state):
-        neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
         dt = state.device_type
+        # Cisco系は lldp run が無ければ機能自体が動いていない
+        if dt in ('cisco', 'catalyst', 'nexus') and not getattr(
+                state, 'lldp_enabled', False):
+            return '% LLDP is not enabled'
+        neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
 
         # SR-S / Si-R: 富士通フォーマット
         if dt in ('srs', 'sir'):
@@ -1817,6 +2335,9 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
         return "\n".join(lines)
 
     def _show_lldp_detail(self, state):
+        if state.device_type in ('cisco', 'catalyst', 'nexus') and not getattr(
+                state, 'lldp_enabled', False):
+            return '% LLDP is not enabled'
         neighbors = getattr(state, 'lldp_neighbors', getattr(state, 'cdp_neighbors', []))
         dt = state.device_type
 
@@ -1995,6 +2516,13 @@ Link ID         ADV Router      Age         Seq#       Checksum Link count
     # ─── show eigrp ───────────────────────────
     def _show_eigrp_neighbors(self, state):
         e = state.eigrp
+        # EIGRPは設定コマンド(router eigrp)を実装していないため、
+        # 未設定の装置では実機同様「何も動いていない」ことを示す。
+        # ここで固定のサンプルネイバーを表示すると、CDPで踏んだのと同じ
+        # 「表示上は隣接が見えるのに実際には一切通信していない」という
+        # 切り分け困難な食い違いになる
+        if not e.get('enabled'):
+            return "% EIGRP is not configured on this device."
         lines = [f"EIGRP-IPv4 Neighbors for AS({e['asn']})",
                  "H   Address         Interface         Hold Uptime   SRTT   RTO  Q  Seq",
                  "                                      (sec)         (ms)       Cnt Num"]
@@ -2004,6 +2532,8 @@ Link ID         ADV Router      Age         Seq#       Checksum Link count
 
     def _show_eigrp_topology(self, state):
         e = state.eigrp
+        if not e.get('enabled'):
+            return "% EIGRP is not configured on this device."
         return f"""EIGRP-IPv4 Topology Table for AS({e['asn']})/ID(10.2.0.1)
 Codes: P - Passive, A - Active, U - Update, Q - Query, R - Reply
 
@@ -2318,10 +2848,7 @@ Configuration Revision            : 5"""
             return '\n'.join(lines)
         # show filter / show acl（Si-R）
         if re.match(r'^show\s+(filter|acl)', c):
-            return ('IP Filter Information\n'
-                    '  No.  Action  Source           Destination      Proto\n'
-                    '  ---  ------  ---------------  ---------------  -----\n'
-                    '  (no filter configured)')
+            return self._sir_show_filter(state)
         # show rip（Si-R）
         if re.match(r'^show\s+(ip\s+)?rip', c):
             return ('RIP Information\n'
@@ -2367,10 +2894,7 @@ Configuration Revision            : 5"""
             return self._show_ip_route(state) if hasattr(self, '_show_ip_route') else None
         # show ip filter / show ip acl
         if re.match(r'^show\s+ip\s+(filter|acl)', c):
-            return ('IP Filter Table\n'
-                    '  No.  Dir  Action  Source           Destination      Proto  Port\n'
-                    '  ---  ---  ------  ---------------  ---------------  -----  ----\n'
-                    '  (no filter configured)')
+            return self._sir_show_filter(state)
         # show sntp
         if re.match(r'^show\s+sntp', c):
             return 'SNTP Client : enabled\n  Server : ntp.nict.jp\n  Status : synchronized'
@@ -2392,6 +2916,41 @@ Configuration Revision            : 5"""
                     '--- system ---\n' + self._sir_show(cmd, 'show system', state) +
                     '\n--- memory ---\n' + self._sir_show(cmd, 'show memory', state))
         return None
+
+    def _sir_show_filter(self, state: DeviceState) -> str:
+        """show filter / show ip filter / show acl / show ip acl（Si-R）。
+        route-manage で定義された prefix-list と、それがRIP/OSPFの
+        distribute-list や redistribute フィルタとしてどこに適用されているかを表示する。"""
+        from engine.protocols import filter_engine
+        device_id = getattr(state, '_device_id', None)
+        lists = filter_engine.prefix_lists.get(device_id, {}) if device_id else {}
+        if not lists:
+            return ('IP Filter Information\n'
+                    '  No.  Action  Source           Destination      Proto\n'
+                    '  ---  ------  ---------------  ---------------  -----\n'
+                    '  (no filter configured)')
+
+        # このprefix-listがどこで使われているか（distribute-list / redistフィルタ）を逆引き
+        used_in = {}
+        for (proto, direction), name in filter_engine.distribute_lists.get(device_id, {}).items():
+            used_in.setdefault(name, []).append(f'{proto} use route-manage {direction}')
+        for (target, source), name in filter_engine.redist_filters.get(device_id, {}).items():
+            used_in.setdefault(name, []).append(f'redistribute {source} -> {target}')
+
+        lines = ['IP Filter Information (route-manage)']
+        for name, entries in lists.items():
+            usage = used_in.get(name)
+            usage_str = f' [used by: {", ".join(usage)}]' if usage else ' [not applied]'
+            lines.append(f'  route-manage {name}{usage_str}')
+            lines.append('    No.  Action  Network')
+            for e in entries:
+                gele = ''
+                if e.ge is not None:
+                    gele += f' ge {e.ge}'
+                if e.le is not None:
+                    gele += f' le {e.le}'
+                lines.append(f'    {e.seq:<4} {e.action:<7} {e.network}/{e.prefix}{gele}')
+        return '\n'.join(lines)
 
     def _sir_show_ipsec_sa(self, state: DeviceState) -> str:
         tunnels = getattr(state, 'ipsec_tunnels', {})
@@ -3671,6 +4230,12 @@ Configuration Revision            : 5"""
             state.hostname = m.group(1)
             return ""
 
+        # NX-OS: feature ospf が入るまで "ip router ospf" は存在しない
+        if state.device_type == 'nexus' and \
+                re.match(r'^(no\s+)?ip\s+router\s+ospf\s+', c) and \
+                'ospf' not in getattr(state, 'nx_features', set()):
+            return self._cmd_error(cmd, state, reason='invalid', position=0)
+
         # NX-OS: feature <name> / no feature <name>（show feature に反映）
         if state.device_type == 'nexus':
             mf = re.match(r'^(no\s+)?feature\s+(\S+)', c)
@@ -4020,12 +4585,25 @@ Configuration Revision            : 5"""
                 state.routes.append(entry)
             return ""
 
-        # ip route <dst> <mask> <gw>  (Si-R / Cisco IOS 共通)
-        m_ip_route = re.match(r'^ip\s+route\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)', c)
+        # lldp run / no lldp run （実機は既定で無効）
+        if c == 'lldp run':
+            state.lldp_enabled = True
+            return ""
+        if c == 'no lldp run':
+            state.lldp_enabled = False
+            return ""
+
+        # ip route <dst> <mask> <gw> [<AD>]  (Si-R / Cisco IOS 共通)
+        # 末尾のADはフローティングスタティック（バックアップ経路）で使う。
+        # ここで取り込まないと、app.py側の再同期でAD=1に上書きされてしまい
+        # 通常のスタティックと区別が付かなくなる
+        m_ip_route = re.match(
+            r'^ip\s+route\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s+(\d+))?', c)
         if m_ip_route and state.device_type in ('sir', 'srs', 'cisco', 'catalyst'):
             dest = m_ip_route.group(1)
             mask = m_ip_route.group(2)
             gw   = m_ip_route.group(3)
+            ad   = int(m_ip_route.group(4)) if m_ip_route.group(4) else 1
             if not _valid_ip(dest):
                 return f"% Invalid input: IP address '{dest}' is not valid"
             if not _valid_mask(mask):
@@ -4033,8 +4611,15 @@ Configuration Revision            : 5"""
             if not _valid_ip(gw):
                 return f"% Invalid input: IP address '{gw}' is not valid"
             prefix = sum(bin(int(o)).count('1') for o in mask.split('.'))
-            entry = {'dest': dest, 'prefix': prefix, 'gw': gw}
-            if entry not in getattr(state, 'static_routes', []):
+            entry = {'dest': dest, 'prefix': prefix, 'gw': gw, 'ad': ad}
+            # 同じ宛先/next-hopをADだけ変えて入れ直した場合は上書きする
+            # （実機でも同じ経路の再投入はADの変更として扱われる）
+            existing = next((r for r in getattr(state, 'static_routes', [])
+                             if r.get('dest') == dest and r.get('prefix') == prefix
+                             and r.get('gw') == gw), None)
+            if existing:
+                existing['ad'] = ad
+            else:
                 state.static_routes.append(entry)
             return ""
 
@@ -6488,30 +7073,45 @@ Key Version         : A
         lines = [
             "Switch/Stack Mac Address : 0057.d2d4.4d00 - Local Mac Address",
             "Mac persistency wait time: Indefinite",
-            "",
-            "                                             H/W   Current",
-            "Switch#   Role    Mac Address     Priority Version  State",
-            "------------------------------------------------------------",
-            "*1       Active   0057.d2d4.4d00     15      V01    Ready",
-            " 2       Standby  0057.d2d4.4d01      14     V01    Ready",
         ]
+        lines += self._STACK_HEADER
+        lines.append(self._stack_row('*1', 'Active', '0057.d2d4.4d00', 15,
+                                     'V01', 'Ready'))
+        lines.append(self._stack_row(' 2', 'Standby', '0057.d2d4.4d01', 14,
+                                     'V01', 'Ready'))
         return "\n".join(lines)
+
+    # 実機のスタック表は列位置が決まっている（値の行はヘッダとずれる）
+    _STACK_HEADER = [
+        "                                             H/W   Current",
+        "Switch#   Role    Mac Address     Priority Version  State ",
+        "-" * 85,
+    ]
+
+    @staticmethod
+    def _stack_row(sw, role, mac, prio, ver, st):
+        return f'{sw:<9}{role:<9}{mac:<19}{prio:>2}     {ver:<8}{st}'
 
     def _show_switch_detail(self, state):
         """show switch detail"""
         lines = [
-            "Switch/Stack Mac Address : 0057.d2d4.4d00",
             "",
-            "                                             H/W   Current",
-            "Switch#   Role    Mac Address     Priority Version  State",
-            "------------------------------------------------------------",
-            "*1       Active   0057.d2d4.4d00     15      V01    Ready",
-            " 2       Standby  0057.d2d4.4d01      14     V01    Ready",
+            "Switch/Stack Mac Address : 0057.d2d4.4d00 - Local Mac Address",
+            "Mac persistency wait time: Indefinite",
+        ]
+        lines += self._STACK_HEADER
+        lines.append(self._stack_row('*1', 'Active', '0057.d2d4.4d00', 15,
+                                     'V01', 'Ready'))
+        lines.append(self._stack_row(' 2', 'Standby', '0057.d2d4.4d01', 14,
+                                     'V01', 'Ready'))
+        lines += [
             "",
-            "         Stack Port Status             Neighbors",
-            "Switch#  Port 1     Port 2           Port 1   Port 2",
-            "  1      OK         OK                2        2",
-            " 2       OK         OK                1        1",
+            "",
+            "         Stack Port Status             Neighbors     ",
+            "Switch#  Port 1     Port 2           Port 1   Port 2 ",
+            "-" * 56,
+            f'{"  1":<10}{"OK":<11}{"OK":<17}{"2":<9}2',
+            f'{"  2":<10}{"OK":<11}{"OK":<17}{"1":<9}1',
         ]
         return "\n".join(lines)
 
@@ -6535,22 +7135,174 @@ Key Version         : A
         return "\n".join(lines)
 
     def _show_logging(self, state):
-        return ("Syslog logging: enabled (0 messages dropped, 0 messages rate-limited,\n"
-                "                0 flushes, 0 overruns, xml disabled, filtering disabled)\n\n"
-                "No Active Message Discriminator.\n\n"
-                "No Inactive Message Discriminator.\n\n"
-                "    Console logging: level debugging, 42 messages logged, xml disabled,\n"
-                "                     filtering disabled\n"
-                "    Monitor logging: level debugging, 0 messages logged, xml disabled,\n"
-                "                     filtering disabled\n"
-                "    Buffer logging:  level debugging, 42 messages logged, xml disabled,\n"
-                "                    filtering disabled\n"
-                "    Logging Exception size (8192 bytes)\n"
-                "    Count and timestamp logging messages: disabled\n"
-                "    Persistent logging: disabled\n\n"
-                "Log Buffer (8192 bytes):\n"
-                f"*Jun 13 10:30:00.001: %LINK-3-UPDOWN: GigabitEthernet1/0/1, changed state to up\n"
-                f"*Jun 13 10:30:01.002: %LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet1/0/1, changed state to up")
+        # 実機(WS-C3650-24TD / IOS-XE 16.12.11)の構成に合わせる。
+        # 1行目は折り返さない（Genieのパーサーが1行前提）。
+        n = 65
+        return "\n".join([
+            "",
+            f"Syslog logging: enabled (0 messages dropped, 2 messages rate-limited, "
+            f"0 flushes, 0 overruns, xml disabled, filtering disabled)",
+            "",
+            "No Active Message Discriminator.",
+            "",
+            "",
+            "",
+            "No Inactive Message Discriminator.",
+            "",
+            "",
+            f"    Console logging: level debugging, {n} messages logged, xml disabled,",
+            "                     filtering disabled",
+            "    Monitor logging: level debugging, 0 messages logged, xml disabled,",
+            "                     filtering disabled",
+            f"    Buffer logging:  level debugging, {n} messages logged, xml disabled,",
+            "                    filtering disabled",
+            "    Exception Logging: size (4096 bytes)",
+            "    Count and timestamp logging messages: disabled",
+            "    File logging: disabled",
+            "    Persistent logging: disabled",
+            "",
+            "No active filter modules.",
+            "",
+            f"    Trap logging: level informational, {n + 2} message lines logged",
+            "        Logging Source-Interface:       VRF Name:",
+            "",
+            "Log Buffer (102400 bytes):",
+            "",
+            "*Jun 13 10:30:00.001: %LINK-3-UPDOWN: Interface GigabitEthernet1/0/1, "
+            "changed state to up",
+            "*Jun 13 10:30:01.002: %LINEPROTO-5-UPDOWN: Line protocol on Interface "
+            "GigabitEthernet1/0/1, changed state to up",
+        ])
+
+    def _show_inventory(self, state):
+        """show inventory"""
+        items = [
+            ('c36xx Stack', 'c36xx Stack', 'WS-C3650-24TD-E', 'V04', 'FDO2030Q1NL'),
+            ('Switch 1', 'WS-C3650-24TD-E', 'WS-C3650-24TD-E', 'V04', 'FDO2030Q1NL'),
+            ('StackAdapter1/1', 'StackAdapter1/1', 'C3650-STACK', 'V01', 'FDO20320PGC'),
+            ('StackAdapter1/2', 'StackAdapter1/2', 'C3650-STACK', 'V01', 'FDO20320QC9'),
+            ('Switch 1 - Power Supply A', 'Switch 1 - Power Supply A',
+             'PWR-C2-250WAC', 'V03', 'LIT20291GJ0'),
+        ]
+        lines = ['']
+        for name, descr, pid, vid, sn in items:
+            lines.append(f'NAME: "{name}", DESCR: "{descr}"')
+            lines.append(f'PID: {pid:<18}, VID: {vid:<5}, SN: {sn}')
+            lines.append('')
+        return "\n".join(lines)
+
+    def _show_environment(self, state):
+        """show environment all"""
+        return "\n".join([
+            '',
+            'Switch 1 FAN 1 is OK',
+            'Switch 1 FAN 2 is OK',
+            'Switch 1 FAN 3 is OK',
+            'FAN PS-1 is OK',
+            'FAN PS-2 is NOT PRESENT',
+            'Switch 1: SYSTEM TEMPERATURE is OK',
+            'Inlet Temperature Value: 25 Degree Celsius',
+            'Temperature State: GREEN',
+            'Yellow Threshold : 46 Degree Celsius',
+            'Red Threshold    : 56 Degree Celsius',
+            '',
+            'Hotspot Temperature Value: 38 Degree Celsius',
+            'Temperature State: GREEN',
+            'Yellow Threshold : 105 Degree Celsius',
+            'Red Threshold    : 125 Degree Celsius',
+            'SW  PID                 Serial#     Status           Sys Pwr  PoE Pwr  Watts',
+            '--  ------------------  ----------  ---------------  -------  -------  -----',
+            '1A  PWR-C2-250WAC       LIT20291GJ0  OK              Good     n/a      250 ',
+            '1B  Not Present',
+            '',
+            'SW  Status          RPS Name          RPS Serial#  RPS Port#',
+            '--  -------------   ----------------  -----------  ---------',
+        ])
+
+    def _show_sdm_prefer(self, state):
+        """show sdm prefer"""
+        rows = [
+            ('Number of VLANs:', 4094),
+            ('Unicast MAC addresses:', 32768),
+            ('Overflow Unicast MAC addresses:', 512),
+            ('L2 Multicast entries:', 4096),
+            ('Overflow L2 Multicast entries:', 512),
+            ('L3 Multicast entries:', 4096),
+            ('Overflow L3 Multicast entries:', 512),
+            ('Directly connected routes:', 16384),
+            ('Indirect routes:', 7168),
+            ('Security Access Control Entries:', 3072),
+            ('QoS Access Control Entries:', 2560),
+            ('Policy Based Routing ACEs:', 1024),
+            ('Netflow ACEs:', 768),
+            ('Flow SPAN ACEs:', 512),
+            ('Tunnels:', 256),
+            ('LISP Instance Mapping Entries:', 768),
+            ('Control Plane Entries:', 512),
+            ('Input Netflow flows:', 8192),
+            ('Output Netflow flows:', 16384),
+            ('SGT/DGT (or) MPLS VPN entries:', 4096),
+            ('SGT/DGT (or) MPLS VPN Overflow entries:', 512),
+            ('Wired clients:', 2048),
+            ('MACSec SPD Entries:', 256),
+            ('MPLS L3 VPN VRF:', 127),
+            ('MPLS Labels:', 2048),
+            ('MPLS L3 VPN Routes VRF Mode:', 7168),
+            ('MPLS L3 VPN Routes Prefix Mode:', 3072),
+            ('MVPN MDT Tunnels:', 256),
+            ('L2 VPN EOMPLS Attachment Circuit:', 256),
+            ('MAX VPLS Bridge Domains :', 128),
+            ('MAX VPLS Peers Per Bridge Domain:', 8),
+            ('MAX VPLS/VPWS Pseudowires :', 256),
+        ]
+        lines = ['', 'Showing SDM Template Info', '',
+                 'This is the Advanced template.']
+        for label, value in rows:
+            lines.append(f'  {label:<53}{value}')
+        lines += [
+            'These numbers are typical for L2 and IPv4 features.',
+            'Some features such as IPv6, use up double the entry size;',
+            'so only half as many entries can be created.',
+            '* values can be modified by sdm cli.',
+        ]
+        return "\n".join(lines)
+
+    def _show_license_summary(self, state):
+        """show license summary"""
+        return "\n".join([
+            '',
+            'Smart Licensing is ENABLED',
+            '',
+            'Registration:',
+            '  Status: UNREGISTERED',
+            '  Export-Controlled Functionality: NOT ALLOWED',
+            '',
+            'License Authorization: ',
+            '  Status: IN-USE',
+            '',
+            'License Usage:',
+            '  License                 Entitlement tag               Count Status',
+            '  ' + '-' * 77,
+            '                          (C3650-24 IP Services)            1 IN-USE',
+            '',
+        ])
+
+    def _show_platform_resources(self, state):
+        """show platform resources"""
+        return "\n".join([
+            '',
+            '**State Acronym: H - Healthy, W - Warning, C - Critical'
+            + ' ' * 45,
+            'Resource                 Usage                 Max             '
+            'Warning         Critical        State',
+            '-' * 100,
+            ' Control Processor       34.32%                100%            '
+            '90%             95%             H    ',
+            '  DRAM                   2047MB(52%)           3872MB          '
+            '90%             95%             H    ',
+            '  TMPFS                  584MB(15%)            3872MB          '
+            '40%             50%             H    ',
+        ])
 
     def _show_snmp(self, state):
         return ("Chassis: " + state.hostname + "\n"
@@ -7432,7 +8184,7 @@ class CliCompletion:
             'route':            'Set static route',
             'rip': {
                 '_desc': 'RIP configuration',
-                'use':          'Enable RIP (ip rip use use)',
+                'use':          'Enable RIP (ip rip use use) / Apply route filter (ip rip use route-manage <name> in|out)',
                 'network':      'Set RIP network',
                 'neighbor':     'Set RIP neighbor',
                 'version':      'Set RIP version',
@@ -7441,7 +8193,9 @@ class CliCompletion:
                 '_desc': 'OSPF configuration',
                 'priority': 'Set OSPF priority',
                 'cost':     'Set OSPF cost',
+                'use':      'Apply route filter (ip ospf use route-manage <name> in|out)',
             },
+            'route-manage': 'Define a named route filter (permit/deny) for redistribution and distribute filtering',
         },
         'ospf': {
             '_desc': 'OSPF global configuration',

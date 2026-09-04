@@ -1,0 +1,58 @@
+# Network Lab Emulator 監視スタック（Prometheus + Alertmanager + Grafana）
+#
+# 使い方（Docker Desktop for Windows/Mac 前提）:
+#   1. エミュレーターを起動: python app.py
+#   2. Exporterを起動: python tools\prometheus_exporter.py
+#      （Windowsなら tools\run_prometheus_exporter.bat でも可）
+#   3. このディレクトリで: docker compose up -d
+#   4. Grafana: http://localhost:3000 （admin / admin、初回パスワード変更あり）
+#      Prometheusデータソースは自動プロビジョニング済み
+#   5. Prometheus本体のUIは http://localhost:9090
+#   6. Alertmanager UIは http://localhost:9093
+#
+# 停止: docker compose down
+#
+# これは Linux サンドボックス側で実バイナリ検証した
+# tools/setup_monitoring_stack.sh と同じ構成（Prometheus/Alertmanager/
+# Grafana + netlab-emulator exporter + InterfaceDown/HighCpuアラート）を
+# Docker Compose で再現したもの。同じ alert_rules.yml を両方で共有する。
+version: '3.8'
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: netlab-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - alertmanager
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: netlab-alertmanager
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "9093:9093"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: netlab-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana-provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  grafana-data:

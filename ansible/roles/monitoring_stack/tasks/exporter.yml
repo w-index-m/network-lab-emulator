@@ -1,0 +1,27 @@
+---
+- name: Check if prometheus_exporter is already up
+  ansible.builtin.uri:
+    url: "http://localhost:{{ exporter_port }}/metrics"
+    status_code: 200
+  register: exporter_check
+  failed_when: false
+
+- name: Start prometheus_exporter.py
+  ansible.builtin.shell: >
+    cd {{ repo_dir }} &&
+    nohup python3 tools/prometheus_exporter.py
+    --emulator-url http://localhost:{{ app_port }} --port {{ exporter_port }} --interval 5
+    > {{ stack_dir }}/exporter.log 2>&1 &
+  args:
+    executable: /bin/bash
+  when: exporter_check.status | default(0) != 200
+
+- name: Wait for exporter to become healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ exporter_port }}/metrics"
+    status_code: 200
+  register: exporter_wait
+  until: exporter_wait.status | default(0) == 200
+  retries: 10
+  delay: 2
+  when: exporter_check.status | default(0) != 200

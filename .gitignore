@@ -34,3 +34,9 @@ desktop.ini
 
 # サーバー自動生成ファイル
 saved_config.json
+tools/monitor_watchlist.json
+
+# Chef local-mode runtime artifacts
+chef/local-mode-cache/
+chef/nodes/
+chef/chef_guid

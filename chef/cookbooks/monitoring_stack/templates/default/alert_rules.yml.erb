@@ -1,0 +1,17 @@
+groups:
+  - name: netlab
+    rules:
+      - alert: InterfaceDown
+        expr: netlab_interface_oper_status == 2
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.hostname }} interface {{ $labels.interface }} is down"
+      - alert: HighCpu
+        expr: netlab_cpu_percent >= 80
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.hostname }} CPU {{ $value }}% is high"

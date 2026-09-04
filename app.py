@@ -8,6 +8,7 @@ import os, asyncio, json, re, httpx, time, random
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -197,6 +198,26 @@ def _save_config():
             crypto = getattr(state, "ipsec_crypto", {})
             if crypto:
                 dev_data["ipsec_crypto"] = crypto
+        # BGP: 設定済みneighbor（トポロジー上ピア未解決でもrunning-config
+        # に残すためのもの。実セッション状態はbgp_engine側が別途持つ）
+        if getattr(state, "_bgp_configured_neighbors", None):
+            dev_data["_bgp_configured_neighbors"] = state._bgp_configured_neighbors
+        # NX-OS TACACS+ / AAA設定を保存
+        if state.device_type == "nexus":
+            if getattr(state, "tacacs_feature_enabled", False):
+                dev_data["tacacs_feature_enabled"] = True
+            if getattr(state, "tacacs_hosts", None):
+                dev_data["tacacs_hosts"] = state.tacacs_hosts
+            if getattr(state, "aaa_tacacs_groups", None):
+                dev_data["aaa_tacacs_groups"] = state.aaa_tacacs_groups
+            if getattr(state, "aaa_authentication_login", None):
+                dev_data["aaa_authentication_login"] = state.aaa_authentication_login
+            if getattr(state, "aaa_authorization_commands", None):
+                dev_data["aaa_authorization_commands"] = state.aaa_authorization_commands
+            if getattr(state, "aaa_accounting_commands", None):
+                dev_data["aaa_accounting_commands"] = state.aaa_accounting_commands
+            if getattr(state, "aaa_accounting_exec", None):
+                dev_data["aaa_accounting_exec"] = state.aaa_accounting_exec
         data["devices"][dev_id] = dev_data
     # vnetリンク
     for a, neighbors in vnet.links.items():
@@ -237,6 +258,7 @@ def _load_config():
             ifaces = {name: {'ip': info['ip'], 'prefix': info.get('prefix', 24)}
                       for name, info in state.interfaces.items() if info.get('ip')}
             icmp_engine.register_device(dev_id, state.hostname, ifaces)
+            vlan_engine.register_ports(dev_id, list(state.interfaces.keys()))
             snmp_agent.register(dev_id, state.device_type, state.hostname)
         return
 
@@ -288,18 +310,73 @@ def _load_config():
         # Cisco/Catalyst IPsec設定を復元
         if dev_data["type"] in ("cisco", "catalyst") and dev_data.get("ipsec_crypto"):
             state.ipsec_crypto = dev_data["ipsec_crypto"]
+        # BGP: 設定済みneighborを復元
+        if dev_data.get("_bgp_configured_neighbors"):
+            state._bgp_configured_neighbors = dev_data["_bgp_configured_neighbors"]
+        # NX-OS TACACS+ / AAA設定を復元
+        if dev_data["type"] == "nexus":
+            if dev_data.get("tacacs_feature_enabled"):
+                state.tacacs_feature_enabled = True
+            if dev_data.get("tacacs_hosts"):
+                state.tacacs_hosts = dev_data["tacacs_hosts"]
+            if dev_data.get("aaa_tacacs_groups"):
+                state.aaa_tacacs_groups = dev_data["aaa_tacacs_groups"]
+            if dev_data.get("aaa_authentication_login"):
+                state.aaa_authentication_login = dev_data["aaa_authentication_login"]
+            if dev_data.get("aaa_authorization_commands"):
+                state.aaa_authorization_commands = dev_data["aaa_authorization_commands"]
+            if dev_data.get("aaa_accounting_commands"):
+                state.aaa_accounting_commands = dev_data["aaa_accounting_commands"]
+            if dev_data.get("aaa_accounting_exec"):
+                state.aaa_accounting_exec = dev_data["aaa_accounting_exec"]
         device_sessions[dev_id] = state
         vnet.device_types[dev_id] = state.device_type
         ifaces = {name: {'ip': info.get('ip',''), 'prefix': info.get('prefix',24)}
                   for name, info in state.interfaces.items() if info.get('ip')}
         icmp_engine.register_device(dev_id, state.hostname, ifaces)
+        vlan_engine.register_ports(dev_id, list(state.interfaces.keys()))
         snmp_agent.register(dev_id, state.device_type, state.hostname)
 
     # リンクを復元
+    # 設定ファイルにはインターフェース名が保存されていないため、a/b双方の
+    # インターフェースIPを突き合わせて「同一セグメントのインターフェース」を推定する。
+    # これが無いと vnet.interface_links が空のままになり、ping等での
+    # dp_engine.bump()（トラフィックカウンタ更新）が常にスキップされてしまう
+    # （SNMPダッシュボード/Prometheus Exporterのトラフィックが常に0になるバグ）。
+    def _find_linked_iface(dev_id: str, peer_id: str) -> Optional[str]:
+        st = device_sessions.get(dev_id)
+        peer_st = device_sessions.get(peer_id)
+        if not st or not peer_st:
+            return None
+        peer_nets = []
+        for _, pinfo in peer_st.interfaces.items():
+            pip = pinfo.get('ip')
+            if pip and pip != '127.0.0.1':
+                mask = (0xffffffff << (32 - pinfo.get('prefix', 24))) & 0xffffffff
+                peer_nets.append((vnet._ip_to_int(pip) & mask, mask))
+        for ifname, iinfo in st.interfaces.items():
+            ip = iinfo.get('ip')
+            if not ip or ip == '127.0.0.1':
+                continue
+            ip_int = vnet._ip_to_int(ip)
+            for net, mask in peer_nets:
+                if (ip_int & mask) == net:
+                    return ifname
+        return None
+
     for link in data.get("links", []):
         a, b = link.get("a"), link.get("b")
         if a and b:
-            vnet.add_link(a, b)
+            iface_a = _find_linked_iface(a, b)
+            iface_b = _find_linked_iface(b, a)
+            vnet.add_link(a, b, iface_a, iface_b)
+
+    # CDP/LLDPのネイバーテーブルを実トポロジー(vnet.links)から作り直す。
+    # DeviceState.__init__ は装置生成時に固定のサンプルネイバーを持たせる
+    # ため、これを呼ばないと「show cdp neighbors には隣接装置が見えるのに
+    # vnet.links には存在せず、OSPF/RIP等のパケットが一切流れない」という
+    # 食い違いが起きる（実際にcatalyst↔ciscoでこの状態を踏んだ）。
+    _rebuild_all_neighbors()
 
     print(f"[Config] 設定をロードしました: {len(data.get('devices',{}))} devices, "
           f"{len(data.get('links',[]))} links")
@@ -322,6 +399,33 @@ async def lifespan(app: FastAPI):
     _load_config()
     # 定期自動保存タスク（60秒ごと）
     auto_save_task = asyncio.create_task(_auto_save_loop())
+    # 実SNMP(UDP/161, v2c)エージェントを各装置ごとに起動
+    from engine.snmp_udp_agent import start_all_snmp_agents
+    from engine.protocols import snmp_agent as _snmp_agent_instance
+    snmp_transports = await start_all_snmp_agents(device_sessions, _snmp_agent_instance)
+    print(f"[SNMP] 実UDPエージェント起動: {len(snmp_transports)}台 "
+          f"({', '.join(f'{d}={ip}' for d, (_, ip) in snmp_transports.items())})")
+
+    # 実RIP(UDP/520)・実BGP(TCP/179)・実OSPF(raw proto 89)リスナーを起動
+    # (外部ツール tools/route_injector_cli.py 等から本物のワイヤプロトコルで
+    # ネイバー確立・経路交換できるようにするための実リスナー)
+    from engine.real_rip_agent import start_all_rip_agents
+    from engine.real_bgp_agent import start_all_bgp_agents
+    from engine.real_ospf_agent import start_all_ospf_agents
+    from engine.protocols import rip_engine as _rip_engine_instance
+    from engine.protocols import bgp_engine as _bgp_engine_instance
+    from engine.protocols import ospf_engine as _ospf_engine_instance
+
+    rip_transports = await start_all_rip_agents(device_sessions, _rip_engine_instance)
+    print(f"[RIP] 実UDPリスナー起動: {len(rip_transports)}台 "
+          f"({', '.join(f'{d}={ip}' for d, (_, ip) in rip_transports.items())})")
+    bgp_transports = await start_all_bgp_agents(device_sessions, _bgp_engine_instance)
+    print(f"[BGP] 実TCPリスナー起動: {len(bgp_transports)}台 "
+          f"({', '.join(f'{d}={ip}' for d, (_, ip) in bgp_transports.items())})")
+    ospf_responders = start_all_ospf_agents(device_sessions, _ospf_engine_instance)
+    print(f"[OSPF] 実リスナー起動: {len(ospf_responders)}台 "
+          f"({', '.join(ospf_responders.keys())})")
+
     yield
     auto_save_task.cancel()
     try:
@@ -487,6 +591,73 @@ async def get_status():
         "devices": list(device_sessions.keys()),
     }
 
+# device_id -> 直近60件の {t, cpu, total_bytes} サンプル（CPU/トラフィック遷移表示用）。
+# /api/snmp/dashboard がポーリングされるたびに1件追記する（別スレッドでのサンプリングはしない）。
+_metrics_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=60))
+
+
+@app.get("/api/snmp/dashboard")
+async def snmp_dashboard():
+    """
+    仮想空間内の全装置をSNMPエージェント(snmp_agent)経由でポーリングし、
+    ダッシュボード表示用のJSONにまとめる。
+    実UDP SNMPパケットではなく、engine.protocols.SnmpAgent が持つ
+    MIB-II相当のデータ（sysDescr/sysUptime/ifTable等）を内部的に読む。
+    CISCO-PROCESS-MIB相当のCPU使用率（Cisco系機種のみ）も含む。
+    """
+    now = time.time()
+    devices = []
+    for device_id, d in snmp_agent.devices.items():
+        mib = snmp_agent._build_mib(device_id)
+        by_oid = {oid: (t, v) for oid, t, v in mib}
+
+        def _val(oid, default=''):
+            return by_oid.get(oid, (None, default))[1]
+
+        # ifTable行をインターフェース単位にまとめ直す
+        if_indexes = sorted({
+            int(oid.rsplit('.', 1)[1])
+            for oid in by_oid
+            if oid.startswith('1.3.6.1.2.1.2.2.1.') and oid.rsplit('.', 1)[1].isdigit()
+        })
+        interfaces = []
+        for i in if_indexes:
+            interfaces.append({
+                'index': i,
+                'descr': _val(f'1.3.6.1.2.1.2.2.1.2.{i}', f'if{i}'),
+                'speed': int(_val(f'1.3.6.1.2.1.2.2.1.5.{i}', '0') or 0),
+                'admin_status': int(_val(f'1.3.6.1.2.1.2.2.1.7.{i}', '2') or 2),
+                'oper_status': int(_val(f'1.3.6.1.2.1.2.2.1.8.{i}', '2') or 2),
+                'in_octets': int(_val(f'1.3.6.1.2.1.2.2.1.10.{i}', '0') or 0),
+                'out_octets': int(_val(f'1.3.6.1.2.1.2.2.1.16.{i}', '0') or 0),
+            })
+
+        cpu_raw = by_oid.get('1.3.6.1.4.1.9.9.109.1.1.1.1.7.1')
+        cpu_percent = int(cpu_raw[1]) if cpu_raw else None
+        total_bytes = sum(i['in_octets'] + i['out_octets'] for i in interfaces)
+        route_count = len(rib_engine.get_best_routes(device_id))
+
+        history = _metrics_history[device_id]
+        history.append({'t': now, 'cpu': cpu_percent, 'bytes': total_bytes,
+                        'routes': route_count})
+
+        devices.append({
+            'device_id': device_id,
+            'type': d.get('type'),
+            'hostname': d.get('hostname', device_id),
+            'sys_descr': _val('1.3.6.1.2.1.1.1.0'),
+            'sys_uptime_ticks': int(_val('1.3.6.1.2.1.1.3.0', '0') or 0),
+            'sys_contact': _val('1.3.6.1.2.1.1.4.0'),
+            'sys_location': _val('1.3.6.1.2.1.1.6.0'),
+            'cpu_percent': cpu_percent,
+            'route_count': route_count,
+            'interfaces': interfaces,
+            'history': list(history),
+        })
+    devices.sort(key=lambda x: x['device_id'])
+    return {'polled_at': now, 'devices': devices}
+
+
 @app.post("/api/cli")
 async def cli_command(body: dict):
     """
@@ -507,6 +678,15 @@ async def cli_command(body: dict):
     # クリアコマンドはフロントエンドで処理
     if command.lower() in ("cls", "clear screen"):
         return {"output": "\x0c", "mode": state.mode, "hostname": state.hostname}
+
+    # ── terminal length/width/monitor 等（実機と同様、表示設定のみで
+    # 状態には影響しない）── unicon等の自動化ツールが接続直後に必ず
+    # 送るコマンド群のため、全機種共通で受理する
+    c_lower = command.lower().strip()
+    if re.match(r'^(terminal|term)\s+(length|width|monitor|no monitor|no\s+monitor|'
+                r'pager|editing|no editing)\b', c_lower) or c_lower in (
+                    'terminal length 0', 'term length 0', 'terminal no monitor'):
+        return {"output": "", "mode": state.mode, "hostname": state.hostname}
 
     # ── ICMP: ping / traceroute（実到達性判定）──
     icmp_out = await handle_icmp(device_id, command, state)
@@ -530,6 +710,11 @@ async def cli_command(body: dict):
 
     # ── プロトコル設定コマンド検出 ──
     await handle_protocol_config(device_id, command, state)
+
+    # ── NX-OS TACACS+ / AAA 設定 ──
+    tacacs_out = _handle_nexus_tacacs_config(device_id, command, state)
+    if tacacs_out is not None:
+        return {"output": tacacs_out, "mode": state.mode, "hostname": state.hostname}
 
     # ルールベースで処理
     c_low = command.lower().strip()
@@ -600,6 +785,19 @@ async def cli_command(body: dict):
     iface_for_flap = state.current_if or ''
     if c_low in ('shutdown', 'shut') and iface_for_flap:
         vnet.interface_down(device_id, iface_for_flap)
+        # 実syslog(%LINK-3-UPDOWN) + 実SNMP trap(linkDown)を送信
+        _link_msg = f'%LINK-3-UPDOWN: Interface {iface_for_flap}, changed state to down'
+        await syslog_dispatcher.emit(device_id, state.hostname, 'warnings', _link_msg)
+        await snmp_dispatcher.emit(device_id, state.hostname,
+                                    '1.3.6.1.6.3.1.1.5.3',  # linkDown
+                                    f'{iface_for_flap} down')
+        # VRRP/HSRP: このIF上の冗長化グループをInitへ落とす
+        # （落とさないと、切れた側がMaster/Activeを名乗ったまま残り、
+        #   対向がDead Timerで昇格して両系Master/Activeになる）
+        await vrrp_engine.interface_down(device_id, iface_for_flap)
+        # HSRP object tracking: このIFをtrack対象にしているグループがあれば
+        # priorityを下げる（グループ自体のIFがdownする場合とは別経路）
+        await vrrp_engine.hsrp_track_down(device_id, iface_for_flap)
         peer_ids = vnet.get_peers_on_interface(device_id, iface_for_flap)
         if peer_ids:
             await ospf_engine.interface_down(device_id, peer_ids)
@@ -628,6 +826,16 @@ async def cli_command(body: dict):
                                        f'changed state to down (全メンバーdown)'))})
     elif c_low in ('no shutdown', 'no shut') and iface_for_flap:
         vnet.interface_up(device_id, iface_for_flap)
+        # 実syslog(%LINK-3-UPDOWN) + 実SNMP trap(linkUp)を送信
+        _link_msg_up = f'%LINK-3-UPDOWN: Interface {iface_for_flap}, changed state to up'
+        await syslog_dispatcher.emit(device_id, state.hostname, 'notifications', _link_msg_up)
+        await snmp_dispatcher.emit(device_id, state.hostname,
+                                    '1.3.6.1.6.3.1.1.5.4',  # linkUp
+                                    f'{iface_for_flap} up')
+        # VRRP/HSRP: 復旧したIF上のグループを再選出させる
+        await vrrp_engine.interface_up(device_id, iface_for_flap)
+        # HSRP object tracking: 復旧したのでpriorityを戻す
+        await vrrp_engine.hsrp_track_up(device_id, iface_for_flap)
         # STP: リンク回復を両端に通知（ポート再追加・再収束）
         _peers_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
         if stp_engine.nodes.get(device_id, {}).get('enabled') or any(
@@ -916,6 +1124,15 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         bgp_engine.add_route_map(device_id, state._current_route_map,
                                  med=int(rm_med.group(1)))
         return
+    # route-map内 "set community 65000:100" / "... 65001:200 additive"
+    rm_comm = re.match(r'^set\s+community\s+(.+)$', c)
+    if rm_comm and getattr(state, '_current_route_map', None):
+        tokens = rm_comm.group(1).strip().split()
+        additive = tokens and tokens[-1].lower() == 'additive'
+        comms = tokens[:-1] if additive else tokens
+        bgp_engine.add_route_map(device_id, state._current_route_map,
+                                 communities=comms, communities_additive=additive)
+        return
     # ── BFDインターバル（neighbor fall-over bfd用パラメータ）──
     bfd_int = re.match(r'^bfd\s+interval\s+(\d+)\s+min[_-]?rx\s+(\d+)\s+multiplier\s+(\d+)', c)
     if bfd_int:
@@ -967,6 +1184,21 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         buf.append({'type': 'redist_log',
                     'message': f'再配信(フィルタ付): {source} → {target} '
                                f'route-manage {list_name} ({count}経路)'})
+        return
+
+    # Si-R: distribute-list相当 "ip rip use route-manage <name> in|out" /
+    # "ip ospf use route-manage <name> in|out"
+    # （Ciscoのdistribute-listと同じくfilter_engineを共用し、学習経路自体を絞る）
+    sir_use_rm = re.match(
+        r'^ip\s+(rip|ospf)\s+use\s+route-manage\s+(\S+)\s+(in|out)', orig, re.I)
+    if sir_use_rm:
+        proto = sir_use_rm.group(1).lower()
+        list_name = sir_use_rm.group(2)
+        direction = sir_use_rm.group(3).lower()
+        filter_engine.set_distribute_list(device_id, proto, direction, list_name)
+        buf = proto_log_buffer.setdefault(device_id, [])
+        buf.append({'type': 'filter_log',
+                    'message': f'ip {proto} use route-manage {list_name} {direction} を適用'})
         return
 
     # ── EtherChannel / LACP（Cisco/Catalyst）──
@@ -1133,6 +1365,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                 vpc_engine.add_vpc_member(device_id, iface, int(m_vpc_member.group(1)))
             return
 
+
     # ── vPC / NX-OS show コマンド ──
     if re.match(r'^show\s+vpc\s+peer-keepalive', c):
         return vpc_engine.format_show_vpc_keepalive(device_id)
@@ -1145,12 +1378,14 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if re.match(r'^show\s+vpc$', c):
         return vpc_engine.format_show_vpc(device_id)
 
-    # "vlan 10" → VLANデータベース作成
+    # "vlan 10" → VLANデータベース作成 + config-vlanサブモードへ入る
     m_vlan_db = re.match(r'^vlan\s+(\d+)$', c)
     if m_vlan_db:
         vid = int(m_vlan_db.group(1))
         vlan_engine.create_vlan(device_id, vid)
         state.vlans.setdefault(vid, {'name': f'VLAN{vid:04d}', 'status': 'active', 'ports': []})
+        state.mode = 'config-vlan'
+        state._current_vlan = vid
         return
     # "vlan <id> name <name>"
     m_vlan_name = re.match(r'^vlan\s+(\d+)\s+name\s+(\S+)', orig)
@@ -1166,6 +1401,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         vid = getattr(state, '_current_vlan', None)
         if vid:
             vlan_engine.create_vlan(device_id, vid, m_name.group(1))
+            state.vlans.setdefault(vid, {})['name'] = m_name.group(1)
         return
     # "no vlan <id>"
     m_no_vlan = re.match(r'^no\s+vlan\s+(\d+)', c)
@@ -1290,10 +1526,16 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if hsrp_ip:
         gid, vip = int(hsrp_ip.group(1)), hsrp_ip.group(2)
         existing = vrrp_engine.hsrp.get(device_id, {}).get(gid)
-        pri = existing.priority if existing else 100
+        # トラックで下がっている最中でも、再設定時は「設定値」を維持する
+        pri = existing.base_priority if existing else 100
         pre = existing.preempt if existing else False
         await vrrp_engine.hsrp_start(device_id, gid, vip, pri, pre,
                                       interface=getattr(state,'current_if',''))
+        # トラック対象が既にdown中なら、再設定後もその分を引いた値に戻す
+        g_new = vrrp_engine.hsrp.get(device_id, {}).get(gid)
+        if g_new and g_new.tracked_down:
+            g_new.priority = max(0, g_new.base_priority -
+                                 sum(g_new.track.get(i, 0) for i in g_new.tracked_down))
         for peer_id in vnet.get_neighbors(device_id):
             peer_g = vrrp_engine.hsrp.get(peer_id, {}).get(gid)
             if peer_g:
@@ -1310,6 +1552,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         g = vrrp_engine.hsrp.get(device_id, {}).get(gid)
         if g:
             g.priority = pri
+            g.base_priority = pri
+            g.tracked_down.clear()
             for peer_id in vnet.get_neighbors(device_id):
                 peer_g = vrrp_engine.hsrp.get(peer_id, {}).get(gid)
                 if peer_g:
@@ -1324,6 +1568,22 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         m = re.match(r'^standby\s+(\d+)\s+preempt', c)
         g = vrrp_engine.hsrp.get(device_id, {}).get(int(m.group(1)))
         if g: g.preempt = True
+        return
+    # "standby 1 track GigabitEthernet0/0/1 [decrement 20]" — object tracking
+    hsrp_track = re.match(
+        r'^standby\s+(\d+)\s+track\s+(\S+)(?:\s+decrement\s+(\d+))?', c)
+    if hsrp_track:
+        gid = int(hsrp_track.group(1))
+        track_if = orig.split()[3] if len(orig.split()) > 3 else hsrp_track.group(2)
+        decrement = int(hsrp_track.group(3)) if hsrp_track.group(3) else 10
+        vrrp_engine.hsrp_set_track(device_id, gid, track_if, decrement)
+        return
+    # "no standby 1 track GigabitEthernet0/0/1"
+    hsrp_no_track = re.match(r'^no\s+standby\s+(\d+)\s+track\s+(\S+)', c)
+    if hsrp_no_track:
+        gid = int(hsrp_no_track.group(1))
+        track_if = orig.split()[4] if len(orig.split()) > 4 else hsrp_no_track.group(2)
+        vrrp_engine.hsrp_remove_track(device_id, gid, track_if)
         return
 
     # ── VRRP/HSRP フェイルオーバーシミュレーション ──
@@ -1395,6 +1655,28 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         ipfilter_engine.add_rule(device_id, num, action, proto, src, dst,
                                  dst_port=port)
         return
+    # Cisco名前付き拡張ACL: "ip access-list extended TEST_ACL" → サブモードへ
+    m_named_acl = re.match(r'^ip\s+access-list\s+extended\s+(\S+)', orig, re.I)
+    if m_named_acl:
+        state.mode = 'config-ext-nacl'
+        state._current_acl_name = m_named_acl.group(1)
+        return
+    # 名前付き拡張ACLサブモード内: "permit ip 10.0.0.0 0.0.0.255 any" 等
+    if state.mode == 'config-ext-nacl':
+        m_nacl_rule = re.match(
+            r'^(permit|deny)\s+(ip|tcp|udp|icmp)\s+'
+            r'(\S+(?:\s+[\d.]+)?)\s+(\S+(?:\s+[\d.]+)?)(?:\s+eq\s+(\S+))?', orig, re.I)
+        if m_nacl_rule:
+            acl_name = getattr(state, '_current_acl_name', None)
+            if acl_name:
+                action = m_nacl_rule.group(1).lower()
+                proto = m_nacl_rule.group(2).lower()
+                src = m_nacl_rule.group(3)
+                dst = m_nacl_rule.group(4)
+                port = m_nacl_rule.group(5)
+                ipfilter_engine.add_rule(device_id, acl_name, action, proto, src, dst,
+                                         dst_port=port)
+            return
     # Si-R形式 ACL: "acl NAME permit ip src X/Y dst Z/W"
     sir_acl = re.match(
         r'^acl\s+(\S+)\s+(permit|deny)\s+(ip|tcp|udp|icmp)\s+'
@@ -1455,7 +1737,12 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         ip = log_host.group(1)
         port = int(log_host.group(2)) if log_host.group(2) else 514
         existing = next((s for s in state.syslog_servers if s['host'] == ip), None)
-        if not existing:
+        if existing:
+            # 同じホストを再設定した場合はポート等を更新する。更新しないと、
+            # 一度誤ったポートで登録してしまうと設定し直しても直せない
+            existing['port'] = port
+            existing['level'] = state.logging_level
+        else:
             state.syslog_servers.append({'host': ip, 'port': port,
                                          'facility': 'local7', 'level': state.logging_level})
         syslog_dispatcher.register(device_id, state.syslog_servers)
@@ -1524,20 +1811,31 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         return
     # Cisco: "snmp-server host 192.168.1.200 traps public"
     snmp_host = re.match(r'^snmp-server\s+host\s+([\d.]+)'
+                         r'(?:\s+udp-port\s+(\d+))?'
                          r'(?:\s+(traps?|informs?))?\s*(?:version\s+(1|2c|3)\s+)?(\S+)?', c)
     if snmp_host:
         ip = snmp_host.group(1)
-        trap_type = snmp_host.group(2) or 'traps'
-        version = snmp_host.group(3) or '2c'
-        community = snmp_host.group(4) or 'public'
-        if not any(h['host'] == ip for h in state.snmp_hosts):
+        # 実機同様 udp-port で送信先ポートを指定できるようにする
+        # （162以外へ飛ばせないと、trap受信の検証が root 権限必須になる）
+        trap_port = int(snmp_host.group(2)) if snmp_host.group(2) else 162
+        trap_type = snmp_host.group(3) or 'traps'
+        version = snmp_host.group(4) or '2c'
+        community = snmp_host.group(5) or 'public'
+        entry = next((h for h in state.snmp_hosts if h['host'] == ip), None)
+        if entry:
+            # 同じホストを再設定した場合は上書きする（syslogと同様）
+            entry.update({'community': community, 'version': version,
+                          'traps': trap_type, 'port': trap_port})
+        else:
             state.snmp_hosts.append({'host': ip, 'community': community,
-                                     'version': version, 'traps': trap_type})
+                                     'version': version, 'traps': trap_type,
+                                     'port': trap_port})
         # snmp_dispatcherに即時登録
         snmp_dispatcher.register(device_id, state.snmp_hosts)
         buf = proto_log_buffer.setdefault(device_id, [])
         buf.append({'type': 'snmp_cfg',
-                    'message': f'SNMP trap送信先を設定: {ip} (community={community} v{version})'})
+                    'message': (f'SNMP trap送信先を設定: {ip}:{trap_port} '
+                                f'(community={community} v{version})')})
         return
     # Cisco: "snmp-server location ..."
     snmp_loc = re.match(r'^snmp-server\s+location\s+(.+)', orig)
@@ -1638,6 +1936,14 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         else:
             prefix = 24
         rib_engine.remove_static_route(device_id, net, prefix)
+        # state.static_routes（rules.py側の別リスト）に残ったままだと、
+        # インターフェースイベント等での再同期時にrib_engineへ復活してしまうため
+        # こちらも合わせて削除する
+        if hasattr(state, 'static_routes'):
+            state.static_routes = [
+                r for r in state.static_routes
+                if not (r.get('dest') == net and r.get('prefix', 24) == prefix)
+            ]
         return
 
     # ── RIP ──
@@ -1698,10 +2004,20 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         if state._rip_networks:
             await rip_engine.start(device_id, hostname, state._rip_networks)
         return
+    # "ip rip neighbor 192.168.1.2"（Si-R: ユニキャストRIP。NBMA/VPNリンクなど
+    # ブロードキャストが届かない区間で、指定IPの相手に直接updateを送る）
+    rip_neighbor = re.match(r'^ip\s+rip\s+neighbor\s+([\d.]+)', c)
+    if rip_neighbor:
+        rip_engine.add_neighbor(device_id, rip_neighbor.group(1))
+        buf = proto_log_buffer.setdefault(device_id, [])
+        buf.append({'type': 'rip_log',
+                    'message': f'ip rip neighbor {rip_neighbor.group(1)} を追加（ユニキャスト）'})
+        return
 
     # ── OSPF ──
     ospf_m = re.match(r'^router\s+ospf\s+(\d+)', c)
-    if ospf_m:
+    if ospf_m and not (state.device_type == 'nexus' and
+                       'ospf' not in getattr(state, 'nx_features', set())):
         state._routing_mode = 'ospf'
         state._ospf_process = int(ospf_m.group(1))
         state._ospf_networks = getattr(state, '_ospf_networks', [])
@@ -1739,7 +2055,46 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                  getattr(state, '_ospf_process', 1),
                                  state._ospf_networks,
                                  getattr(state, '_ospf_area', '0.0.0.0'))
+        from engine.real_ospf_agent import ensure_ospf_agent
+        ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
+    # NX-OS: インターフェース配下の "ip router ospf <tag> area <area>"
+    # NX-OSは network 文を持たず、参加させるインターフェースで直接指定する。
+    nx_ospf_if = re.match(
+        r'^(no\s+)?ip\s+router\s+ospf\s+(\S+)\s+area\s+(\S+)', c)
+    if nx_ospf_if and state.mode == 'config-if':
+        if state.device_type == 'nexus' and \
+                'ospf' not in getattr(state, 'nx_features', set()):
+            return ''
+        iface = getattr(state, 'current_if', '') or ''
+        info = state.interfaces.get(iface, {})
+        ip = info.get('ip')
+        if not ip:
+            return ('ERROR: Cannot configure OSPF on an interface '
+                    'without an IP address')
+        net = _network_address(ip, int(info.get('prefix', 24)))
+        if not hasattr(state, '_ospf_networks'):
+            state._ospf_networks = []
+        if nx_ospf_if.group(1):
+            if net in state._ospf_networks:
+                state._ospf_networks.remove(net)
+            return ''
+        state._routing_mode = 'ospf'
+        state._ospf_process = nx_ospf_if.group(2)
+        state._ospf_area = nx_ospf_if.group(3)
+        if net not in state._ospf_networks:
+            state._ospf_networks.append(net)
+        # 参加させたインターフェースを覚えておく（running-config再現用）
+        info['ospf_area'] = state._ospf_area
+        info['ospf_process'] = state._ospf_process
+        await ospf_engine.start(device_id, hostname,
+                                state._ospf_process,
+                                state._ospf_networks,
+                                state._ospf_area)
+        from engine.real_ospf_agent import ensure_ospf_agent
+        ensure_ospf_agent(device_id, device_sessions, ospf_engine)
+        return ''
+
     # "network 10.0.0.0 0.0.0.255 area 0" (Cisco IOS形式)
     ospf_net = re.match(r'^network\s+([\d.]+)\s+([\d.]+)\s+area\s+(\S+)', c)
     if ospf_net and getattr(state, '_routing_mode', '') == 'ospf':
@@ -1764,6 +2119,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                  getattr(state, '_ospf_process', 1),
                                  state._ospf_networks,
                                  state._ospf_area)
+        from engine.real_ospf_agent import ensure_ospf_agent
+        ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
         net_ip = ospf_net.group(1)
         wildcard = ospf_net.group(2)
@@ -1780,6 +2137,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         await ospf_engine.start(device_id, hostname,
                                  getattr(state, '_ospf_process', 1),
                                  state._ospf_networks, area)
+        from engine.real_ospf_agent import ensure_ospf_agent
+        ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
     # "ip ospf priority <n>" / "ospf priority <n>" — DR選出優先度
     ospf_pri = re.match(r'^(?:ip\s+)?ospf\s+priority\s+(\d+)', c)
@@ -1812,6 +2171,13 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     no_passive = re.match(r'^no\s+passive-interface\s+(\S+)', c)
     if no_passive and getattr(state, '_routing_mode', '') == 'ospf':
         ospf_engine.remove_passive_interface(device_id, no_passive.group(1))
+        return
+    # "area <id> nssa [no-summary]" / "area <id> stub [no-summary]"
+    ospf_area_type = re.match(
+        r'^area\s+(\S+)\s+(nssa|stub)(?:\s+no-summary)?', c)
+    if ospf_area_type and getattr(state, '_routing_mode', '') == 'ospf':
+        ospf_engine.set_area_type(device_id, ospf_area_type.group(1),
+                                  ospf_area_type.group(2))
         return
 
     # ── BGP ──
@@ -1848,6 +2214,13 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if bgp_nbr and getattr(state, '_routing_mode', '') == 'bgp':
         neighbor_ip = bgp_nbr.group(1)
         remote_as = int(bgp_nbr.group(2))
+        # 実機同様、show running-configには「設定したneighbor」がそのまま
+        # 反映される（実際にピアリング可能かどうかとは独立）。トポロジー上
+        # 実リンクが無く peer_id が解決できない場合でも、この辞書に記録して
+        # おくことでrunning-config表示には残す。
+        if not hasattr(state, '_bgp_configured_neighbors'):
+            state._bgp_configured_neighbors = {}
+        state._bgp_configured_neighbors[neighbor_ip] = remote_as
         # IPアドレスでピアを特定（複数リンクがある場合も正確に）
         peer_id = _find_peer_by_ip(device_id, neighbor_ip)
         if not peer_id:
@@ -1885,6 +2258,14 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
         if peer_id:
             bgp_engine.set_neighbor_bfd(device_id, peer_id, True)
+        return
+    # ── neighbor <ip> send-community（community属性を送信）──
+    bgp_send_comm = re.match(r'^neighbor\s+([\d.]+)\s+send-community', c)
+    if bgp_send_comm and getattr(state, '_routing_mode', '') == 'bgp':
+        nip = bgp_send_comm.group(1)
+        peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
+        if peer_id:
+            bgp_engine.set_neighbor_send_community(device_id, peer_id, True)
         return
     # Si-R: "bgp network <ip>/<prefix>" 広告
     sir_bgp_net = re.match(r'^bgp\s+network\s+([\d.]+(?:/\d+)?)', c)
@@ -2160,6 +2541,37 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     if re.match(r'^show\s+(nat-table|ip\s+napt)', c) and state.device_type in ('sir', 'srs'):
         return nat_engine.format_show_translations(device_id)
 
+    # Si-R: show vlan / show interface / show bridge / show bridgegroup
+    if state.device_type in ('sir', 'srs'):
+        if re.match(r'^show\s+vlan\s*$', c):
+            return rule_engine._sir_show_vlan(state)
+        if re.match(r'^show\s+interface\s+brief\s*$', c):
+            return rule_engine._sir_show_interface(state, brief=True)
+        if re.match(r'^show\s+interface\s+summary\s*$', c):
+            return rule_engine._sir_show_interface(state, summary=True)
+        if re.match(r'^show\s+interface\s+detail\s*$', c):
+            return rule_engine._sir_show_interface(state, detail=True)
+        if re.match(r'^show\s+interface\s+statistics\s*$', c):
+            return rule_engine._sir_show_interface(state, detail=True)
+        if re.match(r'^show\s+interface\s*$', c):
+            return rule_engine._sir_show_interface(state)
+        if re.match(r'^show\s+bridge\s+summary\s*$', c):
+            return rule_engine._sir_show_bridge(state, summary=True)
+        if re.match(r'^show\s+bridge\s*$', c):
+            return rule_engine._sir_show_bridge(state)
+        if re.match(r'^show\s+bridgegroup\s+status(\s+group)?\s*$', c):
+            return rule_engine._sir_show_bridgegroup(state, status=True)
+        if re.match(r'^show\s+bridgegroup\s*$', c):
+            return rule_engine._sir_show_bridgegroup(state)
+        # 実機は auth/macauth/arpauth/dot1x を何も設定していないと空出力
+        # （コマンド自体はエラーにならない）。show snmp statistics も同様。
+        if re.match(r'^show\s+(auth\s+(port\s+ether|ethergroup)'
+                    r'|macauth\s+(port\s+ether|ethergroup|statistics\s+(port\s+ether|ethergroup))'
+                    r'|arpauth\s+(statistics|vlan)'
+                    r'|dot1x\s+(port\s+ether|statistics\s+port\s+ether)'
+                    r'|snmp\s+statistics)\s*$', c):
+            return ""
+
     # ── syslog / SNMP 設定確認（state反映版）──
     if re.match(r'^show\s+logging', c):
         return _format_show_logging(state)
@@ -2240,7 +2652,15 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
             lines.append('  Outgoing update filter list for all interfaces is not set')
             lines.append('  Incoming update filter list for all interfaces is not set')
             lines.append(f'  Router ID {on.get("router_id", "0.0.0.0")}')
-            lines.append('  Number of areas in this router is 1. 1 normal 0 stub 0 nssa')
+            _area_types = on.get('area_types', {})
+            _this_area = on.get('area_id', '0.0.0.0')
+            _kind = _area_types.get(_this_area, 'normal')
+            _counts = {'normal': 0, 'stub': 0, 'nssa': 0}
+            _counts[_kind] = 1
+            lines.append(
+                f'  Number of areas in this router is 1. '
+                f'{_counts["normal"]} normal {_counts["stub"]} stub '
+                f'{_counts["nssa"]} nssa')
             lines.append('  Distance: (default is 110)')
         bn = bgp_engine.nodes.get(device_id)
         if bn and bn.get('enabled'):
@@ -2345,6 +2765,14 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
         n = bgp_engine.nodes.get(device_id)
         if n and n.get('enabled'):
             return bgp_engine.format_show_bgp_summary(device_id)
+    # "show ip bgp neighbors [<ip>]" — ネイバー詳細
+    # summaryのState/PfxRcd列は実機同様Established時にprefix数を出すため、
+    # 「Established」という状態名を確認できるのはこのコマンドだけ
+    m_bgp_nei = re.match(r'^show\s+(?:ip\s+)?bgp\s+neighbors?(?:\s+([\d.]+))?\s*$', c)
+    if m_bgp_nei:
+        n = bgp_engine.nodes.get(device_id)
+        if n and n.get('enabled'):
+            return bgp_engine.format_show_bgp_neighbors(device_id, m_bgp_nei.group(1))
     # Si-R: show ip bgp status (= summary相当)
     if re.match(r'^show\s+ip\s+bgp\s+status', c):
         n = bgp_engine.nodes.get(device_id)
@@ -2355,6 +2783,20 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
         n = bgp_engine.nodes.get(device_id)
         if n and n.get('enabled'):
             return bgp_engine.format_show_bgp_table(device_id)
+    # "show ip bgp community <community>" — 指定communityを持つベストパスのみ
+    m_bgp_comm = re.match(r'^show\s+(?:ip\s+)?bgp\s+community\s+(\S+)', c)
+    if m_bgp_comm:
+        n = bgp_engine.nodes.get(device_id)
+        if n and n.get('enabled'):
+            return bgp_engine.format_show_bgp_community(device_id, m_bgp_comm.group(1))
+    # "show ip bgp <prefix>[/<len>]" — 経路詳細（community等）
+    m_bgp_prefix = re.match(r'^show\s+(?:ip\s+)?bgp\s+([\d.]+)(?:/(\d+))?\s*$', c)
+    if m_bgp_prefix:
+        n = bgp_engine.nodes.get(device_id)
+        if n and n.get('enabled'):
+            plen = int(m_bgp_prefix.group(2)) if m_bgp_prefix.group(2) else None
+            return bgp_engine.format_show_bgp_prefix(
+                device_id, m_bgp_prefix.group(1), plen)
     if re.match(r'^show\s+(ip\s+)?bgp$', c):
         n = bgp_engine.nodes.get(device_id)
         if n and n.get('enabled'):
@@ -2367,7 +2809,10 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
 
     # STP
     if re.match(r'^show\s+spanning-tree\s+summary', c):
-        return stp_engine.format_show_spanning_tree_summary(device_id)
+        # STPエンジンに登録が無い機器は、実機同様のデフォルト出力を
+        # ルールエンジン側で組み立てる（実機は必ずSTPが動いている）
+        if stp_engine.nodes.get(device_id):
+            return stp_engine.format_show_spanning_tree_summary(device_id)
     m_stp_vlan = re.match(r'^show\s+spanning-tree\s+vlan\s+(\d+)', c)
     if m_stp_vlan:
         return stp_engine.format_show_spanning_tree_vlan(device_id, int(m_stp_vlan.group(1)))
@@ -2584,6 +3029,9 @@ def _capture_sir_config(state, command: str):
     cmd = command.strip()
     if not cmd:
         return
+    # "?" によるヘルプ照会は設定変更ではないため running-config に残さない
+    if cmd.endswith('?'):
+        return
     first = cmd.split()[0].lower()
     if first in _SIR_NONCONFIG or first.startswith('sh'):
         return
@@ -2614,8 +3062,14 @@ def _build_running_config(device_id: str, state) -> str:
                  state.startup_time.strftime('%a %b %d %H:%M:%S %Y'), '',
                  'version 10.2(7)M', '']
         # feature
+        # 実機は feature 行を先頭にまとめて出す
+        if getattr(state, 'tacacs_feature_enabled', False):
+            lines.append('feature tacacs+')
         if vpc_engine.feature_enabled.get(device_id):
             lines.append('feature vpc')
+        _on_feat = ospf_engine.nodes.get(device_id)
+        if _on_feat and _on_feat.get('enabled'):
+            lines.append('feature ospf')
         lines.append('feature lacp')
         lines.append('')
         lines.append(f'hostname {state.hostname}')
@@ -2629,20 +3083,74 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append('')
         # vPC domain
         lines.extend(vpc_engine.get_running_config(device_id))
+        # インターフェース
+        # NX-OSはOSPFへの参加をインターフェース配下の
+        # "ip router ospf <tag> area <area>" で指定するため、
+        # インターフェース節が無いとOSPF設定を再現できない
+        for ifname, iinfo in (getattr(state, 'interfaces', {}) or {}).items():
+            body = []
+            if iinfo.get('description'):
+                body.append(f'  description {iinfo["description"]}')
+            if iinfo.get('ip'):
+                body.append(
+                    f'  ip address {iinfo["ip"]}/{iinfo.get("prefix", 24)}')
+            if iinfo.get('ospf_area'):
+                body.append(f'  ip router ospf {iinfo.get("ospf_process", 1)} '
+                            f'area {iinfo["ospf_area"]}')
+            if not body:
+                continue
+            lines.append(f'interface {ifname}')
+            lines.extend(body)
+            if iinfo.get('status') in ('up', 'connected'):
+                lines.append('  no shutdown')
+            lines.append('')
         # OSPF
+        # NX-OSの router ospf 配下には network 文が無い（IOSとの違い）
         on = ospf_engine.nodes.get(device_id)
         if on and on.get('enabled'):
             lines.append(f'router ospf {on["process_id"]}')
-            for net in on.get('networks', []):
-                lines.append(f'  network {net} area {on["area_id"]}')
             lines.append('')
         # BGP
         bn = bgp_engine.nodes.get(device_id)
         if bn and bn.get('local_as'):
             lines.append(f'router bgp {bn["local_as"]}')
+            shown_neighbor_ips = set()
             for sid, sess in bn.get('sessions', {}).items():
                 peer_ip = bn.get('_neighbor_ips', {}).get(sid, sess.neighbor_id)
                 lines.append(f'  neighbor {peer_ip} remote-as {sess.remote_as}')
+                shown_neighbor_ips.add(peer_ip)
+            # トポロジー上ピアが解決できず bgp_engine のセッションには
+            # 乗らなかったneighborも、実機同様running-configには反映する
+            for nbr_ip, remote_as in getattr(state, '_bgp_configured_neighbors', {}).items():
+                if nbr_ip not in shown_neighbor_ips:
+                    lines.append(f'  neighbor {nbr_ip} remote-as {remote_as}')
+            lines.append('')
+        # TACACS+ / AAA
+        if getattr(state, 'tacacs_feature_enabled', False):
+            for h in getattr(state, 'tacacs_hosts', []):
+                key_part = ' key ****' if h.get('key') else ''
+                lines.append(f"tacacs-server host {h['host']}{key_part}")
+            if getattr(state, 'tacacs_hosts', []):
+                lines.append('')
+            for name, g in getattr(state, 'aaa_tacacs_groups', {}).items():
+                lines.append(f'aaa group server tacacs+ {name}')
+                for srv in g.get('servers', []):
+                    lines.append(f'  server {srv}')
+                lines.append('')
+            authc = getattr(state, 'aaa_authentication_login', None)
+            if authc:
+                suffix = ' local' if authc.get('local_fallback') else ''
+                lines.append(f"aaa authentication login default group {authc['group']}{suffix}")
+            authz = getattr(state, 'aaa_authorization_commands', None)
+            if authz:
+                suffix = ' local' if authz.get('local_fallback') else ''
+                lines.append(f"aaa authorization commands default group {authz['group']}{suffix}")
+            acct_exec = getattr(state, 'aaa_accounting_exec', None)
+            if acct_exec:
+                lines.append(f"aaa accounting default group {acct_exec['group']}")
+            acct = getattr(state, 'aaa_accounting_commands', None)
+            if acct:
+                lines.append(f"aaa accounting commands default group {acct['group']}")
             lines.append('')
         lines.append('! end')
         return '\n'.join(lines)
@@ -2742,14 +3250,22 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append(f'router ospf {on["process_id"]}')
             for net in on['networks']:
                 lines.append(f' network {net.split("/")[0]} 0.0.0.255 area {on["area_id"]}')
+            for _aid, _atype in sorted(on.get('area_types', {}).items()):
+                if _atype in ('nssa', 'stub'):
+                    lines.append(f' area {_aid} {_atype}')
         # BGP
         bn = bgp_engine.nodes.get(device_id)
         if bn and bn.get('enabled'):
             lines.append('!')
             lines.append(f'router bgp {bn["local_as"]}')
+            shown_neighbor_ips = set()
             for nid, sess in bn['sessions'].items():
                 peer_ip = '10.0.0.2'
                 lines.append(f' neighbor {peer_ip} remote-as {sess.remote_as}')
+                shown_neighbor_ips.add(peer_ip)
+            for nbr_ip, remote_as in getattr(state, '_bgp_configured_neighbors', {}).items():
+                if nbr_ip not in shown_neighbor_ips:
+                    lines.append(f' neighbor {nbr_ip} remote-as {remote_as}')
             for net in bn.get('networks', []):
                 lines.append(f' network {net.split("/")[0]} mask {_prefix_to_mask(int(net.split("/")[1]) if "/" in net else 24)}')
         # ACL
@@ -2793,9 +3309,12 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append('!')
             lines.append(f'interface {iface}')
             lines.append(f' standby {gid} ip {g.vip}')
-            lines.append(f' standby {gid} priority {g.priority}')
+            # トラックによる現在値ではなく設定値(base_priority)を出す
+            lines.append(f' standby {gid} priority {g.base_priority}')
             if g.preempt:
                 lines.append(f' standby {gid} preempt')
+            for track_if, dec in sorted(g.track.items()):
+                lines.append(f' standby {gid} track {track_if} decrement {dec}')
         # line con / line vty
         lines.append('!')
         lines.append('line con 0')
@@ -2883,9 +3402,14 @@ def _build_running_config(device_id: str, state) -> str:
             if bn and bn.get('local_as'):
                 lines.append(f'router bgp {bn["local_as"]}')
                 neighbor_ips = bn.get('_neighbor_ips', {})
+                shown_neighbor_ips = set()
                 for sid, sess in bn.get('sessions', {}).items():
                     peer_ip = neighbor_ips.get(sid, sess.neighbor_id)
                     lines.append(f' neighbor {peer_ip} remote-as {sess.remote_as}')
+                    shown_neighbor_ips.add(peer_ip)
+                for nbr_ip, remote_as in getattr(state, '_bgp_configured_neighbors', {}).items():
+                    if nbr_ip not in shown_neighbor_ips:
+                        lines.append(f' neighbor {nbr_ip} remote-as {remote_as}')
                 for net in bn.get('networks', []):
                     lines.append(f' network {net}')
             for gid, g in sorted(vrrp_engine.vrrp.get(device_id, {}).items()):
@@ -2904,13 +3428,16 @@ def _build_running_config(device_id: str, state) -> str:
                 lines.append(f'snmp trap host {h["host"]} community {h["community"]}')
             if getattr(state, 'snmp_location', ''):
                 lines.append(f'snmp location {state.snmp_location}')
-        # コンソール / リモートアクセスの既定設定（Si-R実機同様に常時表示）
-        lines.append('consoleinfo authtype password')
-        lines.append('telnetinfo authtype password')
+        # コンソール / リモートアクセスの既定設定（実機WS-G110Bの
+        # factory-default show runningと突き合わせて修正。以前は
+        # "consoleinfo authtype password" 等、実機のデフォルトには
+        # 存在しない行を出しており、"save" もアクションコマンドで
+        # あって running-config の行ではないのに紛れ込んでいた）
+        lines.append('consoleinfo autologout 8h')
+        lines.append('telnetinfo autologout 5m')
+        lines.append('terminal pager enable')
         lines.append('terminal charset SJIS')
-        lines.append('rebootlog use on')
-        lines.append('syslog facility 1')
-        lines.append('save')
+        lines.append(f'syslog facility {getattr(state, "sir_syslog_facility", 23)}')
     return '\n'.join(lines)
 
 
@@ -2918,6 +3445,132 @@ def _prefix_to_mask(prefix: int) -> str:
     """プレフィックス長をサブネットマスクに変換"""
     mask = (0xffffffff << (32 - prefix)) & 0xffffffff
     return f'{(mask>>24)&0xff}.{(mask>>16)&0xff}.{(mask>>8)&0xff}.{mask&0xff}'
+
+
+def _handle_nexus_tacacs_config(device_id: str, command: str, state: DeviceState):
+    """
+    NX-OS の TACACS+ / AAA 設定コマンドを解釈する。
+    設定コマンドを処理したら出力文字列("" 含む)を、対象外なら None を返す。
+    rule_engine.process() より前に呼ばれ、ここで処理したコマンドは
+    rule_engine側の一般設定処理と競合させないよう早期returnする
+    （state.modeの上書き競合を防ぐため）。
+    """
+    if state.device_type != 'nexus':
+        return None
+    c = command.lower().strip()
+    orig = command.strip()
+
+    # feature tacacs+ / no feature tacacs+
+    if re.match(r'^feature\s+tacacs\+?$', c):
+        state.tacacs_feature_enabled = True
+        return ""
+    if re.match(r'^no\s+feature\s+tacacs\+?$', c):
+        state.tacacs_feature_enabled = False
+        return ""
+
+    # tacacs-server host <ip> [key <key>] [port <n>]
+    m_tac_host = re.match(r'^tacacs-server\s+host\s+([\d.]+)(?:\s+key\s+(\S+))?(?:\s+port\s+(\d+))?', c)
+    if m_tac_host:
+        if not hasattr(state, 'tacacs_hosts'):
+            state.tacacs_hosts = []
+        ip = m_tac_host.group(1)
+        key = m_tac_host.group(2) or ''
+        port = int(m_tac_host.group(3)) if m_tac_host.group(3) else 49
+        existing = next((h for h in state.tacacs_hosts if h['host'] == ip), None)
+        if existing:
+            if key:
+                existing['key'] = key
+            existing['port'] = port
+        else:
+            state.tacacs_hosts.append({'host': ip, 'key': key, 'port': port})
+        return ""
+
+    # no tacacs-server host <ip>
+    m_no_tac_host = re.match(r'^no\s+tacacs-server\s+host\s+([\d.]+)', c)
+    if m_no_tac_host:
+        if hasattr(state, 'tacacs_hosts'):
+            state.tacacs_hosts = [h for h in state.tacacs_hosts if h['host'] != m_no_tac_host.group(1)]
+        return ""
+
+    # aaa group server tacacs+ <name>
+    m_aaa_group = re.match(r'^aaa\s+group\s+server\s+tacacs\+?\s+(\S+)', c)
+    if m_aaa_group:
+        if not hasattr(state, 'aaa_tacacs_groups'):
+            state.aaa_tacacs_groups = {}
+        group_name = orig.split()[-1]
+        state.aaa_tacacs_groups.setdefault(group_name, {'servers': []})
+        state.mode = 'config-sg-tacacs'
+        state._aaa_group_name = group_name
+        return ""
+
+    # config-sg-tacacs サブモード内: server <ip>
+    if state.mode == 'config-sg-tacacs':
+        m_sg_server = re.match(r'^server\s+([\d.]+)', c)
+        if m_sg_server:
+            group_name = getattr(state, '_aaa_group_name', None)
+            if group_name and hasattr(state, 'aaa_tacacs_groups'):
+                g = state.aaa_tacacs_groups.setdefault(group_name, {'servers': []})
+                if m_sg_server.group(1) not in g['servers']:
+                    g['servers'].append(m_sg_server.group(1))
+            return ""
+
+    # aaa authentication login default group <name> [local]
+    m_aaa_authc = re.match(r'^aaa\s+authentication\s+login\s+default\s+group\s+(\S+)(\s+local)?', c)
+    if m_aaa_authc:
+        m_orig = re.match(r'^aaa\s+authentication\s+login\s+default\s+group\s+(\S+)(\s+local)?', orig, re.I)
+        state.aaa_authentication_login = {
+            'group': m_orig.group(1) if m_orig else m_aaa_authc.group(1),
+            'local_fallback': bool(m_aaa_authc.group(2)),
+        }
+        return ""
+
+    # aaa authorization commands default group <name> [local]
+    m_aaa_authz = re.match(r'^aaa\s+authorization\s+commands\s+default\s+group\s+(\S+)(\s+local)?', c)
+    if m_aaa_authz:
+        m_orig = re.match(r'^aaa\s+authorization\s+commands\s+default\s+group\s+(\S+)(\s+local)?', orig, re.I)
+        state.aaa_authorization_commands = {
+            'group': m_orig.group(1) if m_orig else m_aaa_authz.group(1),
+            'local_fallback': bool(m_aaa_authz.group(2)),
+        }
+        return ""
+
+    # aaa accounting commands default group <name>
+    m_aaa_acct = re.match(r'^aaa\s+accounting\s+commands\s+default\s+group\s+(\S+)', c)
+    if m_aaa_acct:
+        m_orig = re.match(r'^aaa\s+accounting\s+commands\s+default\s+group\s+(\S+)', orig, re.I)
+        state.aaa_accounting_commands = {'group': m_orig.group(1) if m_orig else m_aaa_acct.group(1)}
+        return ""
+
+    # aaa accounting default group <name>  (ログイン/ログアウト=EXECセッションのアカウンティング)
+    m_aaa_acct_exec = re.match(r'^aaa\s+accounting\s+default\s+group\s+(\S+)', c)
+    if m_aaa_acct_exec:
+        m_orig = re.match(r'^aaa\s+accounting\s+default\s+group\s+(\S+)', orig, re.I)
+        state.aaa_accounting_exec = {'group': m_orig.group(1) if m_orig else m_aaa_acct_exec.group(1)}
+        return ""
+
+    # show tacacs-server
+    if re.match(r'^show\s+tacacs-server$', c):
+        hosts = getattr(state, 'tacacs_hosts', [])
+        if not hosts:
+            return 'No TACACS+ server configured'
+        lines = []
+        for h in hosts:
+            lines.append(f"Tacacs server: {h['host']}")
+            lines.append(f"    Port         : {h['port']}")
+            lines.append(f"    Shared secret: {'*' * len(h['key']) if h['key'] else '(none)'}")
+        return '\n'.join(lines)
+
+    # show aaa groups
+    if re.match(r'^show\s+aaa\s+groups?$', c):
+        groups = getattr(state, 'aaa_tacacs_groups', {})
+        if not groups:
+            return 'No AAA server groups configured'
+        lines = ['total number of groups:{}'.format(len(groups)), 'following groups are configured:']
+        for name in groups:
+            lines.append(f'    {name}')
+        return '\n'.join(lines)
+
+    return None
 
 
 def _handle_nat_config(device_id: str, command: str, state: DeviceState):
@@ -3555,6 +4208,10 @@ def _register_icmp(device_id: str):
             interfaces[ifname] = {'ip': info['ip'],
                                   'prefix': info.get('prefix', 24)}
     icmp_engine.register_device(device_id, state.hostname, interfaces)
+    # VLANエンジンには物理ポート一覧を渡す（IPの有無に関わらず全ポート）。
+    # 実機は未割当のaccessポートをVLAN1に置くため、これが無いと
+    # show vlan brief のVLAN1が空欄のままになり実機と食い違う
+    vlan_engine.register_ports(device_id, list(state.interfaces.keys()))
     # SNMPエージェントにも登録（polling応答用）
     _comm = 'public'
     _sc = getattr(state, 'snmp_community', [])
@@ -3595,13 +4252,18 @@ def _register_icmp(device_id: str):
                                         '0.0.0.0', 0, gw, 1)
 
     # ルーター系: 静的ルート（remote N ip route / ip route）をrib_engineに登録
+    # ADは設定時の値を引き継ぐ。ここで固定値1にしてしまうと、
+    # `ip route <dst> <mask> <gw> 200` のようなフローティングスタティックが
+    # この再同期（設定コマンドのたびに走る）でAD=1に上書きされ、
+    # 通常のスタティックと区別が付かなくなる
     for route in getattr(state, 'static_routes', []):
         dest   = route.get('dest', '')
         prefix = route.get('prefix', 0)
         gw     = route.get('gw', '0.0.0.0')
+        ad     = route.get('ad', 1)
         if dest:
             rib_engine.add_static_route(device_id, state.hostname,
-                                        dest, prefix, gw, 1)
+                                        dest, prefix, gw, ad)
 
     # IPsecトンネル: ipsec_crypto の crypto_maps / crypto_map_interface からpeer登録
     icmp_engine.clear_ipsec(device_id)
@@ -3765,8 +4427,12 @@ def _update_neighbors(a_id: str, b_id: str, add: bool):
 
     pairs = [(a_state, a_id, b_state, b_id), (b_state, b_id, a_state, a_id)]
     for local_st, local_id, peer_st, peer_id in pairs:
-        local_if = _first_if(local_st)
-        peer_if  = _first_if(peer_st)
+        # 実際にリンクが張られているインターフェースを vnet から取得する。
+        # vnet.interface_links に無い場合のみ「最初のインターフェース」に
+        # フォールバックする（CDP/LLDPの表示が実トポロジーと食い違わない
+        # ようにするため）
+        local_if = vnet.interface_links.get(local_id, {}).get(peer_id) or _first_if(local_st)
+        peer_if  = vnet.interface_links.get(peer_id, {}).get(local_id) or _first_if(peer_st)
         mac      = _device_mac(peer_id, peer_st.device_type)
         cap      = _cap_code(peer_st.device_type)
 

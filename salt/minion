@@ -1,0 +1,7 @@
+file_client: local
+file_roots:
+  base:
+    - /home/user/network-lab-emulator/salt
+pillar_roots:
+  base:
+    - /home/user/network-lab-emulator/salt/pillar

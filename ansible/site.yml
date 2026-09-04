@@ -1,0 +1,17 @@
+---
+# network-lab-emulator 監視スタック(Prometheus/Alertmanager/Grafana/FRR)を
+# 1playbookで構築する。tools/setup_monitoring_stack.sh(シェル版)と同じ
+# 手順のAnsible移植版。べき等: 既に起動しているサービス/既に展開済みの
+# バイナリはスキップする。
+#
+# 使い方:
+#   ansible-playbook -i ansible/inventory.ini ansible/site.yml
+#
+# 変数の上書き例:
+#   ansible-playbook -i ansible/inventory.ini ansible/site.yml \
+#     -e repo_dir=/home/user/network-lab-emulator
+- name: Provision network-lab-emulator monitoring stack
+  hosts: monitoring_hosts
+  become: true
+  roles:
+    - monitoring_stack

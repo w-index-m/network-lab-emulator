@@ -1,0 +1,14 @@
+---
+- name: Check whether FRR (vtysh) is already installed
+  ansible.builtin.command: which vtysh
+  register: vtysh_check
+  changed_when: false
+  failed_when: false
+
+- name: Install FRRouting via apt
+  ansible.builtin.apt:
+    name:
+      - frr
+      - frr-pythontools
+    update_cache: true
+  when: vtysh_check.rc != 0

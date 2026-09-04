@@ -482,26 +482,32 @@ class TestRouteFilter:
 # ARP テスト
 # ══════════════════════════════════════════
 class TestArp:
-    def test_arp_resolve_same_segment(self, fresh_engines):
+    """
+    arp_engine.resolve() は同期のキャッシュ参照のみで、それ自体は
+    ARP解決を行わない（テーブルが空なら常にNoneを返す）。実際の
+    ARP Request/Reply交換とテーブルへの記録は非同期の
+    resolve_with_packet() が担うため、こちらを使ってテストする。
+    """
+    async def test_arp_resolve_same_segment(self, fresh_engines):
         """同一セグメント内のIPはARP解決できる"""
         from engine.protocols import arp_engine
         e = fresh_engines
         arp_engine.tables.clear()
         e['icmp'].register_device('R1', 'R1',
                                    {'lan0': {'ip': '192.168.1.1', 'prefix': 24}})
-        mac = arp_engine.resolve('R1', '192.168.1.50')
+        mac = await arp_engine.resolve_with_packet('R1', '192.168.1.50')
         assert mac is not None, "同一セグメントのARP解決失敗"
         # テーブルに記録されている
         assert '192.168.1.50' in arp_engine.tables['R1']
 
-    def test_arp_no_resolve_other_segment(self, fresh_engines):
+    async def test_arp_no_resolve_other_segment(self, fresh_engines):
         """別セグメントのIPはARP解決できない"""
         from engine.protocols import arp_engine
         e = fresh_engines
         arp_engine.tables.clear()
         e['icmp'].register_device('R1', 'R1',
                                    {'lan0': {'ip': '192.168.1.1', 'prefix': 24}})
-        mac = arp_engine.resolve('R1', '10.99.99.99')
+        mac = await arp_engine.resolve_with_packet('R1', '10.99.99.99')
         assert mac is None, "別セグメントなのにARP解決できている"
 
     def test_arp_static_entry(self, fresh_engines):
@@ -511,15 +517,16 @@ class TestArp:
         arp_engine.add_static('R1', '192.168.1.99', '00:11:22:33:44:55')
         assert arp_engine.tables['R1']['192.168.1.99'].entry_type == 'static'
 
-    def test_arp_cache(self, fresh_engines):
+    async def test_arp_cache(self, fresh_engines):
         """一度解決したARPはキャッシュされる"""
         from engine.protocols import arp_engine
         e = fresh_engines
         arp_engine.tables.clear()
         e['icmp'].register_device('R1', 'R1',
                                    {'lan0': {'ip': '192.168.1.1', 'prefix': 24}})
-        mac1 = arp_engine.resolve('R1', '192.168.1.50')
-        mac2 = arp_engine.resolve('R1', '192.168.1.50')
+        mac1 = await arp_engine.resolve_with_packet('R1', '192.168.1.50')
+        mac2 = await arp_engine.resolve_with_packet('R1', '192.168.1.50')
+        assert mac1 is not None, "初回のARP解決に失敗した"
         assert mac1 == mac2, "ARPキャッシュが一貫していない"
 
 
@@ -796,13 +803,21 @@ class TestOspfAdvanced:
 
     @pytest.mark.asyncio
     async def test_show_ospf_interface(self, fresh_engines):
-        """show ip ospf interface にCost/Priority/DR状態が出る"""
+        """show ip ospf interface にCost/Priority/DR状態が出る
+
+        出力は network に載っている実インターフェースから組み立てる
+        ため、装置にインターフェースIPを登録しておく必要がある。
+        """
         e = fresh_engines
         _link(e,'R1','R2')
+        e['icmp'].register_device(
+            'R1', 'R1', {'GigabitEthernet0/0': {'ip': '10.0.1.1', 'prefix': 24}})
         await e['ospf'].start('R1','R1',1,['10.0.1.0/24'],'0.0.0.0')
         await e['ospf'].start('R2','R2',1,['10.0.2.0/24'],'0.0.0.0')
         await asyncio.sleep(2)
         out = e['ospf'].format_show_ospf_interface('R1')
+        assert 'GigabitEthernet0/0 is up' in out, out
+        assert 'Internet Address 10.0.1.1/24' in out, out
         assert 'Cost:' in out
         assert 'Priority' in out
         assert 'Hello' in out
@@ -1406,7 +1421,7 @@ class TestUdpPacketSend:
         async def _run():
             await d.emit('R1', 'Router1', '1.3.6.1.6.3.1.1.5.1', 'link up')
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
         t.join(timeout=2.5)
         assert len(received) >= 1, 'SnmpDispatcher からパケットが届いていない'
 
@@ -1454,6 +1469,370 @@ class TestUdpPacketSend:
             assert len(results) == 1
             assert results[0]['sent'] is True
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
         t.join(timeout=3.0)
         assert len(received) >= 1, 'NTP poll_once でパケットが届いていない'
+
+
+def test_floating_static_route_preserves_admin_distance():
+    """ip route ... <AD> のADが保持される（フローティングスタティック）
+
+    以前は engine/rules.py の `ip route` 正規表現がADを取り込まず、
+    app.py 側の再同期ループ（設定コマンドのたびに走る）が AD=1 固定で
+    add_static_route を呼び直していたため、AD 200 を指定しても
+    show ip route が [1/0] と表示され、通常のスタティックと区別が
+    付かなかった。
+    """
+    from engine.protocols import RibEngine
+
+    e = RibEngine()
+    e.add_static_route('d', 'h', '10.210.1.0', 24, '10.9.9.2', 1)
+    e.add_static_route('d', 'h', '10.210.2.0', 24, '10.9.9.2', 200)
+
+    best = {r['network']: r['ad'] for r in e.get_best_routes('d')}
+    assert best['10.210.1.0'] == 1
+    assert best['10.210.2.0'] == 200
+
+    out = e.format_show_ip_route('d')
+    assert '10.210.2.0/24 [200/0]' in out, out
+
+
+def test_rules_ip_route_captures_admin_distance():
+    """engine/rules.py が ip route の末尾ADを state.static_routes に残す"""
+    from engine.rules import DeviceState, RuleEngine
+
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    state.mode = 'config'
+
+    engine.process('ip route 10.210.1.0 255.255.255.0 10.9.9.2', state)
+    engine.process('ip route 10.210.2.0 255.255.255.0 10.9.9.2 200', state)
+
+    by_dest = {r['dest']: r.get('ad') for r in state.static_routes}
+    assert by_dest['10.210.1.0'] == 1, f'既定ADが1でない: {by_dest}'
+    assert by_dest['10.210.2.0'] == 200, f'指定したAD200が保持されていない: {by_dest}'
+
+
+def test_reentering_route_with_new_distance_updates_it():
+    """同じ経路をADだけ変えて再投入すると上書きされる（実機準拠）"""
+    from engine.rules import DeviceState, RuleEngine
+
+    engine = RuleEngine()
+    state = DeviceState('catalyst', 'Dist-SW')
+    state.mode = 'config'
+
+    engine.process('ip route 10.210.3.0 255.255.255.0 10.9.9.2', state)
+    engine.process('ip route 10.210.3.0 255.255.255.0 10.9.9.2 250', state)
+
+    matching = [r for r in state.static_routes if r['dest'] == '10.210.3.0']
+    assert len(matching) == 1, f'重複エントリができている: {matching}'
+    assert matching[0]['ad'] == 250
+
+
+class TestStpPortRecoveryNoCollision:
+    """port_up() のポート名採番が既存ポートを上書きしないことの回帰テスト"""
+
+    @pytest.mark.asyncio
+    async def test_recovered_port_does_not_overwrite_another_port(self, fresh_engines):
+        """3台ループで1本落として戻すと、以前は別ポートが消えていた
+
+        port_down() がポートを辞書から削除して欠番を作るため、
+        port_up() が len(ports)+1 で採番すると既存の別ポート名と
+        衝突し、無関係な接続先のポート情報を上書きして消していた。
+        """
+        e = fresh_engines
+        _link(e, 'A', 'B')
+        _link(e, 'B', 'C')
+        _link(e, 'C', 'A')
+        await e['stp'].start('A', 'A', 'rstp', 32768)
+        await e['stp'].start('B', 'B', 'rstp', 32768)
+        await e['stp'].start('C', 'C', 'rstp', 32768)
+        await asyncio.sleep(2)
+
+        before = len(e['stp'].nodes['A']['ports'])
+        assert before == 2, f'ループ構成なのにAのポート数が{before}'
+
+        # AがBに向けているポートを落として戻す
+        await e['stp'].port_down('A', 'B')
+        await e['stp'].port_up('A', 'B')
+        await asyncio.sleep(1)
+
+        after = len(e['stp'].nodes['A']['ports'])
+        assert after == before, (
+            f'復旧後にポート数が {before} -> {after} に変化した'
+            '（別ポートが上書きされて消えている）'
+        )
+        connected = {p['connected_to'] for p in e['stp'].nodes['A']['ports'].values()}
+        assert connected == {'B', 'C'}, connected
+
+        for d in ('A', 'B', 'C'):
+            e['stp'].stop(d)
+
+
+# ══════════════════════════════════════════
+# BGP community テスト
+# ══════════════════════════════════════════
+class TestBgpCommunity:
+    @pytest.mark.asyncio
+    async def test_community_propagates_to_peer_when_send_community_enabled(
+            self, fresh_engines):
+        """route-mapで付与したcommunityが、send-community有効なピアに届く"""
+        e = fresh_engines
+        _link(e, 'B1', 'B2')
+        await e['bgp'].start('B1', 'R1', 65001)
+        await e['bgp'].start('B2', 'R2', 65002)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await e['bgp'].add_neighbor('B1', 'B2', 'R2', 65002)
+        await e['bgp'].add_neighbor('B2', 'B1', 'R1', 65001)
+        await asyncio.sleep(3)
+
+        e['bgp'].add_route_map('B1', 'SET-COMM', communities=['65001:100'])
+        e['bgp'].set_neighbor_route_map('B1', 'B2', 'SET-COMM', 'out')
+        e['bgp'].set_neighbor_send_community('B1', 'B2', True)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(3)
+
+        rib = [r for r in e['bgp'].nodes['B2']['rib_in'] if r.prefix == '172.20.0.0']
+        assert rib and rib[0].communities == ['65001:100'], \
+            f'communityが対向に伝わっていない: {[r.communities for r in rib]}'
+
+    @pytest.mark.asyncio
+    async def test_community_update_after_route_already_exists(self, fresh_engines):
+        """既に確立済みの経路にcommunityを後から設定しても反映される
+
+        _propagate_bgp() の差分更新が as-path/local-pref/med しか比較して
+        おらず、community だけが変化してもpeer側の既存レコードが
+        更新されない不具合があった（"changed"にならず伝播が止まる）。
+        """
+        e = fresh_engines
+        _link(e, 'B1', 'B2')
+        await e['bgp'].start('B1', 'R1', 65001)
+        await e['bgp'].start('B2', 'R2', 65002)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await e['bgp'].add_neighbor('B1', 'B2', 'R2', 65002)
+        await e['bgp'].add_neighbor('B2', 'B1', 'R1', 65001)
+        await asyncio.sleep(3)
+        # この時点でB2は既にcommunityの無い経路を学習済み
+        before = [r for r in e['bgp'].nodes['B2']['rib_in'] if r.prefix == '172.20.0.0']
+        assert before[0].communities == []
+
+        e['bgp'].add_route_map('B1', 'SET-COMM', communities=['65001:100'])
+        e['bgp'].set_neighbor_route_map('B1', 'B2', 'SET-COMM', 'out')
+        e['bgp'].set_neighbor_send_community('B1', 'B2', True)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(3)
+
+        after = [r for r in e['bgp'].nodes['B2']['rib_in'] if r.prefix == '172.20.0.0']
+        assert after[0].communities == ['65001:100'], \
+            f'既存経路のcommunityが後から更新されていない: {after[0].communities}'
+
+    @pytest.mark.asyncio
+    async def test_community_not_sent_without_send_community(self, fresh_engines):
+        """send-communityが無効（既定）なら、route-mapでcommunityを
+        付けてもpeerには一切届かない（実機の既定動作）"""
+        e = fresh_engines
+        _link(e, 'B1', 'B2')
+        await e['bgp'].start('B1', 'R1', 65001)
+        await e['bgp'].start('B2', 'R2', 65002)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await e['bgp'].add_neighbor('B1', 'B2', 'R2', 65002)
+        await e['bgp'].add_neighbor('B2', 'B1', 'R1', 65001)
+        await asyncio.sleep(3)
+
+        e['bgp'].add_route_map('B1', 'SET-COMM', communities=['65001:100'])
+        e['bgp'].set_neighbor_route_map('B1', 'B2', 'SET-COMM', 'out')
+        # send-community は付けない（既定 False）
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(3)
+
+        rib = [r for r in e['bgp'].nodes['B2']['rib_in'] if r.prefix == '172.20.0.0']
+        assert rib[0].communities == [], \
+            f'send-community未設定なのにcommunityが届いている: {rib[0].communities}'
+
+    @pytest.mark.asyncio
+    async def test_send_community_disabled_strips_previously_sent_community(
+            self, fresh_engines):
+        """send-communityを後から無効化すると、既に届いていたcommunityも
+        次のUpdateで撤回される"""
+        e = fresh_engines
+        _link(e, 'B1', 'B2')
+        await e['bgp'].start('B1', 'R1', 65001)
+        await e['bgp'].start('B2', 'R2', 65002)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await e['bgp'].add_neighbor('B1', 'B2', 'R2', 65002)
+        await e['bgp'].add_neighbor('B2', 'B1', 'R1', 65001)
+        await asyncio.sleep(3)
+
+        e['bgp'].add_route_map('B1', 'SET-COMM', communities=['65001:100'])
+        e['bgp'].set_neighbor_route_map('B1', 'B2', 'SET-COMM', 'out')
+        e['bgp'].set_neighbor_send_community('B1', 'B2', True)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(3)
+        assert [r for r in e['bgp'].nodes['B2']['rib_in']
+               if r.prefix == '172.20.0.0'][0].communities == ['65001:100']
+
+        e['bgp'].set_neighbor_send_community('B1', 'B2', False)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(3)
+        after = [r for r in e['bgp'].nodes['B2']['rib_in'] if r.prefix == '172.20.0.0']
+        assert after[0].communities == [], \
+            f'send-community無効化後もcommunityが残っている: {after[0].communities}'
+
+    @pytest.mark.asyncio
+    async def test_transit_route_carries_community_through_a_third_router(
+            self, fresh_engines):
+        """B1 -> B2 -> B3 と多段中継してもcommunityが引き継がれる
+
+        _compute_adverts の transit（loc_ribからの再広告）経路で
+        communities を loc_rib から引いていなかったバグの回帰。
+        """
+        e = fresh_engines
+        e['vnet'].register('B1', e['noop']); e['vnet'].register('B2', e['noop'])
+        e['vnet'].register('B3', e['noop'])
+        e['vnet'].add_link('B1', 'B2')
+        e['vnet'].add_link('B2', 'B3')
+        await e['bgp'].start('B1', 'R1', 65001)
+        await e['bgp'].start('B2', 'R2', 65002)
+        await e['bgp'].start('B3', 'R3', 65003)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await e['bgp'].add_neighbor('B1', 'B2', 'R2', 65002)
+        await e['bgp'].add_neighbor('B2', 'B1', 'R1', 65001)
+        await e['bgp'].add_neighbor('B2', 'B3', 'R3', 65003)
+        await e['bgp'].add_neighbor('B3', 'B2', 'R2', 65002)
+        await asyncio.sleep(3)
+
+        e['bgp'].add_route_map('B1', 'SET-COMM', communities=['65001:100'])
+        e['bgp'].set_neighbor_route_map('B1', 'B2', 'SET-COMM', 'out')
+        e['bgp'].set_neighbor_send_community('B1', 'B2', True)
+        e['bgp'].set_neighbor_send_community('B2', 'B3', True)
+        await e['bgp'].advertise_network('B1', '172.20.0.0/24')
+        await asyncio.sleep(4)
+
+        rib_b3 = [r for r in e['bgp'].nodes['B3']['rib_in'] if r.prefix == '172.20.0.0']
+        assert rib_b3 and rib_b3[0].communities == ['65001:100'], \
+            f'B3までcommunityが中継されていない: {[r.communities for r in rib_b3]}'
+
+    @pytest.mark.asyncio
+    async def test_route_map_additive_keeps_existing_community(self, fresh_engines):
+        """set community X additive は既存communityを消さず追加する"""
+        e = fresh_engines
+        route = proto.BgpRoute(prefix='10.0.0.0', prefix_len=24, next_hop='B1',
+                               communities=['65001:100'])
+        e['bgp'].add_route_map('B1', 'ADD-COMM', communities=['65001:200'],
+                               communities_additive=True)
+        out = e['bgp']._apply_route_map('B1', 'ADD-COMM', route)
+        assert set(out.communities) == {'65001:100', '65001:200'}, out.communities
+
+    @pytest.mark.asyncio
+    async def test_route_map_community_without_additive_replaces(self, fresh_engines):
+        """additiveを付けない set community は既存communityを置き換える"""
+        e = fresh_engines
+        route = proto.BgpRoute(prefix='10.0.0.0', prefix_len=24, next_hop='B1',
+                               communities=['65001:100'])
+        e['bgp'].add_route_map('B1', 'REPLACE-COMM', communities=['65001:200'])
+        out = e['bgp']._apply_route_map('B1', 'REPLACE-COMM', route)
+        assert out.communities == ['65001:200'], out.communities
+
+    @pytest.mark.asyncio
+    async def test_show_bgp_community_filters_matching_routes_only(self, fresh_engines):
+        """show ip bgp community <val> は該当communityの経路だけ出す"""
+        e = fresh_engines
+        n = e['bgp']._node('B1')
+        n['enabled'] = True
+        n['loc_rib'] = [
+            {'prefix': '10.0.0.0', 'prefix_len': 24, 'next_hop': 'x', 'local_pref': 100,
+             'med': 0, 'as_path': [65001], 'origin': 'i', 'learned_from': 'peer',
+             'learned_from_hostname': 'peer', 'communities': ['65001:100']},
+            {'prefix': '10.0.1.0', 'prefix_len': 24, 'next_hop': 'x', 'local_pref': 100,
+             'med': 0, 'as_path': [65001], 'origin': 'i', 'learned_from': 'peer',
+             'learned_from_hostname': 'peer', 'communities': []},
+        ]
+        out = e['bgp'].format_show_bgp_community('B1', '65001:100')
+        assert '10.0.0.0/24' in out
+        assert '10.0.1.0/24' not in out
+
+    @pytest.mark.asyncio
+    async def test_show_bgp_prefix_reports_not_in_table_for_unknown_prefix(
+            self, fresh_engines):
+        e = fresh_engines
+        n = e['bgp']._node('B1')
+        n['enabled'] = True
+        out = e['bgp'].format_show_bgp_prefix('B1', '203.0.113.0', 24)
+        assert 'not in table' in out
+
+
+# ══════════════════════════════════════════
+# OSPF NSSA テスト
+# ══════════════════════════════════════════
+class TestOspfNssa:
+    @pytest.mark.asyncio
+    async def test_area_type_defaults_to_normal(self, fresh_engines):
+        e = fresh_engines
+        await e['ospf'].start('R1', 'R1', 1, ['10.0.1.0/24'], '0.0.0.0')
+        assert not e['ospf'].is_area_nssa('R1')
+
+    @pytest.mark.asyncio
+    async def test_area_nssa_is_reported(self, fresh_engines):
+        e = fresh_engines
+        await e['ospf'].start('R1', 'R1', 1, ['10.0.1.0/24'], '5')
+        e['ospf'].set_area_type('R1', '5', 'nssa')
+        assert e['ospf'].is_area_nssa('R1')
+
+    @pytest.mark.asyncio
+    async def test_redistributed_route_in_nssa_area_shows_as_n2(self, fresh_engines):
+        """NSSAエリアで再配信された経路は、同エリアの隣接ではE2ではなくN2
+
+        実機はNSSAエリア内の再配信をType-7(NSSA-External)として扱い、
+        show ip routeでは N2 と表示する。E2のまま出るのは食い違い。
+
+        device_idは他クラスの'R1'/'R2'と衝突しないよう専用の名前を使う
+        （他テストの残タスクがhello送信時に新しい同名ノードを掴んで
+        しまうflakinessの回避）。
+        """
+        e = fresh_engines
+        _link(e, 'NSSA-A', 'NSSA-B')
+        await e['ospf'].start('NSSA-A', 'NSSA-A', 1, ['10.50.50.0/24'], '5')
+        e['ospf'].set_area_type('NSSA-A', '5', 'nssa')
+        await e['ospf'].start('NSSA-B', 'NSSA-B', 1, ['10.50.50.0/24'], '5')
+        e['ospf'].set_area_type('NSSA-B', '5', 'nssa')
+        e['ospf'].nodes['NSSA-A']['redistributed']['198.51.100.0/24'] = {
+            'metric': 20, 'source': 'static'}
+
+        r2_ext = []
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            r2_ext = [r for r in e['ospf'].nodes['NSSA-B']['routes']
+                     if r['network'] == '198.51.100.0']
+            if r2_ext:
+                break
+        assert r2_ext, 'NSSAで再配信した経路が隣接に伝わっていない'
+        assert r2_ext[0]['type'] == 'O N2', \
+            f"NSSAエリアの再配信経路がN2でない: {r2_ext[0]['type']}"
+
+    @pytest.mark.asyncio
+    async def test_redistributed_route_in_normal_area_stays_e2(self, fresh_engines):
+        """通常エリアでの再配信は従来どおりE2のまま（NSSAだけの挙動変化）"""
+        e = fresh_engines
+        _link(e, 'NORM-A', 'NORM-B')
+        await e['ospf'].start('NORM-A', 'NORM-A', 1, ['10.60.60.0/24'], '0.0.0.0')
+        await e['ospf'].start('NORM-B', 'NORM-B', 1, ['10.60.60.0/24'], '0.0.0.0')
+        e['ospf'].nodes['NORM-A']['redistributed']['203.0.113.0/24'] = {
+            'metric': 20, 'source': 'static'}
+
+        r2_ext = []
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            r2_ext = [r for r in e['ospf'].nodes['NORM-B']['routes']
+                     if r['network'] == '203.0.113.0']
+            if r2_ext:
+                break
+        assert r2_ext and r2_ext[0]['type'] == 'O E2', \
+            f"通常エリアの再配信経路がE2でない: {r2_ext[0] if r2_ext else None}"
+
+    @pytest.mark.asyncio
+    async def test_show_ip_route_legend_lists_n1_n2(self, fresh_engines):
+        e = fresh_engines
+        e['icmp'].register_device('nssa-rt', 'R', {})
+        out = e['rib'].format_show_ip_route('nssa-rt')
+        assert 'N1 - OSPF NSSA external type 1' in out
+        assert 'N2 - OSPF NSSA external type 2' in out

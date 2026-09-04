@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grafana風モックアップ（実データ表示）</title>
+<style>
+  :root {
+    --bg: #111217;
+    --panel-bg: #181b1f;
+    --panel-border: #2c3235;
+    --text: #d8d9da;
+    --text-dim: #8e9297;
+    --grafana-orange: #ff8833;
+    --grafana-yellow: #f2cc0c;
+    --green: #73bf69;
+    --red: #f2495c;
+    --blue: #5794f2;
+    --purple: #b877d9;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Roboto', 'Segoe UI', 'Hiragino Sans', sans-serif;
+    font-size: 18px;
+  }
+  .notice {
+    background: #2c1f0a; border-bottom: 1px solid var(--grafana-orange);
+    color: #ffcb8a; padding: 10px 20px; font-size: 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .topnav {
+    background: var(--panel-bg); border-bottom: 1px solid var(--panel-border);
+    padding: 14px 20px; display: flex; align-items: center; gap: 16px;
+  }
+  .grafana-logo {
+    width: 32px; height: 32px; border-radius: 4px;
+    background: conic-gradient(from 180deg, var(--grafana-orange), var(--grafana-yellow), var(--grafana-orange));
+  }
+  .topnav .title { font-size: 22px; font-weight: 600; }
+  .topnav .breadcrumb { color: var(--text-dim); font-size: 16px; }
+  .toolbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px; border-bottom: 1px solid var(--panel-border);
+  }
+  .toolbar .left { display: flex; gap: 10px; align-items: center; }
+  .pill {
+    background: #22252b; border: 1px solid var(--panel-border); border-radius: 4px;
+    padding: 6px 14px; font-size: 16px; color: var(--text-dim);
+  }
+  .refresh-badge {
+    background: #22252b; border: 1px solid var(--grafana-orange); border-radius: 4px;
+    padding: 6px 14px; font-size: 16px; color: var(--grafana-orange);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); animation: blink 1.5s infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  .grid {
+    display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px;
+    padding: 12px 20px;
+  }
+  .panel {
+    background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 4px;
+    display: flex; flex-direction: column; min-height: 260px;
+  }
+  .panel.span-12 { grid-column: span 12; }
+  .panel.span-6 { grid-column: span 6; }
+  .panel.span-4 { grid-column: span 4; }
+  .panel.span-3 { grid-column: span 3; }
+  .panel-header {
+    padding: 12px 16px; font-size: 18px; color: var(--text);
+    border-bottom: 1px solid var(--panel-border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .panel-header .ptitle { display: flex; align-items: center; gap: 8px; }
+  .panel-icon { color: var(--text-dim); font-size: 15px; }
+  .panel-body { flex: 1; padding: 12px 16px; position: relative; }
+
+  .big-stat { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; }
+  .big-stat .num { font-size: 56px; font-weight: 700; }
+  .big-stat .label { color: var(--text-dim); font-size: 16px; margin-top: 6px; }
+  .num.green { color: var(--green); } .num.red { color: var(--red); }
+  .num.orange { color: var(--grafana-orange); } .num.blue { color: var(--blue); }
+
+  .chart-svg { width: 100%; height: 100%; display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; padding: 6px 16px 12px; font-size: 15px; color: var(--text-dim); }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 3px; }
+
+  table.grafana-table { width: 100%; border-collapse: collapse; font-size: 16px; }
+  table.grafana-table th {
+    text-align: left; color: var(--text-dim); font-weight: 600; padding: 10px 12px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  table.grafana-table td { padding: 9px 12px; border-bottom: 1px solid #22252b; }
+  .badge { padding: 3px 12px; border-radius: 12px; font-size: 14px; font-weight: 700; }
+  .badge.up { background: #1a3a1a; color: var(--green); }
+  .badge.down { background: #3a1a1a; color: var(--red); }
+
+  .empty-state { color: var(--text-dim); text-align: center; padding: 40px; }
+
+  @media (max-width: 900px) {
+    .panel.span-3 { grid-column: span 6; }
+    .panel.span-4 { grid-column: span 12; }
+    .panel.span-6 { grid-column: span 12; }
+    .big-stat .num { font-size: 44px; }
+    table.grafana-table { font-size: 15px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="notice">⚠️ これはGrafanaのモックアップです（実物のGrafanaではありません）。データは本物のエミュレーター(<code>/api/snmp/dashboard</code>)から取得した実データです。</div>
+
+<div class="topnav">
+  <div class="grafana-logo"></div>
+  <div class="title">Network Lab Emulator</div>
+  <div class="breadcrumb">Dashboards / Network Monitoring</div>
+</div>
+
+<div class="toolbar">
+  <div class="left">
+    <span class="pill">🕐 Last 15 minutes</span>
+    <span class="pill">📊 33 panels</span>
+  </div>
+  <div class="refresh-badge"><span class="dot"></span> Auto-refresh: 5s</div>
+</div>
+
+<div class="grid" id="grid">
+  <div class="panel span-12"><div class="panel-body empty-state">読み込み中...</div></div>
+</div>
+
+<script>
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 ** 2).toFixed(1) + ' MB';
+}
+
+function fmtTime(epochSec) {
+  const d = new Date(epochSec * 1000);
+  return d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function fmtAxisVal(v, unit) {
+  if (unit === 'B') return fmtBytes(v);
+  return Math.round(v * 10) / 10 + (unit || '');
+}
+
+// 横軸=時刻(times)、縦軸=値(unit付き)のラベルを持つチャートを描画する。
+// times が無い場合はインデックスをそのまま等間隔の時刻として扱う。
+function sparkSvg(values, color, min, max, times, unit, yStep) {
+  const w = 340, h = 170;
+  const leftPad = 46, rightPad = 10, topPad = 10, bottomPad = 24;
+  const plotW = w - leftPad - rightPad, plotH = h - topPad - bottomPad;
+
+  if (!values || values.length < 2) {
+    return `<svg class="chart-svg" viewBox="0 0 ${w} ${h}">
+      <line x1="${leftPad}" y1="${topPad + plotH / 2}" x2="${w - rightPad}" y2="${topPad + plotH / 2}" stroke="#2c3235"/>
+      <text x="${leftPad}" y="${topPad + plotH / 2 - 6}" fill="#8e9297" font-size="11">データ収集中...</text>
+    </svg>`;
+  }
+
+  const lo = min !== undefined ? min : Math.min(...values);
+  const hi = max !== undefined ? max : Math.max(...values);
+  const span = (hi - lo) || 1;
+  const step = plotW / (values.length - 1);
+  const pts = values.map((v, i) => [leftPad + i * step, topPad + plotH - ((v - lo) / span) * plotH]);
+  const line = pts.map(p => p.join(',')).join(' ');
+  const area = `${leftPad},${topPad + plotH} ` + line + ` ${leftPad + plotW},${topPad + plotH}`;
+  const gradId = 'g' + Math.random().toString(36).slice(2, 8);
+
+  // Y軸: yStep指定時はhi〜loをその刻みで全段階ラベル表示（例: 10%刻み）、
+  // 未指定時は上端(max)/中央/下端(min)の3段階のみ
+  let yTicks;
+  if (yStep) {
+    yTicks = [];
+    for (let v = Math.ceil(lo / yStep) * yStep; v <= hi + 1e-9; v += yStep) yTicks.push(v);
+  } else {
+    yTicks = [hi, (hi + lo) / 2, lo];
+  }
+  const yLabels = yTicks.map(v => {
+    const y = topPad + plotH - ((v - lo) / span) * plotH;
+    return `<text x="${leftPad - 6}" y="${y + 3}" fill="#8e9297" font-size="9" text-anchor="end">${fmtAxisVal(v, unit)}</text>
+            <line x1="${leftPad}" y1="${y}" x2="${w - rightPad}" y2="${y}" stroke="#22252b" stroke-width="1"/>`;
+  }).join('');
+
+  // X軸: 開始時刻(左)〜現在時刻(右)
+  const tStart = times && times.length ? times[0] : null;
+  const tEnd = times && times.length ? times[times.length - 1] : null;
+  const xLabels = tStart !== null ? `
+    <text x="${leftPad}" y="${h - 6}" fill="#8e9297" font-size="10" text-anchor="start">${fmtTime(tStart)}</text>
+    <text x="${w - rightPad}" y="${h - 6}" fill="#8e9297" font-size="10" text-anchor="end">${fmtTime(tEnd)}</text>
+  ` : '';
+
+  return `
+    <svg class="chart-svg" viewBox="0 0 ${w} ${h}">
+      <defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${color}" stop-opacity="0.35"/>
+        <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+      </linearGradient></defs>
+      ${yLabels}
+      <polygon points="${area}" fill="url(#${gradId})"/>
+      <polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.5"/>
+      ${xLabels}
+    </svg>`;
+}
+
+async function load() {
+  const token = (() => { try { return localStorage.getItem('netlabToken_v1') || ''; } catch(e) { return ''; } })();
+  const res = await fetch('/api/snmp/dashboard', { headers: token ? {'X-Session-Token': token} : {} });
+  if (!res.ok) {
+    document.getElementById('grid').innerHTML = `<div class="panel span-12"><div class="panel-body empty-state">取得失敗 (HTTP ${res.status})</div></div>`;
+    return;
+  }
+  const data = await res.json();
+  render(data);
+}
+
+function render(data) {
+  const devices = data.devices || [];
+  const cpuDevices = devices.filter(d => d.cpu_percent !== null && d.cpu_percent !== undefined);
+  const totalIf = devices.reduce((s, d) => s + d.interfaces.length, 0);
+  const upIf = devices.reduce((s, d) => s + d.interfaces.filter(i => i.oper_status === 1).length, 0);
+  const totalTraffic = devices.reduce((s, d) => s + d.interfaces.reduce((a, i) => a + i.in_octets + i.out_octets, 0), 0);
+  const avgCpu = cpuDevices.length ? Math.round(cpuDevices.reduce((s, d) => s + d.cpu_percent, 0) / cpuDevices.length) : 0;
+  const totalRoutes = devices.reduce((s, d) => s + (d.route_count || 0), 0);
+
+  let html = '';
+
+  // Stat row
+  html += `<div class="panel span-3"><div class="panel-header"><span class="ptitle">Devices Monitored</span></div>
+    <div class="panel-body big-stat"><div class="num blue">${devices.length}</div><div class="label">total devices</div></div></div>`;
+  html += `<div class="panel span-3"><div class="panel-header"><span class="ptitle">Interfaces Up</span></div>
+    <div class="panel-body big-stat"><div class="num green">${upIf}/${totalIf}</div><div class="label">operational</div></div></div>`;
+  html += `<div class="panel span-3"><div class="panel-header"><span class="ptitle">Avg CPU (Cisco family)</span></div>
+    <div class="panel-body big-stat"><div class="num ${avgCpu >= 80 ? 'red' : (avgCpu >= 60 ? 'orange' : 'green')}">${avgCpu}%</div><div class="label">${cpuDevices.length} devices</div></div></div>`;
+  html += `<div class="panel span-3"><div class="panel-header"><span class="ptitle">Total Traffic</span></div>
+    <div class="panel-body big-stat"><div class="num orange">${fmtBytes(totalTraffic)}</div><div class="label">cumulative</div></div></div>`;
+  html += `<div class="panel span-3"><div class="panel-header"><span class="ptitle">Total Routes (RIB)</span></div>
+    <div class="panel-body big-stat"><div class="num blue">${totalRoutes}</div><div class="label">sum(netlab_route_count)</div></div></div>`;
+
+  // CPU panels for cisco-family devices (top 4 by cpu)
+  const cpuColors = [ '#5794f2', '#73bf69', '#ff8833', '#b877d9', '#f2cc0c', '#f2495c' ];
+  cpuDevices.slice(0, 6).forEach((d, i) => {
+    const entries = (d.history || []).filter(h => h.cpu !== null && h.cpu !== undefined);
+    const hist = entries.map(h => h.cpu);
+    const times = entries.map(h => h.t);
+    html += `<div class="panel span-4">
+      <div class="panel-header"><span class="ptitle">📈 ${d.hostname} — CPU Utilization</span><span class="panel-icon">${d.type}</span></div>
+      <div class="panel-body">${sparkSvg(hist, cpuColors[i % cpuColors.length], 0, 100, times, '%', 10)}</div>
+      <div class="legend"><span class="item"><span class="swatch" style="background:${cpuColors[i % cpuColors.length]}"></span>cpu_percent{device="${d.device_id}"} = ${d.cpu_percent}%</span></div>
+    </div>`;
+  });
+
+  // Traffic panel: 全装置のhistory(bytes)を時刻インデックスで合算した時系列
+  const maxLen = Math.max(0, ...devices.map(d => (d.history || []).length));
+  const trafficSeries = [];
+  const trafficTimes = [];
+  for (let i = 0; i < maxLen; i++) {
+    let sum = 0, ts = null;
+    for (const d of devices) {
+      const h = d.history || [];
+      const idx = h.length - maxLen + i;
+      if (idx >= 0 && h[idx]) {
+        sum += h[idx].bytes || 0;
+        ts = h[idx].t;
+      }
+    }
+    trafficSeries.push(sum);
+    trafficTimes.push(ts || (Date.now() / 1000));
+  }
+  html += `<div class="panel span-12">
+    <div class="panel-header"><span class="ptitle">📊 Interface Traffic — All Devices (合算, 時系列)</span><span class="panel-icon">sum(netlab_interface_*_octets_total)</span></div>
+    <div class="panel-body" style="flex:none;height:220px">${sparkSvg(trafficSeries, '#ff8833', undefined, undefined, trafficTimes, 'B')}</div>
+  </div>`;
+
+  // 経路数パネル: 経路を1つ以上持つ装置ごとに遷移グラフを表示
+  const routeColors = [ '#5794f2', '#73bf69', '#ff8833', '#b877d9', '#f2cc0c', '#f2495c' ];
+  const routeDevices = devices.filter(d => (d.route_count || 0) > 0);
+  if (routeDevices.length) {
+    routeDevices.slice(0, 6).forEach((d, i) => {
+      const entries = (d.history || []).filter(h => h.routes !== null && h.routes !== undefined);
+      const hist = entries.map(h => h.routes);
+      const times = entries.map(h => h.t);
+      const maxRoutes = Math.max(10, ...hist);
+      html += `<div class="panel span-4">
+        <div class="panel-header"><span class="ptitle">🧭 ${d.hostname} — Route Count</span><span class="panel-icon">${d.type}</span></div>
+        <div class="panel-body">${sparkSvg(hist, routeColors[i % routeColors.length], 0, maxRoutes, times, '')}</div>
+        <div class="legend"><span class="item"><span class="swatch" style="background:${routeColors[i % routeColors.length]}"></span>netlab_route_count{device="${d.device_id}"} = ${d.route_count}</span></div>
+      </div>`;
+    });
+  }
+
+  // Table panel: device status
+  let rows = devices.map(d => {
+    const down = d.interfaces.filter(i => i.oper_status !== 1).length;
+    return `<tr>
+      <td>${d.hostname}</td><td>${d.type}</td>
+      <td>${d.cpu_percent !== null && d.cpu_percent !== undefined ? d.cpu_percent + '%' : '—'}</td>
+      <td>${d.interfaces.length}</td>
+      <td>${d.route_count !== null && d.route_count !== undefined ? d.route_count : '—'}</td>
+      <td><span class="badge ${down > 0 ? 'down' : 'up'}">${down > 0 ? down + ' DOWN' : 'ALL UP'}</span></td>
+    </tr>`;
+  }).join('');
+  html += `<div class="panel span-12">
+    <div class="panel-header"><span class="ptitle">🗒 Device Status Table</span></div>
+    <div class="panel-body">
+      <table class="grafana-table">
+        <thead><tr><th>Hostname</th><th>Type</th><th>CPU</th><th>Interfaces</th><th>Routes</th><th>Status</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`;
+
+  document.getElementById('grid').innerHTML = html;
+}
+
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>
