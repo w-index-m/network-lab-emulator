@@ -18,6 +18,7 @@ tkinterはGUI専用コードでのみ使用されており、OSPFNeighborFaker�
 import sys
 import types
 import asyncio
+from pathlib import Path
 from typing import Optional
 
 
@@ -41,7 +42,7 @@ def _stub_tkinter():
 
 
 _stub_tkinter()
-sys.path.insert(0, '/home/user/network-lab-emulator/tools/route_injector')
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'tools' / 'route_injector'))
 from network_route_injector import OSPFNeighborFaker, SCAPY_AVAILABLE  # noqa: E402
 
 
