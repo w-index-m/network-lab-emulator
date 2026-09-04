@@ -3397,13 +3397,16 @@ def _build_running_config(device_id: str, state) -> str:
                 lines.append(f'snmp trap host {h["host"]} community {h["community"]}')
             if getattr(state, 'snmp_location', ''):
                 lines.append(f'snmp location {state.snmp_location}')
-        # コンソール / リモートアクセスの既定設定（Si-R実機同様に常時表示）
-        lines.append('consoleinfo authtype password')
-        lines.append('telnetinfo authtype password')
+        # コンソール / リモートアクセスの既定設定（実機WS-G110Bの
+        # factory-default show runningと突き合わせて修正。以前は
+        # "consoleinfo authtype password" 等、実機のデフォルトには
+        # 存在しない行を出しており、"save" もアクションコマンドで
+        # あって running-config の行ではないのに紛れ込んでいた）
+        lines.append('consoleinfo autologout 8h')
+        lines.append('telnetinfo autologout 5m')
+        lines.append('terminal pager enable')
         lines.append('terminal charset SJIS')
-        lines.append('rebootlog use on')
-        lines.append('syslog facility 1')
-        lines.append('save')
+        lines.append(f'syslog facility {getattr(state, "sir_syslog_facility", 23)}')
     return '\n'.join(lines)
 
 
