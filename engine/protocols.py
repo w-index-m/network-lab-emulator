@@ -1015,8 +1015,30 @@ class OspfEngine:
                 'summary_routes': [],  # ABRが生成するSummary LSA
                 'auth_mode': '',  # '' | 'text' | 'md5'
                 'auth_key': '',   # 認証キー（RFC2328 §D 簡易実装）
+                # エリアID -> 'normal'/'stub'/'nssa'（"area <id> nssa"等）
+                'area_types': {},
             }
         return self.nodes[device_id]
+
+    def set_area_type(self, device_id: str, area_id: str, area_type: str):
+        """"area <id> nssa" / "area <id> stub" 相当。
+
+        実機はNSSAエリア内で再配信された経路をType-7(NSSA-External)
+        LSAとして扱い、show ip route上は E2ではなくN2と表示する。
+        このエミュレーターはエリアをまたぐABR変換までは再現していない
+        （エリア=ノード単位の簡易モデルのため）が、「そのエリアで
+        再配信された経路はN2と表示される」という最も観測しやすい
+        違いは再現する。
+        """
+        n = self._node(device_id)
+        n['area_types'][_normalize_area(area_id)] = area_type
+
+    def is_area_nssa(self, device_id: str, area_id: str = None) -> bool:
+        n = self.nodes.get(device_id)
+        if not n:
+            return False
+        aid = _normalize_area(area_id) if area_id else n.get('area_id')
+        return n.get('area_types', {}).get(aid) == 'nssa'
 
     def set_priority(self, device_id: str, priority: int):
         n = self._node(device_id)
@@ -1152,6 +1174,9 @@ class OspfEngine:
             'neighbors': list(n['neighbors'].keys()),
             'networks': n['networks'],
             'external_routes': dict(n.get('redistributed', {})),
+            # このエリアがNSSAなら、再配信経路はType-7(NSSA-External)。
+            # 受信側でE2ではなくN2として表示する判断材料に使う。
+            'area_is_nssa': self.is_area_nssa(device_id),
             'cost': n['interface_cost'],
             'auth_mode': n.get('auth_mode', ''),
             'auth_key': n.get('auth_key', ''),
@@ -1197,6 +1222,7 @@ class OspfEngine:
                     'metric': info.get('metric', 20),
                     'next_hop': src_id,
                     'src_hostname': src_hostname,
+                    'nssa': bool(msg.get('area_is_nssa')),
                 }
 
         existing = n['neighbors'].get(src_id)
@@ -1697,12 +1723,13 @@ class OspfEngine:
             parts = net.split('/')
             if len(parts) != 2:
                 continue
+            # NSSAエリアで再配信された経路はE2ではなくN2（NSSA External）
             n['routes'].append({
                 'network': parts[0], 'prefix': parts[1],
                 'metric': info.get('metric', 20),
                 'via': info.get('next_hop', ''),
                 'next_hop': info.get('next_hop', ''),
-                'type': 'O E2',
+                'type': 'O N2' if info.get('nssa') else 'O E2',
                 'external': True,
             })
 
@@ -3714,6 +3741,9 @@ class RibEngine:
                     'network': r['network'], 'prefix': int(r['prefix']),
                     'next_hop': r.get('next_hop', '0.0.0.0'),
                     'ad': ad, 'source': src, 'metric': r['metric'],
+                    # 'O N2'/'O E2' 等の細分コード（無ければ通常のOSPF内部経路）
+                    'ospf_code': r.get('type', 'O').replace('O ', '')
+                                if r.get('type', 'O').startswith('O ') else None,
                     'iface': self._iface_for_nexthop(
                         device_id, r.get('next_hop', ''))
                         or self._iface_for_network(device_id, r['network'],
@@ -3815,6 +3845,8 @@ class RibEngine:
         lines = [
             'Codes: L - local, C - connected, S - static, R - RIP, B - BGP,',
             '       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area,',
+            '       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2,',
+            '       E1 - OSPF external type 1, E2 - OSPF external type 2,',
             '       i - IS-IS, * - candidate default, U - per-user static route',
             '',
         ]
@@ -3844,8 +3876,13 @@ class RibEngine:
                         f"L        {local_ip}/32 is directly connected, {r['iface']}")
             else:
                 star = '*' if net == '0.0.0.0/0' else ' '
+                # OSPF由来はN2/E2等の細分コードがあればそちらを使う
+                # （実機は "O E2" のように2文字目でOSPF経路の種別を示す）。
+                # 単一文字コードと同じ合計9桁の幅に揃える。
+                disp_code = r.get('ospf_code') or code
+                prefix = f'{disp_code}{star}'.ljust(9)
                 lines.append(
-                    f"{code}{star}       {net} [{r['ad']}/{r['metric']}] "
+                    f"{prefix}{net} [{r['ad']}/{r['metric']}] "
                     f"via {r['next_hop']}, {r['iface']}"
                 )
         return '\n'.join(lines)

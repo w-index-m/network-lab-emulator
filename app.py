@@ -2172,6 +2172,13 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if no_passive and getattr(state, '_routing_mode', '') == 'ospf':
         ospf_engine.remove_passive_interface(device_id, no_passive.group(1))
         return
+    # "area <id> nssa [no-summary]" / "area <id> stub [no-summary]"
+    ospf_area_type = re.match(
+        r'^area\s+(\S+)\s+(nssa|stub)(?:\s+no-summary)?', c)
+    if ospf_area_type and getattr(state, '_routing_mode', '') == 'ospf':
+        ospf_engine.set_area_type(device_id, ospf_area_type.group(1),
+                                  ospf_area_type.group(2))
+        return
 
     # ── BGP ──
     bgp_m = re.match(r'^router\s+bgp\s+(\d+)', c)
@@ -2614,7 +2621,15 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
             lines.append('  Outgoing update filter list for all interfaces is not set')
             lines.append('  Incoming update filter list for all interfaces is not set')
             lines.append(f'  Router ID {on.get("router_id", "0.0.0.0")}')
-            lines.append('  Number of areas in this router is 1. 1 normal 0 stub 0 nssa')
+            _area_types = on.get('area_types', {})
+            _this_area = on.get('area_id', '0.0.0.0')
+            _kind = _area_types.get(_this_area, 'normal')
+            _counts = {'normal': 0, 'stub': 0, 'nssa': 0}
+            _counts[_kind] = 1
+            lines.append(
+                f'  Number of areas in this router is 1. '
+                f'{_counts["normal"]} normal {_counts["stub"]} stub '
+                f'{_counts["nssa"]} nssa')
             lines.append('  Distance: (default is 110)')
         bn = bgp_engine.nodes.get(device_id)
         if bn and bn.get('enabled'):
@@ -3204,6 +3219,9 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append(f'router ospf {on["process_id"]}')
             for net in on['networks']:
                 lines.append(f' network {net.split("/")[0]} 0.0.0.255 area {on["area_id"]}')
+            for _aid, _atype in sorted(on.get('area_types', {}).items()):
+                if _atype in ('nssa', 'stub'):
+                    lines.append(f' area {_aid} {_atype}')
         # BGP
         bn = bgp_engine.nodes.get(device_id)
         if bn and bn.get('enabled'):

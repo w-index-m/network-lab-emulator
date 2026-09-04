@@ -1759,3 +1759,80 @@ class TestBgpCommunity:
         n['enabled'] = True
         out = e['bgp'].format_show_bgp_prefix('B1', '203.0.113.0', 24)
         assert 'not in table' in out
+
+
+# ══════════════════════════════════════════
+# OSPF NSSA テスト
+# ══════════════════════════════════════════
+class TestOspfNssa:
+    @pytest.mark.asyncio
+    async def test_area_type_defaults_to_normal(self, fresh_engines):
+        e = fresh_engines
+        await e['ospf'].start('R1', 'R1', 1, ['10.0.1.0/24'], '0.0.0.0')
+        assert not e['ospf'].is_area_nssa('R1')
+
+    @pytest.mark.asyncio
+    async def test_area_nssa_is_reported(self, fresh_engines):
+        e = fresh_engines
+        await e['ospf'].start('R1', 'R1', 1, ['10.0.1.0/24'], '5')
+        e['ospf'].set_area_type('R1', '5', 'nssa')
+        assert e['ospf'].is_area_nssa('R1')
+
+    @pytest.mark.asyncio
+    async def test_redistributed_route_in_nssa_area_shows_as_n2(self, fresh_engines):
+        """NSSAエリアで再配信された経路は、同エリアの隣接ではE2ではなくN2
+
+        実機はNSSAエリア内の再配信をType-7(NSSA-External)として扱い、
+        show ip routeでは N2 と表示する。E2のまま出るのは食い違い。
+
+        device_idは他クラスの'R1'/'R2'と衝突しないよう専用の名前を使う
+        （他テストの残タスクがhello送信時に新しい同名ノードを掴んで
+        しまうflakinessの回避）。
+        """
+        e = fresh_engines
+        _link(e, 'NSSA-A', 'NSSA-B')
+        await e['ospf'].start('NSSA-A', 'NSSA-A', 1, ['10.50.50.0/24'], '5')
+        e['ospf'].set_area_type('NSSA-A', '5', 'nssa')
+        await e['ospf'].start('NSSA-B', 'NSSA-B', 1, ['10.50.50.0/24'], '5')
+        e['ospf'].set_area_type('NSSA-B', '5', 'nssa')
+        e['ospf'].nodes['NSSA-A']['redistributed']['198.51.100.0/24'] = {
+            'metric': 20, 'source': 'static'}
+
+        r2_ext = []
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            r2_ext = [r for r in e['ospf'].nodes['NSSA-B']['routes']
+                     if r['network'] == '198.51.100.0']
+            if r2_ext:
+                break
+        assert r2_ext, 'NSSAで再配信した経路が隣接に伝わっていない'
+        assert r2_ext[0]['type'] == 'O N2', \
+            f"NSSAエリアの再配信経路がN2でない: {r2_ext[0]['type']}"
+
+    @pytest.mark.asyncio
+    async def test_redistributed_route_in_normal_area_stays_e2(self, fresh_engines):
+        """通常エリアでの再配信は従来どおりE2のまま（NSSAだけの挙動変化）"""
+        e = fresh_engines
+        _link(e, 'NORM-A', 'NORM-B')
+        await e['ospf'].start('NORM-A', 'NORM-A', 1, ['10.60.60.0/24'], '0.0.0.0')
+        await e['ospf'].start('NORM-B', 'NORM-B', 1, ['10.60.60.0/24'], '0.0.0.0')
+        e['ospf'].nodes['NORM-A']['redistributed']['203.0.113.0/24'] = {
+            'metric': 20, 'source': 'static'}
+
+        r2_ext = []
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            r2_ext = [r for r in e['ospf'].nodes['NORM-B']['routes']
+                     if r['network'] == '203.0.113.0']
+            if r2_ext:
+                break
+        assert r2_ext and r2_ext[0]['type'] == 'O E2', \
+            f"通常エリアの再配信経路がE2でない: {r2_ext[0] if r2_ext else None}"
+
+    @pytest.mark.asyncio
+    async def test_show_ip_route_legend_lists_n1_n2(self, fresh_engines):
+        e = fresh_engines
+        e['icmp'].register_device('nssa-rt', 'R', {})
+        out = e['rib'].format_show_ip_route('nssa-rt')
+        assert 'N1 - OSPF NSSA external type 1' in out
+        assert 'N2 - OSPF NSSA external type 2' in out

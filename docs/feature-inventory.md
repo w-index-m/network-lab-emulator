@@ -88,6 +88,7 @@
   - ABR (Area Border Router)
   - Summary LSA (Type 3)
   - Area間経路学習 (O IA)
+  - NSSA (area <id> nssa) — 再配信経路をE2ではなくN2で表示
   - MD5認証
   - Dead Timer (hello timeout)
   - Cost計算
@@ -122,6 +123,8 @@
   - Prefix-list filtering (in/out)
   - ge/le レンジ指定
   - MD5認証
+  - community (set community [additive] / send-community)
+  - show ip bgp community <val> / show ip bgp <prefix>
 
 ✅ 検証済み:
   - 8AS フルメッシュ (28セッション)
@@ -759,8 +762,7 @@
 ### 計画中の機能
 
 ```
-⬜ BGP community
-⬜ OSPF NSSA
+
 ⬜ QoS (Queuing/Shaping)
 ⬜ マルチキャスト
 ⬜ IPv6
