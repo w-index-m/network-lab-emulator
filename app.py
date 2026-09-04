@@ -2563,6 +2563,14 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
             return rule_engine._sir_show_bridgegroup(state, status=True)
         if re.match(r'^show\s+bridgegroup\s*$', c):
             return rule_engine._sir_show_bridgegroup(state)
+        # 実機は auth/macauth/arpauth/dot1x を何も設定していないと空出力
+        # （コマンド自体はエラーにならない）。show snmp statistics も同様。
+        if re.match(r'^show\s+(auth\s+(port\s+ether|ethergroup)'
+                    r'|macauth\s+(port\s+ether|ethergroup|statistics\s+(port\s+ether|ethergroup))'
+                    r'|arpauth\s+(statistics|vlan)'
+                    r'|dot1x\s+(port\s+ether|statistics\s+port\s+ether)'
+                    r'|snmp\s+statistics)\s*$', c):
+            return ""
 
     # ── syslog / SNMP 設定確認（state反映版）──
     if re.match(r'^show\s+logging', c):
