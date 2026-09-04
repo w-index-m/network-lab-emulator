@@ -3227,8 +3227,15 @@ class StpEngine:
         if any(p.get('connected_to') == peer_id for p in n['ports'].values()):
             self.recompute_topology()
             return
-        # 新しいポートを追加してSTP収束させる
-        port_num = len(n['ports']) + 1
+        # 新しいポートを追加してSTP収束させる。
+        # 以前は "len(ports)+1" で採番していたため、port_down で
+        # 途中の番号が欠番になった後に port_up すると既存ポート名と
+        # 衝突し、無関係な接続先のポートを上書きして消してしまっていた
+        # （3台ループでリンクを復旧させたら物理的に繋がっている装置が
+        #   1台分ポート表から消える、という形の不具合）。
+        port_num = 1
+        while f'ether {port_num}' in n['ports']:
+            port_num += 1
         port_name = f'ether {port_num}'
         n['ports'][port_name] = {
             'name': port_name,

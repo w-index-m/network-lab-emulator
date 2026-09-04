@@ -1527,3 +1527,43 @@ def test_reentering_route_with_new_distance_updates_it():
     matching = [r for r in state.static_routes if r['dest'] == '10.210.3.0']
     assert len(matching) == 1, f'重複エントリができている: {matching}'
     assert matching[0]['ad'] == 250
+
+
+class TestStpPortRecoveryNoCollision:
+    """port_up() のポート名採番が既存ポートを上書きしないことの回帰テスト"""
+
+    @pytest.mark.asyncio
+    async def test_recovered_port_does_not_overwrite_another_port(self, fresh_engines):
+        """3台ループで1本落として戻すと、以前は別ポートが消えていた
+
+        port_down() がポートを辞書から削除して欠番を作るため、
+        port_up() が len(ports)+1 で採番すると既存の別ポート名と
+        衝突し、無関係な接続先のポート情報を上書きして消していた。
+        """
+        e = fresh_engines
+        _link(e, 'A', 'B')
+        _link(e, 'B', 'C')
+        _link(e, 'C', 'A')
+        await e['stp'].start('A', 'A', 'rstp', 32768)
+        await e['stp'].start('B', 'B', 'rstp', 32768)
+        await e['stp'].start('C', 'C', 'rstp', 32768)
+        await asyncio.sleep(2)
+
+        before = len(e['stp'].nodes['A']['ports'])
+        assert before == 2, f'ループ構成なのにAのポート数が{before}'
+
+        # AがBに向けているポートを落として戻す
+        await e['stp'].port_down('A', 'B')
+        await e['stp'].port_up('A', 'B')
+        await asyncio.sleep(1)
+
+        after = len(e['stp'].nodes['A']['ports'])
+        assert after == before, (
+            f'復旧後にポート数が {before} -> {after} に変化した'
+            '（別ポートが上書きされて消えている）'
+        )
+        connected = {p['connected_to'] for p in e['stp'].nodes['A']['ports'].values()}
+        assert connected == {'B', 'C'}, connected
+
+        for d in ('A', 'B', 'C'):
+            e['stp'].stop(d)
