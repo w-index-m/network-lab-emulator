@@ -43,7 +43,17 @@ def _stub_tkinter():
 
 _stub_tkinter()
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'tools' / 'route_injector'))
-from network_route_injector import OSPFNeighborFaker, SCAPY_AVAILABLE  # noqa: E402
+try:
+    from network_route_injector import OSPFNeighborFaker, SCAPY_AVAILABLE  # noqa: E402
+except ImportError:
+    # network_route_injector.py only defines OSPFNeighborFaker when scapy
+    # is installed. scapy isn't a hard dependency of this app (CI/Render
+    # don't install it), so fall back to a stub base class; every actual
+    # use below is already gated on SCAPY_AVAILABLE.
+    SCAPY_AVAILABLE = False
+
+    class OSPFNeighborFaker:
+        pass
 
 
 class DeviceOspfResponder(OSPFNeighborFaker):
