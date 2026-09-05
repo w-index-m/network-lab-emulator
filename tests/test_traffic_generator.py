@@ -44,6 +44,10 @@ _stub_tkinter()
 
 from network_route_injector import (  # noqa: E402
     MultiProcessTraffic,
+    benchmark_process_scaling,
+    benchmark_send_capacity,
+    describe_system,
+    get_nic_link_speeds,
     TrafficStats,
     format_rate,
     parse_ip_field,
@@ -279,3 +283,40 @@ def test_multiprocess_splits_the_requested_count_across_processes():
 
     sent_packets, _, _, _, _, _ = tx.snapshot()
     assert sent_packets == total, f"合計が指定値と違う: {sent_packets} != {total}"
+
+
+def test_benchmark_send_capacity_reports_a_real_rate():
+    """このPCの送信上限を測る機能が、実際に測れていること。
+
+    「指定レートが出ない」ときに装置側の限界かPC側の限界かを
+    切り分けるための機能なので、値が取れないと意味がない。
+    """
+    packets, nbytes, _errors, elapsed, pps, bps = benchmark_send_capacity(
+        nproc=1, size=512, seconds=1.0, base_port=_free_udp_port())
+    assert packets > 0, "1秒間で1パケットも送れていない"
+    assert nbytes == packets * 512
+    assert 0 < elapsed < 5
+    assert pps > 0 and bps > 0
+    assert abs(bps - pps * 512 * 8) < pps * 512  # bpsとppsの整合
+
+
+def test_benchmark_process_scaling_returns_one_row_per_process_count():
+    """プロセス数を倍々にしながら測り、各条件の結果が返る"""
+    results = benchmark_process_scaling(size=512, seconds=0.5, max_proc=2)
+    assert [r[0] for r in results] == [1, 2]
+    for nproc, pps, bps in results:
+        assert pps > 0, f"{nproc}プロセスでレートが0"
+        assert bps > 0
+
+
+def test_describe_system_mentions_core_count():
+    desc = describe_system()
+    assert 'コア' in desc
+    assert str(os.cpu_count()) in desc
+
+
+def test_get_nic_link_speeds_returns_a_dict_without_raising():
+    """NIC速度は取れない環境（コンテナ等）もあるので、
+    取れなくても例外にせず空で返ること"""
+    speeds = get_nic_link_speeds()
+    assert isinstance(speeds, dict)

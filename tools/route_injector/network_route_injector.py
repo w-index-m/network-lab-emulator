@@ -28,6 +28,7 @@ RIP / OSPF(Point-to-Point) / OSPF(broadcast・大量ネイバー) / BGP の
 import multiprocessing
 import os
 import socket
+import subprocess
 import struct
 import threading
 import time
@@ -3060,6 +3061,119 @@ class MultiProcessTraffic:
         return packets, nbytes, errors, elapsed, pps, bps
 
 
+# ── PC性能の実測 ─────────────────────────────────────────
+# 「指定したレートが出ていない」ときに、それが装置側の限界なのか
+# 試験機(このPC)側の限界なのかを切り分けられないと、原因調査が迷走する。
+# 事前にこのPCの上限を測っておけるようにする。
+
+def benchmark_send_capacity(nproc=1, size=1472, seconds=2.0, base_port=19000):
+    """指定プロセス数でこのPCの送信上限を測る。
+    戻り値は snapshot() と同じ (packets, bytes, errors, elapsed, pps, bps)。
+
+    宛先ポートはbindだけして読まないソケットを置く。閉じたポートへ送ると
+    ICMP port unreachable が大量に返り、その処理コストで測定値が下がるため。
+    GUIが実際に使う経路(1プロセス=スレッド、2以上=マルチプロセス)を
+    そのまま測るので、表示された値がそのまま実力になる。
+    """
+    sinks = []
+    for i in range(nproc):
+        sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sink.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sink.bind(('127.0.0.1', base_port + i))
+        except OSError:
+            sink.close()
+            continue
+        sinks.append(sink)
+    try:
+        if nproc <= 1:
+            stats = TrafficStats()
+            stop = threading.Event()
+            t = threading.Thread(
+                target=run_traffic_sender,
+                args=('udp', '127.0.0.1', base_port, size, 0, 0, '', 0, 0,
+                      stop, stats), daemon=True)
+            t.start()
+            time.sleep(seconds)
+            stop.set()
+            t.join(timeout=10)
+            return stats.snapshot()
+
+        mp = MultiProcessTraffic()
+        mp.start_senders(nproc, 'udp', '127.0.0.1', base_port, size, 0, 0, '', 0)
+        time.sleep(seconds)
+        mp.stop()
+        return mp.snapshot()
+    finally:
+        for sink in sinks:
+            sink.close()
+
+
+def benchmark_process_scaling(size=1472, seconds=2.0, max_proc=None):
+    """プロセス数を1,2,4,...と増やしながら上限を測る。
+    戻り値: [(nproc, pps, bps), ...]
+
+    スレッドを増やしてもGILの奪い合いで逆に遅くなるため、
+    コア数を活かすにはプロセス分割しかない。何プロセスで頭打ちに
+    なるかはPCによって違うので、実測して確かめる。
+    """
+    cores = os.cpu_count() or 1
+    limit = max_proc or max(1, min(cores * 2, 16))
+    results = []
+    n = 1
+    port = 19000
+    while n <= limit:
+        _pkts, _b, _err, _el, pps, bps = benchmark_send_capacity(
+            nproc=n, size=size, seconds=seconds, base_port=port)
+        results.append((n, pps, bps))
+        port += n + 1
+        n *= 2
+    return results
+
+
+def get_nic_link_speeds():
+    """NICのリンク速度を best effort で取得する（取れなければ空）。
+    1GbEのNICに10Gbpsを指定していたら、そもそもNICが上限になるため。"""
+    speeds = {}
+    if os.name == 'posix':
+        base = '/sys/class/net'
+        try:
+            names = os.listdir(base)
+        except OSError:
+            return speeds
+        for name in names:
+            try:
+                with open(os.path.join(base, name, 'speed')) as f:
+                    mbps = int(f.read().strip())
+            except (OSError, ValueError):
+                continue
+            if mbps > 0:
+                speeds[name] = (f"{mbps // 1000} Gbps" if mbps >= 1000
+                                else f"{mbps} Mbps")
+        return speeds
+    try:
+        out = subprocess.run(
+            ['powershell', '-NoProfile', '-Command',
+             "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | "
+             "ForEach-Object { \"$($_.Name)=$($_.LinkSpeed)\" }"],
+            capture_output=True, text=True, timeout=15)
+        for line in out.stdout.splitlines():
+            if '=' in line:
+                name, speed = line.split('=', 1)
+                speeds[name.strip()] = speed.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return speeds
+
+
+def describe_system():
+    """CPUコア数とNICリンク速度を1行にまとめる"""
+    cores = os.cpu_count() or 1
+    nics = get_nic_link_speeds()
+    nic_desc = ", ".join(f"{n}:{v}" for n, v in list(nics.items())[:4]) or "不明"
+    return f"CPU {cores}コア / NIC {nic_desc}"
+
+
 def format_rate(pps: float, bps: float) -> str:
     """pps/bpsを読みやすい単位に整形する"""
     if bps >= 1_000_000_000:
@@ -3092,6 +3206,10 @@ class TrafficGenTab(ttk.Frame, LogMixin):
         # プロセス数2以上のときに使うマルチプロセス実行器（1のときはNone）
         self.send_mp = None
         self.recv_mp = None
+        # 「このPCの上限を測る」で実測した値 {プロセス数: pps}。
+        # 指定レートがこれを超えていたら、装置ではなくPC側が原因だと警告する
+        self.measured_ceiling = {}
+        self.benchmarking = False
         self._build_widgets()
         self._poll_stats()
 
@@ -3175,6 +3293,24 @@ class TrafficGenTab(ttk.Frame, LogMixin):
         self.send_stat_label = ttk.Label(btn_row, text="送信: -")
         self.send_stat_label.pack(side="left", padx=16)
 
+        # ── このPCの実力 ──
+        bench_frame = ttk.LabelFrame(self, text="このPCの実力")
+        bench_frame.pack(fill="x", padx=8, pady=6)
+
+        self.sysinfo_label = ttk.Label(bench_frame, text="(測定中...)")
+        self.sysinfo_label.grid(row=0, column=0, columnspan=4, sticky="w", **pad)
+
+        self.bench_btn = ttk.Button(bench_frame, text="このPCの送信上限を測る",
+                                     command=self._on_benchmark)
+        self.bench_btn.grid(row=1, column=0, sticky="w", **pad)
+        self.bench_result_label = ttk.Label(
+            bench_frame, text="未測定（指定レートが出ないとき、装置側の限界か"
+                              "このPC側の限界か切り分けられません）")
+        self.bench_result_label.grid(row=1, column=1, columnspan=3, sticky="w", **pad)
+
+        # NIC情報の取得はWindowsだとPowerShell起動で数秒かかるので裏で取る
+        threading.Thread(target=self._load_sysinfo, daemon=True).start()
+
         # ── 受信 ──
         recv_frame = ttk.LabelFrame(self, text="受信(測定)")
         recv_frame.pack(fill="x", padx=8, pady=6)
@@ -3225,6 +3361,82 @@ class TrafficGenTab(ttk.Frame, LogMixin):
         self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
         self._init_log(self.log_text)
 
+    # ---- このPCの実力 ----
+    def _load_sysinfo(self):
+        """CPUコア数とNICリンク速度を表示する。
+        NICのリンク速度が1GbEなら、そもそも1Gbpsが上限になる。"""
+        try:
+            desc = describe_system()
+        except OSError as e:
+            desc = f"取得できませんでした: {e}"
+        self.after(0, lambda: self.sysinfo_label.configure(text=desc))
+
+    def _on_benchmark(self):
+        if self.benchmarking or self.sending or self.receiving:
+            messagebox.showinfo("実行中", "送受信または測定が実行中です")
+            return
+        size = 1472
+        try:
+            size = self._parse_int_field("パケットサイズ(byte)",
+                                          self.size_var.get(), 1, 65507)
+        except ValueError:
+            pass  # 測定は既定サイズで続行する
+        self.benchmarking = True
+        self.bench_btn.configure(state="disabled")
+        self.bench_result_label.configure(text="測定中...")
+        self.log(f"=== このPCの送信上限を測定します (ペイロード{size}B) ===")
+
+        def worker():
+            try:
+                results = benchmark_process_scaling(size=size, seconds=2.0)
+            except OSError as e:
+                self.log(f"[ERROR] 測定に失敗: {e}")
+                results = []
+            best_pps = best_bps = 0.0
+            for nproc, pps, bps in results:
+                self.measured_ceiling[nproc] = pps
+                self.log(f"  {nproc}プロセス: {pps:,.0f} pps / "
+                          f"{format_rate(pps, bps).split(' / ')[1]}")
+                if pps > best_pps:
+                    best_pps, best_bps = pps, bps
+            if results:
+                summary = (f"実測上限: {best_pps:,.0f} pps / "
+                            f"{format_rate(best_pps, best_bps).split(' / ')[1]} "
+                            f"(loopback・送信のみ)")
+                self.log(f"=== 測定終了 {summary} ===")
+                self.after(0, lambda: self.bench_result_label.configure(text=summary))
+            self.benchmarking = False
+            self.after(0, lambda: self.bench_btn.configure(state="normal"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ceiling_for(self, nproc):
+        """指定プロセス数での実測上限pps。未測定ならNone。
+        測っていないプロセス数は、測った中で一番近い小さい方の値で代用する。"""
+        if not self.measured_ceiling:
+            return None
+        if nproc in self.measured_ceiling:
+            return self.measured_ceiling[nproc]
+        lower = [n for n in self.measured_ceiling if n <= nproc]
+        return self.measured_ceiling[max(lower)] if lower else None
+
+    def _warn_if_rate_exceeds_pc(self, rate, nproc):
+        """指定レートがこのPCの実力を超えていたら警告する。
+        これを出さないと、PC側が出せていないだけなのに
+        「装置がパケットを落としている」と誤診してしまう。"""
+        ceiling = self._ceiling_for(nproc)
+        if ceiling is None or rate <= 0 or rate <= ceiling:
+            return True
+        return messagebox.askokcancel(
+            "このPCの能力を超えています",
+            f"指定レート {rate:,} pps は、このPCの実測上限 "
+            f"{ceiling:,.0f} pps ({nproc}プロセス時) を超えています。\n\n"
+            f"このまま実行すると指定より少ないトラフィックしか流れません。\n"
+            f"そこで観測される損失は【このPC側の限界】であって、\n"
+            f"試験対象の装置の性能ではありません。\n\n"
+            f"プロセス数を増やすか、レートを下げることを検討してください。\n\n"
+            f"それでも実行しますか？")
+
     # ---- 入力検証 ----
     @staticmethod
     def _parse_int_field(label, raw, minimum=None, maximum=None):
@@ -3260,6 +3472,8 @@ class TrafficGenTab(ttk.Frame, LogMixin):
 
         proto = self.send_proto_var.get()
         nproc = max(1, int(self.send_nproc_var.get()))
+        if not self._warn_if_rate_exceeds_pc(rate, nproc):
+            return
         self.send_stop.clear()
         self.sending = True
         self.send_start_btn.configure(state="disabled")
@@ -3290,7 +3504,7 @@ class TrafficGenTab(ttk.Frame, LogMixin):
                 while self.sending and self.send_mp and self.send_mp.is_running():
                     if self.send_stop.wait(0.2):
                         break
-                self._finish_send()
+                self._finish_send(rate)
 
             threading.Thread(target=watch_mp, daemon=True).start()
             return
@@ -3302,17 +3516,25 @@ class TrafficGenTab(ttk.Frame, LogMixin):
             except OSError as e:
                 self.log(f"[ERROR] 送信に失敗: {e}")
             finally:
-                self._finish_send()
+                self._finish_send(rate)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_send(self):
+    def _finish_send(self, requested_rate=0):
         if self.send_mp is not None:
             self.send_mp.stop()
         packets, nbytes, errors, elapsed, pps, bps = self._send_snapshot()
         self.log(f"=== 送信終了 {packets:,}パケット / {nbytes:,}バイト / "
                   f"{elapsed:.1f}秒 / {format_rate(pps, bps)} "
                   f"(エラー{errors}件) ===")
+        # 指定レートに対して実測が明らかに低いなら、それはPC側が
+        # 出せていないということ。装置側の問題と取り違えないよう明示する
+        if requested_rate > 0 and pps > 0 and pps < requested_rate * 0.9:
+            self.log(f"[警告] 指定 {requested_rate:,} pps に対し実測 {pps:,.0f} pps "
+                      f"({pps / requested_rate * 100:.0f}%) しか出ていません。"
+                      f"このPCの送信能力が上限です。"
+                      f"ここで見える損失は装置側の性能ではありません"
+                      f"（プロセス数を増やすと改善する場合があります）")
         self.sending = False
         self.after(0, lambda: (self.send_start_btn.configure(state="normal"),
                                 self.send_stop_btn.configure(state="disabled")))
