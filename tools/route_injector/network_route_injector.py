@@ -2620,11 +2620,16 @@ class MainApp(tk.Tk):
         notebook.pack(fill="both", expand=True)
 
         notebook.add(RipTab(notebook), text="RIP")
-        notebook.add(RipMultiRouterTab(notebook), text="RIP (疑似ルータ生成)")
+        rip_multi_tab = RipMultiRouterTab(notebook)
+        notebook.add(rip_multi_tab, text="RIP (疑似ルータ生成)")
         notebook.add(OspfP2PTab(notebook), text="OSPF (P2P)")
         notebook.add(OspfMassTab(notebook), text="OSPF (Broadcast/大量)")
         notebook.add(BgpTab(notebook), text="BGP")
         notebook.add(BgpMultiPeerTab(notebook), text="BGP (疑似ルータ生成)")
+        # 実機との継続的なRIP交換検証では「RIP」タブ(1回限りの送信)より
+        # 「RIP (疑似ルータ生成)」タブ(実機同様に定期送信し続けられる)を
+        # 使うことが多いため、こちらを起動時のデフォルトタブにする
+        notebook.select(rip_multi_tab)
 
 
 def main():
