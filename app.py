@@ -1874,6 +1874,14 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                     if e['number'] != number]
         state.sir_snmp_managers.append(entry)
         state.sir_snmp_managers.sort(key=lambda e: e['number'])
+        # 実trap送信(snmp_dispatcher)にも登録する。<trap>/<write>引数の
+        # 実際の値種別（enable/disable等か、versionの指定なのか）はまだ
+        # 実機で確認できていないため、ひとまずtrap宛先として無条件登録する
+        # （宛先が1件でも定義されればtrapを送る、が現状の挙動）。
+        state.snmp_hosts = [h for h in state.snmp_hosts if h['host'] != entry['ip']]
+        state.snmp_hosts.append({'host': entry['ip'], 'community': entry['community'],
+                                 'version': '2c', 'traps': 'traps'})
+        snmp_dispatcher.register(device_id, state.snmp_hosts)
         return
     # Si-R: "snmp user name <user_name>" — 以降のuser系サブコマンドが効く対象
     # (実機と同様、直前に選択されたユーザーへの「カレント」設定として動作する)
@@ -4349,6 +4357,16 @@ def _register_icmp(device_id: str):
                         contact=getattr(state, 'snmp_contact', ''),
                         location=getattr(state, 'snmp_location', ''),
                         community=_comm)
+    # 実UDP SNMPエージェント（snmpget/snmpwalkに応答する側）を動的起動する。
+    # start_all_snmp_agents はアプリ起動時に存在した装置しか対象にしないため、
+    # これが無いとアプリ起動後に追加した装置はWalk/Getに応答しなかった。
+    # ensure_snmp_agent自身が起動済みなら何もしないので、_register_icmpが
+    # 高頻度で呼ばれても軽量。
+    try:
+        from engine.snmp_udp_agent import ensure_snmp_agent
+        asyncio.ensure_future(ensure_snmp_agent(device_id, device_sessions, snmp_agent))
+    except RuntimeError:
+        pass  # イベントループが無い呼び出し元（起動シーケンス等）からは無視
 
     def _net_addr(ip, prefix):
         try:

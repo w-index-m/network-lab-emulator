@@ -316,6 +316,38 @@ async def start_all_snmp_agents(device_sessions: dict, snmp_agent, port: int = 1
                 local_addr=(ip, port),
             )
             started[device_id] = (transport, ip)
+            _running_agents[device_id] = (transport, ip)
         except Exception as e:
             print(f'[SNMP] {device_id} ({ip}:{port}) の起動失敗: {e}')
     return started
+
+
+_running_agents: dict = {}  # device_id -> (transport, ip)
+
+
+async def ensure_snmp_agent(device_id: str, device_sessions: dict, snmp_agent,
+                             port: int = 161):
+    """アプリ起動後に動的追加された装置に対し、実UDP SNMPエージェントを
+    起動する（start_all_snmp_agentsは起動時に存在した装置しか対象にしない
+    ため、これが無いと後から追加した装置はsnmpget/snmpwalkに応答しない）。
+    既に起動済み、またはIP未設定なら何もしない。IPが変わった場合は
+    device_id単位でしか管理していないため追従しない（今のところ十分）。"""
+    if device_id in _running_agents:
+        return
+    state = device_sessions.get(device_id)
+    if not state:
+        return
+    ip = _pick_management_ip(state)
+    if not ip:
+        return
+    _ensure_loopback_alias(ip)
+    loop = asyncio.get_event_loop()
+    try:
+        transport, protocol = await loop.create_datagram_endpoint(
+            lambda: SnmpDeviceProtocol(device_id, snmp_agent),
+            local_addr=(ip, port),
+        )
+        _running_agents[device_id] = (transport, ip)
+        print(f'[SNMP] {device_id} ({ip}:{port}) 実UDPエージェントを動的起動しました')
+    except Exception as e:
+        print(f'[SNMP] {device_id} ({ip}:{port}) 動的起動失敗: {e}')
