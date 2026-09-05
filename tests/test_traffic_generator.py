@@ -43,6 +43,7 @@ def _stub_tkinter():
 _stub_tkinter()
 
 from network_route_injector import (  # noqa: E402
+    MultiProcessTraffic,
     TrafficStats,
     format_rate,
     parse_ip_field,
@@ -222,3 +223,59 @@ def test_parse_ip_field_reports_the_field_name_and_reason():
         assert '入力されていません' in str(e)
     else:
         raise AssertionError('空欄でValueErrorが送出されなかった')
+
+
+def test_multiprocess_send_and_receive_all_packets_arrive():
+    """マルチプロセス送受信で、全プロセス合算のパケット数が一致する。
+
+    1プロセス(1スレッド)ではsendto()のシステムコールが処理時間の約77%を
+    占め、CPUのコア数に関係なく約24万pps(1472Bで約2.8Gbps)で頭打ちになる。
+    スレッドを増やすとGILの奪い合いで逆に遅くなるため、プロセス分割で
+    スケールさせている（実測で4プロセス3.8倍）。
+    """
+    base_port = _free_udp_port()
+    nproc = 2
+    per_proc = 500
+
+    rx = MultiProcessTraffic()
+    rx.start_receivers(nproc, 'udp', '127.0.0.1', base_port)
+    time.sleep(1.0)  # 各プロセスのbind完了を待つ
+
+    tx = MultiProcessTraffic()
+    tx.start_senders(nproc, 'udp', '127.0.0.1', base_port, size=200,
+                     count=per_proc * nproc, rate_pps=0, src_ip='', tos=0)
+    deadline = time.time() + 30
+    while tx.is_running() and time.time() < deadline:
+        time.sleep(0.1)
+    tx.stop()
+    time.sleep(1.0)
+    rx.stop()
+
+    sent_packets, sent_bytes, sent_errors, _, _, _ = tx.snapshot()
+    recv_packets, recv_bytes, _, _, _, _ = rx.snapshot()
+
+    assert sent_packets == per_proc * nproc, f"送信数が合わない: {sent_packets}"
+    assert sent_bytes == per_proc * nproc * 200
+    assert sent_errors == 0
+    assert recv_packets == sent_packets, (
+        f"受信数が送信数と一致しない: 送信{sent_packets} 受信{recv_packets}")
+    assert recv_bytes == sent_bytes
+
+
+def test_multiprocess_splits_the_requested_count_across_processes():
+    """送信数はプロセス間で等分され、合計が指定値ちょうどになる
+    （端数があっても失われない）"""
+    base_port = _free_udp_port()
+    nproc = 3
+    total = 100  # 3で割り切れない
+
+    tx = MultiProcessTraffic()
+    tx.start_senders(nproc, 'udp', '127.0.0.1', base_port, size=64,
+                     count=total, rate_pps=0, src_ip='', tos=0)
+    deadline = time.time() + 30
+    while tx.is_running() and time.time() < deadline:
+        time.sleep(0.1)
+    tx.stop()
+
+    sent_packets, _, _, _, _, _ = tx.snapshot()
+    assert sent_packets == total, f"合計が指定値と違う: {sent_packets} != {total}"

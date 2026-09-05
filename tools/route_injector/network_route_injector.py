@@ -25,6 +25,8 @@ RIP / OSPF(Point-to-Point) / OSPF(broadcast・大量ネイバー) / BGP の
   検証用ラック・自分が管理する機器以外には絶対に実行しないでください。
 """
 
+import multiprocessing
+import os
 import socket
 import struct
 import threading
@@ -2864,6 +2866,200 @@ def run_traffic_receiver(proto, listen_ip, listen_port, stop_event, stats):
         srv.close()
 
 
+# ── マルチプロセス送受信 ───────────────────────────────────
+# 1プロセス(1スレッド)では sendto() のシステムコールが処理時間の約77%を
+# 占めるため、CPUを何コア積んでいても約24万pps(1472Bで約2.8Gbps)で頭打ちに
+# なる。スレッドを増やすとGILの奪い合いで逆に1/5まで落ちる(実測)。
+# プロセスを分けると素直に伸び、4プロセスで約85万pps=10Gbpsに到達する。
+#
+# プロセスごとに別ポートを使う。SO_REUSEPORTで1ポートを共有する手もあるが
+# Windowsには無いため、可搬性を優先して「プロセス数分の連番ポート」にする。
+
+_MP_FLUSH_INTERVAL = 0.2
+
+
+def _make_shared_cell():
+    """ワーカー1つ分の共有カウンタを作る"""
+    return {
+        'lock': multiprocessing.Lock(),
+        'packets': multiprocessing.Value('q', 0, lock=False),
+        'bytes': multiprocessing.Value('q', 0, lock=False),
+        'errors': multiprocessing.Value('q', 0, lock=False),
+        'first': multiprocessing.Value('d', 0.0, lock=False),
+        'last': multiprocessing.Value('d', 0.0, lock=False),
+    }
+
+
+class _SharedStopEvent:
+    """multiprocessing.Value を threading.Event 互換に見せる薄いラッパ。
+    run_traffic_sender/receiver は is_set()/wait() しか使わないので足りる。"""
+
+    def __init__(self, flag):
+        self._flag = flag
+
+    def is_set(self):
+        return bool(self._flag.value)
+
+    def wait(self, timeout=None):
+        if self._flag.value:
+            return True
+        if timeout is None:
+            timeout = 0.05
+        if timeout <= 0.01:
+            # レート制御の細かいsleepはそのまま寝る（刻むと精度が落ちる）
+            time.sleep(timeout)
+            return bool(self._flag.value)
+        end = time.perf_counter() + timeout
+        while time.perf_counter() < end:
+            if self._flag.value:
+                return True
+            time.sleep(0.005)
+        return bool(self._flag.value)
+
+
+class _SharedStats:
+    """ワーカー側の記帳。1パケットごとにプロセス間ロックを取ると
+    その分だけ送信性能が落ちるので、ローカルに貯めて一定間隔でだけ
+    共有メモリへ書き戻す。"""
+
+    def __init__(self, cell):
+        self._cell = cell
+        self._packets = 0
+        self._bytes = 0
+        self._first = 0.0
+        self._next_flush = 0.0
+
+    def start(self):
+        self._packets = 0
+        self._bytes = 0
+        self._first = 0.0
+        self._next_flush = time.perf_counter() + _MP_FLUSH_INTERVAL
+
+    def add(self, nbytes: int):
+        if not self._packets:
+            self._first = time.time()
+        self._packets += 1
+        self._bytes += nbytes
+        now = time.perf_counter()
+        if now >= self._next_flush:
+            self.flush()
+            self._next_flush = now + _MP_FLUSH_INTERVAL
+
+    def add_error(self, msg: str):
+        c = self._cell
+        with c['lock']:
+            c['errors'].value += 1
+
+    def flush(self):
+        c = self._cell
+        with c['lock']:
+            c['packets'].value = self._packets
+            c['bytes'].value = self._bytes
+            c['first'].value = self._first
+            c['last'].value = time.time() if self._packets else 0.0
+
+
+def _mp_sender_worker(cell, flag, proto, dest_ip, dest_port, size, count,
+                       rate_pps, src_ip, tos):
+    """マルチプロセス送信のワーカー（Windowsのspawnでも動くようモジュール直下）"""
+    stats = _SharedStats(cell)
+    try:
+        run_traffic_sender(proto, dest_ip, dest_port, size, count, rate_pps,
+                            src_ip, 0, tos, _SharedStopEvent(flag), stats)
+    finally:
+        stats.flush()
+
+
+def _mp_receiver_worker(cell, flag, proto, listen_ip, listen_port):
+    """マルチプロセス受信のワーカー"""
+    stats = _SharedStats(cell)
+    try:
+        run_traffic_receiver(proto, listen_ip, listen_port,
+                              _SharedStopEvent(flag), stats)
+    finally:
+        stats.flush()
+
+
+class MultiProcessTraffic:
+    """送信または受信を複数プロセスで動かし、統計を合算して返す。
+
+    プロセスごとにポートを1つずつ使う(base_port, base_port+1, ...)。
+    送信側と受信側で同じプロセス数・同じベースポートを指定すれば
+    1対1で対応する。
+    """
+
+    def __init__(self):
+        self.cells = []
+        self.procs = []
+        self.flag = None
+
+    def start_senders(self, nproc, proto, dest_ip, base_port, size, count,
+                       rate_pps, src_ip, tos):
+        """nproc個の送信プロセスを起動する。
+        レートと送信数はプロセス間で等分する（合計が指定値になるように）。"""
+        self.flag = multiprocessing.Value('b', 0, lock=False)
+        self.cells = [_make_shared_cell() for _ in range(nproc)]
+        self.procs = []
+        for i in range(nproc):
+            # 端数は先頭のプロセスに寄せて、合計を指定値ちょうどにする
+            share_rate = (rate_pps // nproc + (1 if i < rate_pps % nproc else 0)
+                          if rate_pps > 0 else 0)
+            share_count = (count // nproc + (1 if i < count % nproc else 0)
+                           if count > 0 else 0)
+            p = multiprocessing.Process(
+                target=_mp_sender_worker,
+                args=(self.cells[i], self.flag, proto, dest_ip, base_port + i,
+                      size, share_count, share_rate, src_ip, tos),
+                daemon=True)
+            p.start()
+            self.procs.append(p)
+        return len(self.procs)
+
+    def start_receivers(self, nproc, proto, listen_ip, base_port):
+        self.flag = multiprocessing.Value('b', 0, lock=False)
+        self.cells = [_make_shared_cell() for _ in range(nproc)]
+        self.procs = []
+        for i in range(nproc):
+            p = multiprocessing.Process(
+                target=_mp_receiver_worker,
+                args=(self.cells[i], self.flag, proto, listen_ip, base_port + i),
+                daemon=True)
+            p.start()
+            self.procs.append(p)
+        return len(self.procs)
+
+    def stop(self, timeout=5):
+        if self.flag is not None:
+            self.flag.value = 1
+        for p in self.procs:
+            p.join(timeout=timeout)
+        for p in self.procs:
+            if p.is_alive():
+                p.terminate()
+
+    def is_running(self):
+        return any(p.is_alive() for p in self.procs)
+
+    def snapshot(self):
+        """全プロセス合算の (packets, bytes, errors, elapsed, pps, bps)。
+        計測区間は「どれかが最初に送/受した時刻〜最後の時刻」。"""
+        packets = nbytes = errors = 0
+        firsts, lasts = [], []
+        for c in self.cells:
+            with c['lock']:
+                packets += c['packets'].value
+                nbytes += c['bytes'].value
+                errors += c['errors'].value
+                if c['first'].value:
+                    firsts.append(c['first'].value)
+                if c['last'].value:
+                    lasts.append(c['last'].value)
+        elapsed = (max(lasts) - min(firsts)) if firsts and lasts else 0.0
+        pps = packets / elapsed if elapsed > 0 else 0.0
+        bps = nbytes * 8 / elapsed if elapsed > 0 else 0.0
+        return packets, nbytes, errors, elapsed, pps, bps
+
+
 def format_rate(pps: float, bps: float) -> str:
     """pps/bpsを読みやすい単位に整形する"""
     if bps >= 1_000_000_000:
@@ -2893,6 +3089,9 @@ class TrafficGenTab(ttk.Frame, LogMixin):
         self.recv_stop = threading.Event()
         self.sending = False
         self.receiving = False
+        # プロセス数2以上のときに使うマルチプロセス実行器（1のときはNone）
+        self.send_mp = None
+        self.recv_mp = None
         self._build_widgets()
         self._poll_stats()
 
@@ -2956,6 +3155,16 @@ class TrafficGenTab(ttk.Frame, LogMixin):
             row=3, column=4, sticky="w", **pad)
         ttk.Label(send_frame, text="(0-255。QoS確認用)").grid(row=3, column=5, sticky="w")
 
+        ttk.Label(send_frame, text="プロセス数:").grid(row=5, column=0, sticky="e", **pad)
+        self.send_nproc_var = tk.IntVar(value=1)
+        ttk.Spinbox(send_frame, from_=1, to=32, textvariable=self.send_nproc_var,
+                    width=6).grid(row=5, column=1, sticky="w", **pad)
+        ttk.Label(send_frame,
+                  text=f"(1プロセスは約24万pps=1472Bで約2.8Gbpsが上限。"
+                       f"このPCは{os.cpu_count()}コア。"
+                       f"2以上にすると宛先ポートを連番で使います)").grid(
+            row=5, column=2, columnspan=4, sticky="w", **pad)
+
         btn_row = ttk.Frame(send_frame)
         btn_row.grid(row=4, column=0, columnspan=6, sticky="w", **pad)
         self.send_start_btn = ttk.Button(btn_row, text="送信開始", command=self._on_send_start)
@@ -2987,6 +3196,14 @@ class TrafficGenTab(ttk.Frame, LogMixin):
         self.listen_port_var = tk.StringVar(value="5001")
         ttk.Entry(recv_frame, textvariable=self.listen_port_var, width=8).grid(
             row=1, column=1, sticky="w", **pad)
+
+        ttk.Label(recv_frame, text="プロセス数:").grid(row=1, column=2, sticky="e", **pad)
+        self.recv_nproc_var = tk.IntVar(value=1)
+        ttk.Spinbox(recv_frame, from_=1, to=32, textvariable=self.recv_nproc_var,
+                    width=6).grid(row=1, column=3, sticky="w", **pad)
+        ttk.Label(recv_frame,
+                  text="(送信側と同じ数にしてください。ポートを連番で使います)").grid(
+            row=1, column=4, sticky="w", **pad)
 
         rbtn_row = ttk.Frame(recv_frame)
         rbtn_row.grid(row=2, column=0, columnspan=6, sticky="w", **pad)
@@ -3042,13 +3259,41 @@ class TrafficGenTab(ttk.Frame, LogMixin):
             return
 
         proto = self.send_proto_var.get()
+        nproc = max(1, int(self.send_nproc_var.get()))
         self.send_stop.clear()
         self.sending = True
         self.send_start_btn.configure(state="disabled")
         self.send_stop_btn.configure(state="normal")
-        self.log(f"=== 送信開始 {proto.upper()} -> {dest_ip}:{dest_port} "
+        port_desc = (f"{dest_port}" if nproc == 1
+                     else f"{dest_port}〜{dest_port + nproc - 1}")
+        self.log(f"=== 送信開始 {proto.upper()} -> {dest_ip}:{port_desc} "
                   f"size={size}B rate={'無制限' if rate == 0 else str(rate) + 'pps'} "
-                  f"count={'無制限' if count == 0 else count} tos={tos} ===")
+                  f"count={'無制限' if count == 0 else count} tos={tos} "
+                  f"プロセス={nproc} ===")
+
+        self.send_mp = None
+        if nproc > 1:
+            # レート/送信数はプロセス間で等分される（合計が指定値になる）
+            self.send_mp = MultiProcessTraffic()
+            try:
+                self.send_mp.start_senders(nproc, proto, dest_ip, dest_port, size,
+                                            count, rate, src_ip, tos)
+            except OSError as e:
+                self.log(f"[ERROR] 送信プロセスの起動に失敗: {e}")
+                self.send_mp = None
+                self.sending = False
+                self.send_start_btn.configure(state="normal")
+                self.send_stop_btn.configure(state="disabled")
+                return
+
+            def watch_mp():
+                while self.sending and self.send_mp and self.send_mp.is_running():
+                    if self.send_stop.wait(0.2):
+                        break
+                self._finish_send()
+
+            threading.Thread(target=watch_mp, daemon=True).start()
+            return
 
         def worker():
             try:
@@ -3057,18 +3302,30 @@ class TrafficGenTab(ttk.Frame, LogMixin):
             except OSError as e:
                 self.log(f"[ERROR] 送信に失敗: {e}")
             finally:
-                packets, nbytes, errors, elapsed, pps, bps = self.send_stats.snapshot()
-                self.log(f"=== 送信終了 {packets:,}パケット / {nbytes:,}バイト / "
-                          f"{elapsed:.1f}秒 / {format_rate(pps, bps)} "
-                          f"(エラー{errors}件) ===")
-                self.sending = False
-                self.after(0, lambda: (self.send_start_btn.configure(state="normal"),
-                                        self.send_stop_btn.configure(state="disabled")))
+                self._finish_send()
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _finish_send(self):
+        if self.send_mp is not None:
+            self.send_mp.stop()
+        packets, nbytes, errors, elapsed, pps, bps = self._send_snapshot()
+        self.log(f"=== 送信終了 {packets:,}パケット / {nbytes:,}バイト / "
+                  f"{elapsed:.1f}秒 / {format_rate(pps, bps)} "
+                  f"(エラー{errors}件) ===")
+        self.sending = False
+        self.after(0, lambda: (self.send_start_btn.configure(state="normal"),
+                                self.send_stop_btn.configure(state="disabled")))
+
+    def _send_snapshot(self):
+        if self.send_mp is not None:
+            return self.send_mp.snapshot()
+        return self.send_stats.snapshot()
+
     def _on_send_stop(self):
         self.send_stop.set()
+        if self.send_mp is not None:
+            self.send_mp.stop()
 
     # ---- 受信 ----
     def _on_recv_start(self):
@@ -3086,12 +3343,36 @@ class TrafficGenTab(ttk.Frame, LogMixin):
             return
 
         proto = self.recv_proto_var.get()
+        nproc = max(1, int(self.recv_nproc_var.get()))
         self.recv_stop.clear()
         self.receiving = True
         self.recv_start_btn.configure(state="disabled")
         self.recv_stop_btn.configure(state="normal")
+        port_desc = (f"{listen_port}" if nproc == 1
+                     else f"{listen_port}〜{listen_port + nproc - 1}")
         self.log(f"=== 受信開始 {proto.upper()} "
-                  f"{listen_ip or '0.0.0.0'}:{listen_port} ===")
+                  f"{listen_ip or '0.0.0.0'}:{port_desc} プロセス={nproc} ===")
+
+        self.recv_mp = None
+        if nproc > 1:
+            self.recv_mp = MultiProcessTraffic()
+            try:
+                self.recv_mp.start_receivers(nproc, proto, listen_ip, listen_port)
+            except OSError as e:
+                self.log(f"[ERROR] 受信プロセスの起動に失敗: {e}")
+                self.recv_mp = None
+                self.receiving = False
+                self.recv_start_btn.configure(state="normal")
+                self.recv_stop_btn.configure(state="disabled")
+                return
+
+            def watch_mp():
+                while self.receiving and not self.recv_stop.wait(0.2):
+                    pass
+                self._finish_recv()
+
+            threading.Thread(target=watch_mp, daemon=True).start()
+            return
 
         def worker():
             try:
@@ -3101,24 +3382,36 @@ class TrafficGenTab(ttk.Frame, LogMixin):
                 self.log(f"[ERROR] 受信の待ち受けに失敗: {e}"
                           "(ポートが既に使われていませんか？)")
             finally:
-                packets, nbytes, errors, elapsed, pps, bps = self.recv_stats.snapshot()
-                self.log(f"=== 受信終了 {packets:,}パケット / {nbytes:,}バイト / "
-                          f"{elapsed:.1f}秒 / {format_rate(pps, bps)} "
-                          f"(エラー{errors}件) ===")
-                self.receiving = False
-                self.after(0, lambda: (self.recv_start_btn.configure(state="normal"),
-                                        self.recv_stop_btn.configure(state="disabled")))
+                self._finish_recv()
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _finish_recv(self):
+        if self.recv_mp is not None:
+            self.recv_mp.stop()
+        packets, nbytes, errors, elapsed, pps, bps = self._recv_snapshot()
+        self.log(f"=== 受信終了 {packets:,}パケット / {nbytes:,}バイト / "
+                  f"{elapsed:.1f}秒 / {format_rate(pps, bps)} "
+                  f"(エラー{errors}件) ===")
+        self.receiving = False
+        self.after(0, lambda: (self.recv_start_btn.configure(state="normal"),
+                                self.recv_stop_btn.configure(state="disabled")))
+
+    def _recv_snapshot(self):
+        if self.recv_mp is not None:
+            return self.recv_mp.snapshot()
+        return self.recv_stats.snapshot()
+
     def _on_recv_stop(self):
         self.recv_stop.set()
+        if self.recv_mp is not None:
+            self.recv_mp.stop()
 
     # ---- 統計表示 ----
     def _poll_stats(self):
-        for stats, label, name in ((self.send_stats, self.send_stat_label, "送信"),
-                                    (self.recv_stats, self.recv_stat_label, "受信")):
-            packets, nbytes, _errors, elapsed, pps, bps = stats.snapshot()
+        for snap, label, name in ((self._send_snapshot, self.send_stat_label, "送信"),
+                                   (self._recv_snapshot, self.recv_stat_label, "受信")):
+            packets, nbytes, _errors, elapsed, pps, bps = snap()
             if packets or elapsed:
                 label.configure(text=f"{name}: {packets:,}pkt / {nbytes:,}B / "
                                       f"{elapsed:.1f}s / {format_rate(pps, bps)}")
@@ -3155,6 +3448,9 @@ class MainApp(tk.Tk):
 
 
 def main():
+    # PyInstaller等でexe化した場合、これが無いと子プロセスがGUIを
+    # 再起動してしまう（Windowsのspawn方式のため）
+    multiprocessing.freeze_support()
     app = MainApp()
     app.mainloop()
 
