@@ -17,10 +17,6 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from engine.protocols import (
-    VirtualNetwork, RipEngine, OspfEngine, BgpEngine,
-    RibEngine, IcmpEngine
-)
 import engine.protocols as proto
 
 

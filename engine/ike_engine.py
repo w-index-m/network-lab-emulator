@@ -402,7 +402,7 @@ def negotiate_ipsec(device_sessions: dict, initiator_id: str) -> Dict[str, Negot
                 peer_ike_ok = bool(peer_d and peer_d.get('isakmp_enabled'))
 
             if not peer_d or not peer_ike_ok:
-                logs.append(f"IKE: No response — peer not ready")
+                logs.append("IKE: No response — peer not ready")
                 results[key] = NegotiationResult(False, 1, "Peer not ready", logs)
                 continue
 

@@ -8,7 +8,6 @@ Ollamaへの実通信は行わず、interpret()が返すJSONをモックして
 
 import os
 import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))

@@ -106,7 +106,7 @@ def load_fix_snippets(fix_script_path: Optional[str], rule_ids: set) -> dict:
     snippets = {}
     for rid in rule_ids:
         pattern = re.compile(
-            re.escape(f"BEGIN fix") + r'.*?' + re.escape(f"for '{rid}'") +
+            re.escape("BEGIN fix") + r'.*?' + re.escape(f"for '{rid}'") +
             r'.*?\n(.*?)' + re.escape(f"END fix for '{rid}'"),
             re.S,
         )

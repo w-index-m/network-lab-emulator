@@ -1,7 +1,6 @@
 import os
 os.environ['NETLAB_FAST_TIMERS'] = '1'
 import sys
-import asyncio
 import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import engine.protocols as proto

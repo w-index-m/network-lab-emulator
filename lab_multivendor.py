@@ -23,8 +23,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 import app
 from engine.rules import DeviceState
 from engine.protocols import (
-    vnet, rip_engine, ospf_engine, bgp_engine,
-    icmp_engine, rib_engine
+    vnet, rip_engine, bgp_engine,
+    icmp_engine
 )
 from engine.syslog_sender import syslog_dispatcher
 import engine.syslog_sender as ss
@@ -446,7 +446,7 @@ async def phase6_e2e():
 # ══════════════════════════════════════════════
 async def main():
     banner("マルチベンダー ラボ検証")
-    print(f"  APRESIA ─ RIP ─ Catalyst ─ OSPF ─ NX-OS ─ BGP ─ Si-R")
+    print("  APRESIA ─ RIP ─ Catalyst ─ OSPF ─ NX-OS ─ BGP ─ Si-R")
     print(f"  開始時刻: {time.strftime('%Y/%m/%d %H:%M:%S')}")
 
     await phase1_setup()
@@ -472,7 +472,7 @@ async def main():
     print(f"  syslog転送 : {len(syslog_received)}件 → 192.168.1.100")
 
     if failed:
-        print(f"\n  ❌ 失敗項目:")
+        print("\n  ❌ 失敗項目:")
         for label, ok in results:
             if not ok: print(f"    - {label}")
 

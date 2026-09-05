@@ -12,7 +12,6 @@ engine/protocols.py の SnmpAgent（内部シミュレーション、get/getnext
 """
 
 import asyncio
-import struct
 import subprocess
 from typing import Optional
 

@@ -6,7 +6,6 @@ app.py から import して使用
 import asyncio
 import time
 import random
-import math
 from typing import Dict, List, Optional, Callable, Any
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -909,7 +908,7 @@ class RipEngine:
                       if r.learned_from != 'direct' and r.learned_from_hostname)
         for src in sources:
             lines.append(f'  {src:<20}0              0 00:00:{random.randint(10,59):02d}')
-        lines.append(f'Distance: 120')
+        lines.append('Distance: 120')
         lines.append(f'The number of entries : {len(n["table"])}')
         return '\n'.join(lines)
 
@@ -2519,15 +2518,15 @@ class BgpEngine:
                 f'BGP neighbor is {addr},  remote AS {s.remote_as}, {link} link',
                 f'  BGP version 4, remote router ID {addr}',
                 state_line,
-                f'  Last read 00:00:00, last write 00:00:00, hold time is 180, '
-                f'keepalive interval is 60 seconds',
-                f'  Neighbor sessions:',
+                '  Last read 00:00:00, last write 00:00:00, hold time is 180, '
+                'keepalive interval is 60 seconds',
+                '  Neighbor sessions:',
                 f'    {1 if s.state == "Established" else 0} active, '
                 f'is not multisession capable (disabled)',
-                f'  Message statistics:',
-                f'    InQ depth is 0',
-                f'    OutQ depth is 0',
-                f'  For address family: IPv4 Unicast',
+                '  Message statistics:',
+                '    InQ depth is 0',
+                '    OutQ depth is 0',
+                '  For address family: IPv4 Unicast',
                 f'    Prefixes Current:  {sent} sent, {rcvd} received',
                 f'  Connection state is {s.state}, '
                 f'{"connection established" if s.state == "Established" else "not established"}',
@@ -2664,7 +2663,7 @@ class BgpEngine:
                     None)
         candidates = [r for r in n['rib_in'] if _matches(r.prefix, r.prefix_len)]
         if not best and not candidates:
-            return f'% Network not in table'
+            return '% Network not in table'
         key = f'{best["prefix"]}/{best["prefix_len"]}' if best else \
             f'{candidates[0].prefix}/{candidates[0].prefix_len}'
 
@@ -3208,7 +3207,7 @@ class StpEngine:
                 port['state'] = 'FORWARDING'
             await vnet.send_to(device_id, {
                 'type': 'stp_log',
-                'message': vendor_log.ios('SPANTREE', 5, 'ROOTCHANGE', f'This bridge is now the root bridge')
+                'message': vendor_log.ios('SPANTREE', 5, 'ROOTCHANGE', 'This bridge is now the root bridge')
             })
         await vnet.send_to(device_id, {
             'type': 'stp_ports', 'ports': list(n['ports'].values())
@@ -3266,7 +3265,7 @@ class StpEngine:
             # ルートポートが消えた → ルートブリッジ再選出が必要
             await vnet.send_to(device_id, {
                 'type': 'stp_log',
-                'message': vendor_log.ios('SPANTREE', 5, 'ROOTCHANGE', f'Root port lost. Initiating re-election...')
+                'message': vendor_log.ios('SPANTREE', 5, 'ROOTCHANGE', 'Root port lost. Initiating re-election...')
             })
             # ルートを自分自身にリセットして再収束を待つ
             n['root_bridge_id'] = n['bridge_id']
@@ -3279,7 +3278,7 @@ class StpEngine:
             self._recompute_port_roles(device_id)
             await vnet.send_to(device_id, {
                 'type': 'stp_topology_change',
-                'message': f'Topology Change: Root port failed, reconverging...'
+                'message': 'Topology Change: Root port failed, reconverging...'
             })
         else:
             # 非ルートポートが消えた → ポート役割を再計算するだけ
@@ -3503,26 +3502,26 @@ class StpEngine:
 
         lines = [
             f'Switch is in {mode_str} mode',
-            f'Root bridge for: ' + ', '.join(
+            'Root bridge for: ' + ', '.join(
                 f'VLAN{v:04d}' for v in vlan_list
                 if n.get('root_bridge_id') == n.get('bridge_id')
             ) or 'none',
-            f'Extended system ID           is enabled',
+            'Extended system ID           is enabled',
             f'Portfast Default             is {pf_default}',
             f'PortFast BPDU Guard Default  is {bg_default}',
-            f'Portfast BPDU Filter Default is disabled',
-            f'Loopguard Default            is disabled',
-            f'EtherChannel misconfig guard is enabled',
-            f'UplinkFast                   is disabled',
-            f'BackboneFast                 is disabled',
+            'Portfast BPDU Filter Default is disabled',
+            'Loopguard Default            is disabled',
+            'EtherChannel misconfig guard is enabled',
+            'UplinkFast                   is disabled',
+            'BackboneFast                 is disabled',
             '',
-            f'Name                   Blocking Listening Learning Forwarding STP Active',
-            f'---------------------- -------- --------- -------- ---------- ----------',
+            'Name                   Blocking Listening Learning Forwarding STP Active',
+            '---------------------- -------- --------- -------- ---------- ----------',
         ]
         for v in vlan_list:
             vname = f'VLAN{v:04d}'
             lines.append(f'{vname:<23}{blk:<9}{lis:<10}{lrn:<9}{fwd:<11}{total}')
-        lines.append(f'---------------------- -------- --------- -------- ---------- ----------')
+        lines.append('---------------------- -------- --------- -------- ---------- ----------')
         lines.append(f'{len(vlan_list)} vlans    {blk:<9}{lis:<10}{lrn:<9}{fwd:<11}{total}')
         return '\n'.join(lines)
 
@@ -3565,7 +3564,7 @@ class StpEngine:
             lines.append('             This bridge is the root')
         else:
             lines.append(f'             Cost        {n.get("root_path_cost", 0)}')
-            lines.append(f'             Hello Time  2 sec  Max Age 20 sec  Forward Delay 15 sec')
+            lines.append('             Hello Time  2 sec  Max Age 20 sec  Forward Delay 15 sec')
         lines += [
             '',
             f'  Bridge ID  Priority    {pri + vlan}  (priority {pri} sys-id-ext {vlan})',
@@ -4593,9 +4592,9 @@ class NatEngine:
             f'{sum(1 for e in entries if not e.is_static)} dynamic; '
             f'{sum(1 for e in entries if e.glob_port)} extended)',
             'Peak translations: %d' % active,
-            f'Outside interfaces:',
+            'Outside interfaces:',
             f'  {outside}',
-            f'Inside interfaces:',
+            'Inside interfaces:',
             f'  {inside}',
         ])
 
@@ -4698,7 +4697,7 @@ class CefEngine:
         return '\n'.join(lines)
 
     def _format_nexus_fib(self, device_id: str, entries: list) -> str:
-        lines = [f'IPv4 routes for table default/base', '',
+        lines = ['IPv4 routes for table default/base', '',
                  '------------------+----------------------+----------+-----------',
                  'Prefix            | Next-hop             | Interface| Type',
                  '------------------+----------------------+----------+-----------']
@@ -5922,7 +5921,7 @@ class GenieEngine:
                     f'  Result: PASS (no differences)\n'
                     f'  状態に差分はありません。')
         lines = [f'===== Snapshot Comparison: "{before}" vs "{after}" =====',
-                 f'  Result: FAIL (differences detected)', '']
+                 '  Result: FAIL (differences detected)', '']
         for feature, changes in result['diffs'].items():
             lines.append(f"feature '{feature}' に差分:")
             for c in changes:
@@ -6137,13 +6136,13 @@ class LacpEngine:
             lines.append(f'  Group {po_num}:')
             lines.append(f'    Status   : {status}')
             lines.append(f'    Mode     : {mode} ({proto})')
-            lines.append(f'    Members  :')
+            lines.append('    Members  :')
             for m in ch['members']:
                 state_str = 'Bundled' if m.state == 'bundled' else 'Independent'
                 # SR-SのポートはETHER形式で表示
                 ether_name = m.interface.replace('GigabitEthernet1/0/', 'ETHER')
                 lines.append(f'      {ether_name:<10} {state_str}')
-            lines.append(f'    LACP PDU sent/rcvd: 42/38')
+            lines.append('    LACP PDU sent/rcvd: 42/38')
             lines.append('')
         return '\n'.join(lines)
 
@@ -6158,7 +6157,7 @@ class LacpEngine:
             for po_num, ch in sorted(chans.items()):
                 lines.append('!')
                 lines.append(f'interface Port-channel{po_num}')
-                lines.append(f' switchport mode trunk')
+                lines.append(' switchport mode trunk')
                 lines.append('!')
                 for m in ch['members']:
                     lines.append(f'interface {m.interface}')
@@ -6891,7 +6890,7 @@ class VrrpEngine:
                 lines.append(f'  Master Router is {g.peer_ip or g.peer_id}, '
                              f'priority is {g.peer_priority}')
             else:
-                lines.append(f'  Master Router is (unknown)')
+                lines.append('  Master Router is (unknown)')
             lines.append('')
         return '\n'.join(lines)
 
@@ -6932,11 +6931,11 @@ class VrrpEngine:
             peer_desc = (f'{g.peer_ip or g.peer_id}, priority {g.peer_priority}'
                          if g.peer_id else 'unknown')
             if g.state == 'Active':
-                lines.append(f'  Active router is local')
+                lines.append('  Active router is local')
                 lines.append(f'  Standby router is {peer_desc}')
             else:
                 lines.append(f'  Active router is {peer_desc}')
-                lines.append(f'  Standby router is local')
+                lines.append('  Standby router is local')
             lines.append('')
         return '\n'.join(lines)
 
@@ -7241,8 +7240,8 @@ class VlanEngine:
             '---- -------------------------------- --------- -------------------------------',
             f'{vlan_id:<5}{v.name[:32]:<33}{v.state:<10}{", ".join(v.ports)}',
             '',
-            f'VLAN Type  SAID       MTU',
-            f'---- ----- ---------- -----',
+            'VLAN Type  SAID       MTU',
+            '---- ----- ---------- -----',
             f'{vlan_id:<5}{"enet":<6}{100000+vlan_id:<11}1500',
         ]
         return '\n'.join(lines)
@@ -7661,9 +7660,9 @@ class VpcEngine:
                     peer_dom.role = 'primary (oper)'
                     await vnet.send_to(peer_id, {
                         'type': 'vpc_log',
-                        'message': (f'%VPC-6-VPC_STATUS_CHANGE: '
-                                    f'Peer keepalive is dead, '
-                                    f'vPC secondary assuming operational primary role')
+                        'message': ('%VPC-6-VPC_STATUS_CHANGE: '
+                                    'Peer keepalive is dead, '
+                                    'vPC secondary assuming operational primary role')
                     })
 
     async def simulate_peer_link_failure(self, device_id: str):
@@ -7683,14 +7682,14 @@ class VpcEngine:
                         mp.state = 'suspended'
                     await vnet.send_to(peer_id, {
                         'type': 'vpc_log',
-                        'message': (f'%VPC-6-VPC_STATUS_CHANGE: '
-                                    f'Peer-Link is down, '
-                                    f'Secondary vPC ports suspended to avoid loop')
+                        'message': ('%VPC-6-VPC_STATUS_CHANGE: '
+                                    'Peer-Link is down, '
+                                    'Secondary vPC ports suspended to avoid loop')
                     })
                 # Primary側もPeer-Link downを通知
                 await vnet.send_to(device_id, {
                     'type': 'vpc_log',
-                    'message': f'%VPC-6-PEER_LINK_CHANGE: vPC Peer-Link is down'
+                    'message': '%VPC-6-PEER_LINK_CHANGE: vPC Peer-Link is down'
                 })
 
     # ── show コマンド ──────────────────────
@@ -7711,24 +7710,24 @@ class VpcEngine:
             f'vPC domain id                     : {d.domain_id}',
             f'Peer status                        : {d.keepalive_state}',
             f'vPC keep-alive status              : {d.keepalive_state}',
-            f'Configuration consistency status   : success',
-            f'Per-vlan consistency status        : success',
-            f'Type-2 consistency status          : success',
+            'Configuration consistency status   : success',
+            'Per-vlan consistency status        : success',
+            'Type-2 consistency status          : success',
             f'vPC role                           : {d.role}',
             f'Number of vPCs configured          : {len(d.member_ports)}',
             f'Peer Gateway                       : {"Enabled" if d.peer_gateway else "Disabled"}',
             f'Peer-switch                        : {"Enabled" if d.peer_switch else "Disabled"}',
             '',
-            f'vPC Peer-link status',
-            f'---------------------------------------------------------------------',
-            f'id    Port   Status Active vlans',
-            f'--    ----   ------ --------------------------------------------------',
+            'vPC Peer-link status',
+            '---------------------------------------------------------------------',
+            'id    Port   Status Active vlans',
+            '--    ----   ------ --------------------------------------------------',
             f'1     {d.peer_link_if or "N/A":<6} {d.peer_link_state:<6} -',
             '',
-            f'vPC status',
-            f'----------------------------------------------------------------------------',
-            f'Id    Port          Status Consistency Reason                Active vlans',
-            f'--    ------------- ------ ----------- ------                ------------',
+            'vPC status',
+            '----------------------------------------------------------------------------',
+            'Id    Port          Status Consistency Reason                Active vlans',
+            '--    ------------- ------ ----------- ------                ------------',
         ]
         for vpc_id, mp in sorted(d.member_ports.items()):
             consistency = 'success' if mp.state == 'up' else 'failed'
@@ -7779,16 +7778,16 @@ class VpcEngine:
         peer_id = self.peers.get(device_id)
         peer_dom = self.domains.get(peer_id, VpcDomain(0)) if peer_id else VpcDomain(0)
         lines = [
-            f'vPC Role status',
-            f'---------------------------------------------------',
+            'vPC Role status',
+            '---------------------------------------------------',
             f'Configured role                    : {d.role}',
             f'Current role                       : {d.role}',
             f'Role priority                      : {d.role_priority}',
-            f'Dual Active Detection Status       : 0',
+            'Dual Active Detection Status       : 0',
             f'System-mac address                 : {d.system_mac}',
             f'Local system-mac address           : {d.system_mac}',
             f'Peer system-mac address            : {peer_dom.system_mac}',
-            f'Peer fabric-path system-id         : 0',
+            'Peer fabric-path system-id         : 0',
             f'Local system-priority              : {d.system_priority}',
             f'Peer system-priority               : {peer_dom.system_priority}',
         ]
@@ -7802,13 +7801,13 @@ class VpcEngine:
         lines = [
             'Name                        Type  Local Value            Peer Value',
             '--------------------------- ----- ---------------------- --------------------',
-            f'STP mode                    1     Rapid-PVST+            Rapid-PVST+',
-            f'STP MST region name         1     ""                     ""',
-            f'STP port type, edge         1     Normal, Disabled       Normal, Disabled',
-            f'STP MST region revision     1     0                      0',
-            f'Xconnect Vlans              1     -                      -',
-            f'Mode                        1     VPC                    VPC',
-            f'Peer-link                   1     Present                Present',
+            'STP mode                    1     Rapid-PVST+            Rapid-PVST+',
+            'STP MST region name         1     ""                     ""',
+            'STP port type, edge         1     Normal, Disabled       Normal, Disabled',
+            'STP MST region revision     1     0                      0',
+            'Xconnect Vlans              1     -                      -',
+            'Mode                        1     VPC                    VPC',
+            'Peer-link                   1     Present                Present',
         ]
         return '\n'.join(lines)
 
@@ -8270,16 +8269,16 @@ class VendorLogFormatter:
             if device_type == 'nexus':
                 return VendorLogFormatter.nxos(
                     hostname, 'SYSMGR', 5, 'MGMT_CONF',
-                    f'Configured from console by admin on vty0'
+                    'Configured from console by admin on vty0'
                 )
             return VendorLogFormatter.ios(
                 'SYS', 5, 'CONFIG_I',
-                f'Configured from console by console'
+                'Configured from console by console'
             )
         else:
             return VendorLogFormatter.sir(
                 hostname, 'SYS',
-                f'configuration changed from console'
+                'configuration changed from console'
             )
 
 
@@ -8667,8 +8666,8 @@ class SiRMessageEngine:
             return f'{hostname} Si-R G120 : [SYSTEM] no log entries'
         lines = [
             f'Current time : {datetime.now().strftime("%Y/%m/%d %H:%M:%S")}',
-            f'',
-            f'Syslog:',
+            '',
+            'Syslog:',
         ]
         for ts, facility, message in logs[-50:]:  # 最新50件
             lines.append(f'{ts} {hostname} {self.MACHINE} : [{facility}] {message}')
@@ -9238,14 +9237,14 @@ class NxosMessageEngine:
         show logging の出力（Nexus 9000 NX-OS 10.2準拠）
         """
         lines = [
-            f'Logging console:                 5 (Notifications)',
-            f'Logging monitor:                 5 (Notifications)',
-            f'Logging linecard:                5 (Notifications)',
-            f'Logging timestamp:               Microseconds',
-            f'Logging server:                  enabled',
-            f'    192.168.1.100               6 (Informational), link : up',
-            f'',
-            f'Log file (/log/messages):',
+            'Logging console:                 5 (Notifications)',
+            'Logging monitor:                 5 (Notifications)',
+            'Logging linecard:                5 (Notifications)',
+            'Logging timestamp:               Microseconds',
+            'Logging server:                  enabled',
+            '    192.168.1.100               6 (Informational), link : up',
+            '',
+            'Log file (/log/messages):',
         ]
         if not logs:
             lines.append('(no log messages)')
@@ -9377,11 +9376,11 @@ class ApresiaMessageEngine:
         show logging の出力（APRESIA ApresiaLight準拠）
         """
         lines = [
-            f'System Log:',
+            'System Log:',
             f'  Hostname : {hostname}',
             f'  Time     : {datetime.now().strftime("%Y/%m/%d %H:%M:%S")}',
-            f'',
-            f'Log entries:',
+            '',
+            'Log entries:',
         ]
         if not logs:
             lines.append('  (no log messages)')

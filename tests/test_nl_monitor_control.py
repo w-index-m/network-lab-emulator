@@ -6,15 +6,13 @@ tools/nl_monitor_control.py テスト
 - watchlistの追加/重複防止/削除
 """
 
-import json
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
 from tools.nl_monitor_control import (
-    _rule_based_parse, _norm_iface, add_watchlist_entry, remove_watchlist_entry,
-    load_watchlist, save_watchlist, WATCHLIST_PATH, _parse_bulk,
+    _rule_based_parse, _norm_iface, _parse_bulk,
 )
 
 

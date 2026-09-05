@@ -38,8 +38,6 @@ Netmiko を使用した実機/EVE-NG 環境での Catalyst・Cisco ルーター 
 import argparse
 import os
 import sys
-import json
-from datetime import datetime
 
 try:
     from netmiko import ConnectHandler, NetmikoAuthenticationException, NetmikoTimeoutException
@@ -117,24 +115,24 @@ class CatalystTester:
             ]
             output = self.send_config(commands)
             if output:
-                print(f"✅ インターフェース設定投入成功")
+                print("✅ インターフェース設定投入成功")
                 print(f"   出力: {output[:100]}...")
 
             # 設定確認
             output = self.send_command('show running-config interface GigabitEthernet1/0/1')
             if output and '10.100.1.1' in output:
-                print(f"✅ 設定確認成功 - IP アドレスが設定されている")
+                print("✅ 設定確認成功 - IP アドレスが設定されている")
                 self.results.append(('Interface Config', True))
             else:
-                print(f"❌ 設定確認失敗 - IP アドレスが見つからない")
+                print("❌ 設定確認失敗 - IP アドレスが見つからない")
                 self.results.append(('Interface Config', False))
 
             # インターフェース状態確認
             output = self.send_command('show interfaces GigabitEthernet1/0/1')
             if output:
-                print(f"✅ インターフェース状態取得成功")
+                print("✅ インターフェース状態取得成功")
                 if 'up' in output.lower() or 'admin' in output.lower():
-                    print(f"   状態情報を取得")
+                    print("   状態情報を取得")
 
         except Exception as e:
             print(f"❌ テスト失敗: {e}")
@@ -155,21 +153,21 @@ class CatalystTester:
             ]
             output = self.send_config(commands)
             if output:
-                print(f"✅ OSPF設定投入成功")
+                print("✅ OSPF設定投入成功")
 
             # OSPF プロセス確認
             output = self.send_command('show ip ospf')
             if output and 'Routing Process' in output:
-                print(f"✅ OSPF プロセス稼働確認")
+                print("✅ OSPF プロセス稼働確認")
                 self.results.append(('OSPF Config', True))
             else:
-                print(f"❌ OSPF プロセスが稼働していない可能性")
+                print("❌ OSPF プロセスが稼働していない可能性")
                 self.results.append(('OSPF Config', False))
 
             # 隣接状態確認
             output = self.send_command('show ip ospf neighbor')
             if output:
-                print(f"✅ OSPF 隣接情報取得")
+                print("✅ OSPF 隣接情報取得")
                 neighbor_count = output.count('FULL') + output.count('Full')
                 print(f"   Full 隣接数: {neighbor_count}")
 
@@ -195,20 +193,20 @@ class CatalystTester:
             ]
             output = self.send_config(commands)
             if output:
-                print(f"✅ BGP設定投入成功")
+                print("✅ BGP設定投入成功")
 
             # BGP サマリ確認
             output = self.send_command('show ip bgp summary')
             if output and '65001' in output:
-                print(f"✅ BGP プロセス稼働確認")
+                print("✅ BGP プロセス稼働確認")
                 self.results.append(('BGP Config', True))
             else:
-                print(f"❌ BGP プロセスが稼働していない可能性")
+                print("❌ BGP プロセスが稼働していない可能性")
                 self.results.append(('BGP Config', False))
 
             # ネイバー確認
             if 'Neighbor' in output or '192.168' in output:
-                print(f"✅ BGP ネイバー情報取得")
+                print("✅ BGP ネイバー情報取得")
 
         except Exception as e:
             print(f"❌ テスト失敗: {e}")
@@ -229,15 +227,15 @@ class CatalystTester:
             ]
             output = self.send_config(commands)
             if output:
-                print(f"✅ VLAN 設定投入成功")
+                print("✅ VLAN 設定投入成功")
 
             # VLAN 確認
             output = self.send_command('show vlan id 200')
             if output and '200' in output:
-                print(f"✅ VLAN 設定確認成功")
+                print("✅ VLAN 設定確認成功")
                 self.results.append(('VLAN Config', True))
             else:
-                print(f"❌ VLAN 設定が見つからない")
+                print("❌ VLAN 設定が見つからない")
                 self.results.append(('VLAN Config', False))
 
         except Exception as e:
@@ -261,15 +259,15 @@ class CatalystTester:
             ]
             output = self.send_config(commands)
             if output:
-                print(f"✅ ACL 設定投入成功")
+                print("✅ ACL 設定投入成功")
 
             # ACL 確認
             output = self.send_command('show access-lists TEST_ACL')
             if output and ('permit' in output.lower() or 'TEST_ACL' in output):
-                print(f"✅ ACL 設定確認成功")
+                print("✅ ACL 設定確認成功")
                 self.results.append(('ACL Config', True))
             else:
-                print(f"❌ ACL が見つからない")
+                print("❌ ACL が見つからない")
                 self.results.append(('ACL Config', False))
 
         except Exception as e:

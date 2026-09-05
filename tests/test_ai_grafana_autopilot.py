@@ -10,7 +10,6 @@ import json
 import sys
 import os
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))

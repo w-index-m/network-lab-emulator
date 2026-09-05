@@ -14,7 +14,6 @@ import time
 import sys
 import os
 import json
-import asyncio
 import urllib.request
 import pytest
 

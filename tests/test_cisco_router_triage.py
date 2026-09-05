@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from tools.cisco_router_triage import (
     parse_cpu, parse_memory, parse_interfaces_down, parse_interface_errors,
-    parse_recent_errors, diagnose, Finding, CPU_WARN, CPU_CRIT,
+    parse_recent_errors, diagnose, CPU_CRIT,
 )
 
 

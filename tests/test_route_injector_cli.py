@@ -9,7 +9,6 @@ GUI版(tools/route_injector/network_route_injector.py)のRIP/BGP
   実際に相手側でパースできる正しいバイト列が送られているかを確認
 """
 
-import json
 import socket
 import struct
 import sys
@@ -21,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from tools.route_injector_cli import (
     rip_build_rte, rip_build_packet, _parse_route_spec,
-    bgp_build_open, bgp_build_update, bgp_encode_prefix, bgp_parse_community,
+    bgp_build_open, bgp_encode_prefix, bgp_parse_community,
     BGPSpeaker,
 )
 

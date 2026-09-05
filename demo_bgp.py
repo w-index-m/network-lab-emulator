@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import app
 from engine.rules import DeviceState
-from engine.protocols import vnet, bgp_engine, icmp_engine
+from engine.protocols import vnet, icmp_engine
 import engine.protocols as proto
 
 def banner(title, char='━'):
@@ -37,7 +37,7 @@ def step(num, desc):
     print(f"\n┌─ Step {num}: {desc}")
 
 def show(label, output):
-    print(f"│")
+    print("│")
     print(f"│  [{label}]")
     for line in output.strip().split('\n'):
         print(f"│    {line}")

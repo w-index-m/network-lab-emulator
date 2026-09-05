@@ -144,7 +144,7 @@ def run_iac(tool: str, action: str) -> int:
               f'（{tool} がこの環境にインストールされていない可能性があります）')
         return 1
     except subprocess.TimeoutExpired:
-        print(f'❌ タイムアウトしました（600秒）')
+        print('❌ タイムアウトしました（600秒）')
         return 1
 
     print(result.stdout[-4000:])

@@ -13,7 +13,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from engine.protocols import BgpEngine, BgpRoute
-from engine.rules import RuleEngine
 
 
 def test_bgp_community_in_route():

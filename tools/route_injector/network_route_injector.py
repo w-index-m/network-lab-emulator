@@ -30,7 +30,6 @@ import struct
 import threading
 import time
 import queue
-import sys
 import csv
 from collections import Counter
 

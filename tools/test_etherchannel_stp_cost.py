@@ -171,7 +171,7 @@ class EtherChannelSTPTester:
             # ポート状態
             output = self.cli(dev_id, 'show port-channel summary')
             if output:
-                print(f"      ✅ port-channel 情報取得")
+                print("      ✅ port-channel 情報取得")
 
     def verify_stp_cost(self):
         """STP コスト確認"""
@@ -193,7 +193,7 @@ class EtherChannelSTPTester:
             # port-channel 固有のコスト確認
             output = self.cli(dev_id, 'show spanning-tree interface port-channel 1')
             if output:
-                print(f"\n      [port-channel 1 詳細]")
+                print("\n      [port-channel 1 詳細]")
                 lines = output.split('\n')[:15]
                 for line in lines:
                     if line.strip():
@@ -317,7 +317,7 @@ class ParamikoSiRRouteVerifier:
                 look_for_keys=False,
                 allow_agent=False
             )
-            print(f"✅ Paramiko SSH 接続成功")
+            print("✅ Paramiko SSH 接続成功")
             return True
         except Exception as e:
             print(f"❌ Paramiko 接続失敗: {e}")
@@ -356,7 +356,7 @@ class ParamikoSiRRouteVerifier:
                 for line in lines[:25]:
                     if line.strip():
                         print(f"      {line}")
-                print(f"      ✅ ルーティングテーブル取得成功")
+                print("      ✅ ルーティングテーブル取得成功")
 
             # Static Route確認
             print("\n  [2] Static Route一覧:")
@@ -366,7 +366,7 @@ class ParamikoSiRRouteVerifier:
                 for line in lines:
                     if line.strip() and ('192.168.20' in line or '10.100' in line or 'S ' in line):
                         print(f"      {line}")
-                print(f"      ✅ Static Route取得成功")
+                print("      ✅ Static Route取得成功")
 
             # OSPF再配信確認
             print("\n  [3] OSPF プロセス確認:")
@@ -376,7 +376,7 @@ class ParamikoSiRRouteVerifier:
                 for line in lines:
                     if line.strip():
                         print(f"      {line}")
-                print(f"      ✅ OSPF プロセス取得成功")
+                print("      ✅ OSPF プロセス取得成功")
 
             # 詳細設定確認
             print("\n  [4] redistribute 設定確認:")
@@ -386,7 +386,7 @@ class ParamikoSiRRouteVerifier:
                 for line in lines:
                     if line.strip():
                         print(f"      {line}")
-                print(f"      ✅ redistribute 設定取得成功")
+                print("      ✅ redistribute 設定取得成功")
 
             self.disconnect()
             return True

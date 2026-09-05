@@ -27,7 +27,6 @@ OSPF ルーティング配信後の経路確認テスト（netmiko/Paramiko）
 import argparse
 import os
 import sys
-import asyncio
 import json
 import time
 import urllib.request
@@ -36,7 +35,7 @@ import urllib.error
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 try:
-    from netmiko import ConnectHandler, NetmikoAuthenticationException, NetmikoTimeoutException
+    from netmiko import ConnectHandler
     HAS_NETMIKO = True
 except ImportError:
     HAS_NETMIKO = False
@@ -150,7 +149,7 @@ class OSPFRoutingTester:
             self.cli(device_id, cmd)
             time.sleep(0.1)
 
-        print(f"  ✅ Catalyst OSPF 設定完了")
+        print("  ✅ Catalyst OSPF 設定完了")
 
     def configure_ospf_cisco(self, device_id='ospf-cisco2'):
         """Cisco ISR の OSPF 設定"""
@@ -181,7 +180,7 @@ class OSPFRoutingTester:
             self.cli(device_id, cmd)
             time.sleep(0.1)
 
-        print(f"  ✅ Cisco ISR OSPF 設定完了")
+        print("  ✅ Cisco ISR OSPF 設定完了")
 
     def configure_ospf_sir(self, device_id='ospf-sir3'):
         """Si-R の OSPF 設定"""
@@ -204,7 +203,7 @@ class OSPFRoutingTester:
             self.cli(device_id, cmd)
             time.sleep(0.1)
 
-        print(f"  ✅ Si-R OSPF 設定完了")
+        print("  ✅ Si-R OSPF 設定完了")
 
     def verify_ospf_neighbors(self):
         """OSPF 隣接確認"""
@@ -252,7 +251,7 @@ class OSPFRoutingTester:
                         print(f"      ... 他 {len(ospf_routes) - 5} 件")
                     self.results.append((dev_name, True))
                 else:
-                    print(f"      ⚠️  OSPF 経路なし（収束待機中...）")
+                    print("      ⚠️  OSPF 経路なし（収束待機中...）")
                     self.results.append((dev_name, False))
 
     def test_emulator_ospf_topology(self):
@@ -308,7 +307,7 @@ class NetmikoOSPFVerifier:
         try:
             print(f"\n📡 Netmiko 接続中... {self.device['host']}")
             self.conn = ConnectHandler(**self.device)
-            print(f"✅ Netmiko 接続成功")
+            print("✅ Netmiko 接続成功")
             return True
         except Exception as e:
             print(f"❌ Netmiko 接続失敗: {e}")
@@ -409,7 +408,7 @@ class ParamikoSiRVerifier:
                 look_for_keys=False,
                 allow_agent=False
             )
-            print(f"✅ Paramiko SSH 接続成功")
+            print("✅ Paramiko SSH 接続成功")
             return True
         except Exception as e:
             print(f"❌ Paramiko 接続失敗: {e}")
@@ -457,7 +456,7 @@ class ParamikoSiRVerifier:
                             print(f"      {line}")
                     print(f"      ✅ {desc} 取得成功")
                 else:
-                    print(f"      ⚠️  結果なし（Si-R は異なるコマンド体系を使用）")
+                    print("      ⚠️  結果なし（Si-R は異なるコマンド体系を使用）")
 
             self.disconnect()
             return True

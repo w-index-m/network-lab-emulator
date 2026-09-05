@@ -607,7 +607,7 @@ async def main():
     failed = total - passed - warned
 
     print(f"\n{'━'*60}")
-    print(f"  NX-OS 動作確認結果")
+    print("  NX-OS 動作確認結果")
     print(f"{'━'*60}")
     print(f"  総テスト数 : {total}")
     print(f"  PASS       : {passed} ✅")
@@ -616,27 +616,27 @@ async def main():
     print(f"  合格率     : {round(passed/total*100)}% ({passed}/{total})")
 
     if failed > 0:
-        print(f"\n  ❌ 失敗項目一覧:")
+        print("\n  ❌ 失敗項目一覧:")
         for label, ok, w in results:
             if not ok and not w:
                 print(f"    - {label}")
     if warned > 0:
-        print(f"\n  ⚠️  警告項目一覧:")
+        print("\n  ⚠️  警告項目一覧:")
         for label, ok, w in results:
             if not ok and w:
                 print(f"    - {label}")
 
-    print(f"\n  確認コマンド集 (NX-OS):")
-    print(f"    show vpc                           vPCドメイン・ポート状態")
-    print(f"    show vpc brief                     vPC簡易表示")
-    print(f"    show vpc peer-keepalive            Keepalive状態")
-    print(f"    show vpc role                      Primary/Secondary確認")
-    print(f"    show vpc consistency-parameters    整合性確認")
-    print(f"    show ip ospf neighbor              OSPFネイバー")
-    print(f"    show ip ospf database              LSDBコンテンツ")
-    print(f"    show ip bgp summary                BGPセッション")
-    print(f"    show vlan                          VLANデータベース")
-    print(f"    show interfaces trunk              トランクポート")
-    print(f"    show running-config                実行中コンフィグ")
+    print("\n  確認コマンド集 (NX-OS):")
+    print("    show vpc                           vPCドメイン・ポート状態")
+    print("    show vpc brief                     vPC簡易表示")
+    print("    show vpc peer-keepalive            Keepalive状態")
+    print("    show vpc role                      Primary/Secondary確認")
+    print("    show vpc consistency-parameters    整合性確認")
+    print("    show ip ospf neighbor              OSPFネイバー")
+    print("    show ip ospf database              LSDBコンテンツ")
+    print("    show ip bgp summary                BGPセッション")
+    print("    show vlan                          VLANデータベース")
+    print("    show interfaces trunk              トランクポート")
+    print("    show running-config                実行中コンフィグ")
 
 asyncio.run(main())

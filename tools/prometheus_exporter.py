@@ -30,7 +30,6 @@ Windowsの場合は tools/run_prometheus_exporter.bat から起動できる。
 import argparse
 import json
 import os
-import sys
 import time
 import urllib.request
 import urllib.error

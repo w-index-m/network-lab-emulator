@@ -37,7 +37,7 @@ def step(num, desc):
     print(f"\n┌─ Step {num}: {desc}")
 
 def show(label, output):
-    print(f"│")
+    print("│")
     print(f"│  [{label}]")
     for line in output.strip().split('\n'):
         print(f"│    {line}")

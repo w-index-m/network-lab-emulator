@@ -19,13 +19,13 @@
   ⑤ ルーティングテーブルへの反映
 """
 
-import os, sys, asyncio, time
+import os, sys, asyncio
 os.environ['NETLAB_FAST_TIMERS'] = '1'
 sys.path.insert(0, os.path.dirname(__file__))
 
 import app
 from engine.rules import DeviceState
-from engine.protocols import vnet, rip_engine, rib_engine, icmp_engine
+from engine.protocols import vnet, rip_engine, icmp_engine
 import engine.protocols as proto
 
 def banner(title, char='━'):
@@ -37,7 +37,7 @@ def step(num, desc):
     print(f"\n┌─ Step {num}: {desc}")
 
 def show(label, output):
-    print(f"│")
+    print("│")
     print(f"│  [{label}]")
     for line in output.strip().split('\n'):
         print(f"│    {line}")
@@ -125,11 +125,11 @@ async def main():
     learned = [r for r in n_rb.get('table',[]) if r.learned_from != 'direct']
     if learned:
         r = learned[0]
-        print(f"│")
+        print("│")
         print(f"│  Router-B が学習した経路: {r.network}/{r.prefix}")
         print(f"│  メトリック（ホップ数）: {r.metric}")
-        print(f"│")
-        print(f"│  → Router-A の直接接続 = ホップ数 1")
+        print("│")
+        print("│  → Router-A の直接接続 = ホップ数 1")
         print(f"│    Router-B から見ると = 1ホップ先 → メトリック {r.metric}")
     ok("RIPのメトリックはホップ数（経由するルーター数）")
 

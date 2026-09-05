@@ -18,7 +18,6 @@ import json
 import sys
 import urllib.request
 import urllib.error
-import time
 
 
 class EmulatorAPITester:
@@ -87,7 +86,7 @@ class EmulatorAPITester:
             output = self.cli_command('show running-config interface GigabitEthernet1/0/1')
             if output and '10.100.1.1' in output:
                 print("✅ インターフェース設定成功")
-                print(f"   IP: 10.100.1.1/24")
+                print("   IP: 10.100.1.1/24")
                 self.results.append(('Interface Config', True))
             else:
                 print("❌ インターフェース設定失敗")
@@ -114,7 +113,7 @@ class EmulatorAPITester:
             output = self.cli_command('show ip ospf')
             if output and '1' in output:
                 print("✅ OSPF設定成功")
-                print(f"   プロセス ID: 1")
+                print("   プロセス ID: 1")
                 self.results.append(('OSPF Config', True))
             else:
                 print("❌ OSPF設定失敗")
@@ -144,7 +143,7 @@ class EmulatorAPITester:
             output = self.cli_command('show ip bgp summary')
             if output and '65001' in output:
                 print("✅ BGP設定成功")
-                print(f"   AS: 65001")
+                print("   AS: 65001")
                 self.results.append(('BGP Config', True))
             else:
                 print("❌ BGP設定失敗")
@@ -171,7 +170,7 @@ class EmulatorAPITester:
             output = self.cli_command('show vlan id 100')
             if output and '100' in output:
                 print("✅ VLAN設定成功")
-                print(f"   VLAN ID: 100")
+                print("   VLAN ID: 100")
                 self.results.append(('VLAN Config', True))
             else:
                 print("❌ VLAN設定失敗")
@@ -199,7 +198,7 @@ class EmulatorAPITester:
             output = self.cli_command('show access-lists TEST_ACL')
             if output and ('permit' in output.lower() or 'TEST_ACL' in output):
                 print("✅ ACL設定成功")
-                print(f"   ACL: TEST_ACL")
+                print("   ACL: TEST_ACL")
                 self.results.append(('ACL Config', True))
             else:
                 print("❌ ACL設定失敗")
@@ -224,7 +223,7 @@ class EmulatorAPITester:
             # インターフェース一覧
             output = self.cli_command('show interfaces status')
             if output:
-                print(f"✅ インターフェース情報取得")
+                print("✅ インターフェース情報取得")
                 self.results.append(('Device State', True))
             else:
                 self.results.append(('Device State', False))
@@ -232,7 +231,7 @@ class EmulatorAPITester:
             # ルーティングテーブル
             output = self.cli_command('show ip route')
             if output:
-                print(f"✅ ルーティングテーブル取得")
+                print("✅ ルーティングテーブル取得")
 
         except Exception as e:
             print(f"❌ テスト失敗: {e}")
@@ -287,7 +286,7 @@ def main():
     if not tester.check_connectivity():
         print("\n❌ エミュレーターに接続できません")
         print("\n以下のコマンドでサーバーを起動してください:")
-        print(f"  python app.py")
+        print("  python app.py")
         return 1
 
     print("✅ エミュレーター接続成功\n")

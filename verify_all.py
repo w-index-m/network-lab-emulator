@@ -617,16 +617,16 @@ async def main():
     print(f"  合格率    : {rate}% ({passed}/{total})")
 
     if failed > 0:
-        print(f"\n  ❌ 失敗項目:")
+        print("\n  ❌ 失敗項目:")
         for label,ok,w in _results:
             if not ok and not w: print(f"    - {label}")
     if warned > 0:
-        print(f"\n  ⚠️  警告項目:")
+        print("\n  ⚠️  警告項目:")
         for label,ok,w in _results:
             if not ok and w: print(f"    - {label}")
 
-    print(f"\n  実行コマンド:")
-    print(f"    python3 verify_all.py              # 全項目")
+    print("\n  実行コマンド:")
+    print("    python3 verify_all.py              # 全項目")
     for key,(fn,label) in SCENARIOS.items():
         print(f"    python3 verify_all.py {key:<12}  # {label}")
 

@@ -14,8 +14,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from engine.protocols import (
-    VirtualNetwork, RipEngine, OspfEngine, BgpEngine, StpEngine,
-    RibEngine, IcmpEngine,
+    RibEngine,
 )
 import engine.protocols as proto
 
@@ -1366,7 +1365,7 @@ class TestUdpPacketSend:
 
     def test_syslog_pri_field_format(self, fresh_engines):
         """syslog: PRI値が facility*8+severity で正しく計算される"""
-        from engine.syslog_sender import _build_syslog_packet, FACILITY, SEVERITY
+        from engine.syslog_sender import _build_syslog_packet
         pkt = _build_syslog_packet('local7', 'notifications', 'SW1', 'test').decode()
         # local7=23, notifications=5 → PRI = 23*8+5 = 189
         assert pkt.startswith('<189>'), f'PRI値が不正: {pkt[:10]}'
@@ -1483,7 +1482,6 @@ def test_floating_static_route_preserves_admin_distance():
     show ip route が [1/0] と表示され、通常のスタティックと区別が
     付かなかった。
     """
-    from engine.protocols import RibEngine
 
     e = RibEngine()
     e.add_static_route('d', 'h', '10.210.1.0', 24, '10.9.9.2', 1)

@@ -1041,10 +1041,10 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         prev_mode = state.mode
         # configure/conf コマンドでconfigモードに移行した直後にログ
         if c in ('configure', 'conf', 'config', 'configure terminal', 'conf t') and prev_mode == 'exec':
-            _sir_log(device_id, 'SYSTEM', f'configuration mode entered by admin (console)')
+            _sir_log(device_id, 'SYSTEM', 'configuration mode entered by admin (console)')
         # exit/endでexecモードに戻る直前
         elif c in ('exit', 'end', 'quit') and prev_mode == 'config':
-            _sir_log(device_id, 'SYSTEM', f'configuration mode exited by admin')
+            _sir_log(device_id, 'SYSTEM', 'configuration mode exited by admin')
         # saveコマンド
         elif c == 'save':
             _sir_log(device_id, 'SYSTEM', 'configuration saved by admin')
@@ -2610,33 +2610,33 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
                 spi_in  = f'0x{_rand.randint(0, 0xffffffff):08x}'
                 spi_out = f'0x{_rand.randint(0, 0xffffffff):08x}'
                 lines += [
-                    f'   PERMIT, flags={{origin_is_acl,}}',
+                    '   PERMIT, flags={origin_is_acl,}',
                     f'   #pkts encaps: {_rand.randint(100,9999)}, #pkts encrypt: {_rand.randint(100,9999)}',
                     f'   #pkts decaps: {_rand.randint(100,9999)}, #pkts decrypt: {_rand.randint(100,9999)}',
-                    f'   #send errors 0, #recv errors 0',
-                    f'',
+                    '   #send errors 0, #recv errors 0',
+                    '',
                     f'     local crypto endpt.: {local_ip}, remote crypto endpt.: {peer_ip}',
-                    f'     inbound esp sas:',
+                    '     inbound esp sas:',
                     f'      spi: {spi_in}(decimal: {int(spi_in,16)})',
-                    f'       Status: ACTIVE',
-                    f'     outbound esp sas:',
+                    '       Status: ACTIVE',
+                    '     outbound esp sas:',
                     f'      spi: {spi_out}(decimal: {int(spi_out,16)})',
-                    f'       Status: ACTIVE',
+                    '       Status: ACTIVE',
                 ]
             elif state_str in ('detecting', 'down'):
                 lines += [
-                    f'   PERMIT, flags={{origin_is_acl,}}',
-                    f'   #pkts encaps: 0, #pkts encrypt: 0',
-                    f'   #pkts decaps: 0, #pkts decrypt: 0',
+                    '   PERMIT, flags={origin_is_acl,}',
+                    '   #pkts encaps: 0, #pkts encrypt: 0',
+                    '   #pkts decaps: 0, #pkts decrypt: 0',
                     f'   #dpd error timeout: {sa["elapsed"]}',
-                    f'     inbound esp sas: (none)',
-                    f'     outbound esp sas: (none)',
+                    '     inbound esp sas: (none)',
+                    '     outbound esp sas: (none)',
                 ]
             else:  # negotiating
                 lines += [
-                    f'   (IKE Phase1/Phase2 in progress...)',
-                    f'     inbound esp sas: (pending)',
-                    f'     outbound esp sas: (pending)',
+                    '   (IKE Phase1/Phase2 in progress...)',
+                    '     inbound esp sas: (pending)',
+                    '     outbound esp sas: (pending)',
                 ]
             lines.append('')
         return '\n'.join(lines)
@@ -2853,8 +2853,8 @@ def _format_show_logging(state) -> str:
             'Syslog logging: enabled (0 messages dropped, 0 messages rate-limited,',
             '                0 flushes, 0 overruns, xml disabled, filtering disabled)',
             '',
-            f'    Console logging: level debugging, 42 messages logged',
-            f'    Monitor logging: level debugging, 0 messages logged',
+            '    Console logging: level debugging, 42 messages logged',
+            '    Monitor logging: level debugging, 0 messages logged',
             f'    Buffer logging:  level {level}, 42 messages logged',
         ]
         if servers:
@@ -3421,7 +3421,7 @@ def _build_running_config(device_id: str, state) -> str:
                 for net in bn.get('networks', []):
                     lines.append(f' network {net}')
             for gid, g in sorted(vrrp_engine.vrrp.get(device_id, {}).items()):
-                lines.append(f'vrrp use on')
+                lines.append('vrrp use on')
                 iface = g.interface or 'lan0'
                 iface_idx = iface.replace('lan', '') if iface.startswith('lan') else '0'
                 lines.append(f'lan {iface_idx} vrrp group {gid} id {gid} {g.priority} {g.vip}')
@@ -3954,7 +3954,7 @@ async def handle_nc(device_id: str, command: str, state: DeviceState):
                 f"Range  : {p_lo} - {p_hi}",
                 f"Total  : {total} ports scanned",
                 f"Open   : {total} ports",
-                f"Closed : 0 ports",
+                "Closed : 0 ports",
                 f"Avg RTT: {avg_rtt} ms",
             ])
     else:
@@ -3967,7 +3967,7 @@ async def handle_nc(device_id: str, command: str, state: DeviceState):
             f"  Local:  {my_ip}:{_random.randint(40000,60000)}",
             f"  Remote: {host}:{port}",
             f"  RTT:    {rtt} ms",
-            f"  State:  ESTABLISHED",
+            "  State:  ESTABLISHED",
         ])
 
 
@@ -3993,7 +3993,7 @@ def _format_ping(dest: str, result: dict, device_type: str) -> str:
                 lines.append(f"64 bytes from {dest}: icmp_seq={i} ttl={result['ttl']} time={r} ms")
             lines += ["",
                 f"--- {dest} ping statistics ---",
-                f"5 packets transmitted, 5 packets received, 0% packet loss",
+                "5 packets transmitted, 5 packets received, 0% packet loss",
                 f"round-trip min/avg/max = {min(rtts)}/{round(sum(rtts)/len(rtts),3)}/{max(rtts)} ms"]
             return '\n'.join(lines)
     else:
@@ -4010,7 +4010,7 @@ def _format_ping(dest: str, result: dict, device_type: str) -> str:
                 lines.append(f"Request timeout for icmp_seq {i}")
             lines += ["",
                 f"--- {dest} ping statistics ---",
-                f"5 packets transmitted, 0 packets received, 100% packet loss",
+                "5 packets transmitted, 0 packets received, 100% packet loss",
                 f"({reason})"]
             return '\n'.join(lines)
 
@@ -5020,7 +5020,7 @@ async def rip_loop(device_id: str, networks: list):
         if new_routes:
             state.rip_table = [
                 {"fp": "*C" if r["via"]=="direct" else "*R",
-                 "net": r["net"], "gw": "0.0.0.0" if r["via"]=="direct" else f"192.168.1.254",
+                 "net": r["net"], "gw": "0.0.0.0" if r["via"]=="direct" else "192.168.1.254",
                  "metric": r["metric"], "time": "none" if r["via"]=="direct" else f"00:{count%60:02d}",
                  "iface": "lan0"}
                 for r in new_routes
@@ -5040,7 +5040,7 @@ def simulate_ping(dest: str, state: DeviceState) -> str:
         lines.append(f"64 bytes from {dest}: icmp_seq={i} ttl=64 time={r} ms")
     lines += ["",
         f"--- {dest} ping statistics ---",
-        f"5 packets transmitted, 5 packets received, 0% packet loss",
+        "5 packets transmitted, 5 packets received, 0% packet loss",
         f"round-trip min/avg/max = {min(rtts)}/{round(sum(rtts)/len(rtts),3)}/{max(rtts)} ms"]
     return "\n".join(lines)
 

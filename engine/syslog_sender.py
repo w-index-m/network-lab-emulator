@@ -10,7 +10,6 @@ import struct
 import time
 import asyncio
 from datetime import datetime
-from typing import Optional, List
 
 # ══════════════════════════════════════════
 # Syslog（RFC 3164）

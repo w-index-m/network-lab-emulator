@@ -22,7 +22,6 @@ hosts.txt の形式 (1行1台、プラットフォーム指定は省略可):
 """
 
 import os
-import re
 import sys
 import time
 import logging

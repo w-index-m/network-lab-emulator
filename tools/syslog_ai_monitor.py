@@ -26,7 +26,7 @@ import re
 import sys
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -147,8 +147,8 @@ def _rule_based_summary(entries: List[LogEntry]) -> str:
 
     lines = [
         f'件数: {len(entries)}件',
-        f'装置別: ' + ', '.join(f'{h}={c}' for h, c in by_host.most_common(10)),
-        f'重要度別: ' + ', '.join(f'{s}={c}' for s, c in by_sev.most_common()),
+        '装置別: ' + ', '.join(f'{h}={c}' for h, c in by_host.most_common(10)),
+        '重要度別: ' + ', '.join(f'{s}={c}' for s, c in by_sev.most_common()),
     ]
     if by_tag:
         lines.append('イベント種別Top5: ' + ', '.join(f'{t}={c}' for t, c in by_tag.most_common(5)))

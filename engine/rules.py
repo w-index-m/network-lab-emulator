@@ -4,7 +4,6 @@ Si-R / SR-S / Catalyst 9300 / Cisco IOS の出力を決定論的に生成
 マニュアル原文フォーマット準拠
 """
 import re
-import time
 import random
 from datetime import datetime, timedelta
 
@@ -1483,10 +1482,10 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             total = len(names) + 1
             lines = [
                 f"There are {total} interfaces (up status {up} interfaces)",
-                f"    Loopback interface      :     1 (up status     1 interfaces)",
+                "    Loopback interface      :     1 (up status     1 interfaces)",
                 f"    Port VLAN interface     : {len(names):>5} (up status {portvlan_up:>5} interfaces)",
-                f"    Pseudo P2P interface    :     0 (up status     0 interfaces)",
-                f"    Template P2P interface  :     0 (up status     0 interfaces)",
+                "    Pseudo P2P interface    :     0 (up status     0 interfaces)",
+                "    Template P2P interface  :     0 (up status     0 interfaces)",
             ]
             return "\n".join(lines)
 
@@ -1806,7 +1805,7 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         L = []
         if is_loopback:
             L.append(f"{name} is up, line protocol is up")
-            L.append(f"  Hardware is Loopback")
+            L.append("  Hardware is Loopback")
             if desc:
                 L.append(f"  Description: {desc}")
             L.append("  MTU 1514 bytes, BW 8000000 Kbit/sec, DLY 5000 usec,")
@@ -1939,11 +1938,11 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             lines.append(f"[ETHER GROUP-{grp} PORT-{port}]")
             lines.append(f"description      : {name}")
             lines.append(f"status           : {'auto '+speed if status=='up' else 'down'} MDI-X")
-            lines.append(f"media            : Metal")
-            lines.append(f"flow control     : send on, receive on")
-            lines.append(f"type             : Normal")
+            lines.append("media            : Metal")
+            lines.append("flow control     : send on, receive on")
+            lines.append("type             : Normal")
             lines.append(f"since            : {state.startup_time.strftime('%b %d %H:%M:%S %Y')}")
-            lines.append(f"config           : mode(auto), mdi(auto), media(-)")
+            lines.append("config           : mode(auto), mdi(auto), media(-)")
             lines.append("")
         return "\n".join(lines)
 
@@ -2038,28 +2037,28 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             proto = "LACP" if mode in ('active', 'passive') else "PAgP"
             po_name = f"Port-channel{grp_id}"
             lines.append(f"Group: {grp_id}")
-            lines.append(f"----------")
-            lines.append(f"  Group state = L2")
+            lines.append("----------")
+            lines.append("  Group state = L2")
             lines.append(f"  Ports: {len(grp.get('members',[]))}   Maxports = 8")
-            lines.append(f"  Port-channels: 1  Max Port-channels = 16")
+            lines.append("  Port-channels: 1  Max Port-channels = 16")
             lines.append(f"  Protocol:   {proto}")
-            lines.append(f"  Minimum Links: 0")
+            lines.append("  Minimum Links: 0")
             lines.append("")
-            lines.append(f"              Ports in the group:")
-            lines.append(f"              -------------------")
+            lines.append("              Ports in the group:")
+            lines.append("              -------------------")
             lines.append(f"  Port: {po_name}")
-            lines.append(f"  Port state    = Port-channel Ag-Inuse")
+            lines.append("  Port state    = Port-channel Ag-Inuse")
             lines.append(f"  Protocol      =   {proto}")
             lines.append(f"  Port index    =   0  Load: 0x00  Protocol:   {proto}")
             lines.append("")
-            lines.append(f"  Age of the Port-channel   = 0d:00h:05m:21s")
+            lines.append("  Age of the Port-channel   = 0d:00h:05m:21s")
             lines.append(f"  Logical slot/port   = 2/1  Number of ports = {len(grp.get('members',[]))}")
-            lines.append(f"  HotStandBy port = null")
-            lines.append(f"  Port state          = Port-channel Ag-Inuse")
+            lines.append("  HotStandBy port = null")
+            lines.append("  Port state          = Port-channel Ag-Inuse")
             for mem in grp.get('members', []):
                 short = mem.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te")
                 lines.append(f"  Ports: {mem} ")
-                lines.append(f"     Port state    = Up Mstr Assoc In-Bndl")
+                lines.append("     Port state    = Up Mstr Assoc In-Bndl")
                 lines.append(f"     Channel group = {grp_id}    Mode = {'Active' if mode == 'active' else 'Passive' if mode == 'passive' else 'On'}  Gcchange = -")
                 lines.append(f"     Port-channel  = Po{grp_id}    GC  =   -  Pseudo port-channel = Po{grp_id}")
                 lines.append(f"     Port index    = 0   Load = 0x00  Protocol =  {'LACP' if mode in ('active','passive') else 'PAgP'}")
@@ -2078,8 +2077,8 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
                 continue
             lines.append(f"Channel group {grp_id} neighbors")
             lines.append("")
-            lines.append(f"                        LACP port                        Admin  Oper   Port    Port")
-            lines.append(f"Port      Flags   State  Priority  Oper Key  Admin Key  Role   Oper   Number  State")
+            lines.append("                        LACP port                        Admin  Oper   Port    Port")
+            lines.append("Port      Flags   State  Priority  Oper Key  Admin Key  Role   Oper   Number  State")
             for mem in grp.get('members', []):
                 short = mem.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te").replace("Ethernet1/", "Eth1/")
                 lines.append(f"{short:<10}FA      bndl   32768     0x{grp_id:<4}  0x{grp_id:<5} Active Active 0x{grp_id+1:<4}  0x3D")
@@ -2098,8 +2097,8 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             if grp.get('mode') not in ('active', 'passive'):
                 continue
             lines.append(f"Channel group {grp_id}")
-            lines.append(f"                          LACP port     Admin    Oper    Port     Port")
-            lines.append(f"Port       Flags   State  Priority      Key      Key     Number   State")
+            lines.append("                          LACP port     Admin    Oper    Port     Port")
+            lines.append("Port       Flags   State  Priority      Key      Key     Number   State")
             for mem in grp.get('members', []):
                 short = mem.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te")
                 lines.append(f"{short:<11}SA      bndl   32768         0x{grp_id:<4} 0x{grp_id:<4} 0x{grp_id+1:<4} 0x3D")
@@ -2279,9 +2278,9 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
     def _show_cdp_detail(self, state):
         lines = []
         for n in state.cdp_neighbors:
-            lines += [f"-------------------------",
+            lines += ["-------------------------",
                 f"Device ID: {n['device']}",
-                f"Entry address(es):",
+                "Entry address(es):",
                 f"  IP address: 192.168.1.{random.randint(2,254)}",
                 f"Platform: Cisco {n['platform']},  Capabilities: {'Switch' if n['cap']=='S' else 'Router'}",
                 f"Interface: {n['local_if']},  Port ID (outgoing port): {n['port']}",
@@ -2389,20 +2388,20 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
                 f"Port Description: {port_id}",
                 f"System Name: {sysname}",
                 "",
-                f"System Description:",
+                "System Description:",
                 f"{platform}",
                 "",
                 f"Time remaining: {hold} seconds",
                 f"System Capabilities: {cap}",
                 f"Enabled Capabilities: {cap}",
                 "",
-                f"Management Addresses:",
+                "Management Addresses:",
                 f"    IP: 192.168.1.{abs(hash(sysname)) % 253 + 2}",
                 "",
-                f"Auto Negotiation - supported, enabled",
-                f"Physical media capabilities:",
-                f"    1000baseT(FD)",
-                f"    100base-TX(FD)",
+                "Auto Negotiation - supported, enabled",
+                "Physical media capabilities:",
+                "    1000baseT(FD)",
+                "    100base-TX(FD)",
                 "",
             ]
         lines.append(f"Total entries displayed: {len(neighbors)}")
@@ -2431,9 +2430,9 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
         rip_nets = getattr(state, 'rip_networks', [])
         if rip_ver or rip_nets:
             lines.append("Routing Protocol is \"rip\"")
-            lines.append(f"  Sending updates every 30 seconds, next due in 15 seconds")
+            lines.append("  Sending updates every 30 seconds, next due in 15 seconds")
             lines.append(f"  Version {rip_ver or 2}, receive version {rip_ver or 2}")
-            lines.append(f"  Routing for Networks:")
+            lines.append("  Routing for Networks:")
             for n in rip_nets:
                 lines.append(f"    {n}")
         # OSPF
@@ -2441,17 +2440,17 @@ Gi1/0/24            Root  FWD 4         128.24   P2p"""
         if ospf.get('process') and ospf.get('networks'):
             pid = ospf.get('process', 1)
             lines.append(f"Routing Protocol is \"ospf {pid}\"")
-            lines.append(f"  Outgoing update filter list for all interfaces is not set")
-            lines.append(f"  Incoming update filter list for all interfaces is not set")
+            lines.append("  Outgoing update filter list for all interfaces is not set")
+            lines.append("  Incoming update filter list for all interfaces is not set")
             lines.append(f"  Router ID {ospf.get('router_id', '0.0.0.0')}")
-            lines.append(f"  Number of areas in this router is 1. 1 normal 0 stub 0 nssa")
+            lines.append("  Number of areas in this router is 1. 1 normal 0 stub 0 nssa")
         # BGP
         bgp = getattr(state, 'bgp', {})
         if bgp.get('asn') and bgp.get('neighbors'):
             asn = bgp.get('asn', '?')
             lines.append(f"Routing Protocol is \"bgp {asn}\"")
-            lines.append(f"  Outgoing update filter list for all interfaces is not set")
-            lines.append(f"  Incoming update filter list for all interfaces is not set")
+            lines.append("  Outgoing update filter list for all interfaces is not set")
+            lines.append("  Incoming update filter list for all interfaces is not set")
         if not lines:
             lines.append("No routing protocol is configured")
         return "\n".join(lines)
@@ -2495,7 +2494,7 @@ Link ID         ADV Router      Age         Seq#       Checksum Link count
     def _show_bgp_summary(self, state):
         b = state.bgp
         lines = [f"BGP router identifier {b['router_id']}, local AS number {b['asn']}",
-                 f"BGP table version is 1, main routing table version 1",
+                 "BGP table version is 1, main routing table version 1",
                  "",
                  "Neighbor        V    AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd"]
         for n in b["neighbors"]:
@@ -2509,7 +2508,7 @@ Link ID         ADV Router      Age         Seq#       Checksum Link count
                  "Origin codes: i - IGP, e - EGP, ? - incomplete",
                  "",
                  "   Network          Next Hop            Metric LocPrf Weight Path"]
-        lines.append(f"*> 192.168.1.0/24   0.0.0.0                  0         32768 i")
+        lines.append("*> 192.168.1.0/24   0.0.0.0                  0         32768 i")
         lines.append(f"*> 192.168.2.0/24   10.1.0.2                 0    100      0 {b['neighbors'][0]['asn']} i")
         return "\n".join(lines)
 
@@ -2734,7 +2733,7 @@ Configuration Revision            : 5"""
                 f'  Hostname            : {host}',
                 '  Firmware Version    : V40.00',
                 '  Serial Number       : SR000000001',
-                f'  System Up Time      : 1 days 02:34:56',
+                '  System Up Time      : 1 days 02:34:56',
                 '  Current Time        : 2026/06/28 12:00:00',
                 '  Boot Mode           : normal',
             ])
@@ -2803,7 +2802,7 @@ Configuration Revision            : 5"""
             v = getattr(state, 'vrrp', {})
             return '\n'.join([
                 'VRRP Status',
-                f'  Interface : lan0',
+                '  Interface : lan0',
                 f'  Group(VRID) : {v.get("vrid",10)}',
                 f'  State       : {v.get("state","Master")}',
                 f'  Priority    : {v.get("priority",254)}',
@@ -3042,34 +3041,34 @@ Configuration Revision            : 5"""
                 spi_out = p.get('spi_out', f'0x{random.randint(0,0xffffffff):08x}')
                 sa_rem  = p.get('sa_lifetime_remaining', 28800)
                 lines += [
-                    f'interface: GigabitEthernet0/0/0',
+                    'interface: GigabitEthernet0/0/0',
                     f'    Crypto map tag: CMAP, local addr {local_ip}',
-                    f'',
-                    f'   local  ident (addr/mask/prot/port): (0.0.0.0/0.0.0.0/0/0)',
-                    f'   remote ident (addr/mask/prot/port): (0.0.0.0/0.0.0.0/0/0)',
+                    '',
+                    '   local  ident (addr/mask/prot/port): (0.0.0.0/0.0.0.0/0/0)',
+                    '   remote ident (addr/mask/prot/port): (0.0.0.0/0.0.0.0/0/0)',
                     f'   current_peer {peer_ip} port 500',
-                    f'    PERMIT, flags={{origin_is_acl,}}',
+                    '    PERMIT, flags={origin_is_acl,}',
                     f'   #pkts encaps: {random.randint(100,9999)}, #pkts encrypt: {random.randint(100,9999)}, #pkts digest: {random.randint(100,9999)}',
                     f'   #pkts decaps: {random.randint(100,9999)}, #pkts decrypt: {random.randint(100,9999)}, #pkts verify: {random.randint(100,9999)}',
-                    f'   #send errors 0, #recv errors 0',
-                    f'',
+                    '   #send errors 0, #recv errors 0',
+                    '',
                     f'     local crypto endpt.: {local_ip}, remote crypto endpt.: {peer_ip}',
-                    f'     path mtu 1500, ip mtu 1500',
-                    f'',
-                    f'    inbound esp sas:',
+                    '     path mtu 1500, ip mtu 1500',
+                    '',
+                    '    inbound esp sas:',
                     f'     spi: {spi_in}()',
-                    f'      transform: esp-aes-256 esp-sha-hmac ,',
-                    f'      in use settings ={{Tunnel, }}',
+                    '      transform: esp-aes-256 esp-sha-hmac ,',
+                    '      in use settings ={Tunnel, }',
                     f'      sa timing: remaining key lifetime (k/sec): (4608000/{sa_rem})',
-                    f'      Status: ACTIVE(ACTIVE)',
-                    f'',
-                    f'    outbound esp sas:',
+                    '      Status: ACTIVE(ACTIVE)',
+                    '',
+                    '    outbound esp sas:',
                     f'     spi: {spi_out}()',
-                    f'      transform: esp-aes-256 esp-sha-hmac ,',
-                    f'      in use settings ={{Tunnel, }}',
+                    '      transform: esp-aes-256 esp-sha-hmac ,',
+                    '      in use settings ={Tunnel, }',
                     f'      sa timing: remaining key lifetime (k/sec): (4608000/{sa_rem})',
-                    f'      Status: ACTIVE(ACTIVE)',
-                    f'',
+                    '      Status: ACTIVE(ACTIVE)',
+                    '',
                 ]
             return '\n'.join(lines)
 
@@ -3103,7 +3102,7 @@ Configuration Revision            : 5"""
                         f'Crypto Map "{mapname}" {seq} ipsec-isakmp',
                         f'  Peer = {entry.get("peer","-")}',
                         f'  Extended IP access list {entry.get("acl","-")}',
-                        f'  Security association lifetime: 4608000 kilobytes/28800 seconds',
+                        '  Security association lifetime: 4608000 kilobytes/28800 seconds',
                         f'  Transform sets={{ {entry.get("transform_set","-")} }}',
                         f'  Interfaces using crypto map {mapname}:',
                         '',
@@ -3149,15 +3148,15 @@ Configuration Revision            : 5"""
                 bytes_in  = pkts_in  * random.randint(500, 1400)
                 bytes_out = pkts_out * random.randint(500, 1400)
                 lines += [
-                    f'',
+                    '',
                     f'  Remote {remote}  ({name})',
                     f'    Inbound  ESP:  {pkts_in} packets  {bytes_in} bytes  0 errors',
                     f'    Outbound ESP:  {pkts_out} packets  {bytes_out} bytes  0 errors',
-                    f'    Replay check:  0 failures',
+                    '    Replay check:  0 failures',
                     f'    SA rekeys:     {random.randint(0, 5)}',
                 ]
             else:
-                lines += [f'', f'  Remote {remote}  ({name})', f'    SA not yet established.']
+                lines += ['', f'  Remote {remote}  ({name})', '    SA not yet established.']
         return '\n'.join(lines)
 
     def _sir_show_ike_policy(self, state: DeviceState) -> str:
@@ -3193,7 +3192,7 @@ Configuration Revision            : 5"""
             name   = t.get('name', f'tunnel{tid}')
             if t.get('status') == 'established':
                 lines += [
-                    f'',
+                    '',
                     f'  Peer {remote}  ({name})',
                     f'    Phase1 negotiations:  {random.randint(1,5)} success  0 failure',
                     f'    Phase2 negotiations:  {random.randint(1,5)} success  0 failure',
@@ -3202,7 +3201,7 @@ Configuration Revision            : 5"""
                     f'    Rekeys:               {random.randint(0,3)}',
                 ]
             else:
-                lines += [f'', f'  Peer {remote}  ({name})', f'    SA not yet established.']
+                lines += ['', f'  Peer {remote}  ({name})', '    SA not yet established.']
         return '\n'.join(lines)
 
     # ─── show running-config ──────────────────
@@ -3464,7 +3463,7 @@ Configuration Revision            : 5"""
                 return ""
 
         # monitor session 行だが解釈できない → エラー
-        return f"% Invalid input detected at '^' marker."
+        return "% Invalid input detected at '^' marker."
 
     def _format_show_monitor(self, state, sid=None):
         """show monitor [session <id>] の出力"""
@@ -3487,15 +3486,15 @@ Configuration Revision            : 5"""
             out.append('Type                   : Local Session')
             if src_lines:
                 first = src_lines[0]
-                out.append(f'Source Ports           :')
+                out.append('Source Ports           :')
                 out.append(f'    {first[1]:<20}: {first[0]}')
                 for ifn, dlabel in src_lines[1:]:
                     out.append(f'    {dlabel:<20}: {ifn}')
             else:
                 out.append('Source Ports           : (none)')
             out.append(f'Destination Ports      : {s["dest"] or "(none)"}')
-            out.append(f'Encapsulation          : Native')
-            out.append(f'Ingress                : Disabled')
+            out.append('Encapsulation          : Native')
+            out.append('Ingress                : Disabled')
             out.append(f'State                  : {"Up" if s["state"]=="up" else "Down (incomplete)"}')
             out.append('')
         return '\n'.join(out).rstrip()
@@ -3667,8 +3666,8 @@ Configuration Revision            : 5"""
                 pinfo = pmaps.get(pname, {})
                 for cname, actions in pinfo.get('classes', {}).items():
                     out.append(f'    Class-map: {cname}')
-                    out.append(f'      0 packets, 0 bytes')
-                    out.append(f'      5 minute offered rate 0000 bps, drop rate 0000 bps')
+                    out.append('      0 packets, 0 bytes')
+                    out.append('      5 minute offered rate 0000 bps, drop rate 0000 bps')
                     for a in actions:
                         out.append(f'      {a}')
                 out.append('')
@@ -3797,7 +3796,7 @@ Configuration Revision            : 5"""
             ])
         # show switch virtual（概要）
         return '\n'.join([
-            f'Switch mode              : Virtual Switch',
+            'Switch mode              : Virtual Switch',
             f'Virtual switch domain number : {dom}',
             f'Local switch number      : {sw}',
             f'Local switch operational role: Virtual Switch {sw} ({vss["role"]})',
@@ -3848,10 +3847,10 @@ Configuration Revision            : 5"""
                     'Info: Finished copying to the selected switches',
                     'Finished initial file syncing',
                     '',
-                    f'--- Starting Add ---',
+                    '--- Starting Add ---',
                     'Performing Add on all members',
-                    f'  [1] Add package(s) on switch 1',
-                    f'  [1] Finished Add on switch 1',
+                    '  [1] Add package(s) on switch 1',
+                    '  [1] Finished Add on switch 1',
                     'Checking status of Add on [1]',
                     'Add: Passed on [1]',
                     'Finished Add',
@@ -3862,7 +3861,7 @@ Configuration Revision            : 5"""
                     issu['current'] = issu['target']
                     issu['state'] = 'committed'
                     lines.append('install_activate: Activating and committing (ISSU, non-disruptive)')
-                    lines.append(f'SUCCESS: install_add_activate_commit')
+                    lines.append('SUCCESS: install_add_activate_commit')
                 return '\n'.join(lines)
 
             if re.match(r'^install\s+activate(\s+issu)?', c):
@@ -3872,7 +3871,7 @@ Configuration Revision            : 5"""
                 issu['current'] = issu['target']
                 issu_flag = 'ISSU' if 'issu' in c else 'reload'
                 return '\n'.join([
-                    f'install_activate: START',
+                    'install_activate: START',
                     f'install_activate: Activating IMG ({issu_flag})',
                     'Following packages shall be activated:',
                     f'  cat9k image {issu["target"]}',
@@ -3926,9 +3925,9 @@ Configuration Revision            : 5"""
                 return '\n'.join([
                     '--- Starting local lock acquisition on switch 1 ---',
                     '',
-                    f'Finished local lock acquisition on switch 1',
+                    'Finished local lock acquisition on switch 1',
                     '',
-                    f'No ISSU operation is in progress'
+                    'No ISSU operation is in progress'
                     if issu['state'] == 'committed' else
                     f'ISSU operation in progress: state = {issu["state"].upper()}',
                     f'  Current version : {issu["current"]}',
@@ -3977,7 +3976,7 @@ Configuration Revision            : 5"""
                 return '\n'.join([
                     'This is the log of last installation.',
                     '',
-                    f'Continuing with installation, please wait',
+                    'Continuing with installation, please wait',
                     'Trying to start the installer...',
                     '',
                     f'Install has been successful. Running version: {issu["current"]}',
@@ -4067,10 +4066,10 @@ Configuration Revision            : 5"""
         out = []
         for name, p in pools.items():
             out.append(f'Pool {name} :')
-            out.append(f' Utilization mark (high/low)    : 100 / 0')
-            out.append(f' Subnet size (first/next)       : 0 / 0')
-            out.append(f' Total addresses                : 254')
-            out.append(f' Leased addresses               : 0')
+            out.append(' Utilization mark (high/low)    : 100 / 0')
+            out.append(' Subnet size (first/next)       : 0 / 0')
+            out.append(' Total addresses                : 254')
+            out.append(' Leased addresses               : 0')
             net = f'{p["network"]} / {p["mask"]}' if p['network'] else '(未設定)'
             out.append(f' Subnet: {net}')
             out.append(f' Default router: {p["router"] or "-"}   DNS: {p["dns"] or "-"}')
@@ -4088,7 +4087,7 @@ Configuration Revision            : 5"""
     def _format_show_dhcp_snooping(self, state):
         s = getattr(state, 'dhcp_snoop', {'enabled': False, 'vlans': '', 'trust': []})
         out = [f'Switch DHCP snooping is {"enabled" if s["enabled"] else "disabled"}']
-        out.append(f'DHCP snooping is configured on following VLANs:')
+        out.append('DHCP snooping is configured on following VLANs:')
         out.append(f'  {s["vlans"] or "none"}')
         out.append('')
         out.append('Interface                  Trusted    Rate limit (pps)')
@@ -4146,13 +4145,13 @@ Configuration Revision            : 5"""
             ifn, ps = rows[0]
             return '\n'.join([
                 f'Port Security              : {"Enabled" if ps["enabled"] else "Disabled"}',
-                f'Port Status                : Secure-up',
+                'Port Status                : Secure-up',
                 f'Violation Mode             : {ps["violation"].capitalize()}',
                 f'Maximum MAC Addresses      : {ps["max"]}',
                 f'Total MAC Addresses        : {len(ps["macs"])}',
                 f'Sticky MAC Addresses       : {"Enabled" if ps["sticky"] else "Disabled"}',
                 f'Configured MAC Addresses   : {", ".join(ps["macs"]) or "-"}',
-                f'Security Violation Count   : 0',
+                'Security Violation Count   : 0',
             ])
         lines = ['Secure Port  MaxSecureAddr  CurrentAddr  SecurityViolation  Security Action',
                  '                (Count)       (Count)          (Count)',
@@ -4798,7 +4797,7 @@ Configuration Revision            : 5"""
             lines.append(f"64 bytes from {dest}: icmp_seq={i} ttl=64 time={r} ms")
         lines += ["",
             f"--- {dest} ping statistics ---",
-            f"5 packets transmitted, 5 packets received, 0% packet loss",
+            "5 packets transmitted, 5 packets received, 0% packet loss",
             f"round-trip min/avg/max = {min(rtt)}/{round(sum(rtt)/len(rtt),3)}/{max(rtt)} ms"]
         return "\n".join(lines)
 
@@ -4872,44 +4871,44 @@ Configuration Revision            : 5"""
             "=" * 56,
             "",
             "Original (Inner) Packet:",
-            f"  +---------------------------+---------------------------+",
-            f"  | IP Header (20 bytes)      | Payload                   |",
+            "  +---------------------------+---------------------------+",
+            "  | IP Header (20 bytes)      | Payload                   |",
             f"  | Src: {orig_src:<18} |                           |",
             f"  | Dst: {orig_dst:<18} | ICMP / TCP / UDP          |",
             f"  | Proto: ICMP               | ({orig_size - 20} bytes)                 |",
-            f"  +---------------------------+---------------------------+",
+            "  +---------------------------+---------------------------+",
             f"  Total: {orig_size} bytes",
             "",
             "After IPsec ESP Encapsulation (Tunnel Mode):",
-            f"  +---------------+-------+---------------------------+-------+",
-            f"  | Outer IP Hdr  | ESP   | Encrypted Payload         | ESP   |",
-            f"  | (20 bytes)    | Header| (Inner IP + Data)         | Trail |",
+            "  +---------------+-------+---------------------------+-------+",
+            "  | Outer IP Hdr  | ESP   | Encrypted Payload         | ESP   |",
+            "  | (20 bytes)    | Header| (Inner IP + Data)         | Trail |",
             f"  | Src: {tunnel_local:<9} | ({esp_hdr}B)  | Alg: {enc_alg:<20} | ({esp_trl}B) |",
             f"  | Dst: {tunnel_remote:<9} | SPI:  | Original {orig_size} bytes         |       |",
             f"  | Proto: ESP    | {spi_out} |                           |       |",
-            f"  +---------------+-------+---------------------------+-------+",
+            "  +---------------+-------+---------------------------+-------+",
             f"  Total: {total_size} bytes  (overhead: +{total_size - orig_size} bytes)",
             "",
             "Header Details:",
-            f"  [Outer IP Header]",
-            f"    Version  : 4",
-            f"    IHL      : 20 bytes",
-            f"    Protocol : 50 (ESP)",
+            "  [Outer IP Header]",
+            "    Version  : 4",
+            "    IHL      : 20 bytes",
+            "    Protocol : 50 (ESP)",
             f"    Src      : {tunnel_local}",
             f"    Dst      : {tunnel_remote}",
             "",
-            f"  [ESP Header]",
+            "  [ESP Header]",
             f"    SPI      : {spi_out}",
-            f"    Seq No   : 0x00000001",
+            "    Seq No   : 0x00000001",
             "",
-            f"  [Encrypted Payload]",
+            "  [Encrypted Payload]",
             f"    Algorithm: {enc_alg} (CBC)",
             f"    Content  : [Original IP Header + {protocol} Data] (encrypted)",
             "",
-            f"  [ESP Trailer]",
-            f"    Padding  : variable",
-            f"    Next Hdr : 4 (IPv4)",
-            f"    ICV      : 16 bytes (HMAC-SHA256)",
+            "  [ESP Trailer]",
+            "    Padding  : variable",
+            "    Next Hdr : 4 (IPv4)",
+            "    ICV      : 16 bytes (HMAC-SHA256)",
             "",
             f"Tunnel: {tunnel_local} --> {tunnel_remote}",
             f"Status: ACTIVE  SPI(out)={spi_out}  Encr={enc_alg}",
@@ -5123,12 +5122,12 @@ Configuration Revision            : 5"""
             if list_mode:
                 out.append(f'ltm pool {name} {{')
                 out.append(f'    load-balancing-mode {p["lb_mode"]}')
-                out.append(f'    members {{')
+                out.append('    members {')
                 for m in p['members']:
                     out.append(f'        {m["node"]}:{m["port"]} {{')
                     out.append(f'            address {m["node"]}')
-                    out.append(f'        }}')
-                out.append(f'    }}')
+                    out.append('        }')
+                out.append('    }')
                 if p['monitor'] != 'none':
                     out.append(f'    monitor {p["monitor"]}')
                 out.append('}')
@@ -5137,10 +5136,10 @@ Configuration Revision            : 5"""
                 color = 'green' if up > 0 else 'red'
                 out.append(f'Ltm::Pool: {name}')
                 out.append('-' * 60)
-                out.append(f'  Status')
+                out.append('  Status')
                 out.append(f'    Availability : {avail} ({color})')
-                out.append(f'    State        : enabled')
-                out.append(f'    Reason       : The pool is available')
+                out.append('    State        : enabled')
+                out.append('    Reason       : The pool is available')
                 out.append(f'    Load Balancing Mode : {p["lb_mode"]}')
                 out.append(f'    Monitor      : {p["monitor"]}')
                 out.append(f'    Members      : {total} (up: {up}, down: {total-up})')
@@ -5171,17 +5170,17 @@ Configuration Revision            : 5"""
                 if v.get('pool'):
                     out.append(f'    pool {v["pool"]}')
                 if v.get('profiles'):
-                    out.append(f'    profiles {{')
+                    out.append('    profiles {')
                     for pr in v['profiles']:
                         out.append(f'        {pr} {{ }}')
-                    out.append(f'    }}')
+                    out.append('    }')
                 out.append('}')
             else:
                 out.append(f'Ltm::Virtual Server: {name}')
                 out.append('-' * 60)
-                out.append(f'  Status')
+                out.append('  Status')
                 out.append(f'    Availability : {avail} ({color})')
-                out.append(f'    State        : enabled')
+                out.append('    State        : enabled')
                 out.append(f'    Destination  : {v["destination"]}')
                 out.append(f'    Pool         : {v.get("pool","(none)")}')
                 out.append(f'    Members up   : {up}')
@@ -5734,10 +5733,10 @@ Key Version         : A
             if ip and ip != 'unassigned':
                 lines.append(f'  IP address {ip}, subnet mask {mask}')
             else:
-                lines.append(f'  IP address unassigned')
+                lines.append('  IP address unassigned')
             lines.append(f'  MAC address 0000.dead.{abs(hash(ifname)) % 0xffff:04x}, MTU 1500')
-            lines.append(f'  Input: 1234567 packets, 123456789 bytes; Errors: 0')
-            lines.append(f'  Output: 987654 packets, 98765432 bytes; Errors: 0')
+            lines.append('  Input: 1234567 packets, 123456789 bytes; Errors: 0')
+            lines.append('  Output: 987654 packets, 98765432 bytes; Errors: 0')
             lines.append('')
         return '\n'.join(lines).rstrip()
 
@@ -5847,43 +5846,43 @@ Key Version         : A
             return 'There are no ipsec sas.'
         peer = list(state.ipsec_peers.keys())[0]
         lines = [
-            f'interface: outside',
-            f'    Crypto map tag: OUTSIDE_MAP, seq num: 10, local addr: 203.0.113.1',
-            f'',
-            f'      local  ident  (addr/mask/prot/port): (192.168.1.0/255.255.255.0/0/0)',
-            f'      remote ident (addr/mask/prot/port): (10.1.1.0/255.255.255.0/0/0)',
+            'interface: outside',
+            '    Crypto map tag: OUTSIDE_MAP, seq num: 10, local addr: 203.0.113.1',
+            '',
+            '      local  ident  (addr/mask/prot/port): (192.168.1.0/255.255.255.0/0/0)',
+            '      remote ident (addr/mask/prot/port): (10.1.1.0/255.255.255.0/0/0)',
             f'      current_peer: {peer}',
-            f'',
-            f'      #pkts encaps: 12345, #pkts encrypt: 12345, #pkts digest: 12345',
-            f'      #pkts decaps: 12200, #pkts decrypt: 12200, #pkts verify: 12200',
-            f'      #pkts compressed: 0, #pkts decompressed: 0',
-            f'      #pkts not compressed: 12345, #pkts comp failed: 0, #pkts decomp failed: 0',
-            f'      #pre-frag successes: 0, #pre-frag failures: 0, #fragments created: 0',
-            f'      #PMTUs sent: 0, #PMTUs rcvd: 0, #decapsulated frgs needing reassembly: 0',
-            f'      #TFC rcvd: 0, #TFC sent: 0',
-            f'      #Valid ICMP Errors rcvd: 0, #Invalid ICMP Errors rcvd: 0',
-            f'      #send errors: 0, #recv errors: 0',
-            f'',
+            '',
+            '      #pkts encaps: 12345, #pkts encrypt: 12345, #pkts digest: 12345',
+            '      #pkts decaps: 12200, #pkts decrypt: 12200, #pkts verify: 12200',
+            '      #pkts compressed: 0, #pkts decompressed: 0',
+            '      #pkts not compressed: 12345, #pkts comp failed: 0, #pkts decomp failed: 0',
+            '      #pre-frag successes: 0, #pre-frag failures: 0, #fragments created: 0',
+            '      #PMTUs sent: 0, #PMTUs rcvd: 0, #decapsulated frgs needing reassembly: 0',
+            '      #TFC rcvd: 0, #TFC sent: 0',
+            '      #Valid ICMP Errors rcvd: 0, #Invalid ICMP Errors rcvd: 0',
+            '      #send errors: 0, #recv errors: 0',
+            '',
             f'      local crypto endpt.: 203.0.113.1/0, remote crypto endpt.: {peer}/0',
-            f'      path mtu 1500, ipsec overhead 74(44), media mtu 1500',
-            f'      PMTU time remaining (sec): 0, DF policy: copy-df',
-            f'      ICMP error validation: disabled, TFC packets: disabled',
-            f'      current outbound spi: 0xA1B2C3D4',
-            f'      current inbound spi : 0xD4C3B2A1',
-            f'',
-            f'    inbound esp sas:',
-            f'      spi: 0xD4C3B2A1 (3569939105)',
-            f'        transform: esp-aes-256 esp-sha-hmac no compression',
-            f'        in use settings =={{Tunnel, TFC pessimize}}',
-            f'        slot: 0, conn_id: 12288, crypto-map: OUTSIDE_MAP',
-            f'        sa timing: remaining key lifetime (kB/sec): (4374000/28799)',
-            f'',
-            f'    outbound esp sas:',
-            f'      spi: 0xA1B2C3D4 (2712847316)',
-            f'        transform: esp-aes-256 esp-sha-hmac no compression',
-            f'        in use settings =={{Tunnel, TFC pessimize}}',
-            f'        slot: 0, conn_id: 12288, crypto-map: OUTSIDE_MAP',
-            f'        sa timing: remaining key lifetime (kB/sec): (4374000/28799)',
+            '      path mtu 1500, ipsec overhead 74(44), media mtu 1500',
+            '      PMTU time remaining (sec): 0, DF policy: copy-df',
+            '      ICMP error validation: disabled, TFC packets: disabled',
+            '      current outbound spi: 0xA1B2C3D4',
+            '      current inbound spi : 0xD4C3B2A1',
+            '',
+            '    inbound esp sas:',
+            '      spi: 0xD4C3B2A1 (3569939105)',
+            '        transform: esp-aes-256 esp-sha-hmac no compression',
+            '        in use settings =={Tunnel, TFC pessimize}',
+            '        slot: 0, conn_id: 12288, crypto-map: OUTSIDE_MAP',
+            '        sa timing: remaining key lifetime (kB/sec): (4374000/28799)',
+            '',
+            '    outbound esp sas:',
+            '      spi: 0xA1B2C3D4 (2712847316)',
+            '        transform: esp-aes-256 esp-sha-hmac no compression',
+            '        in use settings =={Tunnel, TFC pessimize}',
+            '        slot: 0, conn_id: 12288, crypto-map: OUTSIDE_MAP',
+            '        sa timing: remaining key lifetime (kB/sec): (4374000/28799)',
         ]
         return '\n'.join(lines)
 
@@ -5900,7 +5899,7 @@ Key Version         : A
         lines = [
             ': Saved',
             ':',
-            f'ASA Version 9.16(4)',
+            'ASA Version 9.16(4)',
             '!',
             f'hostname {state.hostname}',
             'enable password *** encrypted',
@@ -6170,11 +6169,11 @@ Key Version         : A
 
         # ps aux / ps
         if re.match(r'^ps', c):
-            return (f'  PID TTY          TIME CMD\n'
-                    f'    1 ?        00:00:01 init\n'
-                    f'  100 ?        00:00:00 sshd\n'
-                    f'  200 pts/0    00:00:00 bash\n'
-                    f'  201 pts/0    00:00:00 ps')
+            return ('  PID TTY          TIME CMD\n'
+                    '    1 ?        00:00:01 init\n'
+                    '  100 ?        00:00:00 sshd\n'
+                    '  200 pts/0    00:00:00 bash\n'
+                    '  201 pts/0    00:00:00 ps')
 
         # uptime
         if c == 'uptime':
@@ -6319,18 +6318,18 @@ Key Version         : A
                     tail.append(f"Connection to {host} {port} port [tcp/*] succeeded!  ({rtt} ms)")
                 avg_rtt = round(random.uniform(1.5, 3.5), 2)
                 summary = [
-                    f"",
+                    "",
                     f"  ... (ports {p_lo + 10} - {p_hi - 10} tested, all succeeded) ...",
-                    f"",
+                    "",
                 ]
                 all_lines = head + summary + tail + [
-                    f"",
-                    f"--- nc scan summary ---",
+                    "",
+                    "--- nc scan summary ---",
                     f"Host   : {host}",
                     f"Range  : {p_lo} - {p_hi}",
                     f"Total  : {total} ports scanned",
                     f"Open   : {total} ports",
-                    f"Closed : 0 ports",
+                    "Closed : 0 ports",
                     f"Avg RTT: {avg_rtt} ms",
                 ]
                 return "\n".join(all_lines)
@@ -6343,7 +6342,7 @@ Key Version         : A
                 f"  Local:  {my_ip}:{random.randint(40000,60000)}",
                 f"  Remote: {host}:{port}",
                 f"  RTT:    {rtt} ms",
-                f"  State:  ESTABLISHED",
+                "  State:  ESTABLISHED",
             ]
             return "\n".join(lines)
         return "Usage: nc -zv <host> <port>"
@@ -6386,28 +6385,28 @@ Key Version         : A
                 f"* Connected to {host} ({host}) port 80 (#0)",
                 f"> GET {path} HTTP/1.1",
                 f"> Host: {host}",
-                f"> User-Agent: curl/7.88.1",
-                f"> Accept: */*",
-                f">",
-                f"< HTTP/1.1 200 OK",
-                f"< Content-Type: text/html",
-                f"< Content-Length: 612",
-                f"< Connection: keep-alive",
-                f"<",
-                f"<!DOCTYPE html>",
-                f"<html><head><title>Network Lab Test Page</title></head>",
-                f"<body><h1>TCP Connection OK</h1>",
+                "> User-Agent: curl/7.88.1",
+                "> Accept: */*",
+                ">",
+                "< HTTP/1.1 200 OK",
+                "< Content-Type: text/html",
+                "< Content-Length: 612",
+                "< Connection: keep-alive",
+                "<",
+                "<!DOCTYPE html>",
+                "<html><head><title>Network Lab Test Page</title></head>",
+                "<body><h1>TCP Connection OK</h1>",
                 f"<p>Server: {host} | Client: {my_ip} | RTT: {rtt}ms</p>",
-                f"</body></html>",
+                "</body></html>",
                 f"* Connection #0 to host {host} left intact",
             ]
         else:
             lines = [
-                f"<!DOCTYPE html>",
-                f"<html><head><title>Network Lab Test Page</title></head>",
-                f"<body><h1>TCP Connection OK</h1>",
+                "<!DOCTYPE html>",
+                "<html><head><title>Network Lab Test Page</title></head>",
+                "<body><h1>TCP Connection OK</h1>",
                 f"<p>Server: {host} | Client: {my_ip} | RTT: {rtt}ms</p>",
-                f"</body></html>",
+                "</body></html>",
             ]
         return "\n".join(lines)
 
@@ -6423,12 +6422,12 @@ Key Version         : A
             f"--{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}--  http://{url_part}",
             f"Resolving {host}... {host}",
             f"Connecting to {host}|{host}|:80... connected.",
-            f"HTTP request sent, awaiting response... 200 OK",
+            "HTTP request sent, awaiting response... 200 OK",
             f"Length: {size} [text/html]",
-            f"Saving to: 'index.html'",
-            f"",
+            "Saving to: 'index.html'",
+            "",
             f"index.html        100%[==========>]  {size}  --.-KB/s    in {rtt}s",
-            f"",
+            "",
             f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ({size/rtt:.0f} B/s) - 'index.html' saved [{size}/{size}]",
         ]
         return "\n".join(lines)
@@ -6466,8 +6465,8 @@ Key Version         : A
             if ip:
                 lines.append(f'        inet {ip}  netmask {mask}  broadcast {self._broadcast(ip, prefix)}')
             lines.append(f'        ether {mac}  txqueuelen 1000  (Ethernet)')
-            lines.append(f'        RX packets 1234  bytes 567890 (567.8 KB)')
-            lines.append(f'        TX packets 456   bytes 123456 (123.4 KB)')
+            lines.append('        RX packets 1234  bytes 567890 (567.8 KB)')
+            lines.append('        TX packets 456   bytes 123456 (123.4 KB)')
             lines.append('')
         return '\n'.join(lines).rstrip()
 
@@ -6486,7 +6485,7 @@ Key Version         : A
             if ip:
                 bcast = self._broadcast(ip, prefix)
                 lines.append(f'    inet {ip}/{prefix} brd {bcast} scope global {ifname}')
-                lines.append(f'       valid_lft forever preferred_lft forever')
+                lines.append('       valid_lft forever preferred_lft forever')
             idx += 1
         return '\n'.join(lines)
 
@@ -6804,7 +6803,7 @@ Key Version         : A
             return 'Are you sure you want to reboot the device? (y/n): y\nRebooting...'
 
         # ── 不明コマンド ──
-        return f"% Unknown command."
+        return "% Unknown command."
 
     def _apresia_show_version(self, state: DeviceState) -> str:
         now = datetime.now()
@@ -6826,25 +6825,25 @@ Key Version         : A
 
     def _apresia_show_unit(self, state: DeviceState) -> str:
         return (
-            f' Unit  : 1\n'
-            f' Model : APLGM200-24GT\n'
-            f' Status: OK\n'
-            f' Ports : 24 x 1000BASE-T + 4 x SFP\n'
-            f' MAC   : 00:1a:2b:3c:4d:00\n'
+            ' Unit  : 1\n'
+            ' Model : APLGM200-24GT\n'
+            ' Status: OK\n'
+            ' Ports : 24 x 1000BASE-T + 4 x SFP\n'
+            ' MAC   : 00:1a:2b:3c:4d:00\n'
         )
 
     def _apresia_show_environment(self, state: DeviceState) -> str:
         return (
-            f' Fan Status   : OK (Fan1: Running, Fan2: Running)\n'
-            f' Temperature  : 42°C (Threshold: 70°C)\n'
-            f' Power Status : OK (AC Power)\n'
-            f' Voltage      : Normal\n'
+            ' Fan Status   : OK (Fan1: Running, Fan2: Running)\n'
+            ' Temperature  : 42°C (Threshold: 70°C)\n'
+            ' Power Status : OK (AC Power)\n'
+            ' Voltage      : Normal\n'
         )
 
     def _apresia_show_port(self, portspec: str, state: DeviceState) -> str:
         lines = [
-            f' Port       Status     Vlan  Duplex  Speed   Desc',
-            f' ---------- ---------- ----- ------- ------- ----------------',
+            ' Port       Status     Vlan  Duplex  Speed   Desc',
+            ' ---------- ---------- ----- ------- ------- ----------------',
         ]
         for name, iface in state.interfaces.items():
             if not name.startswith('Port'):
@@ -6939,17 +6938,17 @@ Key Version         : A
 
     def _apresia_show_stp(self, state: DeviceState) -> str:
         return (
-            f' Spanning Tree: Enabled (RSTP)\n'
-            f'\n'
-            f' Bridge ID     : Priority 32768  Address 00:1a:2b:3c:4d:00\n'
-            f' Root Bridge   : Priority 8192   Address 00:0e:0e:f1:00:01\n'
-            f' Root Port     : Port1/0/24   Cost: 4   Hello: 2  MaxAge: 20  FwdDly: 15\n'
-            f'\n'
-            f' Port        Role       State      Cost   Prio  Type\n'
-            f' ----------- ---------- ---------- ------ ----- ----------\n'
-            f' Port1/0/1   Designated Forwarding 20000  128   P2P\n'
-            f' Port1/0/2   Designated Forwarding 20000  128   P2P\n'
-            f' Port1/0/24  Root       Forwarding 20000  128   P2P\n'
+            ' Spanning Tree: Enabled (RSTP)\n'
+            '\n'
+            ' Bridge ID     : Priority 32768  Address 00:1a:2b:3c:4d:00\n'
+            ' Root Bridge   : Priority 8192   Address 00:0e:0e:f1:00:01\n'
+            ' Root Port     : Port1/0/24   Cost: 4   Hello: 2  MaxAge: 20  FwdDly: 15\n'
+            '\n'
+            ' Port        Role       State      Cost   Prio  Type\n'
+            ' ----------- ---------- ---------- ------ ----- ----------\n'
+            ' Port1/0/1   Designated Forwarding 20000  128   P2P\n'
+            ' Port1/0/2   Designated Forwarding 20000  128   P2P\n'
+            ' Port1/0/24  Root       Forwarding 20000  128   P2P\n'
         )
 
     def _apresia_show_loopdetect(self, state: DeviceState) -> str:
@@ -6997,7 +6996,7 @@ Key Version         : A
                 f'  Chassis ID   : {chassis}',
                 f'  Port ID      : {port_id}',
                 f'  System Name  : {sysname}',
-                f'  System Descr : APRESIA Networks',
+                '  System Descr : APRESIA Networks',
                 f'  Port Descr   : {port_id}',
                 f'  Capability   : {cap}',
                 f'  TTL          : {n.get("ttl", 120)}',
@@ -7024,11 +7023,11 @@ Key Version         : A
 
     def _apresia_show_running(self, state: DeviceState) -> str:
         lines = [
-            f'!',
-            f'! ApresiaLightGM200シリーズ  Version 2.03',
-            f'!',
+            '!',
+            '! ApresiaLightGM200シリーズ  Version 2.03',
+            '!',
             f'hostname {state.hostname}',
-            f'!',
+            '!',
         ]
         # 管理IP
         for name, iface in state.interfaces.items():
@@ -7045,19 +7044,19 @@ Key Version         : A
             if desc:
                 lines.append(f' description {desc}')
             if vlan == 'trunk':
-                lines.append(f' switchport mode trunk')
+                lines.append(' switchport mode trunk')
                 if iface.get('allowed_vlan'):
                     lines.append(f' switchport trunk allowed vlan {iface["allowed_vlan"]}')
             else:
-                lines.append(f' switchport mode access')
+                lines.append(' switchport mode access')
                 lines.append(f' switchport access vlan {vlan}')
-            lines.append(f'!')
+            lines.append('!')
         # VLAN
         for vid in state.vlans:
             if vid != 1:
                 lines.append(f'vlan {vid}')
                 lines.append(f' name {state.vlans[vid].get("name", f"VLAN{vid}")}')
-                lines.append(f'!')
+                lines.append('!')
         lines.append('end')
         return '\n'.join(lines)
 
@@ -7140,8 +7139,8 @@ Key Version         : A
         n = 65
         return "\n".join([
             "",
-            f"Syslog logging: enabled (0 messages dropped, 2 messages rate-limited, "
-            f"0 flushes, 0 overruns, xml disabled, filtering disabled)",
+            "Syslog logging: enabled (0 messages dropped, 2 messages rate-limited, "
+            "0 flushes, 0 overruns, xml disabled, filtering disabled)",
             "",
             "No Active Message Discriminator.",
             "",
@@ -7335,8 +7334,8 @@ Key Version         : A
                     short = name.replace("GigabitEthernet","Gi")
                     lines.append(f"{short:<13}{'1':<15}{'1':<13}{'0':<19}Restrict")
         lines.append("---------------------------------------------------------------------------")
-        lines.append(f"Total Addresses in System (excluding one mac per port)     : 0")
-        lines.append(f"Max Addresses limit in System (excluding one mac per port) : 4096")
+        lines.append("Total Addresses in System (excluding one mac per port)     : 0")
+        lines.append("Max Addresses limit in System (excluding one mac per port) : 4096")
         return "\n".join(lines)
 
     def _show_port_security_interface(self, ifname, state):
@@ -7356,8 +7355,8 @@ Key Version         : A
                     f"Configured MAC Addresses   : {len(ps.get('macs',[]))}\n"
                     f"Sticky MAC Addresses       : {'Enabled' if ps.get('sticky') else 'Disabled'}\n"
                     f"Security Violation Count   : 0")
-        return (f"Port Security              : Disabled\n"
-                f"(このインターフェースでは port-security が無効です)")
+        return ("Port Security              : Disabled\n"
+                "(このインターフェースでは port-security が無効です)")
 
     def _show_dhcp_snooping(self, state):
         """show ip dhcp snooping（実設定を反映）"""
@@ -7724,10 +7723,10 @@ Key Version         : A
             elif reason == 'range':
                 return f'% Error: Value out of range. {value or ""}'
             else:
-                return f'% Error: Unknown command.'
+                return '% Error: Unknown command.'
 
         # フォールバック
-        return f'% Unknown command.'
+        return '% Unknown command.'
 
     def _ambiguous_error(self, cmd: str, state, candidates: list) -> str:
         """候補が複数ある曖昧なコマンドエラー（実機表示準拠）"""

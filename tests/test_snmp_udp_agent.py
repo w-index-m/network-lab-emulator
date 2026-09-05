@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from engine.snmp_udp_agent import (
     _encode_oid, _decode_oid, _encode_int, _decode_int,
     _encode_value, decode_request, encode_response,
-    PDU_GET, PDU_GETNEXT, PDU_GETBULK, TAG_NO_SUCH_OBJECT, TAG_END_OF_MIB_VIEW,
+    PDU_GET, TAG_NO_SUCH_OBJECT, TAG_END_OF_MIB_VIEW,
 )
 
 
@@ -46,7 +46,7 @@ def test_encode_value_gauge32():
 
 def _build_get_request(oid: str, request_id: int = 1) -> bytes:
     """テスト用に簡易的なSNMPv2c GetRequestパケットを手で組み立てる"""
-    from engine.snmp_udp_agent import _tlv, TAG_SEQUENCE, TAG_INTEGER, TAG_OCTET_STRING, TAG_NULL
+    from engine.snmp_udp_agent import _tlv, TAG_SEQUENCE, TAG_OCTET_STRING, TAG_NULL
 
     oid_bytes = _encode_oid(oid)
     null_bytes = _tlv(TAG_NULL, b'')
