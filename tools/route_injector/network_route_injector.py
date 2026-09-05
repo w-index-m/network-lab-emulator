@@ -74,6 +74,26 @@ def prefix_to_netmask(prefix: int) -> str:
     return socket.inet_ntoa(struct.pack("!I", mask_int))
 
 
+def parse_ip_field(label: str, raw: str) -> int:
+    """IPアドレス欄を検証し、失敗時は欄名と原因が分かる日本語エラーにする。
+    （socketの"illegal IP address string passed to inet_aton"は
+    どの欄が悪いのか分からず不親切なため）"""
+    value = raw.strip()
+    if not value:
+        raise ValueError(f"「{label}」が入力されていません。"
+                          f"例: 192.168.1.100 の形式で入力してください。")
+    try:
+        return ip_to_int(value)
+    except OSError:
+        reason = ""
+        if len(value.split('.')) != 4:
+            reason = "（ドット区切りが4つの数字になっていません）"
+        elif any(not part.isdigit() for part in value.split('.')):
+            reason = "（全角数字や余分な文字が混ざっていませんか？半角で入力してください）"
+        raise ValueError(f"「{label}」のIPアドレス形式が不正です: 「{value}」{reason}\n"
+                          f"例: 192.168.1.100 の形式で入力してください。")
+
+
 def is_multicast_ip(ip: str) -> bool:
     first_octet = int(ip.split(".")[0])
     return 224 <= first_octet <= 239
@@ -2256,25 +2276,7 @@ class RipMultiRouterTab(ttk.Frame, LogMixin):
         self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
         self._init_log(self.log_text)
 
-    @staticmethod
-    def _parse_ip_field(label: str, raw: str) -> int:
-        """IPアドレス欄を検証し、失敗時は欄名と原因が分かる日本語エラーにする。
-        （元の"illegal IP address string passed to inet_aton"は
-        Pythonの内部エラーそのままで、どの欄が悪いのか分からず不親切だった）"""
-        value = raw.strip()
-        if not value:
-            raise ValueError(f"「{label}」が入力されていません。"
-                              f"例: 192.168.1.100 の形式で入力してください。")
-        try:
-            return ip_to_int(value)
-        except (OSError, socket.error):
-            reason = ""
-            if len(value.split('.')) != 4:
-                reason = "（ドット区切りが4つの数字になっていません）"
-            elif any(not part.isdigit() for part in value.split('.')):
-                reason = "（全角数字や余分な文字が混ざっていませんか？半角で入力してください）"
-            raise ValueError(f"「{label}」のIPアドレス形式が不正です: 「{value}」{reason}\n"
-                              f"例: 192.168.1.100 の形式で入力してください。")
+    _parse_ip_field = staticmethod(parse_ip_field)
 
     def _parse_common_fields(self):
         """疑似ルータ一括生成欄の共通パラメータを検証して返す。
@@ -2675,10 +2677,435 @@ class BgpMultiPeerTab(ttk.Frame, LogMixin):
 # メインウィンドウ
 # =====================================================================
 
+# =====================================================================
+# トラフィック生成 / スループット測定
+#   L4(TCP/UDP)のトラフィックを流して pps/bps を実測するための機能。
+#   経路注入(制御プレーン)だけでは「経路は入ったが実際に転送されるか」が
+#   分からないため、データプレーン側の確認手段として用意している。
+#   GUIから切り離してテストできるよう、tkinterに依存しない形にしてある。
+# =====================================================================
+
+class TrafficStats:
+    """送信/受信のカウンタ。ワーカースレッドが更新しGUIスレッドが読むため
+    ロックで保護する。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.packets = 0
+        self.bytes = 0
+        self.errors = 0
+        self.last_error = ""
+        self.started_at = None
+
+    def start(self):
+        with self._lock:
+            self.packets = 0
+            self.bytes = 0
+            self.errors = 0
+            self.last_error = ""
+            self.started_at = time.time()
+
+    def add(self, nbytes: int):
+        with self._lock:
+            self.packets += 1
+            self.bytes += nbytes
+
+    def add_error(self, msg: str):
+        with self._lock:
+            self.errors += 1
+            self.last_error = msg
+
+    def snapshot(self):
+        """(packets, bytes, errors, elapsed秒, pps, bps) を返す"""
+        with self._lock:
+            started = self.started_at
+            packets, nbytes, errors = self.packets, self.bytes, self.errors
+        elapsed = (time.time() - started) if started else 0.0
+        pps = packets / elapsed if elapsed > 0 else 0.0
+        bps = nbytes * 8 / elapsed if elapsed > 0 else 0.0
+        return packets, nbytes, errors, elapsed, pps, bps
+
+
+def run_traffic_sender(proto, dest_ip, dest_port, size, count, rate_pps,
+                        src_ip, src_port, tos, stop_event, stats):
+    """UDP/TCPでパケットを送信する。
+    count<=0なら停止されるまで無制限、rate_pps<=0ならレート制限なし。
+    tos(DSCP<<2 等のToSバイト値)を指定するとIP_TOSを設定する
+    （Si-R等のQoS/優先制御の動作確認用。Hachiには無い機能）。"""
+    payload = b'H' * max(1, size)
+    sock_type = socket.SOCK_DGRAM if proto == 'udp' else socket.SOCK_STREAM
+    sock = socket.socket(socket.AF_INET, sock_type)
+    try:
+        if tos:
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, tos)
+            except OSError as e:
+                # 環境によってはIP_TOSを設定できない(Windowsの一部構成)。
+                # 送信自体は続行し、設定できなかったことだけ記録する。
+                stats.add_error(f"ToS設定不可: {e}")
+        if src_ip or src_port:
+            sock.bind((src_ip or '', src_port or 0))
+        if proto == 'tcp':
+            sock.settimeout(5.0)
+            sock.connect((dest_ip, dest_port))
+            sock.settimeout(None)
+        stats.start()
+        interval = (1.0 / rate_pps) if rate_pps > 0 else 0.0
+        next_send = time.perf_counter()
+        sent = 0
+        while not stop_event.is_set():
+            if count > 0 and sent >= count:
+                break
+            try:
+                if proto == 'udp':
+                    sock.sendto(payload, (dest_ip, dest_port))
+                else:
+                    sock.sendall(payload)
+            except OSError as e:
+                stats.add_error(str(e))
+                break
+            stats.add(len(payload))
+            sent += 1
+            if interval:
+                next_send += interval
+                delay = next_send - time.perf_counter()
+                if delay > 0:
+                    if stop_event.wait(delay):
+                        break
+                else:
+                    # 指定レートに追いつけていない。過去分を取り戻そうとして
+                    # バーストさせないよう基準時刻をリセットする
+                    next_send = time.perf_counter()
+    finally:
+        sock.close()
+
+
+def run_traffic_receiver(proto, listen_ip, listen_port, stop_event, stats):
+    """UDP/TCPで待ち受け、受信パケット数/バイト数をstatsに記録する。"""
+    if proto == 'udp':
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((listen_ip or '', listen_port))
+        sock.settimeout(0.5)
+        stats.start()
+        try:
+            while not stop_event.is_set():
+                try:
+                    data, _addr = sock.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                except OSError as e:
+                    stats.add_error(str(e))
+                    break
+                stats.add(len(data))
+        finally:
+            sock.close()
+        return
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((listen_ip or '', listen_port))
+    srv.listen(5)
+    srv.settimeout(0.5)
+    stats.start()
+    try:
+        while not stop_event.is_set():
+            try:
+                conn, _addr = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError as e:
+                stats.add_error(str(e))
+                break
+            conn.settimeout(0.5)
+            try:
+                while not stop_event.is_set():
+                    try:
+                        data = conn.recv(65535)
+                    except socket.timeout:
+                        continue
+                    except OSError as e:
+                        stats.add_error(str(e))
+                        break
+                    if not data:
+                        break  # 相手が切断
+                    stats.add(len(data))
+            finally:
+                conn.close()
+    finally:
+        srv.close()
+
+
+def format_rate(pps: float, bps: float) -> str:
+    """pps/bpsを読みやすい単位に整形する"""
+    if bps >= 1_000_000_000:
+        bps_str = f"{bps / 1_000_000_000:.2f} Gbps"
+    elif bps >= 1_000_000:
+        bps_str = f"{bps / 1_000_000:.2f} Mbps"
+    elif bps >= 1_000:
+        bps_str = f"{bps / 1_000:.2f} kbps"
+    else:
+        bps_str = f"{bps:.0f} bps"
+    return f"{pps:,.0f} pps / {bps_str}"
+
+
+class TrafficGenTab(ttk.Frame, LogMixin):
+    """L4トラフィック生成/測定タブ（Hachi相当）。
+
+    送信側と受信側を同じタブに持たせている。実機を挟んだスループット測定
+    （PC-A → 実機 → PC-B）では両端でこのタブを使い、送信側の送信数と
+    受信側の受信数を突き合わせれば損失も分かる。
+    """
+
+    def __init__(self, parent):
+        ttk.Frame.__init__(self, parent)
+        self.send_stats = TrafficStats()
+        self.recv_stats = TrafficStats()
+        self.send_stop = threading.Event()
+        self.recv_stop = threading.Event()
+        self.sending = False
+        self.receiving = False
+        self._build_widgets()
+        self._poll_stats()
+
+    def _build_widgets(self):
+        pad = {"padx": 6, "pady": 4}
+
+        info = ttk.Label(
+            self, foreground="blue", justify="left",
+            text="TCP/UDPのトラフィックを流してスループット(pps/bps)を実測します。\n"
+                 "実機を挟んだ測定(PC-A → 装置 → PC-B)では、両端でこのタブの"
+                 "送信側/受信側をそれぞれ使ってください。\n"
+                 "ソケットベースのためVLANタグやMACの細工はできません"
+                 "（そういった試験はRIP/OSPFタブのscapyモードを使ってください）。"
+        )
+        info.pack(fill="x", padx=8, pady=(6, 0))
+
+        # ── 送信 ──
+        send_frame = ttk.LabelFrame(self, text="送信")
+        send_frame.pack(fill="x", padx=8, pady=6)
+
+        ttk.Label(send_frame, text="プロトコル:").grid(row=0, column=0, sticky="e", **pad)
+        self.send_proto_var = tk.StringVar(value="udp")
+        ttk.Radiobutton(send_frame, text="UDP", variable=self.send_proto_var,
+                        value="udp").grid(row=0, column=1, sticky="w")
+        ttk.Radiobutton(send_frame, text="TCP", variable=self.send_proto_var,
+                        value="tcp").grid(row=0, column=1, sticky="e")
+
+        ttk.Label(send_frame, text="宛先IP:").grid(row=0, column=2, sticky="e", **pad)
+        self.dest_ip_var = tk.StringVar()
+        ttk.Entry(send_frame, textvariable=self.dest_ip_var, width=16).grid(
+            row=0, column=3, sticky="w", **pad)
+        ttk.Label(send_frame, text="宛先ポート:").grid(row=0, column=4, sticky="e", **pad)
+        self.dest_port_var = tk.StringVar(value="5001")
+        ttk.Entry(send_frame, textvariable=self.dest_port_var, width=8).grid(
+            row=0, column=5, sticky="w", **pad)
+
+        ttk.Label(send_frame, text="送信元IP:").grid(row=1, column=0, sticky="e", **pad)
+        self.src_ip_var = tk.StringVar()
+        ttk.Entry(send_frame, textvariable=self.src_ip_var, width=16).grid(
+            row=1, column=1, sticky="w", **pad)
+        ttk.Label(send_frame, text="(空欄ならOS任せ)").grid(row=1, column=2, sticky="w")
+
+        ttk.Label(send_frame, text="パケットサイズ(byte):").grid(row=2, column=0, sticky="e", **pad)
+        self.size_var = tk.StringVar(value="1400")
+        ttk.Entry(send_frame, textvariable=self.size_var, width=8).grid(
+            row=2, column=1, sticky="w", **pad)
+        ttk.Label(send_frame, text="レート(pps):").grid(row=2, column=2, sticky="e", **pad)
+        self.rate_var = tk.StringVar(value="1000")
+        ttk.Entry(send_frame, textvariable=self.rate_var, width=8).grid(
+            row=2, column=3, sticky="w", **pad)
+        ttk.Label(send_frame, text="(0=無制限)").grid(row=2, column=4, sticky="w")
+
+        ttk.Label(send_frame, text="送信パケット数:").grid(row=3, column=0, sticky="e", **pad)
+        self.count_var = tk.StringVar(value="0")
+        ttk.Entry(send_frame, textvariable=self.count_var, width=8).grid(
+            row=3, column=1, sticky="w", **pad)
+        ttk.Label(send_frame, text="(0=停止するまで)").grid(row=3, column=2, sticky="w")
+        ttk.Label(send_frame, text="ToS/DSCP:").grid(row=3, column=3, sticky="e", **pad)
+        self.tos_var = tk.StringVar(value="0")
+        ttk.Entry(send_frame, textvariable=self.tos_var, width=8).grid(
+            row=3, column=4, sticky="w", **pad)
+        ttk.Label(send_frame, text="(0-255。QoS確認用)").grid(row=3, column=5, sticky="w")
+
+        btn_row = ttk.Frame(send_frame)
+        btn_row.grid(row=4, column=0, columnspan=6, sticky="w", **pad)
+        self.send_start_btn = ttk.Button(btn_row, text="送信開始", command=self._on_send_start)
+        self.send_start_btn.pack(side="left", padx=4)
+        self.send_stop_btn = ttk.Button(btn_row, text="送信停止", command=self._on_send_stop,
+                                         state="disabled")
+        self.send_stop_btn.pack(side="left", padx=4)
+        self.send_stat_label = ttk.Label(btn_row, text="送信: -")
+        self.send_stat_label.pack(side="left", padx=16)
+
+        # ── 受信 ──
+        recv_frame = ttk.LabelFrame(self, text="受信(測定)")
+        recv_frame.pack(fill="x", padx=8, pady=6)
+
+        ttk.Label(recv_frame, text="プロトコル:").grid(row=0, column=0, sticky="e", **pad)
+        self.recv_proto_var = tk.StringVar(value="udp")
+        ttk.Radiobutton(recv_frame, text="UDP", variable=self.recv_proto_var,
+                        value="udp").grid(row=0, column=1, sticky="w")
+        ttk.Radiobutton(recv_frame, text="TCP", variable=self.recv_proto_var,
+                        value="tcp").grid(row=0, column=1, sticky="e")
+
+        ttk.Label(recv_frame, text="待ち受けIP:").grid(row=0, column=2, sticky="e", **pad)
+        self.listen_ip_var = tk.StringVar()
+        ttk.Entry(recv_frame, textvariable=self.listen_ip_var, width=16).grid(
+            row=0, column=3, sticky="w", **pad)
+        ttk.Label(recv_frame, text="(空欄なら全アドレス)").grid(row=0, column=4, sticky="w")
+
+        ttk.Label(recv_frame, text="待ち受けポート:").grid(row=1, column=0, sticky="e", **pad)
+        self.listen_port_var = tk.StringVar(value="5001")
+        ttk.Entry(recv_frame, textvariable=self.listen_port_var, width=8).grid(
+            row=1, column=1, sticky="w", **pad)
+
+        rbtn_row = ttk.Frame(recv_frame)
+        rbtn_row.grid(row=2, column=0, columnspan=6, sticky="w", **pad)
+        self.recv_start_btn = ttk.Button(rbtn_row, text="受信開始", command=self._on_recv_start)
+        self.recv_start_btn.pack(side="left", padx=4)
+        self.recv_stop_btn = ttk.Button(rbtn_row, text="受信停止", command=self._on_recv_stop,
+                                         state="disabled")
+        self.recv_stop_btn.pack(side="left", padx=4)
+        self.recv_stat_label = ttk.Label(rbtn_row, text="受信: -")
+        self.recv_stat_label.pack(side="left", padx=16)
+
+        action = ttk.Frame(self)
+        action.pack(fill="x", padx=8, pady=4)
+        ttk.Button(action, text="ログクリア", command=self._clear_log).pack(side="right", padx=4)
+
+        log_frame = ttk.LabelFrame(self, text="ログ")
+        log_frame.pack(fill="both", expand=True, padx=8, pady=6)
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, state="disabled")
+        self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
+        self._init_log(self.log_text)
+
+    # ---- 入力検証 ----
+    @staticmethod
+    def _parse_int_field(label, raw, minimum=None, maximum=None):
+        try:
+            value = int(str(raw).strip())
+        except ValueError:
+            raise ValueError(f"「{label}」は数字で入力してください: 「{raw}」")
+        if minimum is not None and value < minimum:
+            raise ValueError(f"「{label}」は{minimum}以上で指定してください")
+        if maximum is not None and value > maximum:
+            raise ValueError(f"「{label}」は{maximum}以下で指定してください")
+        return value
+
+    # ---- 送信 ----
+    def _on_send_start(self):
+        if self.sending:
+            messagebox.showinfo("送信中", "既に送信中です")
+            return
+        try:
+            dest_ip = self.dest_ip_var.get().strip()
+            parse_ip_field("宛先IP", dest_ip)  # 形式チェックのみ
+            src_ip = self.src_ip_var.get().strip()
+            if src_ip:
+                parse_ip_field("送信元IP", src_ip)
+            dest_port = self._parse_int_field("宛先ポート", self.dest_port_var.get(), 1, 65535)
+            size = self._parse_int_field("パケットサイズ(byte)", self.size_var.get(), 1, 65507)
+            rate = self._parse_int_field("レート(pps)", self.rate_var.get(), 0)
+            count = self._parse_int_field("送信パケット数", self.count_var.get(), 0)
+            tos = self._parse_int_field("ToS/DSCP", self.tos_var.get(), 0, 255)
+        except ValueError as e:
+            messagebox.showerror("入力エラー", str(e))
+            return
+
+        proto = self.send_proto_var.get()
+        self.send_stop.clear()
+        self.sending = True
+        self.send_start_btn.configure(state="disabled")
+        self.send_stop_btn.configure(state="normal")
+        self.log(f"=== 送信開始 {proto.upper()} -> {dest_ip}:{dest_port} "
+                  f"size={size}B rate={'無制限' if rate == 0 else str(rate) + 'pps'} "
+                  f"count={'無制限' if count == 0 else count} tos={tos} ===")
+
+        def worker():
+            try:
+                run_traffic_sender(proto, dest_ip, dest_port, size, count, rate,
+                                    src_ip, 0, tos, self.send_stop, self.send_stats)
+            except OSError as e:
+                self.log(f"[ERROR] 送信に失敗: {e}")
+            finally:
+                packets, nbytes, errors, elapsed, pps, bps = self.send_stats.snapshot()
+                self.log(f"=== 送信終了 {packets:,}パケット / {nbytes:,}バイト / "
+                          f"{elapsed:.1f}秒 / {format_rate(pps, bps)} "
+                          f"(エラー{errors}件) ===")
+                self.sending = False
+                self.after(0, lambda: (self.send_start_btn.configure(state="normal"),
+                                        self.send_stop_btn.configure(state="disabled")))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_send_stop(self):
+        self.send_stop.set()
+
+    # ---- 受信 ----
+    def _on_recv_start(self):
+        if self.receiving:
+            messagebox.showinfo("受信中", "既に受信中です")
+            return
+        try:
+            listen_ip = self.listen_ip_var.get().strip()
+            if listen_ip:
+                parse_ip_field("待ち受けIP", listen_ip)
+            listen_port = self._parse_int_field("待ち受けポート", self.listen_port_var.get(),
+                                                 1, 65535)
+        except ValueError as e:
+            messagebox.showerror("入力エラー", str(e))
+            return
+
+        proto = self.recv_proto_var.get()
+        self.recv_stop.clear()
+        self.receiving = True
+        self.recv_start_btn.configure(state="disabled")
+        self.recv_stop_btn.configure(state="normal")
+        self.log(f"=== 受信開始 {proto.upper()} "
+                  f"{listen_ip or '0.0.0.0'}:{listen_port} ===")
+
+        def worker():
+            try:
+                run_traffic_receiver(proto, listen_ip, listen_port,
+                                      self.recv_stop, self.recv_stats)
+            except OSError as e:
+                self.log(f"[ERROR] 受信の待ち受けに失敗: {e}"
+                          "(ポートが既に使われていませんか？)")
+            finally:
+                packets, nbytes, errors, elapsed, pps, bps = self.recv_stats.snapshot()
+                self.log(f"=== 受信終了 {packets:,}パケット / {nbytes:,}バイト / "
+                          f"{elapsed:.1f}秒 / {format_rate(pps, bps)} "
+                          f"(エラー{errors}件) ===")
+                self.receiving = False
+                self.after(0, lambda: (self.recv_start_btn.configure(state="normal"),
+                                        self.recv_stop_btn.configure(state="disabled")))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_recv_stop(self):
+        self.recv_stop.set()
+
+    # ---- 統計表示 ----
+    def _poll_stats(self):
+        for stats, label, name in ((self.send_stats, self.send_stat_label, "送信"),
+                                    (self.recv_stats, self.recv_stat_label, "受信")):
+            packets, nbytes, _errors, elapsed, pps, bps = stats.snapshot()
+            if packets or elapsed:
+                label.configure(text=f"{name}: {packets:,}pkt / {nbytes:,}B / "
+                                      f"{elapsed:.1f}s / {format_rate(pps, bps)}")
+        self.after(500, self._poll_stats)
+
+    def _clear_log(self):
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
+
+
 class MainApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("経路配信統合ツール (RIP / OSPF / BGP)")
+        self.title("ネットワーク試験統合ツール (RIP / OSPF / BGP / トラフィック)")
         self.geometry("900x760")
         self.minsize(760, 600)
 
@@ -2692,6 +3119,7 @@ class MainApp(tk.Tk):
         notebook.add(OspfMassTab(notebook), text="OSPF (Broadcast/大量)")
         notebook.add(BgpTab(notebook), text="BGP")
         notebook.add(BgpMultiPeerTab(notebook), text="BGP (疑似ルータ生成)")
+        notebook.add(TrafficGenTab(notebook), text="トラフィック生成/測定")
         # 実機との継続的なRIP交換検証では「RIP」タブ(1回限りの送信)より
         # 「RIP (疑似ルータ生成)」タブ(実機同様に定期送信し続けられる)を
         # 使うことが多いため、こちらを起動時のデフォルトタブにする
