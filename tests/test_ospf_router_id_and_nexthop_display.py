@@ -15,6 +15,8 @@ import os
 import sys
 import time
 
+import pytest
+
 os.environ.setdefault('NETLAB_AUTH_DISABLE', '1')
 os.environ.setdefault('NETLAB_FAST_TIMERS', '1')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -22,6 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from fastapi.testclient import TestClient
 
 import app as app_module
+from engine.real_ospf_agent import SCAPY_AVAILABLE
 
 client = TestClient(app_module.app)
 
@@ -76,6 +79,10 @@ def test_rip_nexthop_is_ip_not_device_id():
 # 問題で、今回の修正内容とは無関係)、自動テストには含めていない。
 
 
+@pytest.mark.skipif(not SCAPY_AVAILABLE,
+                     reason="OSPF neighbor establishment needs the real "
+                            "raw-socket listener, which requires scapy "
+                            "(not installed in CI)")
 def test_ospf_router_id_is_reflected_in_neighbor_table():
     _dev('t-ospf-1', 'cisco')
     _dev('t-ospf-2', 'catalyst')
