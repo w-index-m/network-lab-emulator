@@ -1,0 +1,9 @@
+groups:
+  - name: snmp-traps
+    rules:
+      - alert: SnmpLinkDownTrapReceived
+        expr: increase(snmptrap_linkdown_total[1m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "linkDown trapを受信しました"
