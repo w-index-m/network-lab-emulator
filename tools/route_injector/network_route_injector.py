@@ -2253,15 +2253,47 @@ class RipMultiRouterTab(ttk.Frame, LogMixin):
         self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
         self._init_log(self.log_text)
 
+    @staticmethod
+    def _parse_ip_field(label: str, raw: str) -> int:
+        """IPアドレス欄を検証し、失敗時は欄名と原因が分かる日本語エラーにする。
+        （元の"illegal IP address string passed to inet_aton"は
+        Pythonの内部エラーそのままで、どの欄が悪いのか分からず不親切だった）"""
+        value = raw.strip()
+        if not value:
+            raise ValueError(f"「{label}」が入力されていません。"
+                              f"例: 192.168.1.100 の形式で入力してください。")
+        try:
+            return ip_to_int(value)
+        except (OSError, socket.error):
+            reason = ""
+            if len(value.split('.')) != 4:
+                reason = "（ドット区切りが4つの数字になっていません）"
+            elif any(not part.isdigit() for part in value.split('.')):
+                reason = "（全角数字や余分な文字が混ざっていませんか？半角で入力してください）"
+            raise ValueError(f"「{label}」のIPアドレス形式が不正です: 「{value}」{reason}\n"
+                              f"例: 192.168.1.100 の形式で入力してください。")
+
     # ---- 生成 / 一覧操作 ----
     def _on_generate(self):
         try:
             count = self.count_var.get()
-            base_src_int = ip_to_int(self.base_src_var.get().strip())
-            base_net_int = ip_to_int(self.base_net_var.get().strip())
-            prefix = int(self.prefix_var.get().strip())
-            metric = int(self.metric_var.get().strip())
-            nexthop = self.nexthop_var.get().strip() or "0.0.0.0"
+            base_src_int = self._parse_ip_field("開始送信元IP", self.base_src_var.get())
+            base_net_int = self._parse_ip_field("開始ネットワーク", self.base_net_var.get())
+            try:
+                prefix = int(self.prefix_var.get().strip())
+            except ValueError:
+                raise ValueError(f"「Prefix」は数字で入力してください（例: 24）: "
+                                 f"「{self.prefix_var.get()}」")
+            if not (0 <= prefix <= 32):
+                raise ValueError("「Prefix」は0〜32で指定してください")
+            try:
+                metric = int(self.metric_var.get().strip())
+            except ValueError:
+                raise ValueError(f"「Metric(共通)」は数字で入力してください（例: 1）: "
+                                 f"「{self.metric_var.get()}」")
+            nexthop_raw = self.nexthop_var.get().strip()
+            nexthop = "0.0.0.0" if not nexthop_raw else int_to_ip(
+                self._parse_ip_field("NextHop(共通)", nexthop_raw))
             if not (1 <= metric <= 16):
                 raise ValueError("Metricは1〜16で指定してください")
             netmask = prefix_to_netmask(prefix)
