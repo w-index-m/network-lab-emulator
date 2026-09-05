@@ -3202,6 +3202,59 @@ def format_rate(pps: float, bps: float) -> str:
     return f"{pps:,.0f} pps / {bps_str}"
 
 
+# 1フレームあたりのオーバヘッド(バイト)。ペイロードに足すとフレーム長になる。
+# L2 = Ethernetヘッダ14 + FCS4 + IPヘッダ20 + L4ヘッダ
+#   装置の "show ether statistics" の Octets はこの基準で数えている
+#   (Si-R G110Bで実測: ペイロード1400B/996ppsで11,532,808bps → 1フレーム1446B)
+# L1 = 上記 + プリアンブル7 + SFD1 + IFG12 = +20
+#   「1Gbpsのリンクを何割使うか」はこちらの基準
+_L2_OVERHEAD = {'udp': 14 + 4 + 20 + 8, 'tcp': 14 + 4 + 20 + 20}
+_L1_EXTRA = 7 + 1 + 12
+
+
+def frame_bits(payload_size: int, proto: str = 'udp', basis: str = 'l1') -> int:
+    """ペイロードサイズから1フレームあたりのビット数を求める。
+
+    basis:
+      'l1' … 回線占有率の基準(プリアンブル/IFG込み)
+      'l2' … 装置のインタフェースカウンタの基準
+    """
+    nbytes = payload_size + _L2_OVERHEAD.get(proto, _L2_OVERHEAD['udp'])
+    if basis == 'l1':
+        nbytes += _L1_EXTRA
+    return nbytes * 8
+
+
+def calc_rate_and_count(payload_size: int, mbps: float, seconds: float,
+                        proto: str = 'udp', basis: str = 'l1'):
+    """目標スループット(Mbps)と送信時間(秒)から、レート(pps)と送信パケット数を求める。
+
+    「100Mbpsを10秒流したい」を毎回手計算するのは面倒だし間違えやすい。
+    戻り値: (pps, count, 説明文)
+    """
+    if payload_size <= 0:
+        raise ValueError("パケットサイズは1以上を指定してください")
+    if mbps <= 0:
+        raise ValueError("目標スループットは0より大きい値を指定してください")
+    if seconds <= 0:
+        raise ValueError("送信時間は0より大きい値を指定してください")
+
+    bits = frame_bits(payload_size, proto, basis)
+    pps = int(round(mbps * 1_000_000 / bits))
+    if pps < 1:
+        pps = 1
+    count = int(round(pps * seconds))
+
+    # 装置のカウンタは基準が違うので、期待値を先に出しておく。
+    # そうしないと「装置の表示が指定より低い」と誤解する。
+    dev_bps = pps * frame_bits(payload_size, proto, 'l2')
+    detail = (f"ペイロード{payload_size}B/{proto.upper()} → "
+              f"{pps:,}pps × {seconds:g}秒 = {count:,}パケット "
+              f"(装置のカウンタ上は約{dev_bps / 1_000_000:.1f}Mbps / "
+              f"{count * frame_bits(payload_size, proto, 'l2') // 8:,}バイトになります)")
+    return pps, count, detail
+
+
 class TrafficGenTab(ttk.Frame, LogMixin):
     """L4トラフィック生成/測定タブ（Hachi相当）。
 
@@ -3287,6 +3340,26 @@ class TrafficGenTab(ttk.Frame, LogMixin):
         ttk.Entry(send_frame, textvariable=self.tos_var, width=8).grid(
             row=3, column=4, sticky="w", **pad)
         ttk.Label(send_frame, text="(0-255。QoS確認用)").grid(row=3, column=5, sticky="w")
+
+        # ── 目標スループットからレート/パケット数を逆算する ──
+        # 「100Mbpsを10秒」から毎回pps数と総パケット数を手計算するのは面倒で、
+        # 間違えると装置側のカウンタと突き合わせられなくなる。
+        calc_row = ttk.Frame(send_frame)
+        calc_row.grid(row=6, column=0, columnspan=6, sticky="w", **pad)
+        ttk.Label(calc_row, text="目標スループット:").pack(side="left")
+        self.target_mbps_var = tk.StringVar(value="100")
+        ttk.Entry(calc_row, textvariable=self.target_mbps_var, width=8).pack(side="left", padx=2)
+        ttk.Label(calc_row, text="Mbps ×").pack(side="left")
+        self.target_sec_var = tk.StringVar(value="10")
+        ttk.Entry(calc_row, textvariable=self.target_sec_var, width=6).pack(side="left", padx=2)
+        ttk.Label(calc_row, text="秒  基準:").pack(side="left")
+        self.calc_basis_var = tk.StringVar(value="l1")
+        ttk.Radiobutton(calc_row, text="回線(IFG込み)", variable=self.calc_basis_var,
+                        value="l1").pack(side="left")
+        ttk.Radiobutton(calc_row, text="装置カウンタ", variable=self.calc_basis_var,
+                        value="l2").pack(side="left")
+        ttk.Button(calc_row, text="レート/パケット数を計算",
+                   command=self._on_calc_rate).pack(side="left", padx=8)
 
         ttk.Label(send_frame, text="プロセス数:").grid(row=5, column=0, sticky="e", **pad)
         self.send_nproc_var = tk.IntVar(value=1)
@@ -3385,6 +3458,37 @@ class TrafficGenTab(ttk.Frame, LogMixin):
         except OSError as e:
             desc = f"取得できませんでした: {e}"
         self.after(0, lambda: self.sysinfo_label.configure(text=desc))
+
+    def _on_calc_rate(self):
+        """目標スループットと送信時間から、レート(pps)と送信パケット数を埋める。"""
+        try:
+            size = int(self.size_var.get().strip())
+        except ValueError:
+            messagebox.showerror("入力エラー", "パケットサイズ(byte)には数値を入れてください")
+            return
+        try:
+            mbps = float(self.target_mbps_var.get().strip())
+        except ValueError:
+            messagebox.showerror("入力エラー", "目標スループット(Mbps)には数値を入れてください")
+            return
+        try:
+            seconds = float(self.target_sec_var.get().strip())
+        except ValueError:
+            messagebox.showerror("入力エラー", "送信時間(秒)には数値を入れてください")
+            return
+
+        try:
+            pps, count, detail = calc_rate_and_count(
+                size, mbps, seconds, self.send_proto_var.get(),
+                self.calc_basis_var.get())
+        except ValueError as e:
+            messagebox.showerror("入力エラー", str(e))
+            return
+
+        self.rate_var.set(str(pps))
+        self.count_var.set(str(count))
+        self.log(f"=== 計算: {mbps:g}Mbps × {seconds:g}秒 → {detail} ===")
+        self._warn_if_rate_exceeds_pc(pps, self.send_nproc_var.get())
 
     def _on_benchmark(self):
         if self.benchmarking or self.sending or self.receiving:

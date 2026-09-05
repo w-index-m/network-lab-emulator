@@ -18,6 +18,8 @@ import threading
 import time
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tools', 'route_injector'))
 
 
@@ -46,6 +48,8 @@ from network_route_injector import (  # noqa: E402
     MultiProcessTraffic,
     benchmark_process_scaling,
     benchmark_send_capacity,
+    calc_rate_and_count,
+    frame_bits,
     describe_system,
     get_nic_link_speeds,
     TrafficStats,
@@ -320,3 +324,41 @@ def test_get_nic_link_speeds_returns_a_dict_without_raising():
     取れなくても例外にせず空で返ること"""
     speeds = get_nic_link_speeds()
     assert isinstance(speeds, dict)
+
+
+class TestRateCalculation:
+    """目標スループット(Mbps)からレート(pps)と送信パケット数を逆算する。"""
+
+    def test_l2_basis_matches_real_sir_measurement(self):
+        """実機Si-R G110Bで確認した値と一致すること。
+
+        ペイロード1400B/UDPを996ppsで送ったとき、
+        show ether statistics の bits/sec は 11,532,808 だった。
+        L2基準(ペイロード+46B)で計算するとこれに一致する。
+        """
+        assert frame_bits(1400, 'udp', 'l2') == (1400 + 46) * 8
+        # 装置のbits/secは移動平均なので1pps程度の誤差は許容する
+        pps, _, _ = calc_rate_and_count(1400, 11.532808, 1.0, 'udp', 'l2')
+        assert abs(pps - 996) <= 1
+
+    def test_l1_basis_adds_preamble_and_ifg(self):
+        assert frame_bits(1400, 'udp', 'l1') == (1400 + 46 + 20) * 8
+
+    def test_tcp_header_is_larger_than_udp(self):
+        assert frame_bits(1400, 'tcp', 'l2') > frame_bits(1400, 'udp', 'l2')
+
+    def test_count_is_rate_times_seconds(self):
+        pps, count, _ = calc_rate_and_count(1472, 100.0, 10.0)
+        assert count == pps * 10
+        # 1472Bで100Mbpsは概ね8100pps前後になる
+        assert 8000 <= pps <= 8200
+
+    def test_rejects_invalid_input(self):
+        for args in ((0, 100.0, 10.0), (1472, 0, 10.0), (1472, 100.0, 0)):
+            with pytest.raises(ValueError):
+                calc_rate_and_count(*args)
+
+    def test_very_low_rate_still_sends_at_least_one_pps(self):
+        pps, count, _ = calc_rate_and_count(1472, 0.001, 5.0)
+        assert pps == 1
+        assert count == 5
