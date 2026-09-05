@@ -994,8 +994,11 @@ class OspfEngine:
                 'enabled': False,
                 'process_id': 1,
                 'hostname': device_id,
-                # ループバック優先・最大IP（Cisco仕様）→ 起動時に確定
+                # ループバック優先・最大IP（Cisco仕様）は ensure_auto_router_id()
+                # で反映する。それが呼ばれるまでの暫定値（インタフェース未設定時
+                # のフォールバック）。
                 'router_id': f'10.0.{h}.1',
+                'router_id_manual': False,  # `router-id`コマンドで明示設定済みか
                 'area_id': '0.0.0.0',
                 'networks': [],   # [(network, wildcard, area)]
                 'neighbors': {},  # device_id -> OspfNeighbor
@@ -1062,6 +1065,21 @@ class OspfEngine:
         自動生成IDを管理者指定のIDで上書きする。"""
         n = self._node(device_id)
         n['router_id'] = router_id
+        n['router_id_manual'] = True
+
+    def ensure_auto_router_id(self, device_id: str, candidate_ip: str):
+        """`router-id`が明示設定されていない場合、Cisco仕様
+        （稼働中Loopbackの最大IPを優先、無ければ稼働中インタフェースの最大IP）
+        で選出したIDを反映する。`router ospf`にnetwork文を追加するたびに
+        呼ばれる想定で、実機のように「プロセス起動時に一度だけ確定」までは
+        再現していない（設定変更のたびにインタフェース構成から選び直す）。
+        明示的な`router-id`設定後は何もしない。"""
+        if not candidate_ip:
+            return
+        n = self._node(device_id)
+        if n.get('router_id_manual'):
+            return
+        n['router_id'] = candidate_ip
 
     def add_passive_interface(self, device_id: str, iface: str):
         self.passive_ifaces.setdefault(device_id, set()).add(iface.lower())
