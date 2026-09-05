@@ -4,6 +4,7 @@ RIP v2 / OSPF / BGP / STP / RSTP を実際に動かす
 app.py から import して使用
 """
 import asyncio
+import ipaddress
 import time
 import random
 from typing import Dict, List, Optional, Callable, Any
@@ -58,6 +59,8 @@ class VirtualNetwork:
         self.send_callbacks: Dict[str, Callable] = {}  # device_id -> ws_send関数
         self.ws_send_callbacks: Dict[str, Callable] = {}  # フロントエンド表示用
         self.device_types: Dict[str, str] = {}  # device_id -> device_type
+        # device_id -> {サブインタフェース名: 802.1QのVLAN ID}
+        self.subif_vlans: Dict[str, Dict[str, int]] = {}
 
     # ── MAC flap検知 ────────────────────────────────────────────
     def _has_path(self, src: str, dst: str) -> list:
@@ -182,6 +185,36 @@ class VirtualNetwork:
         return {peer for peer in self.links.get(device_id, set())
                 if self._edge_up(device_id, peer)}
 
+    def vlan_tags_compatible(self, dev_a: str, dev_b: str) -> bool:
+        """802.1Qサブインタフェース同士でタグ番号が噛み合うか。
+
+        「両方がサブインタフェースを使っている」場合だけ判定する。
+        片側だけがタグ付き（タグ付き対アクセス）という構成は物理側の
+        設定に依存するので、ここでは判断しない。
+
+        送信側だけで弾くと、別経路で届いたパケットを受信側が
+        そのまま処理してしまう。実機ではタグが違えばフレームは
+        受信側で捨てられるので、受信側からも呼べるようにしてある。
+        """
+        vlans_a = set(self.subif_vlans.get(dev_a, {}).values())
+        vlans_b = set(self.subif_vlans.get(dev_b, {}).values())
+        if not vlans_a or not vlans_b:
+            return True
+        return bool(vlans_a & vlans_b)
+
+    def register_subif_vlans(self, device_id: str, vlans: dict):
+        """サブインタフェースの802.1Qタグを登録する。 {ifname: vlan_id}
+
+        ルータ・オン・ア・スティックでは、両端のタグ番号が一致していないと
+        フレームが素通りせず隣接は成立しない。これを持っていないと、
+        片側 dot1Q 10 / 反対側 dot1Q 20 でもOSPFが上がってしまい、
+        実機では起きない結果になる。
+        """
+        if vlans:
+            self.subif_vlans[device_id] = dict(vlans)
+        else:
+            self.subif_vlans.pop(device_id, None)
+
     def interface_down(self, device_id: str, iface: str):
         """インターフェースをshutdown状態にする（broadcast_to_neighborsがスキップする）"""
         self.down_interfaces[device_id].add(iface)
@@ -249,6 +282,9 @@ class VirtualNetwork:
         # プロトコルパケットは該当エンジンのreceive()に自動ルーティング
         if msg_type == 'rip_packet':
             await rip_engine.receive(device_id, msg)
+            return
+        elif msg_type == 'eigrp_packet':
+            await eigrp_engine.receive(device_id, msg)
             return
         elif msg_type == 'ospf_hello':
             await ospf_engine.receive_hello(device_id, msg)
@@ -378,6 +414,9 @@ class VirtualNetwork:
         except Exception:
             pass
 
+        if not self.vlan_tags_compatible(dev_a, dev_b):
+            return False
+
         nets_a = self._get_device_networks(dev_a)
         nets_b = self._get_device_networks(dev_b)
         # どちらかにIPが未設定 → 設定中とみなして通信許可
@@ -415,6 +454,7 @@ class VirtualNetwork:
             # L2マルチキャスト系プロトコル（RIP/OSPF/STP/VRRP/LACP）は
             # 同一セグメントのみ届く
             if msg_type in ('rip_update', 'rip_request', 'rip_packet',
+                            'eigrp_packet',
                             'ospf_hello', 'ospf_lsa',
                             'stp_bpdu',
                             'vrrp_advert', 'hsrp_hello',
@@ -428,7 +468,7 @@ class VirtualNetwork:
         # 直結先が「そのプロトコルを喋らない中継装置(=スイッチ)」の場合、
         # その先のL3エンドポイントまでリレーして隣接を成立させる。
         if msg_type in ('rip_update', 'rip_request', 'rip_packet',
-                        'ospf_hello', 'ospf_lsa'):
+                        'eigrp_packet', 'ospf_hello', 'ospf_lsa'):
             await self._flood_through_switches(src_id, msg)
 
     def _runs_proto(self, dev: str, msg_type: str) -> bool:
@@ -438,6 +478,9 @@ class VirtualNetwork:
             return bool(n and n.get('enabled'))
         if msg_type in ('rip_update', 'rip_request', 'rip_packet'):
             return dev in rip_engine.nodes
+        if msg_type == 'eigrp_packet':
+            n = eigrp_engine.nodes.get(dev)
+            return bool(n and n.get('enabled'))
         return False
 
     def _live_neighbors(self, node: str) -> list:
@@ -1218,6 +1261,9 @@ class OspfEngine:
         src_dr = msg.get('dr')
         src_bdr = msg.get('bdr')
 
+        # 802.1Qタグ不一致 → 実機ではフレームが受信側で捨てられる
+        if src_id and not vnet.vlan_tags_compatible(receiver_id, src_id):
+            return
         if _normalize_area(area_id) != n['area_id']:
             return  # エリア不一致
 
@@ -3773,6 +3819,21 @@ class RibEngine:
                                                    int(r['prefix'])) or '',
                 })
 
+        # EIGRP
+        for r in eigrp_engine.get_routes(device_id):
+            candidates.append({
+                'network': r['network'], 'prefix': r['prefix'],
+                'next_hop': r['next_hop'],
+                # 再配信由来(External)はAD 170。内部経路の90と区別しないと
+                # 「なぜEIGRPよりOSPFが優先されたか」が説明できなくなる
+                'ad': 170 if r['external'] else AD_VALUES['eigrp'],
+                'source': 'eigrp', 'metric': r['metric'],
+                'eigrp_external': r['external'],
+                'iface': self._iface_for_nexthop(device_id, r['next_hop'])
+                         or self._iface_for_network(device_id, r['network'],
+                                                    r['prefix']) or '',
+            })
+
         # BGP
         bnode = bgp_engine.nodes.get(device_id)
         if bnode and bnode.get('enabled'):
@@ -3837,6 +3898,14 @@ class RibEngine:
                     'ad': AD_VALUES['ospf'], 'source': 'ospf', 'metric': r['metric'],
                 })
 
+        for r in eigrp_engine.get_routes(device_id):
+            candidates.append({
+                'network': r['network'], 'prefix': r['prefix'],
+                'next_hop': r['next_hop'],
+                'ad': 170 if r['external'] else AD_VALUES['eigrp'],
+                'source': 'eigrp', 'metric': r['metric'],
+            })
+
         best_key: Dict[str, tuple] = {}   # dest -> (ad, metric)
         for c in candidates:
             key = f"{c['network']}/{c['prefix']}"
@@ -3864,7 +3933,7 @@ class RibEngine:
         """統合ルーティングテーブル表示（AD/メトリック付き）"""
         routes = self.get_best_routes(device_id)
         code_map = {'connected': 'C', 'static': 'S', 'rip': 'R',
-                    'ospf': 'O', 'bgp': 'B'}
+                    'ospf': 'O', 'bgp': 'B', 'eigrp': 'D'}
         lines = [
             'Codes: L - local, C - connected, S - static, R - RIP, B - BGP,',
             '       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area,',
@@ -3886,7 +3955,8 @@ class RibEngine:
             lines.append('Gateway of last resort is not set')
         lines.append('')
         # connected → static → 動的の順で表示
-        order = {'connected': 0, 'static': 1, 'bgp': 2, 'ospf': 3, 'rip': 4}
+        order = {'connected': 0, 'static': 1, 'bgp': 2, 'eigrp': 3,
+                 'ospf': 4, 'rip': 5}
         for r in sorted(routes, key=lambda x: (order.get(x['source'], 9), x['network'])):
             code = code_map.get(r['source'], '?')
             net = f"{r['network']}/{r['prefix']}"
@@ -3902,7 +3972,9 @@ class RibEngine:
                 # OSPF由来はN2/E2等の細分コードがあればそちらを使う
                 # （実機は "O E2" のように2文字目でOSPF経路の種別を示す）。
                 # 単一文字コードと同じ合計9桁の幅に揃える。
-                disp_code = r.get('ospf_code') or code
+                # EIGRPの再配信経路は "D EX" で表示する（内部経路の D と区別）
+                disp_code = r.get('ospf_code') or (
+                    'D EX' if r.get('eigrp_external') else code)
                 prefix = f'{disp_code}{star}'.ljust(9)
                 # RIP/BGPはnext_hopにデバイスIDを、OSPFはrouter-idを内部的に
                 # 格納しているため、そのまま表示すると実機と違い
@@ -3910,7 +3982,7 @@ class RibEngine:
                 # 直結セグメント上の実IPへ解決する（内部の経路計算には触れない）。
                 disp_next_hop = r['next_hop']
                 disp_iface = r['iface']
-                if r['source'] in ('rip', 'ospf', 'bgp'):
+                if r['source'] in ('rip', 'ospf', 'bgp', 'eigrp'):
                     resolved = icmp_engine.resolve_learned_next_hop(
                         device_id, r['next_hop'])
                     if resolved != r['next_hop']:
@@ -6214,6 +6286,470 @@ class LacpEngine:
 
 
 lacp_engine = LacpEngine()
+
+# ══════════════════════════════════════════
+# EIGRP
+# ══════════════════════════════════════════
+EIGRP_HELLO_INTERVAL = 1 if _FAST else 5    # LANのデフォルト hello (秒)
+EIGRP_HOLD_TIME = 3 if _FAST else 15        # LANのデフォルト hold (秒) = hello × 3
+EIGRP_MAX_METRIC = 4294967295   # 到達不能を表すメトリック
+
+
+@dataclass
+class EigrpRoute:
+    """EIGRPトポロジテーブルの1エントリ。
+
+    EIGRPはRIPと違い、FD(Feasible Distance)とRD(Reported Distance)の
+    両方を保持する。フィージビリティ条件 RD < FD を満たす経路だけが
+    フィージブルサクセサになり、これがEIGRPの高速収束の根拠になっている。
+    """
+    network: str
+    prefix: int
+    fd: int                  # Feasible Distance（自分から宛先までの合計メトリック）
+    rd: int                  # Reported Distance（ネイバーが報告してきたメトリック）
+    next_hop: str
+    learned_from: str        # 'direct' または device_id
+    learned_from_hostname: str = ''
+    external: bool = False   # 再配信由来なら True（AD 170 / D EX 表示）
+    timestamp: float = field(default_factory=time.time)
+
+
+def eigrp_classic_metric(bandwidth_kbps: int, delay_tens_usec: int) -> int:
+    """EIGRPクラシックメトリック。
+
+        metric = 256 × (10^7 / 最小帯域(kbps) + 遅延の総和(10マイクロ秒単位))
+
+    デフォルトのKパラメータ(K1=1, K2=0, K3=1, K4=0, K5=0)を前提にしている。
+    実機と同じ値を出さないと show ip eigrp topology の突き合わせができない。
+    """
+    if bandwidth_kbps <= 0:
+        return EIGRP_MAX_METRIC
+    return 256 * (10_000_000 // bandwidth_kbps + delay_tens_usec)
+
+
+class EigrpEngine:
+    """EIGRP(Enhanced IGRP)のエミュレーション。
+
+    実装している範囲:
+      - Hello/Holdによるネイバー確立と失効(Dead Timer相当)
+      - AS番号とKパラメータの一致チェック（不一致ならネイバーが上がらない）
+      - スプリットホライズンつきのUpdate交換
+      - FD/RDによるフィージブルサクセサの判定
+      - passive-interface / インターフェースダウン時のネイバー削除
+
+    完全なDUAL(Active/Query/Reply)の状態遷移までは持たせていない。
+    ネイバー断時は該当経路を落として再計算する形にしている。
+    """
+
+    def __init__(self):
+        self.nodes: Dict[str, dict] = {}
+
+    def _node(self, device_id: str) -> dict:
+        if device_id not in self.nodes:
+            self.nodes[device_id] = {
+                'enabled': False,
+                'asn': 0,
+                'hostname': device_id,
+                'router_id': '',
+                'networks': [],           # ["10.1.1.0/24", ...]
+                'topology': [],           # List[EigrpRoute]
+                'neighbors': {},          # peer_id -> dict
+                'k_values': (1, 0, 1, 0, 0),
+                'variance': 1,
+                'passive_ifaces': set(),
+                'redistributed': {},      # net/prefix -> {'metric':..}
+                'hello_task': None,
+                'hold_tasks': {},         # peer_id -> task
+                'log': [],
+            }
+        return self.nodes[device_id]
+
+    # ── 設定 ────────────────────────────────
+    def set_k_values(self, device_id: str, k: tuple):
+        n = self._node(device_id)
+        changed = tuple(k) != tuple(n['k_values'])
+        n['k_values'] = tuple(k)
+        # 実機は metric weights を変えるとネイバーをリセットする。
+        # 落とさないと、Kが食い違ったまま隣接が残り
+        # 「設定は違うのに繋がっている」状態になる。
+        if changed and n['neighbors']:
+            _spawn(self._reset_neighbors(device_id, 'K-value change'))
+
+    async def _reset_neighbors(self, device_id: str, reason: str):
+        n = self.nodes.get(device_id)
+        if not n:
+            return
+        for peer_id in list(n['neighbors']):
+            await self._neighbor_down(device_id, peer_id, reason)
+            peer_n = self.nodes.get(peer_id)
+            if peer_n and device_id in peer_n.get('neighbors', {}):
+                await self._neighbor_down(peer_id, device_id, reason)
+
+    def set_variance(self, device_id: str, variance: int):
+        self._node(device_id)['variance'] = max(1, variance)
+
+    def add_passive_interface(self, device_id: str, iface: str):
+        self._node(device_id)['passive_ifaces'].add(iface)
+
+    def remove_passive_interface(self, device_id: str, iface: str):
+        self._node(device_id)['passive_ifaces'].discard(iface)
+
+    def set_router_id(self, device_id: str, rid: str):
+        self._node(device_id)['router_id'] = rid
+
+    async def start(self, device_id: str, hostname: str, asn: int,
+                    networks: List[str], router_id: str = ''):
+        n = self._node(device_id)
+        already = n['enabled'] and n['asn'] == asn
+        n['enabled'] = True
+        n['asn'] = asn
+        n['hostname'] = hostname
+        if router_id:
+            n['router_id'] = router_id
+        for net in networks:
+            if net not in n['networks']:
+                n['networks'].append(net)
+
+        # 直接接続ネットワークをトポロジテーブルへ。
+        # 直結のFDはインターフェースのメトリックそのもの
+        # (Gigabit想定: 帯域1000000kbps / 遅延10usec = 10の1/10単位)
+        direct_metric = eigrp_classic_metric(1_000_000, 1)
+        for net in n['networks']:
+            parts = net.split('/')
+            if len(parts) != 2:
+                continue
+            if any(r.network == parts[0] and r.prefix == int(parts[1])
+                   and r.learned_from == 'direct' for r in n['topology']):
+                continue
+            n['topology'].append(EigrpRoute(
+                network=parts[0], prefix=int(parts[1]),
+                fd=direct_metric, rd=0, next_hop='0.0.0.0',
+                learned_from='direct'))
+
+        if not already:
+            await vnet.send_to(device_id, {
+                'type': 'eigrp_log',
+                'message': (f'%DUAL-5-NBRCHANGE: EIGRP-IPv4 {asn}: '
+                            f'Process {asn} started, networks: '
+                            f'{", ".join(n["networks"])}')})
+
+        if n['hello_task']:
+            n['hello_task'].cancel()
+        n['hello_task'] = _spawn(self._hello_loop(device_id))
+        await asyncio.sleep(0.3)
+        await self._send_hello(device_id)
+        # EIGRPは定期Updateを送らない（変更時のみ）。network文を後から
+        # 追加した場合、これが無いと既存ネイバーへ新経路が伝わらず
+        # 「設定したのに相手のルーティングテーブルに出ない」状態になる。
+        if n['neighbors']:
+            await self._send_update(device_id)
+
+    async def stop(self, device_id: str):
+        n = self.nodes.get(device_id)
+        if not n:
+            return
+        for peer_id in list(n['neighbors']):
+            await self._neighbor_down(device_id, peer_id, 'process shutdown')
+        if n['hello_task']:
+            n['hello_task'].cancel()
+            n['hello_task'] = None
+        for t in n['hold_tasks'].values():
+            t.cancel()
+        n['hold_tasks'].clear()
+        n['enabled'] = False
+        n['topology'] = []
+
+    # ── Hello / ネイバー ─────────────────────
+    async def _hello_loop(self, device_id: str):
+        while True:
+            n = self.nodes.get(device_id)
+            if not n or not n['enabled']:
+                break
+            await self._send_hello(device_id)
+            await asyncio.sleep(EIGRP_HELLO_INTERVAL)
+
+    def _reachable_peers(self, device_id: str) -> List[str]:
+        """helloが届くピア。shutdownされたIF経由とpassive-interfaceは除外する。"""
+        n = self.nodes.get(device_id)
+        if not n:
+            return []
+        down = vnet.down_interfaces.get(device_id, set())
+        passive = n.get('passive_ifaces', set())
+        out = []
+        for peer_id in vnet.get_neighbors(device_id):
+            iface = vnet.interface_links.get(device_id, {}).get(peer_id)
+            if iface and (iface in down or iface in passive):
+                continue
+            if not vnet._shares_segment(device_id, peer_id):
+                continue
+            out.append(peer_id)
+        return out
+
+    async def _send_hello(self, device_id: str, to_peer: str = None):
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return
+        peers = [to_peer] if to_peer else self._reachable_peers(device_id)
+        for peer_id in peers:
+            peer_node = self.nodes.get(peer_id)
+            if not peer_node or not peer_node.get('enabled'):
+                continue
+            await vnet.send_to(peer_id, {
+                'type': 'eigrp_packet', 'op': 'hello',
+                'src_id': device_id, 'src_hostname': n['hostname'],
+                'asn': n['asn'], 'k_values': list(n['k_values']),
+                'router_id': n.get('router_id', ''),
+                'timestamp': time.time(),
+            })
+
+    async def _neighbor_up(self, device_id: str, peer_id: str, msg: dict):
+        n = self.nodes.get(device_id)
+        iface = vnet.interface_links.get(device_id, {}).get(peer_id, '')
+        n['neighbors'][peer_id] = {
+            'hostname': msg.get('src_hostname', peer_id),
+            'ip': self._peer_ip(device_id, peer_id),
+            'iface': iface,
+            'up_since': time.time(),
+            'last_seen': time.time(),
+            'srtt': random.randint(1, 20),
+            'rto': 200,
+            'q_count': 0,
+            'seq': random.randint(1, 60),
+        }
+        await vnet.send_to(device_id, {
+            'type': 'eigrp_log',
+            'message': (f'%DUAL-5-NBRCHANGE: EIGRP-IPv4 {n["asn"]}: Neighbor '
+                        f'{n["neighbors"][peer_id]["ip"]} ({iface or "unknown"}) '
+                        f'is up: new adjacency')})
+        await self._send_update(device_id, to_peer=peer_id)
+
+    async def _neighbor_down(self, device_id: str, peer_id: str, reason: str):
+        n = self.nodes.get(device_id)
+        if not n:
+            return
+        info = n['neighbors'].pop(peer_id, None)
+        task = n['hold_tasks'].pop(peer_id, None)
+        if task:
+            task.cancel()
+        # このネイバー経由で学習した経路を落とす
+        n['topology'] = [r for r in n['topology'] if r.learned_from != peer_id]
+        if info:
+            await vnet.send_to(device_id, {
+                'type': 'eigrp_log',
+                'message': (f'%DUAL-5-NBRCHANGE: EIGRP-IPv4 {n["asn"]}: Neighbor '
+                            f'{info["ip"]} ({info["iface"] or "unknown"}) '
+                            f'is down: {reason}')})
+
+    def _peer_ip(self, device_id: str, peer_id: str) -> str:
+        """ネイバーの、自分と同じセグメント上のIPを返す。
+        show ip eigrp neighbors はdevice_idではなく実IPを出す必要がある。"""
+        my = icmp_engine.device_ips.get(device_id, {}).get('ips', {})
+        peer = icmp_engine.device_ips.get(peer_id, {}).get('ips', {})
+        # device_ips[dev]['ips'] は {IPアドレス: プレフィックス長} の形。
+        # 自分と同じIPは候補から除く。装置の初期状態では両側が同じ既定IP
+        # (203.0.113.2 等)を持っていることがあり、これを除かないと
+        # 「自分のIPをネイバーのIPとして表示する」ことになる。
+        for pip, pprefix in peer.items():
+            if pip in my:
+                continue
+            for mip in my:
+                try:
+                    pnet = ipaddress.ip_network(f"{pip}/{pprefix}", strict=False)
+                    if ipaddress.ip_address(mip) in pnet:
+                        return pip
+                except (ValueError, TypeError):
+                    continue
+        return next((ip for ip in peer if ip not in my), peer_id)
+
+    async def _hold_timer(self, device_id: str, peer_id: str):
+        """Hold時間helloが来なければネイバーを落とす(Dead Timer相当)。"""
+        await asyncio.sleep(EIGRP_HOLD_TIME)
+        n = self.nodes.get(device_id)
+        if not n or peer_id not in n['neighbors']:
+            return
+        await self._neighbor_down(device_id, peer_id, 'holding time expired')
+
+    def _arm_hold_timer(self, device_id: str, peer_id: str):
+        n = self.nodes.get(device_id)
+        old = n['hold_tasks'].get(peer_id)
+        if old:
+            old.cancel()
+        n['hold_tasks'][peer_id] = _spawn(self._hold_timer(device_id, peer_id))
+
+    # ── Update ──────────────────────────────
+    async def _send_update(self, device_id: str, to_peer: str = None):
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return
+        targets = [to_peer] if to_peer else list(n['neighbors'])
+        for peer_id in targets:
+            if peer_id not in n['neighbors']:
+                continue
+            entries = []
+            for r in n['topology']:
+                # スプリットホライズン: 学習元へは広告し返さない
+                if r.learned_from == peer_id:
+                    continue
+                entries.append({'network': r.network, 'prefix': r.prefix,
+                                'metric': r.fd, 'external': r.external})
+            for net, info in n.get('redistributed', {}).items():
+                parts = net.split('/')
+                if len(parts) == 2:
+                    entries.append({'network': parts[0], 'prefix': int(parts[1]),
+                                    'metric': info.get('metric', 512000),
+                                    'external': True})
+            if not entries:
+                continue
+            entries = filter_engine.filter_routes(device_id, 'eigrp', 'out', entries)
+            if not entries:
+                continue
+            await vnet.send_to(peer_id, {
+                'type': 'eigrp_packet', 'op': 'update',
+                'src_id': device_id, 'src_hostname': n['hostname'],
+                'asn': n['asn'], 'entries': entries, 'timestamp': time.time()})
+
+    async def receive(self, receiver_id: str, msg: dict):
+        n = self.nodes.get(receiver_id)
+        if not n or not n['enabled']:
+            return
+        src_id = msg.get('src_id')
+        if not src_id:
+            return
+
+        if not vnet.vlan_tags_compatible(receiver_id, src_id):
+            return
+        # AS番号が違えばネイバーにならない。実機で最も多い設定ミスなので
+        # 黙って無視せずログに残す。
+        if msg.get('asn') != n['asn']:
+            await vnet.send_to(receiver_id, {
+                'type': 'eigrp_log',
+                'message': (f'%DUAL-6-ASMISMATCH: EIGRP-IPv4 {n["asn"]}: '
+                            f'Packet from {msg.get("src_hostname", src_id)} '
+                            f'has mismatched AS number ({msg.get("asn")}) '
+                            f'— ignored')})
+            return
+
+        if msg.get('op') == 'hello':
+            k_peer = tuple(msg.get('k_values', (1, 0, 1, 0, 0)))
+            if k_peer != tuple(n['k_values']):
+                await vnet.send_to(receiver_id, {
+                    'type': 'eigrp_log',
+                    'message': (f'%DUAL-5-NBRCHANGE: EIGRP-IPv4 {n["asn"]}: '
+                                f'Neighbor {msg.get("src_hostname", src_id)} '
+                                f'not on common subnet or K-value mismatch '
+                                f'(peer K={k_peer}, local K={tuple(n["k_values"])})')})
+                return
+            if src_id not in n['neighbors']:
+                await self._neighbor_up(receiver_id, src_id, msg)
+                # 相手にもHelloを返す。先に起動した側のHelloは、相手が
+                # まだEIGRPを有効にしていない時点で捨てられている。
+                # 返さないと片側だけがネイバーを持つ非対称状態になり、
+                # 経路が一方向にしか流れない。
+                peer_n = self.nodes.get(src_id)
+                if peer_n and receiver_id not in peer_n.get('neighbors', {}):
+                    await self._send_hello(receiver_id, to_peer=src_id)
+            else:
+                n['neighbors'][src_id]['last_seen'] = time.time()
+            self._arm_hold_timer(receiver_id, src_id)
+            return
+
+        if msg.get('op') != 'update':
+            return
+        if src_id not in n['neighbors']:
+            return
+
+        entries = filter_engine.filter_routes(receiver_id, 'eigrp', 'in',
+                                              msg.get('entries', []))
+        next_hop = self._peer_ip(receiver_id, src_id)
+        # 受信側で加算するのは、そのリンク分のコスト。
+        # 直結リンクのメトリックを足すことで距離が伸びていく。
+        link_cost = eigrp_classic_metric(1_000_000, 1)
+        changed = False
+        for e in entries:
+            rd = int(e.get('metric', 0))       # ネイバーが報告した距離
+            fd = rd + link_cost                # 自分から見た距離
+            net, plen = e['network'], int(e['prefix'])
+            existing = next((r for r in n['topology']
+                             if r.network == net and r.prefix == plen), None)
+            if existing is None:
+                n['topology'].append(EigrpRoute(
+                    network=net, prefix=plen, fd=fd, rd=rd,
+                    next_hop=next_hop, learned_from=src_id,
+                    learned_from_hostname=msg.get('src_hostname', src_id),
+                    external=bool(e.get('external'))))
+                changed = True
+            elif existing.learned_from == 'direct':
+                continue                       # 直結が常に優先
+            elif fd < existing.fd or existing.learned_from == src_id:
+                existing.fd = fd
+                existing.rd = rd
+                existing.next_hop = next_hop
+                existing.learned_from = src_id
+                existing.learned_from_hostname = msg.get('src_hostname', src_id)
+                existing.external = bool(e.get('external'))
+                existing.timestamp = time.time()
+                changed = True
+        if changed:
+            await self._send_update(receiver_id)
+
+    # ── 外部イベント ─────────────────────────
+    async def interface_down(self, device_id: str, peer_ids: set):
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return
+        for peer_id in list(peer_ids):
+            if peer_id in n['neighbors']:
+                await self._neighbor_down(device_id, peer_id, 'Interface down')
+            peer_n = self.nodes.get(peer_id)
+            if peer_n and device_id in peer_n.get('neighbors', {}):
+                await self._neighbor_down(peer_id, device_id, 'Interface down')
+
+    async def interface_up(self, device_id: str, peer_ids: set):
+        """インターフェース復旧時に即座にHelloを送って隣接を張り直す。
+
+        Helloは5秒周期なので待っていればいずれ張り直るが、
+        復旧を明示的に契機にしたほうが実機の体感に近く、
+        復旧したのに隣接が戻らないという誤解も避けられる。"""
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return
+        for peer_id in list(peer_ids):
+            peer_n = self.nodes.get(peer_id)
+            if not peer_n or not peer_n.get('enabled'):
+                continue
+            await self._send_hello(device_id, to_peer=peer_id)
+            await self._send_hello(peer_id, to_peer=device_id)
+
+    def feasible_successors(self, device_id: str, network: str, prefix: int) -> List[EigrpRoute]:
+        """フィージビリティ条件(RD < 現在のFD)を満たす経路。
+        EIGRPが即座に代替経路へ切り替えられる根拠がこれ。"""
+        n = self.nodes.get(device_id)
+        if not n:
+            return []
+        cands = [r for r in n['topology']
+                 if r.network == network and r.prefix == prefix]
+        if not cands:
+            return []
+        best_fd = min(r.fd for r in cands)
+        return [r for r in cands if r is not None and r.rd < best_fd and r.fd > best_fd]
+
+    def get_routes(self, device_id: str) -> List[dict]:
+        """RIBへ渡す形式。直結は除く（connectedとして別途載るため）。"""
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return []
+        out = []
+        for r in n['topology']:
+            if r.learned_from == 'direct':
+                continue
+            out.append({'network': r.network, 'prefix': r.prefix,
+                        'next_hop': r.next_hop, 'metric': r.fd,
+                        'external': r.external})
+        return out
+
+
+eigrp_engine = EigrpEngine()
+
 
 # グローバルインスタンス
 # ══════════════════════════════════════════

@@ -26,9 +26,9 @@ except ImportError:
 # ルールベースエンジン
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
-from engine.rules import RuleEngine, DeviceState
+from engine.rules import RuleEngine, DeviceState, _expand_port_list
 from engine.protocols import (
-    vnet, rip_engine, ospf_engine, bgp_engine, stp_engine, rib_engine,
+    vnet, rip_engine, ospf_engine, bgp_engine, eigrp_engine, stp_engine, rib_engine,
     icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
     nat_engine, cef_engine, dp_engine, snmp_agent,
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine,
@@ -781,82 +781,37 @@ async def cli_command(body: dict):
             state.interfaces.get(state.current_if, {}).get('crypto_map')):
         icmp_engine.clear_ipsec(device_id)
 
-    # shutdown / no shutdown → VirtualNetwork + OSPF/RIP エンジンに通知
-    iface_for_flap = state.current_if or ''
-    if c_low in ('shutdown', 'shut') and iface_for_flap:
-        vnet.interface_down(device_id, iface_for_flap)
-        # 実syslog(%LINK-3-UPDOWN) + 実SNMP trap(linkDown)を送信
-        _link_msg = f'%LINK-3-UPDOWN: Interface {iface_for_flap}, changed state to down'
-        await syslog_dispatcher.emit(device_id, state.hostname, 'warnings', _link_msg)
-        await snmp_dispatcher.emit(device_id, state.hostname,
-                                    '1.3.6.1.6.3.1.1.5.3',  # linkDown
-                                    f'{iface_for_flap} down')
-        # VRRP/HSRP: このIF上の冗長化グループをInitへ落とす
-        # （落とさないと、切れた側がMaster/Activeを名乗ったまま残り、
-        #   対向がDead Timerで昇格して両系Master/Activeになる）
-        await vrrp_engine.interface_down(device_id, iface_for_flap)
-        # HSRP object tracking: このIFをtrack対象にしているグループがあれば
-        # priorityを下げる（グループ自体のIFがdownする場合とは別経路）
-        await vrrp_engine.hsrp_track_down(device_id, iface_for_flap)
-        peer_ids = vnet.get_peers_on_interface(device_id, iface_for_flap)
-        if peer_ids:
-            await ospf_engine.interface_down(device_id, peer_ids)
-            await rip_engine.interface_down(device_id, peer_ids)
-        # STP: リンク障害を両端に通知（ルート/ポート役割の再収束）
-        if stp_engine.nodes.get(device_id, {}).get('enabled') or any(
-                stp_engine.nodes.get(p, {}).get('enabled') for p in peer_ids):
-            for _pid in peer_ids:
-                await stp_engine.port_down(device_id, _pid)
-                await stp_engine.port_down(_pid, device_id)
-        # BGPセッション断（インターフェースダウン / BFD高速検知）→ 冗長ピアへフェイルオーバー
-        bn = bgp_engine.nodes.get(device_id)
-        if bn and bn.get('enabled'):
-            for _pid in list(bn.get('sessions', {}).keys()):
-                if _pid in peer_ids:
-                    await bgp_engine.session_down(device_id, _pid, 'interface shutdown')
-        # EtherChannel メンバーポート障害 → バンドルから外す
-        po_num, remaining = lacp_engine.member_down(device_id, iface_for_flap)
-        if po_num is not None:
-            buf = proto_log_buffer.setdefault(device_id, [])
-            buf.append({'type': 'lacp_log',
-                        'message': (f'%EC-5-UNBUNDLE: Interface {iface_for_flap} left the '
-                                    f'port-channel Po{po_num}'
-                                    + ('' if remaining else
-                                       f'\n%LINK-3-UPDOWN: Interface Port-channel{po_num}, '
-                                       f'changed state to down (全メンバーdown)'))})
-    elif c_low in ('no shutdown', 'no shut') and iface_for_flap:
-        vnet.interface_up(device_id, iface_for_flap)
-        # 実syslog(%LINK-3-UPDOWN) + 実SNMP trap(linkUp)を送信
-        _link_msg_up = f'%LINK-3-UPDOWN: Interface {iface_for_flap}, changed state to up'
-        await syslog_dispatcher.emit(device_id, state.hostname, 'notifications', _link_msg_up)
-        await snmp_dispatcher.emit(device_id, state.hostname,
-                                    '1.3.6.1.6.3.1.1.5.4',  # linkUp
-                                    f'{iface_for_flap} up')
-        # VRRP/HSRP: 復旧したIF上のグループを再選出させる
-        await vrrp_engine.interface_up(device_id, iface_for_flap)
-        # HSRP object tracking: 復旧したのでpriorityを戻す
-        await vrrp_engine.hsrp_track_up(device_id, iface_for_flap)
-        # STP: リンク回復を両端に通知（ポート再追加・再収束）
-        _peers_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
-        if stp_engine.nodes.get(device_id, {}).get('enabled') or any(
-                stp_engine.nodes.get(p, {}).get('enabled') for p in _peers_up):
-            for _pid in _peers_up:
-                await stp_engine.port_up(device_id, _pid)
-                await stp_engine.port_up(_pid, device_id)
-        # BGPセッション復旧（インターフェースアップ）
-        bn = bgp_engine.nodes.get(device_id)
-        if bn and bn.get('enabled'):
-            peer_ids_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
-            for _pid in list(bn.get('sessions', {}).keys()):
-                if _pid in peer_ids_up:
-                    await bgp_engine.try_reestablish(device_id, _pid)
-        # EtherChannel メンバーポート復旧 → バンドルへ復帰
-        po_num, bundled = lacp_engine.member_up(device_id, iface_for_flap)
-        if po_num is not None:
-            buf = proto_log_buffer.setdefault(device_id, [])
-            buf.append({'type': 'lacp_log',
-                        'message': (f'%EC-5-BUNDLE: Interface {iface_for_flap} joined '
-                                    f'port-channel Po{po_num}')})
+    # shutdown / no shutdown → VirtualNetwork + OSPF/RIP/EIGRP エンジンに通知
+    #
+    # ベンダごとにコマンドの形が違うため、ここで「どのインタフェースを
+    # どちらに倒すか」に正規化してから共通処理に渡す。
+    #   Cisco系 : interface配下の shutdown / no shutdown
+    #   Si-R    : ether <group> <port> use off / on（実機にshutdownは無い）
+    _flap_targets = []
+    _flap_action = ''
+    _cur_if = state.current_if or ''
+    if c_low in ('shutdown', 'shut') and _cur_if:
+        _flap_action, _flap_targets = 'down', [_cur_if]
+    elif c_low in ('no shutdown', 'no shut') and _cur_if:
+        _flap_action, _flap_targets = 'up', [_cur_if]
+    else:
+        _m_use = re.match(r'^ether\s+(\d+)\s+([\d,\-]+)\s+use\s+(on|off)$', c_low)
+        if _m_use and state.device_type in ('sir', 'srs'):
+            _flap_action = 'down' if _m_use.group(3) == 'off' else 'up'
+            _grp = int(_m_use.group(1))
+            for _prt in _expand_port_list(_m_use.group(2)):
+                _lan = rule_engine._sir_lan_for_ether(state, _grp, _prt)
+                # トラップ抑止の設定はポート単位なので、対象ポートも覚えておく
+                if _lan and _lan not in _flap_targets:
+                    _flap_targets.append(_lan)
+            state._flap_ether_ports = [(_grp, prt)
+                                       for prt in _expand_port_list(_m_use.group(2))]
+
+    for iface_for_flap in _flap_targets:
+        if _flap_action == 'down':
+            await _flap_interface_down(device_id, state, iface_for_flap)
+        elif _flap_action == 'up':
+            await _flap_interface_up(device_id, state, iface_for_flap)
 
     if re.search(r'ip\s+addr(?:ess)?|ip\s+route|remote\s+\d+\s+ip\s+route|'
                  r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address|'
@@ -883,6 +838,113 @@ async def cli_command(body: dict):
         "mode": state.mode,
         "hostname": state.hostname,
     }
+
+
+
+def _sir_trap_enabled(state, kind: str) -> bool:
+    """Si-R: ether <g> <p> snmp trap linkdown|linkup disable が入っていたら
+    そのポートのトラップを送らない（マニュアル 4.9.1 / 4.9.2）。
+    ここを見ないと、抑止設定が効かず実機と挙動が食い違う。"""
+    ports = getattr(state, '_flap_ether_ports', None)
+    if not ports:
+        return True
+    cfg = getattr(state, 'sir_ether_trap', {})
+    return any(cfg.get(p, {}).get(kind, True) for p in ports)
+
+
+async def _flap_interface_down(device_id: str, state, iface_for_flap: str):
+    """インタフェースダウン時の共通処理（Cisco系のshutdown / Si-Rのether use off）"""
+    vnet.interface_down(device_id, iface_for_flap)
+    # 実syslog + 実SNMP trap(linkDown)を送信。メッセージ形式はベンダで異なる
+    if state.device_type in ('sir', 'srs'):
+        _link_msg = sir_msg.link_down(state.hostname, iface_for_flap)
+    else:
+        _link_msg = (f'%LINK-3-UPDOWN: Interface {iface_for_flap}, '
+                     f'changed state to down')
+    await syslog_dispatcher.emit(device_id, state.hostname, 'warnings', _link_msg)
+    if _sir_trap_enabled(state, 'linkdown'):
+        await snmp_dispatcher.emit(device_id, state.hostname,
+                                    '1.3.6.1.6.3.1.1.5.3',  # linkDown
+                                    f'{iface_for_flap} down')
+    # VRRP/HSRP: このIF上の冗長化グループをInitへ落とす
+    # （落とさないと、切れた側がMaster/Activeを名乗ったまま残り、
+    #   対向がDead Timerで昇格して両系Master/Activeになる）
+    await vrrp_engine.interface_down(device_id, iface_for_flap)
+    # HSRP object tracking: このIFをtrack対象にしているグループがあれば
+    # priorityを下げる（グループ自体のIFがdownする場合とは別経路）
+    await vrrp_engine.hsrp_track_down(device_id, iface_for_flap)
+    peer_ids = vnet.get_peers_on_interface(device_id, iface_for_flap)
+    if peer_ids:
+        await ospf_engine.interface_down(device_id, peer_ids)
+        await rip_engine.interface_down(device_id, peer_ids)
+        await eigrp_engine.interface_down(device_id, peer_ids)
+    # STP: リンク障害を両端に通知（ルート/ポート役割の再収束）
+    if stp_engine.nodes.get(device_id, {}).get('enabled') or any(
+            stp_engine.nodes.get(p, {}).get('enabled') for p in peer_ids):
+        for _pid in peer_ids:
+            await stp_engine.port_down(device_id, _pid)
+            await stp_engine.port_down(_pid, device_id)
+    # BGPセッション断（インターフェースダウン / BFD高速検知）→ 冗長ピアへフェイルオーバー
+    bn = bgp_engine.nodes.get(device_id)
+    if bn and bn.get('enabled'):
+        for _pid in list(bn.get('sessions', {}).keys()):
+            if _pid in peer_ids:
+                await bgp_engine.session_down(device_id, _pid, 'interface shutdown')
+    # EtherChannel メンバーポート障害 → バンドルから外す
+    po_num, remaining = lacp_engine.member_down(device_id, iface_for_flap)
+    if po_num is not None:
+        buf = proto_log_buffer.setdefault(device_id, [])
+        buf.append({'type': 'lacp_log',
+                    'message': (f'%EC-5-UNBUNDLE: Interface {iface_for_flap} left the '
+                                f'port-channel Po{po_num}'
+                                + ('' if remaining else
+                                   f'\n%LINK-3-UPDOWN: Interface Port-channel{po_num}, '
+                                   f'changed state to down (全メンバーdown)'))})
+
+
+async def _flap_interface_up(device_id: str, state, iface_for_flap: str):
+    """インタフェース復旧時の共通処理（Cisco系のno shutdown / Si-Rのether use on）"""
+    vnet.interface_up(device_id, iface_for_flap)
+    # 実syslog + 実SNMP trap(linkUp)を送信
+    if state.device_type in ('sir', 'srs'):
+        _link_msg_up = sir_msg.link_up(state.hostname, iface_for_flap)
+    else:
+        _link_msg_up = (f'%LINK-3-UPDOWN: Interface {iface_for_flap}, '
+                        f'changed state to up')
+    await syslog_dispatcher.emit(device_id, state.hostname, 'notifications',
+                                 _link_msg_up)
+    if _sir_trap_enabled(state, 'linkup'):
+        await snmp_dispatcher.emit(device_id, state.hostname,
+                                    '1.3.6.1.6.3.1.1.5.4',  # linkUp
+                                    f'{iface_for_flap} up')
+    # VRRP/HSRP: 復旧したIF上のグループを再選出させる
+    await vrrp_engine.interface_up(device_id, iface_for_flap)
+    # HSRP object tracking: 復旧したのでpriorityを戻す
+    await vrrp_engine.hsrp_track_up(device_id, iface_for_flap)
+    # EIGRP: 復旧したリンクの相手と隣接を張り直す
+    await eigrp_engine.interface_up(
+        device_id, vnet.get_peers_on_interface(device_id, iface_for_flap))
+    # STP: リンク回復を両端に通知（ポート再追加・再収束）
+    _peers_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
+    if stp_engine.nodes.get(device_id, {}).get('enabled') or any(
+            stp_engine.nodes.get(p, {}).get('enabled') for p in _peers_up):
+        for _pid in _peers_up:
+            await stp_engine.port_up(device_id, _pid)
+            await stp_engine.port_up(_pid, device_id)
+    # BGPセッション復旧（インターフェースアップ）
+    bn = bgp_engine.nodes.get(device_id)
+    if bn and bn.get('enabled'):
+        peer_ids_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
+        for _pid in list(bn.get('sessions', {}).keys()):
+            if _pid in peer_ids_up:
+                await bgp_engine.try_reestablish(device_id, _pid)
+    # EtherChannel メンバーポート復旧 → バンドルへ復帰
+    po_num, bundled = lacp_engine.member_up(device_id, iface_for_flap)
+    if po_num is not None:
+        buf = proto_log_buffer.setdefault(device_id, [])
+        buf.append({'type': 'lacp_log',
+                    'message': (f'%EC-5-BUNDLE: Interface {iface_for_flap} joined '
+                                f'port-channel Po{po_num}')})
 
 
 # ══════════════════════════════════════════
@@ -2082,6 +2144,94 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         buf.append({'type': 'rip_log',
                     'message': f'ip rip neighbor {rip_neighbor.group(1)} を追加（ユニキャスト）'})
         return
+
+    # ── EIGRP ──
+    # Cisco IOS / Catalyst / NX-OS。Si-RはEIGRP非対応（実機に無い）ため対象外。
+    eigrp_m = re.match(r'^router\s+eigrp\s+(\d+)', c)
+    if eigrp_m and state.device_type in ('cisco', 'catalyst', 'nexus'):
+        if (state.device_type == 'nexus' and
+                'eigrp' not in getattr(state, 'nx_features', set())):
+            # エラーメッセージはRuleEngine側で返す
+            # (handle_protocol_configの戻り値は呼び出し元で捨てられるため)
+            return
+        state._routing_mode = 'eigrp'
+        state._eigrp_asn = int(eigrp_m.group(1))
+        state._eigrp_networks = getattr(state, '_eigrp_networks', [])
+        state._rip_pending = False
+        state._bgp_pending = False
+        state._ospf_pending = False
+        # returnしない → RuleEngineがmode='config-router'へ遷移する
+
+    no_eigrp = re.match(r'^no\s+router\s+eigrp\s+(\d+)', c)
+    if no_eigrp and state.device_type in ('cisco', 'catalyst', 'nexus'):
+        await eigrp_engine.stop(device_id)
+        state._eigrp_networks = []
+        state._routing_mode = ''
+        return
+
+    if getattr(state, '_routing_mode', '') == 'eigrp':
+        # network <ip> [wildcard]。ワイルドカード省略時はクラスフルとして扱う
+        # （実機Ciscoと同じ。省略形を書かれたときに黙って無視すると
+        #   「設定したのに隣接しない」で必ず詰まる）
+        m_net = re.match(r'^network\s+([\d.]+)(?:\s+([\d.]+))?$', c)
+        if m_net:
+            base, wildcard = m_net.group(1), m_net.group(2)
+            added = []
+            if wildcard:
+                try:
+                    inv = [int(x) for x in wildcard.split('.')]
+                    mask_bits = 32 - sum(bin(o).count('1') for o in inv)
+                    added = [_network_address(base, mask_bits)]
+                except (ValueError, IndexError):
+                    return f"% Invalid wildcard mask '{wildcard}'"
+            else:
+                first = int(base.split('.')[0]) if base.split('.')[0].isdigit() else 0
+                cf_prefix = 8 if first < 128 else (16 if first < 192 else 24)
+                cf_net = _network_address(base, cf_prefix)
+                for _ifn, _info in state.interfaces.items():
+                    _ip = _info.get('ip', '')
+                    if not _ip or _ip == '127.0.0.1':
+                        continue
+                    if _network_address(_ip, cf_prefix) != cf_net:
+                        continue
+                    connected = _network_address(_ip, _info.get('prefix', 24))
+                    if connected not in added:
+                        added.append(connected)
+            for net in added:
+                if net not in state._eigrp_networks:
+                    state._eigrp_networks.append(net)
+            if state._eigrp_networks:
+                await eigrp_engine.start(
+                    device_id, hostname, state._eigrp_asn,
+                    state._eigrp_networks,
+                    getattr(state, '_eigrp_router_id', ''))
+            return
+
+        m_rid = re.match(r'^eigrp\s+router-id\s+([\d.]+)', c)
+        if m_rid:
+            state._eigrp_router_id = m_rid.group(1)
+            eigrp_engine.set_router_id(device_id, m_rid.group(1))
+            return
+
+        m_var = re.match(r'^variance\s+(\d+)', c)
+        if m_var:
+            eigrp_engine.set_variance(device_id, int(m_var.group(1)))
+            return
+
+        # metric weights <tos> k1 k2 k3 k4 k5。両端で一致していないと
+        # ネイバーが上がらない（実機と同じ挙動をエンジン側で再現している）
+        m_k = re.match(r'^metric\s+weights\s+\d+\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)', c)
+        if m_k:
+            eigrp_engine.set_k_values(device_id, tuple(int(m_k.group(i)) for i in range(1, 6)))
+            return
+
+        m_pass = re.match(r'^(no\s+)?passive-interface\s+(\S+)', c)
+        if m_pass:
+            if m_pass.group(1):
+                eigrp_engine.remove_passive_interface(device_id, m_pass.group(2))
+            else:
+                eigrp_engine.add_passive_interface(device_id, m_pass.group(2))
+            return
 
     # ── OSPF ──
     ospf_m = re.match(r'^router\s+ospf\s+(\d+)', c)
@@ -3287,6 +3437,11 @@ def _build_running_config(device_id: str, state) -> str:
         if state_ifaces:
             for ifname, iinfo in state_ifaces.items():
                 lines.append(f'interface {ifname}')
+                # サブインタフェースはIPより先にencapsulationを出す（実機と同じ順）
+                _enc = iinfo.get('encapsulation')
+                if _enc:
+                    lines.append(f' encapsulation {_enc["type"]} {_enc["vlan"]}'
+                                 + (' native' if _enc.get('native') else ''))
                 ip = iinfo.get('ip', '')
                 if ip:
                     mask = _prefix_to_mask(iinfo.get('prefix', 24))
@@ -4344,6 +4499,12 @@ def _register_icmp(device_id: str):
             interfaces[ifname] = {'ip': info['ip'],
                                   'prefix': info.get('prefix', 24)}
     icmp_engine.register_device(device_id, state.hostname, interfaces)
+    # サブインタフェースの802.1Qタグを登録。両端のタグが食い違っていれば
+    # 同一セグメントとみなさない（実機ではフレームが素通りしないため）
+    vnet.register_subif_vlans(device_id, {
+        ifname: info['encapsulation']['vlan']
+        for ifname, info in state.interfaces.items()
+        if info.get('encapsulation', {}).get('vlan')})
     # VLANエンジンには物理ポート一覧を渡す（IPの有無に関わらず全ポート）。
     # 実機は未割当のaccessポートをVLAN1に置くため、これが無いと
     # show vlan brief のVLAN1が空欄のままになり実機と食い違う

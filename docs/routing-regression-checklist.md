@@ -51,10 +51,53 @@ network 100.64.12.0 0.0.0.3 area 0
 - cisco ↔ catalyst eBGP: Established・経路交換・ping疎通 OK
 - cisco ↔ catalyst OSPF: サブネットを分離すればFull到達 OK（router-id表示を除く）
 
+## 実装済み（この回で追加）
+
+### EIGRP（Cisco / Catalyst / Nexus）
+`engine/protocols.py` の `EigrpEngine`。回帰試験は `tests/test_eigrp.py`。
+
+- `router eigrp <asn>` / `network <ip> [wildcard]` / `no router eigrp <asn>`
+- `eigrp router-id` / `variance` / `metric weights` / `passive-interface`
+- Hello 5秒・Hold 15秒でのネイバー確立と失効
+- AS番号不一致・Kパラメータ不一致でネイバーが上がらないこと
+  （`metric weights` の変更は実機同様に既存ネイバーをリセットする）
+- クラシックメトリック `256 × (10^7/帯域kbps + 遅延/10usec)`
+- FD/RD を持つトポロジテーブルとフィージブルサクセサ判定
+- `show ip eigrp neighbors` / `topology` / `interfaces`
+- `show ip route` に AD 90 の `D`、再配信由来は AD 170 の `D EX`
+- Nexus は `feature eigrp` が先に必要
+
+Si-R / SR-S / APRESIA は実機がEIGRP非対応のため対象外。
+
+### Si-R のリンク断/復旧（ether use）
+Si-R には Cisco の `shutdown` が無く、実機のコマンドは
+`ether <group> <port> use <on|off>`（コマンドリファレンス 4.1.2）。
+回帰試験は `tests/test_sir_ether_use.py`。
+
+- `ether <g> <p> use on|off`（`1,3-4` のような複数指定にも対応）
+- ether → VLAN → lan の2段（`ether vlan untag <vid>` / `lan <n> vlan <vid>`）を
+  たどって、落ちる lan インタフェースを決める
+- `ether <g> <p> snmp trap linkdown|linkup <enable|disable>` によるトラップ抑止
+- `show ether` / `show ether brief` / `show ether statistics` / `clear ether statistics`
+  を実機の出力形式に修正（以前は固定文字列を返しており、`use off` の結果が
+  表示に反映されなかった）
+
+あわせて、Si-R/SR-S で `ether` が略称展開により `etherchannel` へ化けるバグを修正。
+これが原因で `show ether brief` などが正規表現にマッチしていなかった。
+
+### サブインタフェース（802.1Q）
+回帰試験は `tests/test_subinterface_dot1q.py`。
+
+- `encapsulation dot1Q <vlan> [native]` / `no encapsulation`
+  （物理インタフェース上では実機同様に拒否）
+- `show running-config` に ip address より前で出力
+- `show vlans`（IOSルータの802.1Qサブインタフェース一覧）
+- 両端のタグ番号が食い違う場合は同一セグメントとみなさない
+  （送信側・受信側の両方で判定。片側だけタグ付きの構成は物理側の設定
+  依存のため判定しない）
+
 ## 未着手
 
-- EIGRP: `router eigrp` が構成コマンドとして未実装（設定しても常に
-  `show ip eigrp neighbor` は "not configured" を返す仕様）。Catalyst/Cisco/Nexus
-  向けに実装予定。
 - Si-R を含む組み合わせ（Si-R↔Catalyst, Si-R↔Cisco）でのRIP/OSPF/BGP試験は未実施。
-- interface shutdown/no shutdown 時のDeadタイマー通りの切断・再確立試験は未実施。
+- Si-R の `show snmp` 出力形式は実機で未確認（現状はベストエフォート）。
+- ruff の F841（未使用変数）34件はCIのブロック対象から除外中。

@@ -5,6 +5,7 @@ Si-R / SR-S / Catalyst 9300 / Cisco IOS の出力を決定論的に生成
 """
 import re
 import random
+import time
 from datetime import datetime, timedelta
 
 def _prefix_to_mask(prefix: int) -> str:
@@ -223,6 +224,17 @@ class DeviceState:
             # ether <slot> <port> vlan untag <vid>（実機のfactory-default）
             self.sir_ether_vlan = {(1, 1): 1, (2, 1): 2, (2, 2): 2, (2, 3): 2, (2, 4): 2}
             self.sir_vlan_desc = {1: 'default', 2: 'v2'}
+            # lan 定義番号 ↔ VLAN ID の対応（lan <n> vlan <vid>）。
+            # 実機のfactory-defaultは lan 0 vlan 1 / lan 1 vlan 2
+            # （コマンドリファレンス p.1177 の実行例と同じ）。
+            # ether → VLAN → lan の順にたどることで、
+            # 「ether 2 1 を落としたとき、どのlanインタフェースが落ちるか」が決まる。
+            self.sir_lan_vlan = {0: 1, 1: 2}
+            # ether <group> <port> use <on|off>。未設定時は on（マニュアル 4.1.2）
+            self.sir_ether_use = {}
+            # ether <group> <port> snmp trap linkdown/linkup <enable|disable>
+            # 未設定時はいずれも enable（マニュアル 4.9.1）
+            self.sir_ether_trap = {}
 
         self.routes = [
             {"fp":"*C","dest":"192.168.1.0/24","gw":"192.168.1.1","dist":0, "iface":"lan0"},
@@ -360,6 +372,24 @@ class DeviceState:
 # ══════════════════════════════════════════
 # コマンドエンジン本体
 # ══════════════════════════════════════════
+
+def _expand_port_list(raw: str):
+    """Si-Rのポート指定 "1,3-5" を [1,3,4,5] に展開する。
+    実機は "," と "-" の両方を受け付ける（マニュアル 4.1.2）。"""
+    ports = []
+    for chunk in raw.split(','):
+        chunk = chunk.strip()
+        if '-' in chunk:
+            try:
+                lo, hi = chunk.split('-', 1)
+                ports.extend(range(int(lo), int(hi) + 1))
+            except ValueError:
+                continue
+        elif chunk.isdigit():
+            ports.append(int(chunk))
+    return ports
+
+
 class RuleEngine:
 
     # ── CLI略称展開テーブル（Cisco IOS準拠）──────────────────
@@ -596,6 +626,15 @@ class RuleEngine:
         if device_type == 'apresia':
             return cmd
         tokens = cmd.strip().split()
+        # Si-R/SR-Sの "ether" は、それ自体で完結する実機のキーワード
+        # (ether <group> <port> use off / show ether brief など)。
+        # Cisco向けの略称展開に任せると "etherchannel" に化けてしまい、
+        # ether系のコマンドがどれも正規表現にマッチしなくなる。
+        if device_type in ('sir', 'srs') and len(tokens) > 1:
+            for i, tok in enumerate(tokens):
+                if tok.lower() == 'ether' and (i == 0 or tokens[i - 1].lower()
+                                               in ('show', 'clear')):
+                    return cmd
         if not tokens:
             return cmd
 
@@ -696,6 +735,11 @@ class RuleEngine:
         if re.match(r'^interface\s+\S+', c):
             return self._cmd_interface(cmd, state)
         if re.match(r'^router\s+(ospf|bgp|eigrp|rip)(\s+\d+)?', c):
+            # NX-OS: feature eigrp が入るまで router eigrp は存在しない
+            if (state.device_type == 'nexus' and c.startswith('router eigrp')
+                    and 'eigrp' not in getattr(state, 'nx_features', set())):
+                return ("% Invalid command at '^' marker.\n"
+                        '  (NX-OSでは "feature eigrp" が先に必要です)')
             return self._cmd_router_mode(cmd, state)
         if re.match(r'^vlan\s+\d+$', c) and state.mode == "config":
             return self._cmd_vlan_mode(cmd, state)
@@ -1042,6 +1086,11 @@ class RuleEngine:
             return 'QoS is enabled globally\n(MQCポリシーは show policy-map interface を参照)'
 
         # ── show vlan ──
+        # show vlans はIOSルータの802.1Qサブインタフェース一覧で、
+        # スイッチの show vlan とは別コマンド。先に判定しないと
+        # 前方一致で show vlan 側に吸われてしまう。
+        if re.match(r'^show\s+vlans$', c):
+            return self._show_router_vlans(state)
         if re.match(r'^show\s+vlan', c):
             return self._show_vlan(state)
 
@@ -1092,6 +1141,8 @@ class RuleEngine:
             return self._show_eigrp_neighbors(state)
         if re.match(r'^show\s+ip\s+eigrp\s+topology', c):
             return self._show_eigrp_topology(state)
+        if re.match(r'^show\s+ip\s+eigrp\s+interface', c):
+            return self._show_eigrp_interfaces(state)
 
         # ── show vrrp (Si-R) ──
         if re.match(r'^show\s+vrrp\s+brief', c):
@@ -1952,33 +2003,136 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         return "\n".join(lines)
 
     # ─── show ether (Si-R / SR-S) ─────────────
+    def _sir_ether_ports(self, state):
+        """この装置に載っている ether ポートを (group, port) の昇順で返す。"""
+        ports = getattr(state, 'sir_ether_vlan', None)
+        if ports:
+            return sorted(ports)
+        # SR-S など sir_ether_vlan を持たない機種は既定の並びで代用する
+        return [(1, 1), (2, 1), (2, 2), (2, 3), (2, 4)]
+
+    def _sir_lan_for_ether(self, state, group, port):
+        """ether ポートに結び付く lan インタフェース名を返す（無ければ None）。
+
+        実機の対応は ether <g> <p> vlan untag <vid> → lan <n> vlan <vid>。
+        この2段を経由しないと、ether 2 1 を落としたときに
+        どの lan が道連れになるかが決められない。
+        """
+        vid = getattr(state, 'sir_ether_vlan', {}).get((group, port))
+        if vid is None:
+            return None
+        for lan_no, lan_vid in getattr(state, 'sir_lan_vlan', {}).items():
+            if lan_vid == vid:
+                return f'lan{lan_no}'
+        return None
+
+    def _sir_port_status(self, state, group, port):
+        """ポートの状態を実機の表記で返す。
+
+        disable … ether use off。定義により使用しない状態
+        down    … リンクダウン（shutdown相当も含む）
+        up      … リンクアップ
+        """
+        if getattr(state, 'sir_ether_use', {}).get((group, port), True) is False:
+            return 'disable'
+        lan = self._sir_lan_for_ether(state, group, port)
+        if not lan:
+            return 'down'
+        did = getattr(state, '_device_id', None)
+        if did:
+            from engine.protocols import vnet
+            if lan in vnet.down_interfaces.get(did, set()):
+                return 'down'
+        info = state.interfaces.get(lan, {})
+        if info.get('status') == 'down':
+            return 'down'
+        return 'up' if info.get('ip') else 'down'
+
     def _show_ether(self, state):
         lines = []
-        for i, (name, iface) in enumerate(state.interfaces.items(), 1):
-            grp = 1 if i <= 4 else 2
-            port = ((i-1) % 4) + 1
-            status = iface.get("status","up")
-            speed = "1000M Full" if status == "up" else "down"
+        for (grp, port) in self._sir_ether_ports(state):
+            status = self._sir_port_status(state, grp, port)
+            lan = self._sir_lan_for_ether(state, grp, port) or '-'
             lines.append(f"[ETHER GROUP-{grp} PORT-{port}]")
-            lines.append(f"description      : {name}")
-            lines.append(f"status           : {'auto '+speed if status=='up' else 'down'} MDI-X")
-            lines.append("media            : Metal")
-            lines.append("flow control     : send on, receive on")
+            lines.append(f"description      : Ether_Group_{grp}_Port_{port}")
+            if status == 'up':
+                lines.append("status           : auto 1000M Full MDI-X")
+                lines.append("media            : Metal")
+                lines.append("flow control     : send on, receive on")
+            elif status == 'disable':
+                lines.append("status           : disable")
+                lines.append("media            : -")
+                lines.append("flow control     : -")
+            else:
+                lines.append("status           : down")
+                lines.append("media            : -")
+                lines.append("flow control     : -")
             lines.append("type             : Normal")
-            lines.append(f"since            : {state.startup_time.strftime('%b %d %H:%M:%S %Y')}")
+            lines.append(f"since            : "
+                         f"{state.startup_time.strftime('%b %d %H:%M:%S %Y')}")
             lines.append("config           : mode(auto), mdi(auto), media(-)")
+            lines.append(f"                   (lan: {lan})")
             lines.append("")
         return "\n".join(lines)
 
     def _show_ether_brief(self, state):
-        lines = ["Group Port  Status           Type",
-                 "----- ----- ---------------- -------"]
-        for i, (name, iface) in enumerate(state.interfaces.items(), 1):
-            grp = 1 if i <= 4 else 2
-            port = ((i-1) % 4) + 1
-            status = "1000M Full" if iface.get("status") == "up" else "down"
-            lines.append(f"{grp:<6}{port:<6}{status:<17}Normal")
+        # 実機の桁揃え（コマンドリファレンス 32.1.2 / 実機出力に一致）
+        lines = ["",
+                 "port  status   type               media  mdi   speed  duplex  flow",
+                 "----- -------- ------------------ ------ ----- ------ ------- -----"]
+        for (grp, port) in self._sir_ether_ports(state):
+            status = self._sir_port_status(state, grp, port)
+            if status == 'up':
+                media, mdi, speed, duplex, flow = 'metal', 'MDIX', '1000M', 'full', 'TxRx'
+            else:
+                media = mdi = speed = duplex = flow = '-'
+            lines.append(
+                f"{f'{grp} {port}':<5} {status:<8} {'normal':<18} "
+                f"{media:<6} {mdi:<5} {speed:<6} {duplex:<7} {flow:<5}".rstrip())
+        lines.append("")
         return "\n".join(lines)
+
+    def _show_ether_statistics(self, cmd, state):
+        """show ether statistics [group <g> [port <p>]] [detail]
+        （コマンドリファレンス 32.1.3）。
+
+        エミュレータは ether ポート単位のデータプレーンカウンタを持たない。
+        値をでっち上げると実機と突き合わせたときに必ず食い違うので、
+        clear 直後と同じ 0 を返す。形式だけは実機に合わせてある。
+        """
+        c = ' '.join(cmd.lower().split())
+        m = re.search(r'group\s+(\d+)(?:\s+port\s+([\d,\-]+))?', c)
+        ports = self._sir_ether_ports(state)
+        if m:
+            grp = int(m.group(1))
+            wanted = _expand_port_list(m.group(2)) if m.group(2) else None
+            ports = [(g, p) for (g, p) in ports
+                     if g == grp and (wanted is None or p in wanted)]
+        if not ports:
+            return ''
+        stats = getattr(state, 'sir_ether_stats', {})
+        out = []
+        for (grp, port) in ports:
+            st = stats.get((grp, port), {})
+            out.append(f"[ETHER GROUP-{grp} PORT-{port} STATISTICS]")
+            for direction, label in (('in', 'Input'), ('out', 'Output')):
+                out.append(f"[{label} Statistics]")
+                for key, name in (('octets', 'Octets'), ('frames', 'Frames'),
+                                  ('unicast', 'Unicast'),
+                                  ('multicast', 'Multicast'),
+                                  ('broadcast', 'Broadcast')):
+                    out.append(f" {name:<25}: {st.get(f'{direction}_{key}', 0)}")
+                    if name != 'Unicast' or direction == 'in':
+                        out.append(f"  {'bits/sec' if key == 'octets' else 'frames/sec':<24}: 0")
+                out.append(f" {'Pause frames':<25}: 0")
+                out.append("")
+                out.append(" Discards")
+                out.append(f"  {'All DiscardsPkts':<24}: 0" if direction == 'in'
+                           else f"  {'Queue Full Discards':<24}: 0")
+                out.append(" Errors")
+                out.append(f"  {'FCSErrors':<24}: 0")
+                out.append("")
+        return '\n'.join(out)
 
     # ─── show system info (Si-R) ──────────────
     def _show_system_info(self, state):
@@ -2537,33 +2691,95 @@ Link ID         ADV Router      Age         Seq#       Checksum Link count
         return "\n".join(lines)
 
     # ─── show eigrp ───────────────────────────
+    def _eigrp_node(self, state):
+        """EigrpEngine上のこの装置のノードを返す（未設定ならNone）。"""
+        from engine.protocols import eigrp_engine
+        did = getattr(state, '_device_id', None)
+        if not did:
+            return None
+        n = eigrp_engine.nodes.get(did)
+        return n if n and n.get('enabled') else None
+
     def _show_eigrp_neighbors(self, state):
-        e = state.eigrp
-        # EIGRPは設定コマンド(router eigrp)を実装していないため、
-        # 未設定の装置では実機同様「何も動いていない」ことを示す。
-        # ここで固定のサンプルネイバーを表示すると、CDPで踏んだのと同じ
+        # EIGRPが実際に動いていない装置で固定のサンプルネイバーを出すと、
         # 「表示上は隣接が見えるのに実際には一切通信していない」という
-        # 切り分け困難な食い違いになる
-        if not e.get('enabled'):
+        # 切り分けの難しい食い違いになる。実エンジンの状態だけを出す。
+        n = self._eigrp_node(state)
+        if not n:
             return "% EIGRP is not configured on this device."
-        lines = [f"EIGRP-IPv4 Neighbors for AS({e['asn']})",
-                 "H   Address         Interface         Hold Uptime   SRTT   RTO  Q  Seq",
-                 "                                      (sec)         (ms)       Cnt Num"]
-        for i, n in enumerate(e["neighbors"]):
-            lines.append(f"{i:<4}{n['ip']:<16}{n['iface']:<18}{n['hold']:<6}{n['uptime']:<10}{n['srtt']:<7}{n['rto']:<5}0  {random.randint(10,50)}")
+        lines = [f"EIGRP-IPv4 Neighbors for AS({n['asn']})",
+                 "H   Address                 Interface              "
+                 "Hold Uptime   SRTT   RTO  Q  Seq",
+                 "                                                   "
+                 "(sec)         (ms)       Cnt Num"]
+        from engine.protocols import EIGRP_HOLD_TIME
+        now = time.time()
+        for i, (peer_id, info) in enumerate(sorted(n['neighbors'].items())):
+            # Holdは「あと何秒でネイバーを落とすか」の残り時間
+            hold = max(0, int(EIGRP_HOLD_TIME - (now - info['last_seen'])))
+            up = int(now - info['up_since'])
+            uptime = f"{up // 3600:02d}:{(up % 3600) // 60:02d}:{up % 60:02d}"
+            lines.append(
+                f"{i:<4}{info['ip']:<24}{(info['iface'] or 'unknown'):<23}"
+                f"{hold:<5}{uptime:<9}{info['srtt']:<7}{info['rto']:<5}"
+                f"{info['q_count']}  {info['seq']}")
+        if not n['neighbors']:
+            lines.append("(ネイバーなし)")
         return "\n".join(lines)
 
     def _show_eigrp_topology(self, state):
-        e = state.eigrp
-        if not e.get('enabled'):
+        n = self._eigrp_node(state)
+        if not n:
             return "% EIGRP is not configured on this device."
-        return f"""EIGRP-IPv4 Topology Table for AS({e['asn']})/ID(10.2.0.1)
-Codes: P - Passive, A - Active, U - Update, Q - Query, R - Reply
+        rid = n.get('router_id') or '0.0.0.0'
+        lines = [f"EIGRP-IPv4 Topology Table for AS({n['asn']})/ID({rid})",
+                 "Codes: P - Passive, A - Active, U - Update, Q - Query, "
+                 "R - Reply,",
+                 "       r - reply Status, s - sia Status",
+                 ""]
+        # 宛先ごとにまとめ、FD最小をサクセサとして先頭に出す
+        by_dest = {}
+        for r in n['topology']:
+            by_dest.setdefault((r.network, r.prefix), []).append(r)
+        for (net, plen) in sorted(by_dest):
+            routes = sorted(by_dest[(net, plen)], key=lambda r: r.fd)
+            best_fd = routes[0].fd
+            successors = [r for r in routes if r.fd == best_fd]
+            lines.append(f"P {net}/{plen}, {len(successors)} successors, "
+                         f"FD is {best_fd}")
+            for r in routes:
+                if r.learned_from == 'direct':
+                    lines.append("        via Connected")
+                else:
+                    # (FD/RD) の並びは実機と同じ。RD < FD がフィージビリティ
+                    # 条件で、これを満たす経路が即時の代替になる
+                    lines.append(f"        via {r.next_hop} ({r.fd}/{r.rd})")
+        if not by_dest:
+            lines.append("(経路なし)")
+        return "\n".join(lines)
 
-P 192.168.1.0/24, 1 successors, FD is 28160
-        via Connected, GigabitEthernet0/0/0
-P 192.168.2.0/24, 1 successors, FD is 30720
-        via 10.0.0.2 (30720/28160), GigabitEthernet0/0/0"""
+    def _show_eigrp_interfaces(self, state):
+        n = self._eigrp_node(state)
+        if not n:
+            return "% EIGRP is not configured on this device."
+        lines = [f"EIGRP-IPv4 Interfaces for AS({n['asn']})",
+                 "                        Xmit Queue   PeerQ        "
+                 "Mean   Pacing Time   Multicast    Pending",
+                 "Interface        Peers  Un/Reliable  Un/Reliable  "
+                 "SRTT   Un/Reliable   Flow Timer   Routes"]
+        # ネイバーが乗っているインターフェースごとに集計する
+        by_iface = {}
+        for info in n['neighbors'].values():
+            by_iface.setdefault(info['iface'] or 'unknown', []).append(info)
+        for iface, peers in sorted(by_iface.items()):
+            mean_srtt = sum(p['srtt'] for p in peers) // len(peers)
+            lines.append(f"{iface:<17}{len(peers):<7}0/0          0/0          "
+                         f"{mean_srtt:<7}0/0           50           0")
+        for iface in sorted(n.get('passive_ifaces', set())):
+            lines.append(f"{iface:<17}(passive-interface のためHelloを送信しません)")
+        if not by_iface and not n.get('passive_ifaces'):
+            lines.append("(EIGRPが有効なインターフェースなし)")
+        return "\n".join(lines)
 
     # ─── show vrrp (Si-R) ─────────────────────
     def _show_vrrp(self, state):
@@ -2724,11 +2940,14 @@ Configuration Revision            : 5"""
             return ('PIM Neighbor Status for VRF "default"\n'
                     'Neighbor        Interface            Uptime    Expires   DR\n'
                     '(no PIM neighbors)')
-        # show ip eigrp neighbors
+        # show ip eigrp neighbors（NX-OS。実エンジンの状態を出す）
         if re.match(r'^show\s+ip\s+eigrp\s+neighbor', c):
-            return ('EIGRP neighbors for process 100 VRF default\n'
-                    'H   Address      Interface   Hold Uptime   SRTT   RTO  Q  Seq\n'
-                    '(no EIGRP neighbors)')
+            n = self._eigrp_node(state)
+            if not n:
+                return ('EIGRP neighbors for process 100 VRF default\n'
+                        'H   Address      Interface   Hold Uptime   SRTT   RTO  Q  Seq\n'
+                        '(no EIGRP neighbors)')
+            return self._show_eigrp_neighbors(state)
         # show hsrp
         if re.match(r'^show\s+hsrp', c):
             return ('(no HSRP groups configured — Nexusではfeature hsrp + interface設定が必要)')
@@ -2787,14 +3006,21 @@ Configuration Revision            : 5"""
         # show clock / show time
         if re.match(r'^show\s+(clock|time)', c):
             return '2026/06/28 (Sun) 12:00:00 JST'
-        # show ether [N] — イーサネットポート状態
+        # clear ether statistics（コマンドリファレンス 32.2.1）
+        if re.match(r'^clear\s+ether\s+statistics', c):
+            if not hasattr(state, 'sir_ether_stats'):
+                state.sir_ether_stats = {}
+            state.sir_ether_stats.clear()
+            return ''
+        # show ether — 実機の出力形式（コマンドリファレンス 32.1.1 / 32.1.2）。
+        # 以前はポート番号もリンク状態も固定文字列を返していたため、
+        # ether use off を実装しても結果が表示に反映されなかった。
+        if re.match(r'^show\s+ether\s+brief$', c):
+            return self._show_ether_brief(state)
+        if re.match(r'^show\s+ether\s+statistics', c):
+            return self._show_ether_statistics(cmd, state)
         if re.match(r'^show\s+ether', c):
-            lines = ['Port  Link    Speed/Duplex   MAC Address']
-            for i in range(0, 4):
-                lines.append(f'ether{i}  {"up" if i==0 else "down":<6}  '
-                             f'{"1000M/Full" if i==0 else "-":<13}  '
-                             f'00:0e:0e:f1:41:{i:02d}')
-            return '\n'.join(lines)
+            return self._show_ether(state)
         # show lan [N]
         if re.match(r'^show\s+lan', c):
             lines = ['LAN Interface Status']
@@ -3316,6 +3542,11 @@ Configuration Revision            : 5"""
                     continue
                 mask = _prefix_to_mask(prefix) if prefix else '255.255.255.0'
                 lines.append(f"interface {ifname}")
+                # サブインタフェースはIPより先にencapsulationを出す（実機と同じ順）
+                _enc = ifdata.get('encapsulation')
+                if _enc:
+                    lines.append(f" encapsulation {_enc['type']} {_enc['vlan']}"
+                                 + (' native' if _enc.get('native') else ''))
                 if ip:
                     lines.append(f" ip address {ip} {mask}")
                 if status == 'up':
@@ -3377,6 +3608,29 @@ Configuration Revision            : 5"""
                       "ip routing", "!",
                       "end"]
             return "\n".join(lines)
+
+    def _show_router_vlans(self, state):
+        """IOSルータの show vlans（802.1Qサブインタフェースの一覧）。"""
+        subs = [(n, i) for n, i in state.interfaces.items()
+                if i.get('encapsulation')]
+        if not subs:
+            return 'No Virtual LANs configured.'
+        out = []
+        for name, info in sorted(subs):
+            enc = info['encapsulation']
+            native = '  (Native)' if enc.get('native') else ''
+            out.append(f"Virtual LAN ID:  {enc['vlan']} ({enc['type']} Encapsulation){native}")
+            out.append('')
+            out.append(f"   vLAN Trunk Interface:   {name}")
+            out.append('')
+            ip = info.get('ip')
+            if ip:
+                out.append(f"   Protocols Configured:   Address:          Received:  Transmitted:")
+                out.append(f"           IP                {ip}         0          0")
+            else:
+                out.append('   Protocols Configured:   (none)')
+            out.append('')
+        return '\n'.join(out)
 
     # ─── show logging ─────────────────────────
     def _show_logging(self, state):
@@ -4381,6 +4635,33 @@ Configuration Revision            : 5"""
                 'name': map_name, 'interface': state.current_if}
             return ""
 
+        # ── サブインタフェース: encapsulation dot1Q <vlan> [native] ──
+        # ルータ・オン・ア・スティック（1本の物理リンクを複数VLANで多重化）の
+        # 要になる設定。ここが無いと、サブインタフェースにIPは付くのに
+        # どのVLANに属するのかが装置内に一切残らず、
+        # 「両端でタグ番号が食い違っていても隣接してしまう」という
+        # 実機では起きない状態になる。
+        m_encap = re.match(
+            r'^encapsulation\s+(dot1q|isl)\s+(\d+)(\s+native)?$', c)
+        if m_encap and state.current_if:
+            if '.' not in state.current_if:
+                # 実機は物理インタフェースでは受け付けない
+                return ('% Incomplete command.\n'
+                        '  (encapsulation dot1Q はサブインタフェース'
+                        '(例 GigabitEthernet0/0.10)に設定します)')
+            vid = int(m_encap.group(2))
+            if not 1 <= vid <= 4094:
+                return f"% Invalid VLAN ID {vid} (1-4094)"
+            state.interfaces.setdefault(state.current_if, {})['encapsulation'] = {
+                'type': 'dot1Q' if m_encap.group(1) == 'dot1q' else 'ISL',
+                'vlan': vid,
+                'native': bool(m_encap.group(3)),
+            }
+            return ""
+        if re.match(r'^no\s+encapsulation\b', c) and state.current_if:
+            state.interfaces.get(state.current_if, {}).pop('encapsulation', None)
+            return ""
+
         # no shutdown
         if c in ("no shutdown", "no shut"):
             if state.current_if:
@@ -4403,6 +4684,51 @@ Configuration Revision            : 5"""
             m = re.match(r'^spanning-tree\s+mode\s+(\S+)', c)
             if m:
                 state.stp["mode"] = m.group(1)
+            return ""
+
+        # Si-R: ether <group> <port> use <on|off>（マニュアル 4.1.2）
+        # Ciscoの shutdown / no shutdown に相当する。実機にはこの形しか無いので
+        # Si-Rに対して shutdown と打っても何も起きないのが正しい。
+        m_use = re.match(r'^ether\s+(\d+)\s+([\d,\-]+)\s+use\s+(on|off)$', c)
+        if m_use and state.device_type in ('sir', 'srs'):
+            grp = int(m_use.group(1))
+            mode_on = m_use.group(3) == 'on'
+            for port in _expand_port_list(m_use.group(2)):
+                if (grp, port) not in getattr(state, 'sir_ether_vlan', {}):
+                    return (f"<ERROR> : 3 : format error\n"
+                            f"  (ether group {grp} port {port} は"
+                            f"この装置に存在しません)")
+                state.sir_ether_use[(grp, port)] = mode_on
+            return ""
+
+        # Si-R: ether <group> <port> snmp trap linkdown|linkup <enable|disable>
+        #（マニュアル 4.9.1 / 4.9.2。未設定時はいずれも enable）
+        m_trap = re.match(
+            r'^ether\s+(\d+)\s+([\d,\-]+)\s+snmp\s+trap\s+'
+            r'(linkdown|linkup)\s+(enable|disable)$', c)
+        if m_trap and state.device_type in ('sir', 'srs'):
+            grp = int(m_trap.group(1))
+            kind, mode = m_trap.group(3), m_trap.group(4) == 'enable'
+            for port in _expand_port_list(m_trap.group(2)):
+                state.sir_ether_trap.setdefault((grp, port), {})[kind] = mode
+            return ""
+
+        # Si-R: lan <n> vlan <vid>（VLAN IDとlan定義番号の関連付け）
+        m_lanvlan = re.match(r'^lan\s+(\d+)\s+vlan\s+(\d+)$', c)
+        if m_lanvlan and state.device_type in ('sir', 'srs'):
+            vid = int(m_lanvlan.group(2))
+            if vid > 4094:
+                return f"<ERROR> : 3 : format error\n  (VLAN IDは0〜4094です)"
+            state.sir_lan_vlan[int(m_lanvlan.group(1))] = vid
+            return ""
+
+        # Si-R: ether <group> <port> vlan untag <vid>
+        m_ethvlan = re.match(
+            r'^ether\s+(\d+)\s+([\d,\-]+)\s+vlan\s+untag\s+(\d+)$', c)
+        if m_ethvlan and state.device_type in ('sir', 'srs'):
+            grp, vid = int(m_ethvlan.group(1)), int(m_ethvlan.group(3))
+            for port in _expand_port_list(m_ethvlan.group(2)):
+                state.sir_ether_vlan[(grp, port)] = vid
             return ""
 
         # Si-R 固有
