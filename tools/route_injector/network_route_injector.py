@@ -2687,7 +2687,13 @@ class BgpMultiPeerTab(ttk.Frame, LogMixin):
 
 class TrafficStats:
     """送信/受信のカウンタ。ワーカースレッドが更新しGUIスレッドが読むため
-    ロックで保護する。"""
+    ロックで保護する。
+
+    計測区間は「最初のパケット〜最後のパケット」であって、開始ボタンを
+    押した時刻からではない。受信側は送信側より先に起動しておくのが普通で、
+    待ち受け開始から数えると待っていた時間の分だけ平均レートが薄まって
+    しまうため（実測で 1,000pps のトラフィックが 606pps と表示された）。
+    """
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -2695,18 +2701,25 @@ class TrafficStats:
         self.bytes = 0
         self.errors = 0
         self.last_error = ""
-        self.started_at = None
+        self.first_at = None
+        self.last_at = None
 
     def start(self):
+        """カウンタをリセットする（計測時刻は最初のパケットで始まる）"""
         with self._lock:
             self.packets = 0
             self.bytes = 0
             self.errors = 0
             self.last_error = ""
-            self.started_at = time.time()
+            self.first_at = None
+            self.last_at = None
 
     def add(self, nbytes: int):
         with self._lock:
+            now = time.time()
+            if self.first_at is None:
+                self.first_at = now
+            self.last_at = now
             self.packets += 1
             self.bytes += nbytes
 
@@ -2718,9 +2731,9 @@ class TrafficStats:
     def snapshot(self):
         """(packets, bytes, errors, elapsed秒, pps, bps) を返す"""
         with self._lock:
-            started = self.started_at
+            first, last = self.first_at, self.last_at
             packets, nbytes, errors = self.packets, self.bytes, self.errors
-        elapsed = (time.time() - started) if started else 0.0
+        elapsed = (last - first) if (first and last) else 0.0
         pps = packets / elapsed if elapsed > 0 else 0.0
         bps = nbytes * 8 / elapsed if elapsed > 0 else 0.0
         return packets, nbytes, errors, elapsed, pps, bps
@@ -2750,12 +2763,25 @@ def run_traffic_sender(proto, dest_ip, dest_port, size, count, rate_pps,
             sock.connect((dest_ip, dest_port))
             sock.settimeout(None)
         stats.start()
-        interval = (1.0 / rate_pps) if rate_pps > 0 else 0.0
-        next_send = time.perf_counter()
+        started = time.perf_counter()
         sent = 0
         while not stop_event.is_set():
             if count > 0 and sent >= count:
                 break
+            if rate_pps > 0:
+                # 「開始からの経過時間から見て、本来ここまでに何パケット
+                # 送信済みであるべきか」で判定する。
+                # 1パケットごとにsleepで間隔を刻む実装だと、OSのタイマー
+                # 粒度(数ms)のせいで毎回寝過ごし、指定レートに全く届かない
+                # (1000pps指定で実測667pps = 33%低い、という測定結果だった)。
+                # 経過時間基準にすると、寝過ごした分は次の周回でまとめて
+                # 送られるので、平均レートが指定値に収束する。
+                due = (time.perf_counter() - started) * rate_pps
+                if sent >= due:
+                    sleep_for = (sent + 1) / rate_pps - (time.perf_counter() - started)
+                    if sleep_for > 0 and stop_event.wait(min(sleep_for, 0.05)):
+                        break
+                    continue
             try:
                 if proto == 'udp':
                     sock.sendto(payload, (dest_ip, dest_port))
@@ -2766,18 +2792,19 @@ def run_traffic_sender(proto, dest_ip, dest_port, size, count, rate_pps,
                 break
             stats.add(len(payload))
             sent += 1
-            if interval:
-                next_send += interval
-                delay = next_send - time.perf_counter()
-                if delay > 0:
-                    if stop_event.wait(delay):
-                        break
-                else:
-                    # 指定レートに追いつけていない。過去分を取り戻そうとして
-                    # バーストさせないよう基準時刻をリセットする
-                    next_send = time.perf_counter()
     finally:
         sock.close()
+
+
+def _enlarge_recv_buffer(sock, stats, want=4 * 1024 * 1024):
+    """受信ソケットバッファを広げる。
+    既定サイズのままだと、高レート時に受信側で取りこぼしてしまい
+    「ネットワークで落ちた」ように見えてしまう（実測で3.5%の損失が出た。
+    これを装置側の損失と誤読すると原因調査が完全に迷走する）。"""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, want)
+    except OSError as e:
+        stats.add_error(f"受信バッファ拡大に失敗: {e}")
 
 
 def run_traffic_receiver(proto, listen_ip, listen_port, stop_event, stats):
@@ -2785,6 +2812,7 @@ def run_traffic_receiver(proto, listen_ip, listen_port, stop_event, stats):
     if proto == 'udp':
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        _enlarge_recv_buffer(sock, stats)
         sock.bind((listen_ip or '', listen_port))
         sock.settimeout(0.5)
         stats.start()

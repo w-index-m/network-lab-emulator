@@ -126,23 +126,58 @@ def test_tcp_send_and_receive_counters_match():
     assert recv_bytes == 25 * 200, f"受信バイト数が一致しない: {recv_bytes}"
 
 
-def test_rate_limit_is_roughly_honoured():
-    """レート指定(pps)がおおよそ守られる。
-    厳密な精度は環境依存なので「明らかに速すぎない」ことだけ見る。"""
+def test_rate_limit_is_accurate():
+    """指定pps付近の実測レートが出る。
+
+    1パケットごとにsleepで間隔を刻む実装だと、OSのタイマー粒度で
+    毎回寝過ごして指定レートに届かない（1000pps指定で実測667ppsだった）。
+    経過時間基準で送信数を決める実装に直したので、ここで精度を担保する。
+    """
     port = _free_udp_port()
     stats = TrafficStats()
     stop = threading.Event()
 
     start = time.time()
-    run_traffic_sender('udp', '127.0.0.1', port, size=64, count=20, rate_pps=50,
+    run_traffic_sender('udp', '127.0.0.1', port, size=64, count=500, rate_pps=500,
                        src_ip='', src_port=0, tos=0, stop_event=stop, stats=stats)
-    elapsed = time.time() - start
+    wall = time.time() - start
 
-    # 50ppsで20パケット = 理論値0.4秒。無制限なら一瞬で終わるので、
-    # レート制限が効いていれば最低でも0.2秒はかかる
-    assert elapsed > 0.2, f"レート制限が効いていない可能性: {elapsed:.3f}秒"
-    packets, _, _, _, _, _ = stats.snapshot()
-    assert packets == 20
+    packets, _, _, elapsed, pps, _ = stats.snapshot()
+    assert packets == 500
+    # 500ppsで500パケット = 理論値1.0秒
+    assert 0.8 < wall < 1.6, f"実時間が理論値1.0秒から外れすぎ: {wall:.3f}秒"
+    assert 400 < pps < 650, f"実測レートが指定500ppsから外れすぎ: {pps:.0f}pps"
+    assert 0.7 < elapsed < 1.5, f"計測区間がおかしい: {elapsed:.3f}秒"
+
+
+def test_receiver_rate_is_not_diluted_by_idle_listening_time():
+    """受信側を先に起動して待っていても、その待ち時間で平均レートが
+    薄まらない（計測区間は最初のパケット〜最後のパケット）。
+
+    待ち受け開始から数える実装では、1,000ppsのトラフィックが
+    606ppsと表示されてしまっていた。
+    """
+    port = _free_udp_port()
+    recv_stats, send_stats = TrafficStats(), TrafficStats()
+    recv_stop, send_stop = threading.Event(), threading.Event()
+
+    receiver = threading.Thread(
+        target=run_traffic_receiver,
+        args=('udp', '127.0.0.1', port, recv_stop, recv_stats), daemon=True)
+    receiver.start()
+    time.sleep(1.0)  # 送信を始める前にわざと長めに待ち受けさせる
+
+    run_traffic_sender('udp', '127.0.0.1', port, size=64, count=400, rate_pps=400,
+                       src_ip='', src_port=0, tos=0,
+                       stop_event=send_stop, stats=send_stats)
+    time.sleep(0.5)
+    recv_stop.set()
+    receiver.join(timeout=3)
+
+    recv_packets, _, _, _, recv_pps, _ = recv_stats.snapshot()
+    assert recv_packets == 400
+    # 1秒待ってから受信しているので、待ち受け開始起点だと約200ppsまで薄まる
+    assert recv_pps > 300, f"待ち時間で平均が薄まっている: {recv_pps:.0f}pps"
 
 
 def test_sender_stops_on_stop_event():
