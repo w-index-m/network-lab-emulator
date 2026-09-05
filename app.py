@@ -860,6 +860,7 @@ async def cli_command(body: dict):
 
     if re.search(r'ip\s+addr(?:ess)?|ip\s+route|remote\s+\d+\s+ip\s+route|'
                  r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address|'
+                 r'config\s+ipif|'  # APRESIA: "config ipif System <ip>/<prefix>"
                  r'no\s+shutdown|no\s+shut', c_low) or (
             re.search(r'crypto\s+map', c_low) and
             not re.match(r'^no\s+crypto\s+map', c_low)):

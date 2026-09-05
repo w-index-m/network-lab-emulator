@@ -577,14 +577,23 @@ class RuleEngine:
         },
     }
 
-    def _expand_abbreviation(self, cmd: str) -> str:
+    def _expand_abbreviation(self, cmd: str, device_type: str = '') -> str:
         """
         Cisco IOS準拠のCLI略称を展開する。
         例: 'sh ip ro' → 'show ip route'
             'in gi1/0/1' → 'interface GigabitEthernet1/0/1'
             'ro os 1' → 'router ospf 1'
+
+        APRESIAはCisco IOSと無関係な独自コマンド体系（"config ipif ..."等、
+        "config"がそれ自体で完結する動詞）を持つため、ここで一律に
+        "config"→"configure"へ展開すると、その独自コマンドの正規表現に
+        マッチしなくなってしまう。_apresia_process側は元々
+        "configure"/"conf"/"config"のいずれも直接受け付けるので、
+        APRESIAではこの展開自体をスキップする。
         """
         if not cmd.strip():
+            return cmd
+        if device_type == 'apresia':
             return cmd
         tokens = cmd.strip().split()
         if not tokens:
@@ -640,7 +649,7 @@ class RuleEngine:
             return cli_completion.get_help(cmd, state)
 
         # CLI略称展開（sh → show, in → interface 等）
-        cmd = self._expand_abbreviation(cmd)
+        cmd = self._expand_abbreviation(cmd, state.device_type)
 
         c = cmd.lower().strip()
 
