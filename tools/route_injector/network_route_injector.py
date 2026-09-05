@@ -3225,6 +3225,41 @@ def frame_bits(payload_size: int, proto: str = 'udp', basis: str = 'l1') -> int:
     return nbytes * 8
 
 
+def max_payload_for_mtu(proto: str = 'udp', mtu: int = 1500) -> int:
+    """フラグメントせずに送れるペイロードの上限。
+    IPヘッダ20 + L4ヘッダ を MTU から引いた値。"""
+    l4 = 8 if proto == 'udp' else 20
+    return mtu - 20 - l4
+
+
+def check_fragmentation(payload_size: int, proto: str = 'udp', mtu: int = 1500):
+    """MTUを超えていたら警告文を返す。超えていなければ None。
+
+    「パケットサイズ」欄はUDP/TCPのペイロード長なので、1500と入れると
+    IPヘッダ+L4ヘッダの分だけMTUを超えてIPフラグメントが起きる。
+    1パケットが2フレームになるため、装置のInput Unicastが送信数の
+    約2倍になり、数の突き合わせができなくなる。
+
+    黙って上限値に丸めることはしない。あえてフラグメントさせて装置の
+    再組み立てを試験したい場合もあるので、判断は利用者に委ねる。
+    """
+    limit = max_payload_for_mtu(proto, mtu)
+    if payload_size <= limit:
+        return None
+    frags = -(-(payload_size + 20 + (8 if proto == 'udp' else 20)) // mtu)
+    return (
+        f"パケットサイズ {payload_size}B は MTU {mtu}B を超えます。\n\n"
+        f"この欄は{proto.upper()}のペイロード長です。"
+        f"IPヘッダ20B + {proto.upper()}ヘッダ{8 if proto == 'udp' else 20}B が付くため、"
+        f"1パケットが約{frags}個のフレームに分割されて送信されます。\n\n"
+        f"その結果、装置側の Input Unicast は送信パケット数の約{frags}倍になり、"
+        f"送信数との突き合わせができなくなります。\n\n"
+        f"フラグメントさせたくない場合は {limit} を指定してください"
+        f"(Ethernetフレーム{mtu}B相当)。\n\n"
+        f"このまま {payload_size}B で送信しますか?"
+    )
+
+
 def calc_rate_and_count(payload_size: int, mbps: float, seconds: float,
                         proto: str = 'udp', basis: str = 'l1'):
     """目標スループット(Mbps)と送信時間(秒)から、レート(pps)と送信パケット数を求める。
@@ -3329,6 +3364,15 @@ class TrafficGenTab(ttk.Frame, LogMixin):
         ttk.Entry(send_frame, textvariable=self.rate_var, width=8).grid(
             row=2, column=3, sticky="w", **pad)
         ttk.Label(send_frame, text="(0=無制限)").grid(row=2, column=4, sticky="w")
+
+        # パケットサイズがフレーム長として何バイトになるかを常時表示する。
+        # 「1500と入れたのに装置のカウンタが2倍」を防ぐため、
+        # MTU超過はここで赤く出したうえで送信時にも確認する。
+        self.frame_info_label = ttk.Label(send_frame, text="")
+        self.frame_info_label.grid(row=7, column=0, columnspan=6, sticky="w", **pad)
+        self.size_var.trace_add("write", lambda *_: self._update_frame_info())
+        self.send_proto_var.trace_add("write", lambda *_: self._update_frame_info())
+        self._update_frame_info()
 
         ttk.Label(send_frame, text="送信パケット数:").grid(row=3, column=0, sticky="e", **pad)
         self.count_var = tk.StringVar(value="0")
@@ -3459,6 +3503,31 @@ class TrafficGenTab(ttk.Frame, LogMixin):
             desc = f"取得できませんでした: {e}"
         self.after(0, lambda: self.sysinfo_label.configure(text=desc))
 
+    def _update_frame_info(self):
+        """パケットサイズ欄の下に、フレーム長の内訳を出す。"""
+        proto = self.send_proto_var.get()
+        l4 = 8 if proto == 'udp' else 20
+        try:
+            size = int(self.size_var.get().strip())
+        except ValueError:
+            self.frame_info_label.configure(text="", foreground="")
+            return
+        if size < 1:
+            self.frame_info_label.configure(text="", foreground="")
+            return
+
+        limit = max_payload_for_mtu(proto)
+        wire = size + l4 + 20 + 14 + 4
+        text = (f"ペイロード{size}B + {proto.upper()}ヘッダ{l4}B + IPヘッダ20B "
+                f"= IPパケット{size + l4 + 20}B "
+                f"→ Ethernetフレーム{wire}B(FCS込み)")
+        if size > limit:
+            text += (f"  ※MTU1500Bを超えるためIPフラグメントが発生します"
+                     f"(分割させない上限は{limit}B)")
+            self.frame_info_label.configure(text=text, foreground="#b00020")
+        else:
+            self.frame_info_label.configure(text=text, foreground="")
+
     def _on_calc_rate(self):
         """目標スループットと送信時間から、レート(pps)と送信パケット数を埋める。"""
         try:
@@ -3488,6 +3557,11 @@ class TrafficGenTab(ttk.Frame, LogMixin):
         self.rate_var.set(str(pps))
         self.count_var.set(str(count))
         self.log(f"=== 計算: {mbps:g}Mbps × {seconds:g}秒 → {detail} ===")
+        if check_fragmentation(size, self.send_proto_var.get()):
+            limit = max_payload_for_mtu(self.send_proto_var.get())
+            self.log(f"[警告] パケットサイズ{size}BはMTU1500Bを超えるためIPフラグメントが"
+                     f"発生し、装置側のフレーム数は送信パケット数より多くなります"
+                     f"(分割させない上限は{limit}B)")
         self._warn_if_rate_exceeds_pc(pps, self.send_nproc_var.get())
 
     def _on_benchmark(self):
@@ -3590,6 +3664,9 @@ class TrafficGenTab(ttk.Frame, LogMixin):
             return
 
         proto = self.send_proto_var.get()
+        frag_msg = check_fragmentation(size, proto)
+        if frag_msg and not messagebox.askyesno("MTU超過", frag_msg):
+            return
         nproc = max(1, int(self.send_nproc_var.get()))
         if not self._warn_if_rate_exceeds_pc(rate, nproc):
             return

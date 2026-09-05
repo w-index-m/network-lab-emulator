@@ -49,6 +49,8 @@ from network_route_injector import (  # noqa: E402
     benchmark_process_scaling,
     benchmark_send_capacity,
     calc_rate_and_count,
+    check_fragmentation,
+    max_payload_for_mtu,
     frame_bits,
     describe_system,
     get_nic_link_speeds,
@@ -362,3 +364,32 @@ class TestRateCalculation:
         pps, count, _ = calc_rate_and_count(1472, 0.001, 5.0)
         assert pps == 1
         assert count == 5
+
+
+class TestFragmentationWarning:
+    """MTUを超えるペイロードを黙って送るとフレーム数が合わなくなる。"""
+
+    def test_udp_limit_is_1472(self):
+        assert max_payload_for_mtu('udp') == 1472
+
+    def test_tcp_limit_is_1460(self):
+        assert max_payload_for_mtu('tcp') == 1460
+
+    def test_no_warning_at_or_below_limit(self):
+        assert check_fragmentation(1472, 'udp') is None
+        assert check_fragmentation(1400, 'udp') is None
+        assert check_fragmentation(1460, 'tcp') is None
+
+    def test_warns_above_limit_and_suggests_the_limit(self):
+        msg = check_fragmentation(1500, 'udp')
+        assert msg is not None
+        assert '1472' in msg          # 直すべき値を必ず示す
+        assert 'フラグメント' in msg
+
+    def test_warning_reports_fragment_count(self):
+        # 3000B は IPパケット3028B なので 1500B MTU では3フレームになる
+        assert '3個' in check_fragmentation(3000, 'udp')
+
+    def test_tcp_warns_at_1470_where_udp_would_not(self):
+        assert check_fragmentation(1470, 'udp') is None
+        assert check_fragmentation(1470, 'tcp') is not None
