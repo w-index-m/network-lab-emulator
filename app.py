@@ -1847,22 +1847,82 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if snmp_con:
         state.snmp_contact = snmp_con.group(1)
         return
-    # Si-R: "snmp trap host 192.168.1.200 community public"
-    sir_snmp_trap = re.match(r'^snmp\s+trap\s+host\s+([\d.]+)'
-                              r'(?:\s+community\s+(\S+))?', c)
-    if sir_snmp_trap:
-        ip = sir_snmp_trap.group(1)
-        community = sir_snmp_trap.group(2) or 'public'
-        if not any(h['host'] == ip for h in state.snmp_hosts):
-            state.snmp_hosts.append({'host': ip, 'community': community,
-                                     'version': '2c', 'traps': 'traps'})
+    # Si-R: "snmp agent contact|sysname|location|ip|ipv6|engineid <value>"
+    # (2026-09-05 実機Tab補完で確認した正式構文。以前の
+    #  "snmp community .../snmp trap host ..." はCisco流のでたらめな構文で、
+    #  実機では <ERROR> : 2 : format error になることを確認済みのため置換)
+    sir_snmp_agent = re.match(
+        r'^snmp\s+agent\s+(contact|sysname|location|ip|ipv6|engineid)\s+(.+)$', orig, re.I)
+    if sir_snmp_agent and hasattr(state, 'sir_snmp_agent'):
+        state.sir_snmp_agent[sir_snmp_agent.group(1).lower()] = sir_snmp_agent.group(2).strip()
         return
-    # Si-R: "snmp community public ro"
-    sir_snmp_comm = re.match(r'^snmp\s+community\s+(\S+)\s+(ro|rw)', c)
-    if sir_snmp_comm:
-        name, perm = sir_snmp_comm.group(1), sir_snmp_comm.group(2)
-        if not any(c_['name'] == name for c_ in state.snmp_community):
-            state.snmp_community.append({'name': name, 'perm': perm})
+    # Si-R: "snmp service disable|enable"
+    sir_snmp_service = re.match(r'^snmp\s+service\s+(disable|enable)$', c)
+    if sir_snmp_service and hasattr(state, 'sir_snmp_service'):
+        state.sir_snmp_service = sir_snmp_service.group(1)
+        return
+    # Si-R: "snmp manager <manager_number> <ip_address> <community> <trap> [<write>]"
+    sir_snmp_manager = re.match(
+        r'^snmp\s+manager\s+(\d+)\s+([\d.]+)\s+(\S+)\s+(\S+)(?:\s+(\S+))?$', c)
+    if sir_snmp_manager and hasattr(state, 'sir_snmp_managers'):
+        number = int(sir_snmp_manager.group(1))
+        entry = {'number': number, 'ip': sir_snmp_manager.group(2),
+                 'community': sir_snmp_manager.group(3),
+                 'trap': sir_snmp_manager.group(4),
+                 'write': sir_snmp_manager.group(5)}
+        state.sir_snmp_managers = [e for e in state.sir_snmp_managers
+                                    if e['number'] != number]
+        state.sir_snmp_managers.append(entry)
+        state.sir_snmp_managers.sort(key=lambda e: e['number'])
+        return
+    # Si-R: "snmp user name <user_name>" — 以降のuser系サブコマンドが効く対象
+    # (実機と同様、直前に選択されたユーザーへの「カレント」設定として動作する)
+    sir_snmp_user_name = re.match(r'^snmp\s+user\s+name\s+(\S+)$', c)
+    if sir_snmp_user_name and hasattr(state, 'sir_snmp_users'):
+        _name = sir_snmp_user_name.group(1)
+        state.sir_snmp_users.setdefault(_name, {
+            'address': '', 'auth': 'none', 'priv': 'none',
+            'write': 'none', 'read': 'all', 'read_view': None,
+            'notify': 'all', 'notify_view': None,
+        })
+        state._sir_snmp_current_user = _name
+        return
+    # Si-R: "snmp user address/auth/priv/write/read/notify ..."
+    # （いずれも直前の"snmp user name"で選択されたカレントユーザーに効く）
+    sir_snmp_user_sub = re.match(r'^snmp\s+user\s+(address|auth|priv|write|read|notify)\s+(.+)$', c)
+    if sir_snmp_user_sub and hasattr(state, 'sir_snmp_users'):
+        _cur = state.sir_snmp_users.get(getattr(state, '_sir_snmp_current_user', None))
+        if _cur is not None:
+            field = sir_snmp_user_sub.group(1)
+            rest = sir_snmp_user_sub.group(2).strip()
+            if field == 'address':
+                _cur['address'] = rest
+            elif field == 'auth' and rest in ('md5', 'none', 'sha'):
+                _cur['auth'] = rest
+            elif field == 'priv' and rest in ('none', 'des'):
+                _cur['priv'] = rest
+            elif field == 'write' and rest in ('none', 'all'):
+                _cur['write'] = rest
+            elif field in ('read', 'notify'):
+                view_m = re.match(r'^view\s+(\d+)$', rest)
+                if view_m:
+                    _cur[field] = 'view'
+                    _cur[f'{field}_view'] = int(view_m.group(1))
+                elif rest in ('all', 'none'):
+                    _cur[field] = rest
+                    _cur[f'{field}_view'] = None
+        return
+    # Si-R: "snmp view <view_number> subtree [<subtree_number>] <include|exclude> <subtree_name>"
+    sir_snmp_view = re.match(
+        r'^snmp\s+view\s+(\d+)\s+subtree(?:\s+(\d+))?\s+(include|exclude)\s+(\S+)$', c)
+    if sir_snmp_view and hasattr(state, 'sir_snmp_views'):
+        view_number = int(sir_snmp_view.group(1))
+        subtree_number = int(sir_snmp_view.group(2)) if sir_snmp_view.group(2) else 0
+        views = state.sir_snmp_views.setdefault(view_number, [])
+        views[:] = [v for v in views if v['subtree_number'] != subtree_number]
+        views.append({'subtree_number': subtree_number,
+                      'type': sir_snmp_view.group(3), 'name': sir_snmp_view.group(4)})
+        views.sort(key=lambda v: v['subtree_number'])
         return
     # no snmp-server host
     no_snmp = re.match(r'^no\s+snmp-server\s+host\s+([\d.]+)', c)
@@ -2920,17 +2980,42 @@ def _format_show_snmp(state) -> str:
         else:
             lines.append('Trap hosts: (未設定)')
     elif state.device_type in ('sir', 'srs'):
-        lines = ['  SNMP agent : enabled']
-        for c in comms:
-            lines.append(f'  community  : {c["name"]} ({c["perm"]})')
-        if not comms:
-            lines.append('  community  : (未設定)')
-        for h in hosts:
-            lines.append(f'  trap host  : {h["host"]} community {h["community"]}')
-        if not hosts:
-            lines.append('  trap host  : (未設定)')
-        if loc:
-            lines.append(f'  location   : {loc}')
+        # 実機の "show snmp" 出力そのものは未検証。ここでは
+        # `snmp agent/manager/service/user/view`（2026-09-05 実機Tab補完で
+        # 確認した正式構文）で設定した内容を分かりやすく列挙するに留める。
+        agent = getattr(state, 'sir_snmp_agent', {})
+        service = getattr(state, 'sir_snmp_service', 'disable')
+        managers = getattr(state, 'sir_snmp_managers', [])
+        users = getattr(state, 'sir_snmp_users', {})
+        views = getattr(state, 'sir_snmp_views', {})
+        lines = [f'  SNMP service : {service}']
+        for key in ('contact', 'sysname', 'location', 'ip', 'ipv6', 'engineid'):
+            if agent.get(key):
+                lines.append(f'  agent {key:<9}: {agent[key]}')
+        if managers:
+            lines.append('  managers:')
+            for m in managers:
+                write = f' write={m["write"]}' if m.get('write') else ''
+                lines.append(f'    #{m["number"]} {m["ip"]} community={m["community"]} '
+                             f'trap={m["trap"]}{write}')
+        else:
+            lines.append('  managers     : (未設定)')
+        if users:
+            lines.append('  users:')
+            for name, u in users.items():
+                read = (f'view{u["read_view"]}' if u['read'] == 'view' else u['read'])
+                notify = (f'view{u["notify_view"]}' if u['notify'] == 'view' else u['notify'])
+                lines.append(f'    {name} address={u["address"] or "(未設定)"} '
+                             f'auth={u["auth"]} priv={u["priv"]} write={u["write"]} '
+                             f'read={read} notify={notify}')
+        else:
+            lines.append('  users        : (未設定)')
+        if views:
+            lines.append('  views:')
+            for vnum, subtrees in sorted(views.items()):
+                for st in subtrees:
+                    lines.append(f'    view {vnum} subtree {st["subtree_number"]} '
+                                 f'{st["type"]} {st["name"]}')
     else:
         lines = [f'SNMP: {"enabled" if comms or hosts else "disabled"}']
         for c in comms:

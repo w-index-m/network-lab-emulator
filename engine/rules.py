@@ -280,6 +280,21 @@ class DeviceState:
         self.snmp_contact    = ""
         self.logging_level   = "informational"   # emergencies/alerts/critical/errors/warnings/notifications/informational/debugging
 
+        # Si-R固有のSNMP設定（実機 `snmp agent/manager/service/user/view` 系。
+        # 2026-09-05 実機Tab補完で確認した正式構文に基づく）
+        if device_type in ("sir", "srs"):
+            self.sir_snmp_agent = {'contact': '', 'sysname': '', 'location': '',
+                                   'ip': '', 'ipv6': '', 'engineid': ''}
+            self.sir_snmp_service = 'disable'  # 未設定時値
+            self.sir_snmp_managers = []  # [{"number","ip","community","trap","write"}]
+            # SNMPv3ユーザー。"snmp user name <name>" で作成/選択され、以降の
+            # "snmp user address/auth/priv/write/read/notify" は実機同様、
+            # 直前にnameで選択された「カレントユーザー」に対して効く
+            self.sir_snmp_users = {}
+            self._sir_snmp_current_user = None
+            # view_number -> [{"subtree_number","type"(include/exclude),"name"}]
+            self.sir_snmp_views = {}
+
         # Si-R IPsec VPN 状態（Si-R/Si-R brin 系）
         if device_type in ("sir", "srs"):
             self.ipsec_tunnels   = {}
