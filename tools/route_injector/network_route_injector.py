@@ -3151,18 +3151,28 @@ def get_nic_link_speeds():
                 speeds[name] = (f"{mbps // 1000} Gbps" if mbps >= 1000
                                 else f"{mbps} Mbps")
         return speeds
+    # Windows。アダプタ名は日本語のことがある(「イーサネット」など)ので
+    # PowerShell側の出力をUTF-8に固定してから自前でデコードする。
+    # text=Trueに任せると日本語Windowsではcp932で出力されて壊れ、
+    # 肝心の物理NICだけ表示から消える。
+    # 仮想アダプタ(VMware/Hyper-V)より物理NICを先に並べる。試験に使うのは
+    # ほぼ必ず物理NICで、それが後ろに回ると表示の打ち切りで消えてしまう。
     try:
         out = subprocess.run(
             ['powershell', '-NoProfile', '-Command',
+             "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
              "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | "
+             "Sort-Object -Property @{Expression={-not $_.Virtual}} -Descending | "
              "ForEach-Object { \"$($_.Name)=$($_.LinkSpeed)\" }"],
-            capture_output=True, text=True, timeout=15)
-        for line in out.stdout.splitlines():
-            if '=' in line:
-                name, speed = line.split('=', 1)
-                speeds[name.strip()] = speed.strip()
+            capture_output=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
-        pass
+        return speeds
+    for line in out.stdout.decode('utf-8', errors='replace').splitlines():
+        if '=' in line:
+            name, speed = line.split('=', 1)
+            name = name.strip()
+            if name:
+                speeds[name] = speed.strip()
     return speeds
 
 
@@ -3170,7 +3180,12 @@ def describe_system():
     """CPUコア数とNICリンク速度を1行にまとめる"""
     cores = os.cpu_count() or 1
     nics = get_nic_link_speeds()
-    nic_desc = ", ".join(f"{n}:{v}" for n, v in list(nics.items())[:4]) or "不明"
+    # 表示を絞りすぎると、試験に使っている物理NICが隠れて
+    # 「NIC速度が上限かどうか」の判断を誤らせる。省略した場合は件数を出す。
+    shown = list(nics.items())[:6]
+    nic_desc = ", ".join(f"{n}:{v}" for n, v in shown) or "不明"
+    if len(nics) > len(shown):
+        nic_desc += f" ほか{len(nics) - len(shown)}件"
     return f"CPU {cores}コア / NIC {nic_desc}"
 
 
