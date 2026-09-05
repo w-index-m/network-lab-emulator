@@ -1058,6 +1058,12 @@ class OspfEngine:
         n = self._node(device_id)
         n['interface_cost'] = cost
 
+    def set_router_id(self, device_id: str, router_id: str):
+        """router ospf 配下の `router-id X.X.X.X` に対応。
+        自動生成IDを管理者指定のIDで上書きする。"""
+        n = self._node(device_id)
+        n['router_id'] = router_id
+
     def add_passive_interface(self, device_id: str, iface: str):
         self.passive_ifaces.setdefault(device_id, set()).add(iface.lower())
 
@@ -3881,9 +3887,23 @@ class RibEngine:
                 # 単一文字コードと同じ合計9桁の幅に揃える。
                 disp_code = r.get('ospf_code') or code
                 prefix = f'{disp_code}{star}'.ljust(9)
+                # RIP/BGPはnext_hopにデバイスIDを、OSPFはrouter-idを内部的に
+                # 格納しているため、そのまま表示すると実機と違い
+                # "via r2," のようにIPでない文字列が出てしまう。表示直前に
+                # 直結セグメント上の実IPへ解決する（内部の経路計算には触れない）。
+                disp_next_hop = r['next_hop']
+                disp_iface = r['iface']
+                if r['source'] in ('rip', 'ospf', 'bgp'):
+                    resolved = icmp_engine.resolve_learned_next_hop(
+                        device_id, r['next_hop'])
+                    if resolved != r['next_hop']:
+                        disp_next_hop = resolved
+                        if not disp_iface:
+                            disp_iface = (self._iface_for_nexthop(device_id, resolved)
+                                          or disp_iface)
                 lines.append(
                     f"{prefix}{net} [{r['ad']}/{r['metric']}] "
-                    f"via {r['next_hop']}, {r['iface']}"
+                    f"via {disp_next_hop}, {disp_iface}"
                 )
         return '\n'.join(lines)
 
@@ -4270,6 +4290,35 @@ class IcmpEngine:
         neighbors = vnet.get_neighbors(device_id)
         dev = next(iter(neighbors), None) if neighbors else None
         return dev, next_hop_ip
+
+    def resolve_learned_next_hop(self, device_id: str, raw_next_hop: str) -> str:
+        """RIP/BGPはnext_hopに送信元のデバイスIDを、OSPFはrouter-idを格納する
+        （実際のパケット転送はこれを直結セグメント上の実IPへ解決して行う）。
+        show ip route の表示用に、同じ解決を行って実IPを返す。
+        解決できない場合はraw_next_hopをそのまま返す。"""
+        if not raw_next_hop or raw_next_hop in ('0.0.0.0', ''):
+            return raw_next_hop
+        my_info = self.device_ips.get(device_id, {})
+
+        def _shared_ip(peer):
+            peer_info = self.device_ips.get(peer, {})
+            for p_ip, _pp in peer_info.get('ips', {}).items():
+                for m_ip, m_pref in my_info.get('ips', {}).items():
+                    if self._ip_in_network(p_ip, m_ip, m_pref):
+                        return p_ip
+            return raw_next_hop
+
+        for peer in vnet.get_neighbors(device_id):
+            onode = ospf_engine.nodes.get(peer)
+            if peer == raw_next_hop or (onode and onode.get('router_id') == raw_next_hop):
+                return _shared_ip(peer)
+        for peer in self._l2_segment_peers(device_id):
+            onode = ospf_engine.nodes.get(peer)
+            if peer == raw_next_hop or (onode and onode.get('router_id') == raw_next_hop):
+                return _shared_ip(peer)
+            if raw_next_hop in self.device_ips.get(peer, {}).get('ips', {}):
+                return raw_next_hop
+        return raw_next_hop
 
     def _l2_segment_peers(self, device_id: str) -> set:
         """L2スイッチ(=OSPF非対応の中継装置)を越えて到達できる、

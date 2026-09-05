@@ -2095,6 +2095,14 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return ''
 
+    # "router-id X.X.X.X" (OSPF) — 管理者指定のRouter IDで自動生成IDを上書き
+    ospf_rid = re.match(r'^router-id\s+([\d.]+)', c)
+    if ospf_rid and getattr(state, '_routing_mode', '') == 'ospf':
+        ospf_engine.set_router_id(device_id, ospf_rid.group(1))
+        if hasattr(state, 'ospf') and isinstance(state.ospf, dict):
+            state.ospf['router_id'] = ospf_rid.group(1)
+        return
+
     # "network 10.0.0.0 0.0.0.255 area 0" (Cisco IOS形式)
     ospf_net = re.match(r'^network\s+([\d.]+)\s+([\d.]+)\s+area\s+(\S+)', c)
     if ospf_net and getattr(state, '_routing_mode', '') == 'ospf':
