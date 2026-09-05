@@ -2389,19 +2389,23 @@ class RipMultiRouterTab(ttk.Frame, LogMixin):
         self.stop_btn.configure(state="normal")
         threading.Thread(
             target=self._send_worker,
-            args=(list(self.routers), mode, iface, dest, version, continuous, interval),
+            args=(mode, iface, dest, version, continuous, interval),
             daemon=True,
         ).start()
 
     def _on_stop(self):
         self.stop_event.set()
 
-    def _send_worker(self, routers, mode, iface, dest, version, continuous, interval):
-        self.log(f"=== {len(routers)}台の疑似ルータから送信開始 "
+    def _send_worker(self, mode, iface, dest, version, continuous, interval):
+        self.log(f"=== {len(self.routers)}台の疑似ルータから送信開始 "
                   f"(mode={mode}, dest={dest}, RIPv{version}) ===")
         try:
             while True:
-                for r in routers:
+                # 継続送信中でも「1件追加」等でリストを更新できるよう、
+                # 周期ごとに最新のself.routersを読み直す（開始時点の
+                # スナップショット固定だと、送信中に追加した経路が
+                # 停止→再開しないと配信されないという分かりにくい挙動になっていた）
+                for r in list(self.routers):
                     if self.stop_event.is_set():
                         break
                     try:
