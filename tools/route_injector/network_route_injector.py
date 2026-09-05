@@ -2188,7 +2188,10 @@ class RipMultiRouterTab(ttk.Frame, LogMixin):
         self.nexthop_var = tk.StringVar(value="0.0.0.0")
         ttk.Entry(gen_frame, textvariable=self.nexthop_var, width=16).grid(row=2, column=3, sticky="w", **pad)
 
-        ttk.Button(gen_frame, text="生成", command=self._on_generate).grid(row=2, column=5, sticky="e", **pad)
+        ttk.Button(gen_frame, text="1件追加", command=self._on_add_one).grid(
+            row=2, column=4, sticky="e", **pad)
+        ttk.Button(gen_frame, text="生成(全部作り直し)", command=self._on_generate).grid(
+            row=2, column=5, sticky="e", **pad)
 
         list_frame = ttk.LabelFrame(self, text="生成された疑似ルータ一覧")
         list_frame.pack(fill="both", expand=True, padx=8, pady=6)
@@ -2273,29 +2276,56 @@ class RipMultiRouterTab(ttk.Frame, LogMixin):
             raise ValueError(f"「{label}」のIPアドレス形式が不正です: 「{value}」{reason}\n"
                               f"例: 192.168.1.100 の形式で入力してください。")
 
+    def _parse_common_fields(self):
+        """疑似ルータ一括生成欄の共通パラメータを検証して返す。
+        戻り値: (base_src_int, base_net_int, prefix, metric, nexthop)"""
+        base_src_int = self._parse_ip_field("開始送信元IP", self.base_src_var.get())
+        base_net_int = self._parse_ip_field("開始ネットワーク", self.base_net_var.get())
+        try:
+            prefix = int(self.prefix_var.get().strip())
+        except ValueError:
+            raise ValueError(f"「Prefix」は数字で入力してください（例: 24）: "
+                             f"「{self.prefix_var.get()}」")
+        if not (0 <= prefix <= 32):
+            raise ValueError("「Prefix」は0〜32で指定してください")
+        try:
+            metric = int(self.metric_var.get().strip())
+        except ValueError:
+            raise ValueError(f"「Metric(共通)」は数字で入力してください（例: 1）: "
+                             f"「{self.metric_var.get()}」")
+        if not (1 <= metric <= 16):
+            raise ValueError("Metricは1〜16で指定してください")
+        nexthop_raw = self.nexthop_var.get().strip()
+        nexthop = "0.0.0.0" if not nexthop_raw else int_to_ip(
+            self._parse_ip_field("NextHop(共通)", nexthop_raw))
+        return base_src_int, base_net_int, prefix, metric, nexthop
+
+    def _append_router_row(self, src_ip, network, prefix, netmask, metric, nexthop):
+        idx = len(self.routers)
+        self.routers.append({
+            "src_ip": src_ip, "network": network, "prefix": prefix,
+            "netmask": netmask, "metric": metric, "nexthop": nexthop, "tag": 0,
+        })
+        self.tree.insert("", "end", values=(idx + 1, src_ip, f"{network}/{prefix}", metric, nexthop))
+
     # ---- 生成 / 一覧操作 ----
+    def _on_add_one(self):
+        """現在の入力値のまま(送信元IP・ネットワークとも増分せず)1件だけ
+        既存リストに追加する。1台のPCから複数の経路を少しずつ足していく
+        使い方（"生成"はリストを全部作り直してしまうため、それとは別に用意）。"""
+        try:
+            base_src_int, base_net_int, prefix, metric, nexthop = self._parse_common_fields()
+            netmask = prefix_to_netmask(prefix)
+            self._append_router_row(int_to_ip(base_src_int), int_to_ip(base_net_int),
+                                    prefix, netmask, metric, nexthop)
+            self.log(f"[OK] 経路を1件追加しました: {int_to_ip(base_net_int)}/{prefix}")
+        except (ValueError, OSError) as e:
+            messagebox.showerror("追加エラー", str(e))
+
     def _on_generate(self):
         try:
             count = self.count_var.get()
-            base_src_int = self._parse_ip_field("開始送信元IP", self.base_src_var.get())
-            base_net_int = self._parse_ip_field("開始ネットワーク", self.base_net_var.get())
-            try:
-                prefix = int(self.prefix_var.get().strip())
-            except ValueError:
-                raise ValueError(f"「Prefix」は数字で入力してください（例: 24）: "
-                                 f"「{self.prefix_var.get()}」")
-            if not (0 <= prefix <= 32):
-                raise ValueError("「Prefix」は0〜32で指定してください")
-            try:
-                metric = int(self.metric_var.get().strip())
-            except ValueError:
-                raise ValueError(f"「Metric(共通)」は数字で入力してください（例: 1）: "
-                                 f"「{self.metric_var.get()}」")
-            nexthop_raw = self.nexthop_var.get().strip()
-            nexthop = "0.0.0.0" if not nexthop_raw else int_to_ip(
-                self._parse_ip_field("NextHop(共通)", nexthop_raw))
-            if not (1 <= metric <= 16):
-                raise ValueError("Metricは1〜16で指定してください")
+            base_src_int, base_net_int, prefix, metric, nexthop = self._parse_common_fields()
             netmask = prefix_to_netmask(prefix)
 
             self.tree.delete(*self.tree.get_children())
