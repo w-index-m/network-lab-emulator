@@ -82,3 +82,22 @@ B: 実機とのやり取りで見つかった勘違い・バグの経緯、の�
 
 - Si-Rの`show running-config`は「入力したコマンドをそのまま再現する」実装（`app.py _build_running_config`）。省略した引数のデフォルト補完は内部状態では正しく行われるが、表示には反映されない。
 - IPsec/IKEは他プロトコル（RIP/OSPF/BGP）と違い、実パケットを送受信する「本物版」エージェントが無い。実機Si-RとこのPCの擬似Si-Rを本当にIPsecで繋ぐには、strongSwan等の別ソフトウェアが必要。
+
+---
+
+## 関連ドキュメント（このまとめの元になった詳細メモ）
+
+このまとめは要点だけを抜き出したもの。実機とのやり取りの生ログや
+コマンド例、機能の網羅的な一覧は以下を参照。
+
+- **`docs/sir-g110b-real-device-comparison.md`** — 実機Si-R G110Bとの
+  比較記録。09-04時点の`show running-config`突き合わせに加え、
+  今回（09-05/09-06）の追記として、PC-Aからの実機RIP交換試験と
+  `show ether statistics`でのトラフィック実測試験、それを踏まえて
+  `ether`↔VLAN↔`lan`の対応関係を実装した経緯を記載
+- **`docs/routing-regression-checklist.md`** — RIP/OSPF/BGP/EIGRP の
+  2台構成試験項目と、見つかった問題・確認済み事項の一覧
+  （IPsec/IKEタイマー、手動鍵設定の節もここに追記済み）
+- **`docs/feature-inventory.md`** — 実装済み全機能の網羅的インベントリ。
+  EIGRP・802.1Qサブインタフェース・IPsec/IKE（DPD・手動鍵含む）を
+  今回追加
