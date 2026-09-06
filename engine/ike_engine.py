@@ -8,6 +8,7 @@ IKE/IPsec ネゴシエーションエンジン
   - Cisco IOS ↔ Cisco IOS
 両ルーターの設定を突き合わせて一致確認・状態遷移を行う。
 """
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
@@ -19,6 +20,21 @@ DEFAULT_IKE_LT     = 86400
 DEFAULT_SA_LT      = 28800
 DEFAULT_MODE       = "main"
 DEFAULT_PROTOCOL   = "esp"
+
+# Si-R: remote ap ike retry / ike dpd 系コマンドの未設定時デフォルト値
+# （コマンドリファレンス 10.2.62, 10.2.82～10.2.84）
+DEFAULT_IKE_RETRY_TIME  = 10     # 初回再送時間(秒)
+DEFAULT_IKE_RETRY_COUNT = 3      # 再送回数
+DEFAULT_DPD_USE         = False  # DPD利用（未設定時はoff）
+DEFAULT_DPD_IDLE        = 10     # 無通信監視時間(秒)
+DEFAULT_DPD_RETRY_TIME  = 1      # DPD再送時間(秒)
+DEFAULT_DPD_RETRY_COUNT = 3      # DPD再送回数
+
+# テスト高速化(NETLAB_FAST_TIMERS=1)時はDPD検知にかかる時間を縮める。
+# 設定値の表示（show/running-config）には影響しない — 内部の
+# タイマー判定だけを速める。
+_FAST = os.environ.get('NETLAB_FAST_TIMERS') == '1'
+_DPD_TIME_DIVISOR = 10 if _FAST else 1
 
 # Cisco IOS 暗号名 → 正規化マッピング
 _ENC_NORM = {
@@ -132,6 +148,83 @@ def _get_local_ip(state) -> str:
         if ip and ip != '127.0.0.1':
             return ip
     return ''
+
+# ══════════════════════════════════════════════════════════
+# Si-R: DPD (Dead Peer Detection) / ike retry
+# ══════════════════════════════════════════════════════════
+#
+# 実機のDPDは「無通信監視時間(idle)が過ぎたらDPDパケットを送り始め、
+# 再送時間×再送回数の間に応答が無ければ相手死亡とみなす」という
+# ポーリング型の生存確認。ここでは他プロトコルのタイマー実装
+# （OSPFのDead Timer等）と同じく、常駐タスクを持たず show 系コマンド
+# から呼ばれた時点で経過時間をチェックする方式にしている。
+#
+# ike retry（ネゴシエーション自体の再送）はこのモジュールの
+# negotiate_ipsec() が同期的に一発で成否を決めるため、実際に
+# 初回再送時間×再送回数だけ待って初めて失敗を確定させる、という
+# 実機の時間経過はエミュレートしていない。ここでは設定値の保持と
+# show/running-config への反映まで（後述の TODO）。
+
+
+def sir_dpd_detect_seconds(t: dict) -> float:
+    """DPD検知が完了するまでの合計秒数（無通信監視時間 + 再送時間×再送回数）。"""
+    idle  = _get_val(t, 'dpd_idle', DEFAULT_DPD_IDLE)
+    rtime = _get_val(t, 'dpd_retry_time', DEFAULT_DPD_RETRY_TIME)
+    rcnt  = _get_val(t, 'dpd_retry_count', DEFAULT_DPD_RETRY_COUNT)
+    return (idle + rtime * rcnt) / _DPD_TIME_DIVISOR
+
+
+def sir_link_down(state, local_ip: str) -> None:
+    """Si-R: local_ip を保持するインタフェースがdownしたときに呼ぶ。
+
+    DPDが有効(ike dpd use on)なトンネルだけをdetecting状態に遷移させる。
+    DPDが無効なトンネルには何もしない — 実機同様、能動的な生存確認を
+    行わないため、次にネゴシエーションし直すかIKE SAの有効期限が切れる
+    まで見かけ上はestablishedのまま残る（これは仕様であってバグではない）。
+    """
+    for t in getattr(state, 'ipsec_tunnels', {}).values():
+        if t.get('local_ip') != local_ip:
+            continue
+        if t.get('status') != 'established':
+            continue
+        if t.get('dpd_use'):
+            t['dpd_state'] = 'detecting'
+            t['dpd_since'] = time.time()
+
+
+def sir_link_up(state, local_ip: str) -> None:
+    """Si-R: local_ip を保持するインタフェースが復旧したときに呼ぶ。
+
+    DPDの検知窓（無通信監視時間+再送時間×再送回数）が満了する前に
+    リンクが戻れば、トンネルは切断されずestablishedのまま保たれる。
+    """
+    for t in getattr(state, 'ipsec_tunnels', {}).values():
+        if t.get('local_ip') == local_ip and t.get('dpd_state') == 'detecting':
+            t.pop('dpd_state', None)
+            t.pop('dpd_since', None)
+
+
+def sir_dpd_status(t: dict) -> str:
+    """DPD検知中のトンネルについて検知窓を過ぎていればdownへ進め、
+    現在のstatusを返す。show系コマンドから呼ぶポーリング方式。
+    """
+    if t.get('dpd_state') != 'detecting':
+        return t.get('status', 'wait')
+    elapsed = time.time() - t.get('dpd_since', time.time())
+    if elapsed >= sir_dpd_detect_seconds(t):
+        t['status'] = 'wait'
+        t['phase1'] = 'DYING'
+        t['phase2'] = 'DYING'
+        t['dpd_state'] = 'down'
+    return t.get('status', 'wait')
+
+
+def advance_all_sir_dpd(state) -> None:
+    """このデバイスの全トンネルのDPDタイマーを進める。
+    show ipsec 系コマンドの入口で必ず呼び、表示直前の状態を最新化する。
+    """
+    for t in getattr(state, 'ipsec_tunnels', {}).values():
+        sir_dpd_status(t)
 
 
 # ══════════════════════════════════════════════════════════

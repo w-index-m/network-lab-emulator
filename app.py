@@ -35,7 +35,7 @@ from engine.protocols import (
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
 from engine.syslog_sender import syslog_dispatcher, snmp_dispatcher, ntp_client
-from engine.ike_engine import negotiate_ipsec
+from engine.ike_engine import negotiate_ipsec, sir_link_down, sir_link_up
 from engine.config_importer import import_running_config, validate_config_text
 
 # ══════════════════════════════════════════
@@ -855,6 +855,13 @@ def _sir_trap_enabled(state, kind: str) -> bool:
 async def _flap_interface_down(device_id: str, state, iface_for_flap: str):
     """インタフェースダウン時の共通処理（Cisco系のshutdown / Si-Rのether use off）"""
     vnet.interface_down(device_id, iface_for_flap)
+    # Si-R: このIFのIPを使っているIPsecトンネルのDPDを起動する。
+    # DPDが有効(ike dpd use on)なトンネルだけがdetecting状態に遷移し、
+    # 無通信監視時間+再送時間×再送回数の経過後にdownと判定される。
+    if state.device_type in ('sir', 'srs'):
+        _flap_local_ip = state.interfaces.get(iface_for_flap, {}).get('ip', '')
+        if _flap_local_ip:
+            sir_link_down(state, _flap_local_ip)
     # 実syslog + 実SNMP trap(linkDown)を送信。メッセージ形式はベンダで異なる
     if state.device_type in ('sir', 'srs'):
         _link_msg = sir_msg.link_down(state.hostname, iface_for_flap)
@@ -905,6 +912,12 @@ async def _flap_interface_down(device_id: str, state, iface_for_flap: str):
 async def _flap_interface_up(device_id: str, state, iface_for_flap: str):
     """インタフェース復旧時の共通処理（Cisco系のno shutdown / Si-Rのether use on）"""
     vnet.interface_up(device_id, iface_for_flap)
+    # Si-R: DPD検知窓の満了前にリンクが戻れば、トンネルは切断されず
+    # establishedのまま保たれる（detecting状態を解除する）
+    if state.device_type in ('sir', 'srs'):
+        _flap_local_ip_up = state.interfaces.get(iface_for_flap, {}).get('ip', '')
+        if _flap_local_ip_up:
+            sir_link_up(state, _flap_local_ip_up)
     # 実syslog + 実SNMP trap(linkUp)を送信
     if state.device_type in ('sir', 'srs'):
         _link_msg_up = sir_msg.link_up(state.hostname, iface_for_flap)
@@ -3580,6 +3593,45 @@ def _build_running_config(device_id: str, state) -> str:
                 lines.append(f' standby {gid} preempt')
             for track_if, dec in sorted(g.track.items()):
                 lines.append(f' standby {gid} track {track_if} decrement {dec}')
+        # crypto isakmp/ipsec設定
+        # 以前はこの生成器(app.py)にcrypto関連の出力が一切無く、
+        # crypto isakmp keepalive等を設定してもrunning-configに反映されない
+        # 状態だった（rules.py側には出力コードがあったが、show running-config
+        # はここで完結するため実際には呼ばれず死んでいた）。
+        crypto = getattr(state, 'ipsec_crypto', {})
+        if crypto:
+            lines.append('!')
+            for num, pol in sorted(crypto.get('isakmp_policies', {}).items()):
+                lines.append(f'crypto isakmp policy {num}')
+                lines.append(f' authentication {pol.get("authentication","pre-share")}')
+                lines.append(f' encryption {pol.get("encryption","aes 256")}')
+                lines.append(f' hash {pol.get("hash","sha256")}')
+                lines.append(f' group {pol.get("group",14)}')
+                lines.append(f' lifetime {pol.get("lifetime",86400)}')
+            for peer in crypto.get('isakmp_keys', {}):
+                lines.append(f'crypto isakmp key **** address {peer}')
+            dpd = crypto.get('dpd', {})
+            if dpd:
+                lines.append(f'crypto isakmp keepalive {dpd.get("interval",10)} '
+                             f'{dpd.get("retry",2)}')
+            ike_if = crypto.get('isakmp_enabled', '')
+            if ike_if:
+                lines.append(f'crypto isakmp enable {ike_if}')
+            for ts_name, ts in crypto.get('transform_sets', {}).items():
+                lines.append(f'crypto ipsec transform-set {ts_name} '
+                             + ' '.join(ts.get('transforms', [])))
+            for mapname, seqs in crypto.get('crypto_maps', {}).items():
+                for seq, entry in sorted(seqs.items()):
+                    if entry.get('acl'):
+                        lines.append(f'crypto map {mapname} {seq} ipsec-isakmp')
+                        lines.append(f' match address {entry["acl"]}')
+                        if entry.get('peer'):
+                            lines.append(f' set peer {entry["peer"]}')
+                        if entry.get('transform_set'):
+                            lines.append(f' set transform-set {entry["transform_set"]}')
+            cm_if = crypto.get('crypto_map_interface', {})
+            if cm_if:
+                lines.append(f'crypto map {cm_if["name"]} interface {cm_if["interface"]}')
         # line con / line vty
         lines.append('!')
         lines.append('line con 0')
@@ -4580,28 +4632,50 @@ def _register_icmp(device_id: str):
         cmap_if       = ipsec_crypto.get('crypto_map_interface', {})
         applied_name  = cmap_if.get('name', '')
         applied_if    = cmap_if.get('interface', '')
-        # WAN側インターフェースのIPを取得
+        # WAN側インターフェースのIPを取得。
+        # 完全一致を先に試す — 部分一致だけだと "GigabitEthernet0/0" が
+        # "GigabitEthernet0/0/0" のような別インタフェース名の部分文字列に
+        # なるケースで誤って一致してしまい（0/0 は 0/0/0 の部分文字列）、
+        # crypto mapを適用していないインタフェースのIPを掴んでしまう。
+        # 完全一致が無い場合のみ、緩い部分一致にフォールバックする。
         local_ip = ''
-        for ifname, info in state.interfaces.items():
-            if applied_if and applied_if.lower() in ifname.lower():
-                local_ip = info.get('ip', '')
-                break
-        if not local_ip and applied_if == '':
-            # interface に直接 crypto map が書かれているパターン
+        if applied_if:
             for ifname, info in state.interfaces.items():
-                if info.get('crypto_map') == applied_name:
+                if ifname.lower() == applied_if.lower():
+                    local_ip = info.get('ip', '')
+                    break
+            if not local_ip:
+                for ifname, info in state.interfaces.items():
+                    if applied_if.lower() in ifname.lower():
+                        local_ip = info.get('ip', '')
+                        break
+        if not applied_name:
+            # 標準的なCisco IOS構文: "crypto map <name> interface <if>" を
+            # 別途打たず、interface配下で "crypto map <name>" とだけ
+            # 指定するパターン（実機で最も一般的な形）。
+            # これが無いと、この構文で組んだ設定ではicmp_engineに一切
+            # 登録されず、show crypto ipsec sa / DPD検知が常に空のままになる。
+            for ifname, info in state.interfaces.items():
+                if info.get('crypto_map'):
+                    applied_name = info['crypto_map']
+                    applied_if = ifname
                     local_ip = info.get('ip', '')
                     break
         if local_ip and applied_name and applied_name in crypto_maps:
-            # DPDタイマー設定をicmp_engineに反映
+            # DPDタイマー設定（crypto isakmp keepalive <interval> <retry>）を
+            # このトンネルだけに反映する。以前はicmp_engineの共有属性を
+            # 直接書き換えていたため、keepalive設定が違う複数装置が同じ
+            # グローバル値を取り合うクロストークがあった。
             dpd_cfg = ipsec_crypto.get('dpd', {})
-            if dpd_cfg.get('interval'):
-                icmp_engine.DPD_DETECT_SEC = dpd_cfg['interval'] * dpd_cfg.get('retry', 2)
-                icmp_engine.IKE_NEGO_SEC   = max(2, dpd_cfg['interval'] // 5)
+            detect_sec = (dpd_cfg['interval'] * dpd_cfg.get('retry', 2)
+                         if dpd_cfg.get('interval') else None)
+            nego_sec = (max(2, dpd_cfg['interval'] // 5)
+                       if dpd_cfg.get('interval') else None)
             for seq, seq_data in crypto_maps[applied_name].items():
                 peer = seq_data.get('peer', '') if isinstance(seq_data, dict) else ''
                 if peer:
-                    icmp_engine.register_ipsec(device_id, local_ip, peer)
+                    icmp_engine.register_ipsec(device_id, local_ip, peer,
+                                               detect_sec=detect_sec, nego_sec=nego_sec)
 
 @app.post("/api/save")
 async def api_save():

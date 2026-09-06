@@ -96,8 +96,44 @@ Si-R には Cisco の `shutdown` が無く、実機のコマンドは
   （送信側・受信側の両方で判定。片側だけタグ付きの構成は物理側の設定
   依存のため判定しない）
 
+### IPsec/IKE タイマー（Si-R / Cisco ルータ）
+回帰試験は `tests/test_ipsec_dpd_timers.py`。
+
+Si-R（コマンドリファレンス 10.2.62, 10.2.82〜10.2.84, 10.2.101で仕様確認）:
+- `remote ap ike retry <time> <count>`（ネゴシエーション再送、既定10s/3回）
+- `remote ap ike dpd use <on|off>`（DPD利用可否、既定off）
+- `remote ap ike dpd idle <time>`（無通信監視時間、既定10s、5〜600s）
+- `remote ap ike dpd retry <time> <count>`（DPD再送、既定1s/3回、1〜60s・1〜10回）
+  再送時間×(再送回数+1) < 無通信監視時間 のマニュアル注記どおり相互検証する
+- `remote ap sessionwatch interval <normal> <error> <timeout> [<retry>]`
+- `ether use off`（リンクダウン）でDPDが有効なトンネルだけがdetecting状態に遷移し、
+  無通信監視時間+再送時間×再送回数の経過後にdownと判定される。DPD無効なら
+  実機同様に能動検知しない（次のネゴシエーションかSA有効期限切れまで見かけ上
+  establishedのまま）
+- 検知窓が満了する前にリンクが復旧すればトンネルは切断されない
+
+Cisco:
+- `crypto isakmp keepalive <interval> <retry>`（実IOSの範囲10-3600s/2-60sで検証）を
+  実際のDPD検知窓として使う
+- 検知窓をicmp_engineの共有属性からトンネルごとの値に変更
+  （以前はkeepalive設定が異なる複数装置が同じグローバル値を取り合うクロストークがあった）
+- `crypto map <name> interface <if>` と、実機で最も一般的な
+  「interface配下で `crypto map <name>` とだけ書く」構文の両方でDPD登録が働くことを確認
+  （後者は以前は一切登録されずshow crypto ipsec sa/DPDが常に空になっていた）
+- crypto map名の大文字小文字がデータ構造間で食い違い、`crypto_map_interface`の
+  適用先マップが見つからなくなるバグを修正
+- WAN側インタフェースのIP特定が部分一致だったため、"GigabitEthernet0/0"が
+  "GigabitEthernet0/0/0"の部分文字列として誤って一致するバグを修正（完全一致を優先）
+- `show running-config`（app.pyの実際のCisco生成器）に crypto isakmp policy/key/
+  keepalive/transform-set/crypto map の出力が丸ごと欠けていたため追加
+  （`engine/rules.py`側には同等の出力コードが以前からあったが、実際のAPI経路では
+  呼ばれない生成器で、設定しても running-config に一切反映されなかった）
+
 ## 未着手
 
 - Si-R を含む組み合わせ（Si-R↔Catalyst, Si-R↔Cisco）でのRIP/OSPF/BGP試験は未実施。
 - Si-R の `show snmp` 出力形式は実機で未確認（現状はベストエフォート）。
+- ike retry（ネゴシエーション自体の再送）は設定値の保持とrunning-config反映まで。
+  negotiate_ipsec()は同期的に一発で成否を決めるため、実際に初回再送時間×再送回数
+  だけ待って失敗を確定させる、という時間経過そのものはエミュレートしていない。
 - ruff の F841（未使用変数）34件はCIのブロック対象から除外中。

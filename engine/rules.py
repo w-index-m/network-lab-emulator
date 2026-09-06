@@ -7,6 +7,11 @@ import re
 import random
 import time
 from datetime import datetime, timedelta
+from engine.ike_engine import (
+    DEFAULT_DPD_IDLE, DEFAULT_DPD_RETRY_COUNT, DEFAULT_DPD_RETRY_TIME,
+    DEFAULT_IKE_RETRY_COUNT, DEFAULT_IKE_RETRY_TIME,
+    advance_all_sir_dpd,
+)
 
 def _prefix_to_mask(prefix: int) -> str:
     bits = (0xffffffff >> (32 - prefix)) << (32 - prefix)
@@ -372,6 +377,38 @@ class DeviceState:
 # ══════════════════════════════════════════
 # コマンドエンジン本体
 # ══════════════════════════════════════════
+
+
+def _parse_sir_time(raw: str, lo: int, hi: int, label: str):
+    """Si-Rの時間指定 (例 "10s","1m","8h","1d") を秒に変換する。
+
+    マニュアルのIKE/DPD/sessionwatch系コマンドは、単位(s/m/h/d)付きの
+    数値で時間を指定する形式に統一されている。書式不正・範囲外は
+    (None, エラーメッセージ) を返す。
+    """
+    m = re.match(r'^(\d+)(s|m|h|d)$', raw.strip())
+    if not m:
+        return None, (f"<ERROR> : 3 : format error\n"
+                      f"  ({label}は数値+単位(s/m/h/d)で指定してください。"
+                      f"例: 10s)")
+    n, unit = int(m.group(1)), m.group(2)
+    mult = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[unit]
+    sec = n * mult
+    if not (lo <= sec <= hi):
+        return None, (f"<ERROR> : 3 : format error\n"
+                      f"  ({label}は{lo}秒〜{hi}秒の範囲で指定してください)")
+    return sec, None
+
+
+def _format_sir_time(sec: int) -> str:
+    """秒数を、割り切れる最大の単位(d/h/m/s)で表示用に整形する。
+    running-configはユーザが入力しうる最小の表現に丸めて出す
+    （例: 28800 → "8h"）。"""
+    for unit, mult in (('d', 86400), ('h', 3600), ('m', 60)):
+        if sec % mult == 0 and sec // mult > 0:
+            return f"{sec // mult}{unit}"
+    return f"{sec}s"
+
 
 def _expand_port_list(raw: str):
     """Si-Rのポート指定 "1,3-5" を [1,3,4,5] に展開する。
@@ -3205,6 +3242,7 @@ Configuration Revision            : 5"""
         tunnels = getattr(state, 'ipsec_tunnels', {})
         if not tunnels:
             return '  No IPsec SA established.'
+        advance_all_sir_dpd(state)
         lines = [
             '  Remote       Local        Protocol  SPI(In)    SPI(Out)   State',
             '  -----------  -----------  --------  ---------  ---------  -----------',
@@ -3215,6 +3253,11 @@ Configuration Revision            : 5"""
             proto  = t.get('protocol', 'esp').upper()
             phase2 = t.get('phase2', 'LARVAL')
             status = t.get('status', 'wait')
+            if t.get('dpd_state') == 'detecting':
+                spi_in = spi_out = '-'
+                state_str = 'DPD-DETECT'
+                lines.append(f'  {remote:<13}{local:<13}{proto:<10}{spi_in:<11}{spi_out:<11}{state_str}')
+                continue
             if status == 'established' and phase2 == 'MATURE':
                 spi_in  = t.get('spi_in',  f'0x{abs(hash(remote+str(tid)))%0xffffffff:08x}')
                 spi_out = t.get('spi_out', f'0x{abs(hash(local +str(tid)))%0xffffffff:08x}')
@@ -3232,8 +3275,9 @@ Configuration Revision            : 5"""
         tunnels = getattr(state, 'ipsec_tunnels', {})
         if not tunnels:
             return '  No IPsec tunnel configured.'
-        lines = ['  Tunnel  Status       Local-IP        Remote-IP       Encrypt    Hash   DH   Mode']
-        lines.append('  ------  -----------  --------------  --------------  ---------  -----  ---  ----------')
+        advance_all_sir_dpd(state)
+        lines = ['  Tunnel  Status         Local-IP        Remote-IP       Encrypt    Hash   DH   Mode']
+        lines.append('  ------  -------------  --------------  --------------  ---------  -----  ---  ----------')
         for tid, t in tunnels.items():
             remote = t.get('remote_ip', '-')
             local  = t.get('local_ip',  '-')
@@ -3241,8 +3285,13 @@ Configuration Revision            : 5"""
             hsh    = t.get('hash', 'sha256')
             dh     = str(t.get('dh_group', 14))
             mode   = t.get('ike_mode', 'main')
-            status = 'Established' if t.get('status') == 'established' else 'Waiting'
-            lines.append(f'  {tid:<8}{status:<13}{local:<16}{remote:<16}{enc:<11}{hsh:<7}{dh:<5}{mode}')
+            if t.get('dpd_state') == 'detecting':
+                status = 'DPD-Detecting'
+            elif t.get('status') == 'established':
+                status = 'Established'
+            else:
+                status = 'Waiting'
+            lines.append(f'  {tid:<8}{status:<15}{local:<16}{remote:<16}{enc:<11}{hsh:<7}{dh:<5}{mode}')
         return '\n'.join(lines)
 
     def _sir_show_ike_sa(self, state: DeviceState) -> str:
@@ -3414,8 +3463,10 @@ Configuration Revision            : 5"""
         if not tunnels:
             return '  No IKE policy configured.'
         lines = [
-            '  No.  Peer             Mode        DH   Encrypt    Hash    Auth         Lifetime',
-            '  ---  ---------------  ----------  ---  ---------  ------  -----------  --------',
+            '  No.  Peer             Mode        DH   Encrypt    Hash    Auth         '
+            'Lifetime  Retry       DPD',
+            '  ---  ---------------  ----------  ---  ---------  ------  -----------  '
+            '--------  ----------  --------------------',
         ]
         for tid, t in sorted(tunnels.items()):
             remote   = t.get('remote_ip', '-')
@@ -3424,8 +3475,19 @@ Configuration Revision            : 5"""
             enc      = t.get('encryption', 'aes256')
             hsh      = t.get('hash', 'sha256')
             lifetime = str(t.get('ike_lifetime', 86400))
+            retry_time  = t.get('ike_retry_time', DEFAULT_IKE_RETRY_TIME)
+            retry_count = t.get('ike_retry_count', DEFAULT_IKE_RETRY_COUNT)
+            retry_str = f'{retry_time}s*{retry_count}'
+            if t.get('dpd_use'):
+                idle = t.get('dpd_idle', DEFAULT_DPD_IDLE)
+                drt  = t.get('dpd_retry_time', DEFAULT_DPD_RETRY_TIME)
+                drc  = t.get('dpd_retry_count', DEFAULT_DPD_RETRY_COUNT)
+                dpd_str = f'on(idle={idle}s,retry={drt}s*{drc})'
+            else:
+                dpd_str = 'off'
             lines.append(
-                f'  {tid:<5}{remote:<17}{mode:<12}{dh:<5}{enc:<11}{hsh:<8}{"preshared":<13}{lifetime}'
+                f'  {tid:<5}{remote:<17}{mode:<12}{dh:<5}{enc:<11}{hsh:<8}'
+                f'{"preshared":<13}{lifetime:<10}{retry_str:<12}{dpd_str}'
             )
         return '\n'.join(lines)
 
@@ -3519,6 +3581,30 @@ Configuration Revision            : 5"""
                         lines.append(f"{prefix} ipsec sa lifetime {t['sa_lifetime']}")
                     if t.get('preshared'):
                         lines.append(f"{prefix} ipsec ike preshared-key ****")
+                    if t.get('ike_retry_time') is not None:
+                        lines.append(
+                            f"{prefix} ike retry "
+                            f"{_format_sir_time(t['ike_retry_time'])} "
+                            f"{t.get('ike_retry_count', DEFAULT_IKE_RETRY_COUNT)}")
+                    if t.get('dpd_use'):
+                        lines.append(f"{prefix} ike dpd use on")
+                    if t.get('dpd_idle') is not None:
+                        lines.append(
+                            f"{prefix} ike dpd idle "
+                            f"{_format_sir_time(t['dpd_idle'])}")
+                    if t.get('dpd_retry_time') is not None:
+                        lines.append(
+                            f"{prefix} ike dpd retry "
+                            f"{_format_sir_time(t['dpd_retry_time'])} "
+                            f"{t.get('dpd_retry_count', DEFAULT_DPD_RETRY_COUNT)}")
+                    sw = t.get('sessionwatch')
+                    if sw:
+                        lines.append(
+                            f"{prefix} sessionwatch interval "
+                            f"{_format_sir_time(sw['normal'])} "
+                            f"{_format_sir_time(sw['error'])} "
+                            f"{_format_sir_time(sw['timeout'])} "
+                            f"{_format_sir_time(sw['retry'])}")
                     lines.append("!")
                 if ipsec_enabled:
                     lines.append("ipsec use on")
@@ -3570,6 +3656,11 @@ Configuration Revision            : 5"""
                     lines.append("!")
                 for peer, key in crypto.get('isakmp_keys', {}).items():
                     lines.append(f"crypto isakmp key **** address {peer}")
+                dpd = crypto.get('dpd', {})
+                if dpd:
+                    lines.append(
+                        f"crypto isakmp keepalive {dpd.get('interval', 10)} "
+                        f"{dpd.get('retry', 2)}")
                 lines.append("!")
                 for ts_name, ts in crypto.get('transform_sets', {}).items():
                     transforms = ' '.join(ts.get('transforms', []))
@@ -4872,6 +4963,108 @@ Configuration Revision            : 5"""
             state.ipsec_tunnels.setdefault(tid, {})['sa_lifetime'] = int(m_sa_lt.group(2))
             return ""
 
+        # remote 1 ap 0 ike retry <time> <count>（ネゴシエーション再送、10.2.62）
+        m_ike_retry = re.match(
+            r'^remote\s+(\d+)\s+ap\s+\d+\s+ike\s+retry\s+(\S+)\s+(\d+)$', c)
+        if m_ike_retry and state.device_type in ('sir', 'srs'):
+            tid = int(m_ike_retry.group(1))
+            sec, err = _parse_sir_time(m_ike_retry.group(2), 1, 60, '初回再送時間')
+            if err:
+                return err
+            count = int(m_ike_retry.group(3))
+            if not (1 <= count <= 10):
+                return ("<ERROR> : 3 : format error\n"
+                        "  (再送回数は1〜10の範囲で指定してください)")
+            t = state.ipsec_tunnels.setdefault(tid, {})
+            t['ike_retry_time'] = sec
+            t['ike_retry_count'] = count
+            return ""
+
+        # remote 1 ap 0 ike dpd use on|off（DPD利用可否、10.2.82）
+        m_dpd_use = re.match(
+            r'^remote\s+(\d+)\s+ap\s+\d+\s+ike\s+dpd\s+use\s+(on|off)$', c)
+        if m_dpd_use and state.device_type in ('sir', 'srs'):
+            tid = int(m_dpd_use.group(1))
+            state.ipsec_tunnels.setdefault(tid, {})['dpd_use'] = (
+                m_dpd_use.group(2) == 'on')
+            return ""
+
+        # remote 1 ap 0 ike dpd idle <time>（無通信監視時間、10.2.83）
+        m_dpd_idle = re.match(
+            r'^remote\s+(\d+)\s+ap\s+\d+\s+ike\s+dpd\s+idle\s+(\S+)$', c)
+        if m_dpd_idle and state.device_type in ('sir', 'srs'):
+            tid = int(m_dpd_idle.group(1))
+            sec, err = _parse_sir_time(m_dpd_idle.group(2), 5, 600, '無通信監視時間')
+            if err:
+                return err
+            t = state.ipsec_tunnels.setdefault(tid, {})
+            # マニュアル注記: 再送時間×(再送回数+1) < 無通信監視時間 でなければ
+            # 定義反映時にエラーとなる。dpd retry が既に設定済みなら
+            # その値との整合をここで確認する。
+            rt = t.get('dpd_retry_time', DEFAULT_DPD_RETRY_TIME)
+            rc = t.get('dpd_retry_count', DEFAULT_DPD_RETRY_COUNT)
+            if rt * (rc + 1) >= sec:
+                return ("<ERROR> : 3 : format error\n"
+                        "  (再送時間×(再送回数+1)は無通信監視時間より"
+                        "短くしてください)")
+            t['dpd_idle'] = sec
+            return ""
+
+        # remote 1 ap 0 ike dpd retry <time> <count>（DPD再送、10.2.84）
+        m_dpd_retry = re.match(
+            r'^remote\s+(\d+)\s+ap\s+\d+\s+ike\s+dpd\s+retry\s+(\S+)\s+(\d+)$', c)
+        if m_dpd_retry and state.device_type in ('sir', 'srs'):
+            tid = int(m_dpd_retry.group(1))
+            sec, err = _parse_sir_time(m_dpd_retry.group(2), 1, 60, '再送時間')
+            if err:
+                return err
+            count = int(m_dpd_retry.group(3))
+            if not (1 <= count <= 10):
+                return ("<ERROR> : 3 : format error\n"
+                        "  (再送回数は1〜10の範囲で指定してください)")
+            t = state.ipsec_tunnels.setdefault(tid, {})
+            idle = t.get('dpd_idle', DEFAULT_DPD_IDLE)
+            if sec * (count + 1) >= idle:
+                return ("<ERROR> : 3 : format error\n"
+                        "  (再送時間×(再送回数+1)は無通信監視時間より"
+                        "短くしてください)")
+            t['dpd_retry_time'] = sec
+            t['dpd_retry_count'] = count
+            return ""
+
+        # remote 1 ap 0 sessionwatch interval <normal> <error> <timeout> [<retry>]
+        #（接続先監視、10.2.101）
+        m_sw = re.match(
+            r'^remote\s+(\d+)\s+ap\s+\d+\s+sessionwatch\s+interval\s+'
+            r'(\S+)\s+(\S+)\s+(\S+)(?:\s+(\S+))?$', c)
+        if m_sw and state.device_type in ('sir', 'srs'):
+            tid = int(m_sw.group(1))
+            normal, err = _parse_sir_time(m_sw.group(2), 1, 3600, '正常時送信間隔')
+            if err:
+                return err
+            error_, err = _parse_sir_time(m_sw.group(3), 1, 3600, '異常時送信間隔')
+            if err:
+                return err
+            timeout, err = _parse_sir_time(m_sw.group(4), 5, 180, '監視タイムアウト')
+            if err:
+                return err
+            if m_sw.group(5):
+                if timeout - 1 < 1:
+                    return ("<ERROR> : 3 : format error\n"
+                            "  (再送間隔を指定できる余地がありません。"
+                            "監視タイムアウトを大きくしてください)")
+                retry, err = _parse_sir_time(
+                    m_sw.group(5), 1, timeout - 1, '再送間隔')
+                if err:
+                    return err
+            else:
+                retry = 1
+            state.ipsec_tunnels.setdefault(tid, {})['sessionwatch'] = {
+                'normal': normal, 'error': error_, 'timeout': timeout,
+                'retry': retry,
+            }
+            return ""
+
         # remote 1 ip route <dst>/<prefix> <gw> metric <n>
         m_remote_route = re.match(r'^remote\s+\d+\s+ip\s+route\s+([\d.]+)/(\d+)(?:\s+([\d.]+))?', c)
         if m_remote_route and state.device_type in ('sir', 'srs'):
@@ -5010,11 +5203,20 @@ Configuration Revision            : 5"""
                 if m_lt2: pol['lifetime'] = int(m_lt2.group(1)); return ''
 
             # crypto isakmp keepalive <interval> [<retry>] [periodic|on-demand]
-            # DPDタイマー設定: state.ipsec_crypto['dpd'] に保存
+            # DPD(Dead Peer Detection)のキープアライブ設定。実IOSの範囲は
+            # interval 10-3600秒、retry 2-60秒。
+            # state.ipsec_crypto['dpd'] に保存し、show crypto ipsec sa の
+            # DPD検知窓（interval×retry秒）として使う。
             m_dpd = re.match(r'^crypto\s+isakmp\s+keepalive\s+(\d+)(?:\s+(\d+))?', c)
             if m_dpd:
                 interval = int(m_dpd.group(1))
                 retry    = int(m_dpd.group(2)) if m_dpd.group(2) else 2
+                if not (10 <= interval <= 3600):
+                    return ('% Invalid input: keepalive interval must be '
+                            'between 10 and 3600 seconds')
+                if not (2 <= retry <= 60):
+                    return ('% Invalid input: keepalive retry must be '
+                            'between 2 and 60 seconds')
                 state.ipsec_crypto['dpd'] = {'interval': interval, 'retry': retry}
                 return ''
 
@@ -5093,10 +5295,18 @@ Configuration Revision            : 5"""
                 return ''
 
             # crypto map <name> interface <if>
+            # crypto_mapsのキーは大文字小文字を保持して登録されるため
+            # (m_cmap_enterがcmd.strip()の元表記を使う)、ここも小文字化した
+            # cから取ると "CMAP" と "cmap" が一致せずcrypto_map_interfaceの
+            # 適用先マップが見つからなくなる。元表記を保持する。
             m_cmap_if = re.match(r'^crypto\s+map\s+(\S+)\s+interface\s+(\S+)', c)
             if m_cmap_if:
+                m_cmap_if_orig = re.match(
+                    r'^crypto\s+map\s+(\S+)\s+interface\s+(\S+)', cmd.strip(), re.I)
+                name = m_cmap_if_orig.group(1) if m_cmap_if_orig else m_cmap_if.group(1)
+                iface = m_cmap_if_orig.group(2) if m_cmap_if_orig else m_cmap_if.group(2)
                 state.ipsec_crypto['crypto_map_interface'] = {
-                    'name': m_cmap_if.group(1), 'interface': m_cmap_if.group(2)}
+                    'name': name, 'interface': iface}
                 return ''
 
             # crypto isakmp enable <if>
@@ -5954,10 +6164,15 @@ Configuration Revision            : 5"""
             return ''
 
         # crypto map OUTSIDE_MAP interface outside
+        # (大文字小文字を保持する理由は上のIOS版コメントを参照)
         m_cmap_if = re.match(r'^crypto\s+map\s+(\S+)\s+interface\s+(\S+)', c)
         if m_cmap_if and state.mode == 'config':
+            m_cmap_if_orig = re.match(
+                r'^crypto\s+map\s+(\S+)\s+interface\s+(\S+)', cmd.strip(), re.I)
+            name = m_cmap_if_orig.group(1) if m_cmap_if_orig else m_cmap_if.group(1)
+            iface = m_cmap_if_orig.group(2) if m_cmap_if_orig else m_cmap_if.group(2)
             state.ipsec_crypto['crypto_map_interface'] = {
-                'name': m_cmap_if.group(1), 'interface': m_cmap_if.group(2)}
+                'name': name, 'interface': iface}
             return ''
 
         # crypto isakmp enable outside

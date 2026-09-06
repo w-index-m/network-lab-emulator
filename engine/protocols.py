@@ -4107,9 +4107,11 @@ class IcmpEngine:
     送信元から宛先まで実際に経路をたどって到達性を判定。
     各装置のIP・接続ネットワークを把握し、RIBを参照してホップ転送する。
     """
-    # DPD タイマーデフォルト値
-    DPD_DETECT_SEC  = 30   # no crypto map 後、tunnelがDOWNになるまでの秒数
-    IKE_NEGO_SEC    = 3    # crypto map 再適用後、ESTABLISHEDになるまでの秒数
+    # DPD タイマーデフォルト値（crypto isakmp keepalive 未設定時のフォールバック）
+    # テスト高速化(NETLAB_FAST_TIMERS=1)時は縮める。実際に使う値は
+    # register_ipsec() で装置ごとに指定されたものがトンネル単位で優先される。
+    DPD_DETECT_SEC  = (3 if _FAST else 30)   # no crypto map 後、tunnelがDOWNになるまでの秒数
+    IKE_NEGO_SEC    = (1 if _FAST else 3)    # crypto map 再適用後、ESTABLISHEDになるまでの秒数
 
     def __init__(self):
         import time as _time
@@ -4119,18 +4121,45 @@ class IcmpEngine:
         # state: 'established' | 'detecting' | 'down' | 'negotiating'
         self.ipsec_tunnels: Dict[str, list] = {}
 
-    def register_ipsec(self, device_id: str, local_ip: str, peer_ip: str):
-        """IPsecトンネルを登録。既存エントリは negotiating 状態で再開"""
+    def register_ipsec(self, device_id: str, local_ip: str, peer_ip: str,
+                       detect_sec: float = None, nego_sec: float = None):
+        """IPsecトンネルを登録。既存エントリは negotiating 状態で再開。
+
+        detect_sec/nego_sec はこのトンネル固有のDPD検知時間/ネゴ時間
+        （crypto isakmp keepalive から算出）。省略時はクラスのデフォルト値。
+
+        以前はこれらをエンジンのクラス/インスタンス属性
+        (icmp_engine.DPD_DETECT_SEC = ...) に直接代入していたため、
+        keepalive設定が異なる複数装置が同じグローバル値を取り合い、
+        後から設定した装置の値が他の装置のタイマーまで書き換えてしまう
+        クロストークがあった。トンネルごとに保持することで解消する。
+        """
         now = self._time.time()
+        # テスト高速化(NETLAB_FAST_TIMERS=1)時は、呼び出し元が渡した
+        # 実際の設定値(crypto isakmp keepaliveのinterval×retry等)も
+        # 縮める。設定値の表示には影響しない — 内部のタイマー判定だけ。
+        _div = 10 if _FAST else 1
+        if detect_sec is not None:
+            detect_sec = max(1, detect_sec / _div)
+        if nego_sec is not None:
+            nego_sec = max(0.5, nego_sec / _div)
         tunnels = self.ipsec_tunnels.setdefault(device_id, [])
         for t in tunnels:
             if t['local'] == local_ip and t['peer'] == peer_ip:
+                if detect_sec is not None:
+                    t['detect_sec'] = detect_sec
+                if nego_sec is not None:
+                    t['nego_sec'] = nego_sec
                 if t['state'] not in ('established',):
                     t['state'] = 'negotiating'
                     t['since'] = now
                 return
-        tunnels.append({'local': local_ip, 'peer': peer_ip,
-                        'state': 'negotiating', 'since': now})
+        tunnels.append({
+            'local': local_ip, 'peer': peer_ip,
+            'state': 'negotiating', 'since': now,
+            'detect_sec': detect_sec if detect_sec is not None else self.DPD_DETECT_SEC,
+            'nego_sec': nego_sec if nego_sec is not None else self.IKE_NEGO_SEC,
+        })
 
     def clear_ipsec(self, device_id: str):
         """crypto map 削除 / interface shutdown → detecting 状態へ遷移"""
@@ -4152,13 +4181,15 @@ class IcmpEngine:
             self.ipsec_tunnels.pop(device_id, None)
 
     def _advance_dpd(self, t: dict) -> str:
-        """タイマーを進めて現在の state を返す"""
+        """タイマーを進めて現在の state を返す（トンネル固有の時間を優先）"""
         now = self._time.time()
         elapsed = now - t.get('since', now)
-        if t['state'] == 'detecting' and elapsed >= self.DPD_DETECT_SEC:
+        detect_sec = t.get('detect_sec', self.DPD_DETECT_SEC)
+        nego_sec = t.get('nego_sec', self.IKE_NEGO_SEC)
+        if t['state'] == 'detecting' and elapsed >= detect_sec:
             t['state'] = 'down'
             t['since'] = now
-        elif t['state'] == 'negotiating' and elapsed >= self.IKE_NEGO_SEC:
+        elif t['state'] == 'negotiating' and elapsed >= nego_sec:
             t['state'] = 'established'
             t['since'] = now
         return t['state']
@@ -4187,7 +4218,7 @@ class IcmpEngine:
                 remain = None
                 label = 'ESTABLISHED'
             elif state == 'detecting':
-                remain = max(0, self.DPD_DETECT_SEC - elapsed)
+                remain = max(0, t.get('detect_sec', self.DPD_DETECT_SEC) - elapsed)
                 label = f'DPD-DETECTING (DOWN まで {remain}s)'
             elif state == 'negotiating':
                 remain = max(0, self.IKE_NEGO_SEC - elapsed)
