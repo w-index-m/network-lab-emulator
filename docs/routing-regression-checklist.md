@@ -129,6 +129,27 @@ Cisco:
   （`engine/rules.py`側には同等の出力コードが以前からあったが、実際のAPI経路では
   呼ばれない生成器で、設定しても running-config に一切反映されなかった）
 
+### Si-R 手動鍵設定 IPsec（remote ap ipsec type manual）
+回帰試験は `tests/test_ipsec_manual_key.py`。
+
+IKE（自動鍵交換）とは別の、SPI・プロトコル・鍵を直接指定する方式
+（コマンドリファレンス 10.2.27〜10.2.36）。ネゴシエーションを介さず、
+両側の send/receive 設定が噛み合った時点でSAが張られる。
+
+- `remote ap ipsec type manual` / `ipsec send|receive spi <hex>`（100〜ffffffff）/
+  `protocol <none|esp|ah>` / `range <src>/<mask> <dst>/<mask>` /
+  `encrypt <algo> [<hex|text> <key>]` / `auth <algo> [<hex|text> <key>]`
+- SA作成可否はマニュアル10.2.29の表どおり判定する:
+  `protocol=ah` は auth必須（encryptの有無は無関係）、
+  `protocol=esp` は encrypt必須（authの有無は無関係）
+- 「暗号化しないトンネル」はここで組める:
+  - `protocol=ah` + `auth=hmac-sha256` 等（認証のみ、暗号化なし）
+  - `protocol=esp` + `encrypt=null`（ESP-NULL。フレーミングはあるが機密性なし）
+- `encrypt`/`auth` が `none`/`null` の場合は鍵を指定できない（マニュアル注記どおり拒否）
+- SPI・プロトコル・鍵材料のいずれかが両側で食い違えばSAは張られず`Waiting`のまま
+- IKE用トンネル（`ipsec type`未指定）とは判定経路が完全に分離しており、
+  同じトンネル辞書を共有していても混ざらないことを確認
+
 ## 未着手
 
 - Si-R を含む組み合わせ（Si-R↔Catalyst, Si-R↔Cisco）でのRIP/OSPF/BGP試験は未実施。
@@ -136,4 +157,7 @@ Cisco:
 - ike retry（ネゴシエーション自体の再送）は設定値の保持とrunning-config反映まで。
   negotiate_ipsec()は同期的に一発で成否を決めるため、実際に初回再送時間×再送回数
   だけ待って失敗を確定させる、という時間経過そのものはエミュレートしていない。
+- 手動鍵設定のDPD/sessionwatchとの連動は未確認（IKE用のsir_link_down等は
+  ipsec_tunnelsのstatusを直接見るため手動鍵トンネルにも一応効くはずだが、
+  専用のテストはまだ無い）。
 - ruff の F841（未使用変数）34件はCIのブロック対象から除外中。

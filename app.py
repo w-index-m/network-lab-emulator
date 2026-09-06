@@ -35,7 +35,9 @@ from engine.protocols import (
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
 from engine.syslog_sender import syslog_dispatcher, snmp_dispatcher, ntp_client
-from engine.ike_engine import negotiate_ipsec, sir_link_down, sir_link_up
+from engine.ike_engine import (
+    negotiate_ipsec, negotiate_manual_ipsec, sir_link_down, sir_link_up,
+)
 from engine.config_importer import import_running_config, validate_config_text
 
 # ══════════════════════════════════════════
@@ -108,6 +110,10 @@ def _trigger_ike_negotiation(device_id: str, _cascade: bool = True):
     設定順序に依らず両側で収束させる（片側の設定完了時に相手が未設定でも、
     後から相手が設定を打った時点で成立する）。"""
     results = negotiate_ipsec(device_sessions, device_id)
+    # 手動鍵設定(ipsec type manual)はIKEネゴシエーションを介さないため
+    # 別関数で判定する。同じトンネル番号キーを共有しても、IKE対象の
+    # トンネルはmanual側で該当なし(スキップ)になるだけなので競合しない。
+    results.update(negotiate_manual_ipsec(device_sessions, device_id))
     buf = proto_log_buffer.setdefault(device_id, [])
     _self_state = device_sessions.get(device_id)
     for tid_str, result in results.items():
@@ -771,7 +777,11 @@ async def cli_command(body: dict):
     if (re.match(r'^crypto\s+isakmp\s+(enable|key)', c_low) or
             re.match(r'^crypto\s+map\s+\S+\s+interface', c_low) or
             c_low in ('ike use on', 'ipsec use on') or
-            re.match(r'^remote\s+\d+\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key', c_low)):
+            re.match(r'^remote\s+\d+\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key', c_low) or
+            # 手動鍵設定(ipsec type manual)。IKEを介さないため、
+            # send/receiveのSPI・protocol・鍵のいずれかが揃うたびに
+            # 再判定する必要がある。
+            re.match(r'^remote\s+\d+\s+ap\s+\d+\s+ipsec\s+(type|send|receive)\b', c_low)):
         _trigger_ike_negotiation(device_id)
 
     # IPアドレス・ルート変更があればicmp_engineに再登録

@@ -3277,10 +3277,13 @@ Configuration Revision            : 5"""
             return '  No IPsec tunnel configured.'
         advance_all_sir_dpd(state)
         lines = ['  Tunnel  Status         Local-IP        Remote-IP       Encrypt    Hash   DH   Mode']
-        lines.append('  ------  -------------  --------------  --------------  ---------  -----  ---  ----------')
+        lines.append('  ------  -------------  --------------  --------------  -----------  ------------  ---  ----------')
         for tid, t in tunnels.items():
             remote = t.get('remote_ip', '-')
             local  = t.get('local_ip',  '-')
+            # 手動鍵設定(ipsec type manual)ならencrypt/authの列がnone/nullを
+            # とりうるため、IKE想定の固定幅(11桁)だと "hmac-sha256" 等が
+            # 隣の列にめり込む。列幅を広げて対応する。
             enc    = t.get('encryption', 'aes256')
             hsh    = t.get('hash', 'sha256')
             dh     = str(t.get('dh_group', 14))
@@ -3291,7 +3294,7 @@ Configuration Revision            : 5"""
                 status = 'Established'
             else:
                 status = 'Waiting'
-            lines.append(f'  {tid:<8}{status:<15}{local:<16}{remote:<16}{enc:<11}{hsh:<7}{dh:<5}{mode}')
+            lines.append(f'  {tid:<8}{status:<15}{local:<16}{remote:<16}{enc:<13}{hsh:<14}{dh:<5}{mode}')
         return '\n'.join(lines)
 
     def _sir_show_ike_sa(self, state: DeviceState) -> str:
@@ -5063,6 +5066,98 @@ Configuration Revision            : 5"""
                 'normal': normal, 'error': error_, 'timeout': timeout,
                 'retry': retry,
             }
+            return ""
+
+        # ── 手動鍵設定 IPsec（IKEを使わない。remote ap ipsec type manual）──
+        # マニュアル 10.2.28〜10.2.36。ここではSPI/プロトコル/暗号鍵/認証鍵を
+        # 直接指定する。IKEのようなネゴシエーションは行わず、両側の
+        # send/receiveパラメータが噛み合った時点でSAが張られる。
+        # 暗号化なしのトンネル(認証のみ=ah、無鍵=encrypt none/null)を
+        # 組みたい場合、実機ではこちらの手動鍵設定を使う。
+
+        # remote 1 ap 0 ipsec send spi <hex>（100〜ffffffff）
+        m_mspi = re.match(
+            r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+(send|receive)\s+spi\s+([0-9a-fA-F]+)$', c)
+        if m_mspi and state.device_type in ('sir', 'srs'):
+            tid = int(m_mspi.group(1))
+            direction = m_mspi.group(2)
+            try:
+                spi = int(m_mspi.group(3), 16)
+            except ValueError:
+                return "<ERROR> : 3 : format error\n  (SPIは16進数で指定してください)"
+            if not (0x100 <= spi <= 0xffffffff):
+                return ("<ERROR> : 3 : format error\n"
+                        "  (SPIは100〜ffffffffの範囲で指定してください)")
+            t = state.ipsec_tunnels.setdefault(tid, {})
+            t.setdefault(f'manual_{direction}', {})['spi'] = spi
+            return ""
+
+        # remote 1 ap 0 ipsec send|receive protocol none|esp|ah
+        m_mproto = re.match(
+            r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+(send|receive)\s+protocol\s+(none|esp|ah)$', c)
+        if m_mproto and state.device_type in ('sir', 'srs'):
+            tid = int(m_mproto.group(1))
+            direction = m_mproto.group(2)
+            t = state.ipsec_tunnels.setdefault(tid, {})
+            t.setdefault(f'manual_{direction}', {})['protocol'] = m_mproto.group(3)
+            return ""
+
+        # remote 1 ap 0 ipsec send range <src>/<mask> <dst>/<mask>
+        # remote 1 ap 0 ipsec receive range <dst>/<mask> <src>/<mask>
+        m_mrange = re.match(
+            r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+(send|receive)\s+range\s+'
+            r'(any4|[\d.]+/[\d.]+)\s+(any4|[\d.]+/[\d.]+)$', c)
+        if m_mrange and state.device_type in ('sir', 'srs'):
+            tid = int(m_mrange.group(1))
+            direction = m_mrange.group(2)
+            t = state.ipsec_tunnels.setdefault(tid, {})
+            t.setdefault(f'manual_{direction}', {})['range'] = (
+                m_mrange.group(3), m_mrange.group(4))
+            return ""
+
+        # remote 1 ap 0 ipsec send|receive encrypt <algo> [<hex|text> <key>]
+        _MANUAL_ENC_ALGOS = ('none', 'des-cbc', '3des-cbc',
+                             'aes-cbc-128', 'aes-cbc-192', 'aes-cbc-256', 'null')
+        m_menc = re.match(
+            r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+(send|receive)\s+encrypt\s+'
+            r'(\S+)(?:\s+(hex|text)\s+(\S+))?$', c)
+        if m_menc and state.device_type in ('sir', 'srs'):
+            algo = m_menc.group(3)
+            if algo not in _MANUAL_ENC_ALGOS:
+                return (f"<ERROR> : 3 : format error\n"
+                        f"  (暗号アルゴリズムは {', '.join(_MANUAL_ENC_ALGOS)} "
+                        f"のいずれかを指定してください)")
+            # null/none は鍵を指定できない（マニュアル10.2.31注記）
+            if algo in ('none', 'null') and m_menc.group(4):
+                return ("<ERROR> : 3 : format error\n"
+                        "  (暗号アルゴリズムが null/none の場合、鍵は指定できません)")
+            tid = int(m_menc.group(1))
+            direction = m_menc.group(2)
+            t = state.ipsec_tunnels.setdefault(tid, {})
+            t.setdefault(f'manual_{direction}', {})['encrypt'] = {
+                'algo': algo, 'key': m_menc.group(5) or ''}
+            return ""
+
+        # remote 1 ap 0 ipsec send|receive auth <algo> [<hex|text> <key>]
+        _MANUAL_AUTH_ALGOS = ('none', 'hmac-md5', 'hmac-sha1', 'hmac-sha256',
+                              'hmac-sha384', 'hmac-sha512')
+        m_mauth = re.match(
+            r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+(send|receive)\s+auth\s+'
+            r'(\S+)(?:\s+(hex|text)\s+(\S+))?$', c)
+        if m_mauth and state.device_type in ('sir', 'srs'):
+            algo = m_mauth.group(3)
+            if algo not in _MANUAL_AUTH_ALGOS:
+                return (f"<ERROR> : 3 : format error\n"
+                        f"  (認証アルゴリズムは {', '.join(_MANUAL_AUTH_ALGOS)} "
+                        f"のいずれかを指定してください)")
+            if algo == 'none' and m_mauth.group(4):
+                return ("<ERROR> : 3 : format error\n"
+                        "  (認証アルゴリズムが none の場合、鍵は指定できません)")
+            tid = int(m_mauth.group(1))
+            direction = m_mauth.group(2)
+            t = state.ipsec_tunnels.setdefault(tid, {})
+            t.setdefault(f'manual_{direction}', {})['auth'] = {
+                'algo': algo, 'key': m_mauth.group(5) or ''}
             return ""
 
         # remote 1 ip route <dst>/<prefix> <gw> metric <n>

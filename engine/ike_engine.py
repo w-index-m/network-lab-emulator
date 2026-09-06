@@ -318,6 +318,145 @@ def _get_val(d: dict, key: str, default):
 # メインネゴシエーション
 # ══════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════
+# Si-R: 手動鍵設定 IPsec（remote ap ipsec type manual）
+# ══════════════════════════════════════════════════════════
+#
+# IKEのようなネゴシエーションは存在しない。両側のsend/receive設定
+# （SPI・プロトコル・暗号鍵・認証鍵）が正しく噛み合っていれば、
+# 設定を入れた時点でSAが張られる。
+#
+# 認証/暗号アルゴリズム定義とセキュリティプロトコルの組み合わせで
+# SAが作成できるかどうかが決まる（コマンドリファレンス 10.2.29 の表）:
+#   protocol=ah  → auth が定義されていればSA作成可（encryptの有無は無関係）
+#   protocol=esp → encrypt が定義されていればSA作成可（authの有無は無関係）
+#   protocol未定義/none → 常にSA作成不可
+#
+# 「暗号化しないトンネル」は、ここでは2通りで表現できる:
+#   - protocol=ah, auth=hmac-sha256 等（認証のみ、暗号化なし）
+#   - protocol=esp, encrypt=null（ESP-NULL。フレーミングはESPだが機密性なし）
+
+def manual_sa_creatable(direction_cfg: dict) -> bool:
+    """send/receiveの片方向設定だけを見て、SAを作成できる組み合わせか判定する。"""
+    proto = direction_cfg.get('protocol')
+    auth_algo = direction_cfg.get('auth', {}).get('algo')
+    encrypt_algo = direction_cfg.get('encrypt', {}).get('algo')
+    has_auth = bool(auth_algo) and auth_algo != 'none'
+    has_encrypt = bool(encrypt_algo) and encrypt_algo != 'none'
+    if proto == 'ah':
+        return has_auth
+    if proto == 'esp':
+        return has_encrypt
+    return False
+
+
+def _manual_key_matches(local: dict, peer: dict) -> Tuple[bool, str]:
+    """自分のsend(またはreceive)設定と、相手のreceive(またはsend)設定が
+    噛み合っているか確認する。SPI・プロトコル・鍵材料が完全に一致しないと
+    実機でも通信できない。"""
+    if local.get('protocol') != peer.get('protocol'):
+        return False, (f"protocol mismatch (local={local.get('protocol')}, "
+                       f"peer={peer.get('protocol')})")
+    if local.get('spi') != peer.get('spi'):
+        return False, (f"SPI mismatch (local=0x{local.get('spi', 0):x}, "
+                       f"peer=0x{peer.get('spi', 0):x})")
+    le, pe = local.get('encrypt', {}), peer.get('encrypt', {})
+    if le.get('algo') != pe.get('algo') or le.get('key') != pe.get('key'):
+        return False, "encrypt algorithm/key mismatch"
+    la, pa = local.get('auth', {}), peer.get('auth', {})
+    if la.get('algo') != pa.get('algo') or la.get('key') != pa.get('key'):
+        return False, "auth algorithm/key mismatch"
+    return True, ""
+
+
+def negotiate_manual_ipsec(device_sessions: dict, initiator_id: str) -> Dict[str, NegotiationResult]:
+    """手動鍵設定(ipsec type manual)のトンネルについて、send/receive設定が
+    両側で噛み合っていればSAをestablishedにする。IKEのnegotiate_ipsec()と
+    違い、ネゴシエーションのやり取りそのものは発生しない（設定が全てのため）。
+    """
+    results: Dict[str, NegotiationResult] = {}
+    initiator = device_sessions.get(initiator_id)
+    if not initiator or initiator.device_type not in ('sir', 'srs'):
+        return results
+
+    for tid, t in getattr(initiator, 'ipsec_tunnels', {}).items():
+        if t.get('ipsec_type') != 'manual':
+            continue
+        key = str(tid)
+        logs = []
+        local_ip = t.get('local_ip', '')
+        remote_ip = t.get('remote_ip', '')
+        send_cfg = t.get('manual_send', {})
+        recv_cfg = t.get('manual_receive', {})
+
+        if not local_ip or not remote_ip:
+            t['status'] = 'wait'
+            results[key] = NegotiationResult(False, 0, "Tunnel IP not configured", logs)
+            continue
+
+        if not manual_sa_creatable(send_cfg) or not manual_sa_creatable(recv_cfg):
+            t['status'] = 'wait'
+            reason = ("send/receiveの設定が不完全です — protocol=ah なら auth を、"
+                      "protocol=esp なら encrypt を定義してください")
+            logs.append(f"IPsec(manual): {reason}")
+            results[key] = NegotiationResult(False, 0, reason, logs)
+            continue
+
+        peer_id, peer_state = _find_peer(device_sessions, initiator_id, remote_ip)
+        if not peer_id:
+            t['status'] = 'wait'
+            logs.append(f"IPsec(manual): No peer found for {remote_ip}")
+            results[key] = NegotiationResult(False, 0, f"Peer {remote_ip} not found", logs)
+            continue
+
+        peer_t = _sir_tunnel_info(peer_state, remote_ip, local_ip)
+        if not peer_t or peer_t.get('ipsec_type') != 'manual':
+            t['status'] = 'wait'
+            logs.append(f"IPsec(manual): peer {remote_ip} tunnel not configured for manual keying")
+            results[key] = NegotiationResult(False, 0, "Peer tunnel not manual", logs)
+            continue
+
+        peer_send = peer_t.get('manual_send', {})
+        peer_recv = peer_t.get('manual_receive', {})
+        ok_out, why_out = _manual_key_matches(send_cfg, peer_recv)
+        ok_in, why_in = _manual_key_matches(peer_send, recv_cfg)
+        if not (ok_out and ok_in):
+            t['status'] = 'wait'
+            reason = why_out if not ok_out else why_in
+            logs.append(f"IPsec(manual): SA not established with {remote_ip} — {reason}")
+            results[key] = NegotiationResult(False, 0, reason, logs)
+            continue
+
+        # SPI(Out) = 自分が送信パケットに刻む値 = 自分のsend spi
+        # SPI(In)  = 自分が受信パケットを認識する値 = 自分のreceive spi
+        my_spi_out = send_cfg.get('spi', 0)
+        my_spi_in = recv_cfg.get('spi', 0)
+        peer_spi_out = peer_send.get('spi', 0)
+        peer_spi_in = peer_recv.get('spi', 0)
+        t.update({
+            'status': 'established', 'phase1': 'MATURE', 'phase2': 'MATURE',
+            'spi_in': f'0x{my_spi_in:08x}', 'spi_out': f'0x{my_spi_out:08x}',
+            'protocol': send_cfg.get('protocol', 'esp'),
+            'encryption': send_cfg.get('encrypt', {}).get('algo', 'none'),
+            'hash': send_cfg.get('auth', {}).get('algo', 'none'),
+        })
+        peer_t.update({
+            'status': 'established', 'phase1': 'MATURE', 'phase2': 'MATURE',
+            'spi_in': f'0x{peer_spi_in:08x}', 'spi_out': f'0x{peer_spi_out:08x}',
+            'protocol': peer_send.get('protocol', 'esp'),
+            'encryption': peer_send.get('encrypt', {}).get('algo', 'none'),
+            'hash': peer_send.get('auth', {}).get('algo', 'none'),
+        })
+        logs.append(f"IPsec(manual): SA established with {remote_ip} "
+                    f"(protocol={send_cfg.get('protocol')}, "
+                    f"encrypt={send_cfg.get('encrypt', {}).get('algo', 'none')}, "
+                    f"auth={send_cfg.get('auth', {}).get('algo', 'none')}, "
+                    f"spi_out=0x{my_spi_out:08x})")
+        results[key] = NegotiationResult(True, 0, "OK", logs)
+
+    return results
+
+
 def negotiate_ipsec(device_sessions: dict, initiator_id: str) -> Dict[str, NegotiationResult]:
     """
     initiator_id が持つ IPsec トンネルに対してネゴシエーションを実行。
