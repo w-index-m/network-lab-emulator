@@ -48,6 +48,9 @@
 | `tools/bigip_qkview_collector.py` | paramiko（+ F5OS REST API） | BigIP実機からqkview/UCS/configをSSH・SCPで採取 |
 | `tools/test_bigip_ltm.py` | HTTP（このエミュレーター向け） | Pool/VIP/Member管理の自動テスト |
 | `tools/syslog_ai_monitor.py` | UDP受信 + Ollama | ログ監視 + AI要約（フラップ検知等） |
+| `tools/route_injector/network_route_injector.py`（トラフィック生成タブ） | 生ソケット（UDP/TCP） | 実機↔実機/PC↔実機のスループット測定。マルチプロセスでコア分散、目標スループットからレート自動計算、MTU超過警告 |
+| `tools/route_injector/pc_benchmark.py` | 上記トラフィック生成コアの直接呼び出し | このPC単体の送信上限（pps/bps）をプロセス数を振って計測。試験対象の限界かPC側の限界かを切り分ける |
+| `tools/snmp_trap_receiver.py` | UDP 162 受信 + Prometheus exporter | 疑似linkDown等のSNMPトラップをPrometheus/Alertmanager経由で監視 |
 
 「ツール = コア製品と実機・実プロトコル・実ログで繋がるための橋渡し層」という位置づけ。
 新しい周辺スクリプトを追加する際もこの2分類（コア製品／ツール）で整理する。
@@ -140,6 +143,29 @@
 
 ---
 
+### EIGRP
+
+```
+✅ 実装済み機能:
+  - router eigrp <asn> / network <ip> [wildcard] / no router eigrp
+  - eigrp router-id / variance / metric weights / passive-interface
+  - Hello 5秒・Hold 15秒によるネイバー確立と失効(Dead Timer相当)
+  - AS番号不一致・Kパラメータ不一致ではネイバーが上がらない
+    (metric weights変更時は実機同様に既存ネイバーをリセット)
+  - クラシックメトリック 256 × (10^7/帯域kbps + 遅延/10usec)
+  - FD/RDを保持したトポロジテーブルとフィージブルサクセサ判定
+  - show ip route に AD 90 の D、再配信由来は AD 170 の D EX
+
+✅ 対応デバイス:
+  - Catalyst / Cisco ISR / Nexus（NX-OSは feature eigrp が先に必要）
+
+⚠️ 非対応: Si-R / SR-S / APRESIA（実機がEIGRP非対応のため対象外）
+```
+
+**テスト**: `pytest tests/test_eigrp.py -v`
+
+---
+
 ### Static Route
 
 ```
@@ -197,7 +223,16 @@
 
 ✅ 対応デバイス:
   - Catalyst / SR-S / Nexus / APRESIA
+
+✅ 802.1Qサブインタフェース（ルータ・オン・ア・スティック）:
+  - encapsulation dot1Q <vlan> [native] / no encapsulation
+    （物理インタフェース上では実機同様に拒否）
+  - show vlans（IOSルータの802.1Qサブインタフェース一覧）
+  - 両端のタグ番号が食い違う場合は同一セグメントとみなさない
+    （送信側・受信側の両方で判定）
 ```
+
+**テスト**: `pytest tests/test_subinterface_dot1q.py -v`
 
 ---
 
@@ -463,6 +498,34 @@
 
 ---
 
+### IPsec / IKE
+
+```
+✅ IKE自動鍵交換（Si-R ↔ Si-R / Cisco IOS / ASA、Cisco IOS ↔ IOS）:
+  - Phase1/Phase2の一致確認（PSK・暗号・ハッシュ・DH・モード）
+  - remote ap ike retry <time> <count>（ネゴシエーション再送、既定10s/3回）
+  - remote ap ike dpd use <on|off> / dpd idle <time> / dpd retry <time> <count>
+    （Dead Peer Detection。リンクダウンでdetecting状態に遷移し、
+    無通信監視時間+再送時間×再送回数の経過後にdownと判定）
+  - remote ap sessionwatch interval <normal> <error> <timeout> [<retry>]
+  - Cisco: crypto isakmp keepalive <interval> <retry> を実際のDPD検知窓として使用
+
+✅ Si-R 手動鍵設定（remote ap ipsec type manual、IKEを介さない）:
+  - ipsec send|receive spi/protocol/range/encrypt/auth
+  - SA作成可否をマニュアルの表どおり判定（protocol=ah は auth必須、
+    protocol=esp は encrypt必須）
+  - 暗号化しないトンネル（AH認証のみ、ESP-NULL）を構成可能
+
+✅ 対応デバイス:
+  - Si-R / SR-S（IKE + 手動鍵） / Cisco ISR / Catalyst / ASA（IKEのみ）
+```
+
+**テスト**:
+- `pytest tests/test_ipsec_dpd_timers.py -v`
+- `pytest tests/test_ipsec_manual_key.py -v`
+
+---
+
 ## 🔍 ネットワーク管理・監視
 
 ### ARP (Address Resolution Protocol)
@@ -646,6 +709,11 @@
   - test_netmiko_catalyst.py
   - test_ospf_routing_verification.py
   - test_etherchannel_stp_cost.py
+  - test_eigrp.py
+  - test_sir_ether_use.py（Si-Rの ether use on/off によるリンク断/復旧）
+  - test_subinterface_dot1q.py
+  - test_ipsec_dpd_timers.py
+  - test_ipsec_manual_key.py
 ```
 
 ---
@@ -747,9 +815,9 @@
 | カテゴリ | 実装数 | テスト | 備考 |
 |---------|------|------|------|
 | **デバイス** | 9機種 | ✅ | Si-R/SR-S/Catalyst/Cisco/Nexus/ASA/APRESIA/F5/PC |
-| **ルーティング** | 4プロトコル | ✅ | RIP/OSPF/BGP/Static + redistribute |
-| **スイッチング** | 6機能 | ✅ | VLAN/STP/LACP/vPC/VRRP/HSRP |
-| **フィルタ/セキュリティ** | 7機能 | ✅ | ACL/Prefix-list/Route-map/ICMP/IPFilter/NAT/Firewall |
+| **ルーティング** | 5プロトコル | ✅ | RIP/OSPF/BGP/EIGRP/Static + redistribute |
+| **スイッチング** | 7機能 | ✅ | VLAN(802.1Qサブインタフェース含む)/STP/LACP/vPC/VRRP/HSRP |
+| **フィルタ/セキュリティ** | 8機能 | ✅ | ACL/Prefix-list/Route-map/ICMP/IPFilter/NAT/Firewall/IPsec・IKE |
 | **ロードバランシング** | 1機能 | ✅ | F5 BIG-IP LTM (Pool/Virtual/Monitor) |
 | **管理・監視** | 6機能 | ✅ | ARP/CEF/DP/Syslog/SNMP/NTP |
 | **テストツール** | 11スイート | ✅ | 100+ テストケース |

@@ -80,3 +80,46 @@ client|server` / `lan <n> ip nat mode multi ...` / `lan <n> ip rip use
 ## テスト
 
 `tests/test_sir_running_config_defaults.py`を新規作成（6件）。
+
+---
+
+## 追記（2026-09-05〜09-06）: 上記「まだ突き合わせていない部分」を実装
+
+上で「構造的な差」として保留していた `ether`↔VLAN↔`lan` の対応関係を、
+実際にPC-Aから実機Si-R G110Bに繋いでラボ試験をしながら実装した。
+
+### ラボ試験1: 実機とのRIP交換
+
+WindowsのPowerShellでセカンダリIP（192.168.1.100/24）を追加し、実機
+Si-R G110Bと同一セグメントに置いてRIPを交換。`show ip route` で
+`*R 192.168.1.0/24 ... lan1` が実際に学習できることを確認した。
+
+### ラボ試験2: `show ether statistics` でのトラフィック実測
+
+`tools/route_injector/network_route_injector.py` のトラフィック生成
+タブから実機のlan1ポート（`ether 2 1`）宛にUDPを送信し、`clear ether
+statistics` → `show ether statistics group 2 port 1` で受信フレーム数
+が送信数と一致することを実測で確認した。この過程で以下が判明:
+
+- 宛先IPを間違える（存在しないIP）とARPが返らず、`Input Unicast`が
+  0のまま変化しない — 送信側の「送信成功数」カウンタと、実際にNICから
+  出たフレーム数は別物であることを再確認
+- Si-Rは受信した未知ポート宛パケットに対してICMP Port Unreachableを
+  返す。高レートで流すとOutput側にもトラフィックが発生する
+
+### 実装した対応関係
+
+`ether <group> <port> vlan untag <vid>` → `lan <n> vlan <vid>` の2段を
+たどって、`ether`ポートと`lan`インタフェースの対応を持たせた。
+
+- `ether <g> <p> use on|off`（マニュアル4.1.2）でリンク断/復旧
+  — 実機に`shutdown`は無く、これが正しいコマンド
+- `show ether` / `show ether brief` / `show ether statistics` /
+  `clear ether statistics` を実機の出力形式に修正
+  （以前は固定文字列を返しており、`ether`が略称展開で`etherchannel`に
+  化けるバグもあって`use off`の結果が表示に反映されなかった）
+
+回帰試験は `tests/test_sir_ether_use.py`（9件）。
+
+「まだ突き合わせていない部分」に残っている `lan ip dhcp`/`nat mode`/
+`lan ip rip use`等の意味的な動作は、引き続き未実装のまま。
