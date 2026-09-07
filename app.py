@@ -3353,6 +3353,13 @@ def _build_running_config(device_id: str, state) -> str:
         _on_feat = ospf_engine.nodes.get(device_id)
         if _on_feat and _on_feat.get('enabled'):
             lines.append('feature ospf')
+        _nxf = getattr(state, 'nx_features', set())
+        if 'nv overlay' in _nxf:
+            lines.append('feature nv overlay')
+        if 'vn-segment-vlan-based' in _nxf:
+            lines.append('feature vn-segment-vlan-based')
+        if 'bgp' in _nxf:
+            lines.append('feature bgp')
         lines.append('feature lacp')
         lines.append('')
         lines.append(f'hostname {state.hostname}')
@@ -5282,6 +5289,93 @@ async def export_configs():
         "generated_at": datetime.now().isoformat(timespec='seconds'),
         "devices":      devices,
         "links":        links,
+    }
+
+
+@app.get("/api/nexus/dashboard")
+async def nexus_dashboard():
+    """
+    Cisco Nexus Dashboard 風のファブリック俯瞰ビュー用データ。
+    実際のNexus Dashboard(旧DCNM/Nexus Dashboard Fabric Controller)の
+    ような「ファブリック単位でのVXLAN EVPN状態の一覧化」を、
+    このエミュレータ内のNexus装置（device_type == 'nexus'）の
+    状態（feature有効化、VLAN⇔VNIマッピング、nve1のメンバーVNI、
+    BGP EVPNアドレスファミリ）から組み立てて返す。
+    実際のNexus DashboardのAPI/データモデルそのものではなく、
+    このエミュレータのCLI実装内容をダッシュボード形式に投影したもの。
+    """
+    switches = []
+    vni_index: Dict[int, dict] = {}
+
+    for device_id, state in device_sessions.items():
+        if state.device_type != 'nexus':
+            continue
+        features = sorted(getattr(state, 'nx_features', set()))
+        nve_map = getattr(state, 'nve', {})
+        evpn_vnis = getattr(state, 'evpn_vnis', {})
+        vn_segment = getattr(state, 'vlan_vn_segment', {})
+        bgp = getattr(state, 'bgp', None) or {}
+        af = bgp.get('l2vpn_evpn') if isinstance(bgp, dict) else None
+
+        nve_peers = []
+        member_vnis = []
+        for nve_ifname, nve in nve_map.items():
+            for peer_ip in sorted((af or {}).get('activated_neighbors', [])):
+                nve_peers.append({
+                    "interface": nve_ifname,
+                    "peer_ip": peer_ip,
+                    "state": "Up",
+                })
+            for vni, m in nve.get('members', {}).items():
+                member_vnis.append({
+                    "vni": vni,
+                    "interface": nve_ifname,
+                    "type": "L3" if m.get('associate_vrf') else "L2",
+                    "ingress_replication": bool(m.get('ingress_replication')),
+                    "mcast_group": m.get('mcast_group') or None,
+                })
+
+        overlay_enabled = 'nv overlay' in features
+        vxlan_ready = overlay_enabled and bool(nve_map) and bool(af and af.get('enabled'))
+
+        switch_entry = {
+            "device_id": device_id,
+            "hostname": state.hostname,
+            "role": "VTEP" if nve_map else "-",
+            "features": features,
+            "overlay_enabled": overlay_enabled,
+            "vxlan_ready": vxlan_ready,
+            "bgp_asn": bgp.get('asn') if isinstance(bgp, dict) else None,
+            "evpn_address_family": bool(af and af.get('enabled')),
+            "advertise_all_vni": bool(af and af.get('advertise_all_vni')),
+            "vlan_vni_map": [
+                {"vlan": vlan, "vni": vni} for vlan, vni in sorted(vn_segment.items())
+            ],
+            "nve_peers": nve_peers,
+            "member_vnis": member_vnis,
+        }
+        switches.append(switch_entry)
+
+        # ファブリック全体のVNIインベントリ（どのスイッチが参加しているか）
+        for vni in evpn_vnis:
+            entry = vni_index.setdefault(vni, {
+                "vni": vni, "l2vpn_evpn": True, "switches": [],
+            })
+            entry["switches"].append(device_id)
+
+    switches.sort(key=lambda s: s["device_id"])
+    vni_list = [vni_index[v] for v in sorted(vni_index)]
+
+    return {
+        "polled_at": time.time(),
+        "fabric": {
+            "switch_count": len(switches),
+            "vtep_count": sum(1 for s in switches if s["role"] == "VTEP"),
+            "vni_count": len(vni_list),
+            "vxlan_ready_count": sum(1 for s in switches if s["vxlan_ready"]),
+        },
+        "switches": switches,
+        "vnis": vni_list,
     }
 
 

@@ -168,6 +168,69 @@ Type-2/Type-5ルートの伝播）をしたい場合は、少なくとも以下�
 これらは今回のPPPoE/IPsec検証より一段大掛かりな実装になるため、
 「設定が通ってrunning-configに正しく反映される」レベルで一旦区切った。
 
+## Nexus Dashboard風ファブリックビュー（追記）
+
+Cisco Nexus Dashboard（旧DCNM/Nexus Dashboard Fabric Controller）の
+ような「ファブリック全体を俯瞰するダッシュボード」を模したビューを
+追加した。実際のNexus DashboardのAPI/データモデルの再現ではなく、
+このエミュレータ内のNexus装置に投入されたCLI設定を集計して
+ダッシュボード形式に投影したもの。
+
+- **画面**: `/static/nexus_dashboard.html`
+- **データAPI**: `GET /api/nexus/dashboard`（`device_type == 'nexus'`
+  の装置だけを集計。認証は他のAPIと同じセッショントークン方式）
+
+返すJSONの主な項目:
+
+```jsonc
+{
+  "fabric": {"switch_count": 2, "vtep_count": 2, "vni_count": 1, "vxlan_ready_count": 2},
+  "switches": [
+    {
+      "device_id": "nd-demo1", "hostname": "ND-Demo-Leaf1", "role": "VTEP",
+      "features": ["bgp", "nv overlay", "vn-segment-vlan-based"],
+      "overlay_enabled": true, "vxlan_ready": true,
+      "bgp_asn": 65001, "evpn_address_family": true, "advertise_all_vni": true,
+      "vlan_vni_map": [{"vlan": 10, "vni": 10010}],
+      "nve_peers": [{"interface": "nve1", "peer_ip": "10.1.1.2", "state": "Up"}],
+      "member_vnis": [{"vni": 10010, "interface": "nve1", "type": "L2",
+                        "ingress_replication": true, "mcast_group": null}]
+    }
+  ],
+  "vnis": [{"vni": 10010, "l2vpn_evpn": true, "switches": ["nd-demo1", "nd-demo2"]}]
+}
+```
+
+`vxlan_ready`は「`feature nv overlay`が有効・`nve1`にVNIメンバーが
+構成済み・`address-family l2vpn evpn`が有効」の3条件が揃っている
+ことだけを見て判定している（実際にBGP EVPN NLRIが交換されている
+ことの確認ではない）。
+
+### 実際に確認した動作
+
+2台のNexus（`nd-demo1`/`nd-demo2`）に本ドキュメント前半のサンプル
+構成を投入したところ、ダッシュボードは以下の通り表示された:
+
+- SWITCHES: 14（トポロジー上の全Nexus装置。他は未構成なので
+  PARTIAL表示）
+- VTEPS: 2、VNIS: 1、VXLAN READY: 2
+- `ND-Demo-Leaf1` / `ND-Demo-Leaf2` カードに `VTEP` / `VXLAN READY`
+  バッジ、`nve1`のPeer IPと`Up`状態、VNI 10010がVLAN 10に
+  マッピングされていることが表示された
+- VNIインベントリ表に`10010`が両スイッチの参加として一覧化された
+
+### 実装時に見つけた既存バグ（今回修正）
+
+NX-OSの`feature <name>`受理ロジック（`engine/rules.py`）は
+`\S+`で1語だけを切り出していたため、`feature nv overlay`が
+`feature nv`として保存され、`overlay`が欠落していた
+（他のNX-OS feature名—`ospf`/`bgp`/`vpc`/`eigrp`/
+`vn-segment-vlan-based`—はすべて1語なので今まで顕在化していな
+かった）。`nv overlay`だけ2語であることを先に個別マッチする形で
+修正し、`show running-config`にも`feature nv overlay`
+（およびこれまで欠落していた`feature vn-segment-vlan-based`
+/`feature bgp`）を出力するようにした。
+
 ## 関連ドキュメント
 
 - `docs/ipsec-cisco-cisco-verified.md` / `docs/ipoe-ipsec-verified.md`

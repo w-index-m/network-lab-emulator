@@ -156,3 +156,38 @@ class TestNotConfigured:
         _dev('nx-evpn-9')
         out = _cli('nx-evpn-9', 'show nve peers')
         assert 'NVEピアなし' in out
+
+
+class TestNexusDashboardApi:
+    """Nexus Dashboard風ファブリックビュー（/api/nexus/dashboard）"""
+
+    def test_vtep_and_vxlan_ready_reflect_full_config(self):
+        _dev('nx-evpn-10')
+        _run('nx-evpn-10', EVPN_SETUP)
+        r = client.get('/api/nexus/dashboard')
+        assert r.status_code == 200
+        data = r.json()
+        sw = next(s for s in data['switches'] if s['device_id'] == 'nx-evpn-10')
+        assert sw['role'] == 'VTEP'
+        assert sw['overlay_enabled'] is True
+        assert sw['vxlan_ready'] is True
+        assert sw['evpn_address_family'] is True
+        assert sw['advertise_all_vni'] is True
+        assert {'vlan': 10, 'vni': 10010} in sw['vlan_vni_map']
+        assert any(p['peer_ip'] == '10.0.0.2' for p in sw['nve_peers'])
+        vni_entry = next(v for v in data['vnis'] if v['vni'] == 10010)
+        assert 'nx-evpn-10' in vni_entry['switches']
+
+    def test_non_nexus_device_excluded(self):
+        _dev('evpn-cisco-1', type_='cisco')
+        r = client.get('/api/nexus/dashboard')
+        ids = [s['device_id'] for s in r.json()['switches']]
+        assert 'evpn-cisco-1' not in ids
+
+    def test_partial_config_is_not_vxlan_ready(self):
+        _dev('nx-evpn-11')
+        _run('nx-evpn-11', ['configure terminal', 'feature nv overlay', 'end'])
+        r = client.get('/api/nexus/dashboard')
+        sw = next(s for s in r.json()['switches'] if s['device_id'] == 'nx-evpn-11')
+        assert sw['overlay_enabled'] is True
+        assert sw['vxlan_ready'] is False

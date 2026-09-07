@@ -4947,7 +4947,9 @@ Configuration Revision            : 5"""
 
         # NX-OS: feature <name> / no feature <name>（show feature に反映）
         if state.device_type == 'nexus':
-            mf = re.match(r'^(no\s+)?feature\s+(\S+)', c)
+            # "nv overlay" はNX-OSで唯一の2語featureなので先に個別マッチ
+            mf = re.match(r'^(no\s+)?feature\s+(nv\s+overlay)$', c) or \
+                 re.match(r'^(no\s+)?feature\s+(\S+)', c)
             if mf:
                 if not hasattr(state, 'nx_features'):
                     state.nx_features = set()

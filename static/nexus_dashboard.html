@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nexus Dashboard 風 ファブリックビュー</title>
+<style>
+  :root {
+    --bg: #0a0e14;
+    --panel: #12161f;
+    --panel-2: #171c27;
+    --border: #232936;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --amber: #d29922;
+    --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: radial-gradient(circle at top, #131a26 0%, #0a0e14 60%);
+    color: var(--text);
+    font-family: 'Segoe UI', 'Hiragino Sans', 'メイリオ', sans-serif;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
+  }
+  header h1 {
+    font-size: 20px; font-weight: 600;
+    display: flex; align-items: center; gap: 10px;
+  }
+  header h1 .sub {
+    font-size: 12px; font-weight: 400; color: var(--text-dim);
+  }
+  .pulse-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--purple); box-shadow: 0 0 8px var(--purple);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .controls { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--text-dim); }
+  .controls select, .controls input[type=text] {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; font-size: 12px;
+  }
+  .stat-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px; margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .stat-card .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .5px; }
+  .stat-card .value { font-size: 26px; font-weight: 700; margin-top: 4px; }
+  .value.green { color: var(--green); }
+  .value.amber { color: var(--amber); }
+  .value.red   { color: var(--red); }
+  .value.purple { color: var(--purple); }
+
+  section { margin-bottom: 28px; }
+  section > h2 {
+    font-size: 13px; font-weight: 600; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: .6px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 8px;
+  }
+
+  .switch-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 16px;
+  }
+  .switch-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .switch-card .head {
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .switch-card .hostname { font-size: 15px; font-weight: 600; }
+  .switch-card .device-id { font-size: 11px; color: var(--text-dim); }
+  .role-badge {
+    font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px;
+    background: rgba(188,140,255,.15); color: var(--purple); letter-spacing: .4px;
+  }
+  .role-badge.none { background: rgba(139,148,158,.15); color: var(--text-dim); }
+  .status-badge {
+    font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px;
+    letter-spacing: .4px;
+  }
+  .status-badge.ready { background: rgba(63,185,80,.15); color: var(--green); }
+  .status-badge.partial { background: rgba(210,153,34,.15); color: var(--amber); }
+
+  .feature-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-size: 10px; padding: 2px 8px; border-radius: 999px;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text-dim);
+  }
+  .chip.on { color: var(--accent); border-color: rgba(88,166,255,.4); }
+
+  .kv-row { display: flex; justify-content: space-between; font-size: 12px; }
+  .kv-row span:first-child { color: var(--text-dim); }
+
+  table.mini {
+    width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px;
+  }
+  table.mini th {
+    text-align: left; color: var(--text-dim); font-weight: 500;
+    border-bottom: 1px solid var(--border); padding: 4px 6px;
+  }
+  table.mini td {
+    padding: 4px 6px; border-bottom: 1px solid var(--border);
+  }
+  table.mini tr:last-child td { border-bottom: none; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .dot.up { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.down { background: var(--red); }
+
+  .vni-table-wrap {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px; overflow-x: auto;
+  }
+  .vni-table-wrap table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .vni-table-wrap th {
+    text-align: left; color: var(--text-dim); font-weight: 500; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .4px;
+    border-bottom: 1px solid var(--border); padding: 8px 10px;
+  }
+  .vni-table-wrap td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  .vni-table-wrap tr:last-child td { border-bottom: none; }
+  .switch-tag {
+    font-size: 10px; background: var(--panel-2); border: 1px solid var(--border);
+    padding: 2px 6px; border-radius: 6px; margin-right: 4px; display: inline-block;
+    margin-bottom: 2px;
+  }
+
+  .empty { color: var(--text-dim); font-size: 13px; padding: 24px; text-align: center; }
+
+  .note {
+    font-size: 11px; color: var(--text-dim); border-top: 1px dashed var(--border);
+    padding-top: 10px; margin-top: 6px; line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>
+    <span class="pulse-dot"></span>
+    Nexus Dashboard 風 ファブリックビュー
+    <span class="sub">VXLAN EVPN ファブリック俯瞰（このエミュレータのNexus装置のみ集計）</span>
+  </h1>
+  <div class="controls">
+    <input id="filter-input" type="text" placeholder="hostname / device_id で絞り込み">
+    <span>更新間隔</span>
+    <select id="interval-select">
+      <option value="2000">2秒</option>
+      <option value="5000" selected>5秒</option>
+      <option value="10000">10秒</option>
+      <option value="30000">30秒</option>
+    </select>
+    <span>最終更新: <span id="last-poll">-</span></span>
+  </div>
+</header>
+
+<div id="stat-row" class="stat-row"></div>
+
+<section>
+  <h2>Switches（VTEPロール / Feature / EVPNアドレスファミリ）</h2>
+  <div id="switch-grid" class="switch-grid"></div>
+</section>
+
+<section>
+  <h2>VNI インベントリ（ファブリック全体）</h2>
+  <div class="vni-table-wrap">
+    <table id="vni-table"></table>
+  </div>
+  <div class="note">
+    このビューは実際のCisco Nexus Dashboard（Fabric Controller）のAPI/データモデルを
+    再現したものではなく、エミュレータ内のNexus装置に投入されたCLI設定
+    （<code>feature nv overlay</code> / <code>evpn</code> / <code>interface nve1</code> /
+    <code>address-family l2vpn evpn</code> 等）をダッシュボード形式に投影したものです。
+    「VXLAN Ready」は feature nv overlay が有効・nve1が構成済み・
+    address-family l2vpn evpnが有効の3条件が揃っている状態を指し、
+    実際にBGP EVPN NLRIが交換されていることを意味しません
+    （詳細は <code>docs/evpn-vxlan-nexus.md</code> 参照）。
+  </div>
+</section>
+
+<script>
+const SESSION_KEY = 'netlabToken_v1';
+function getToken() {
+  try {
+    return localStorage.getItem(SESSION_KEY) ||
+           new URLSearchParams(location.search).get('token') || '';
+  } catch (e) { return ''; }
+}
+
+function render(data) {
+  const filter = document.getElementById('filter-input').value.trim().toLowerCase();
+  const switches = data.switches.filter(s =>
+    !filter || s.hostname.toLowerCase().includes(filter) || s.device_id.toLowerCase().includes(filter)
+  );
+
+  document.getElementById('stat-row').innerHTML = `
+    <div class="stat-card"><div class="label">Switches</div><div class="value">${data.fabric.switch_count}</div></div>
+    <div class="stat-card"><div class="label">VTEPs</div><div class="value purple">${data.fabric.vtep_count}</div></div>
+    <div class="stat-card"><div class="label">VNIs</div><div class="value">${data.fabric.vni_count}</div></div>
+    <div class="stat-card"><div class="label">VXLAN Ready</div><div class="value ${data.fabric.vxlan_ready_count > 0 ? 'green' : ''}">${data.fabric.vxlan_ready_count}</div></div>
+  `;
+
+  const grid = document.getElementById('switch-grid');
+  if (switches.length === 0) {
+    grid.innerHTML = '<div class="empty">Nexus装置が見つかりません（device_type: nexus の装置を作成してください）</div>';
+  } else {
+    grid.innerHTML = switches.map(s => {
+      const featureChips = ['nv overlay', 'vn-segment-vlan-based', 'bgp']
+        .map(f => `<span class="chip ${s.features.includes(f) ? 'on' : ''}">${f}</span>`).join('');
+
+      const peerRows = s.nve_peers.length ? s.nve_peers.map(p => `
+        <tr>
+          <td><span class="dot up"></span>${p.interface}</td>
+          <td>${p.peer_ip}</td>
+          <td>${p.state}</td>
+        </tr>`).join('') : `<tr><td colspan="3" style="color:var(--text-dim)">NVEピアなし</td></tr>`;
+
+      return `
+        <div class="switch-card">
+          <div class="head">
+            <div>
+              <div class="hostname">${s.hostname}</div>
+              <div class="device-id">${s.device_id}</div>
+            </div>
+            <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+              <span class="role-badge ${s.role === 'VTEP' ? '' : 'none'}">${s.role}</span>
+              <span class="status-badge ${s.vxlan_ready ? 'ready' : 'partial'}">${s.vxlan_ready ? 'VXLAN READY' : 'PARTIAL'}</span>
+            </div>
+          </div>
+          <div class="feature-chips">${featureChips}</div>
+          <div class="kv-row"><span>BGP ASN</span><span>${s.bgp_asn ?? '-'}</span></div>
+          <div class="kv-row"><span>address-family l2vpn evpn</span><span>${s.evpn_address_family ? '有効' : '未設定'}</span></div>
+          <div class="kv-row"><span>advertise-all-vni</span><span>${s.advertise_all_vni ? '有効' : '無効'}</span></div>
+          <table class="mini">
+            <thead><tr><th>NVE Interface</th><th>Peer IP</th><th>State</th></tr></thead>
+            <tbody>${peerRows}</tbody>
+          </table>
+        </div>`;
+    }).join('');
+  }
+
+  const vniTable = document.getElementById('vni-table');
+  if (data.vnis.length === 0) {
+    vniTable.innerHTML = '<tr><td class="empty">VNI未設定</td></tr>';
+  } else {
+    vniTable.innerHTML = `
+      <thead><tr><th>VNI</th><th>L2VPN EVPN</th><th>参加スイッチ</th></tr></thead>
+      <tbody>
+        ${data.vnis.map(v => `
+          <tr>
+            <td>${v.vni}</td>
+            <td>${v.l2vpn_evpn ? '有効' : '-'}</td>
+            <td>${v.switches.map(sid => `<span class="switch-tag">${sid}</span>`).join('')}</td>
+          </tr>`).join('')}
+      </tbody>`;
+  }
+}
+
+async function poll() {
+  try {
+    const token = getToken();
+    const res = await fetch('/api/nexus/dashboard', {
+      headers: token ? { 'X-Session-Token': token } : {}
+    });
+    if (!res.ok) {
+      document.getElementById('switch-grid').innerHTML =
+        `<div class="empty">取得失敗 (HTTP ${res.status})${res.status === 401 ? ' — ログインが必要です' : ''}</div>`;
+      return;
+    }
+    const data = await res.json();
+    render(data);
+    document.getElementById('last-poll').textContent = new Date().toLocaleTimeString('ja-JP');
+  } catch (e) {
+    document.getElementById('switch-grid').innerHTML = `<div class="empty">接続エラー: ${e}</div>`;
+  }
+}
+
+let timer = null;
+function restartTimer() {
+  if (timer) clearInterval(timer);
+  const ms = parseInt(document.getElementById('interval-select').value, 10);
+  timer = setInterval(poll, ms);
+}
+
+document.getElementById('interval-select').addEventListener('change', restartTimer);
+document.getElementById('filter-input').addEventListener('input', poll);
+
+poll();
+restartTimer();
+</script>
+</body>
+</html>
