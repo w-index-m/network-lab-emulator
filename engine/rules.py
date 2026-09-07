@@ -753,6 +753,8 @@ class RuleEngine:
         # モード遷移
         if c in ("exit", "end", "quit"):
             return self._cmd_exit(cmd, state)
+        if c == "exit-address-family" and state.mode == "config-bgp-af":
+            return self._cmd_exit(cmd, state)
         # Cisco/Catalyst/SR-S: t または terminal が必須
         if state.device_type in ("catalyst", "cisco", "srs"):
             if c in ("configure terminal", "conf t", "conf terminal",
@@ -784,6 +786,21 @@ class RuleEngine:
         if re.match(r'^bba-group\s+pppoe\s+\S+', c) and state.mode == "config" \
                 and state.device_type in ("cisco", "catalyst", "srs"):
             return self._cmd_bba_mode(cmd, state)
+        # EVPN/VXLAN: evpn グローバルサブモード（Nexus）
+        if c == 'evpn' and state.mode == "config" and state.device_type == 'nexus':
+            state.mode = 'config-evpn'
+            return ""
+        # EVPN/VXLAN: router bgp 配下の address-family l2vpn evpn サブモード
+        if re.match(r'^address-family\s+l2vpn\s+evpn', c) and state.mode == "config-router":
+            if not hasattr(state, 'bgp') or not isinstance(state.bgp, dict):
+                state.bgp = {"asn": None, "router_id": "", "neighbors": []}
+            state.bgp.setdefault('l2vpn_evpn', {
+                'enabled': False, 'activated_neighbors': set(),
+                'advertise_all_vni': False,
+            })
+            state.bgp['l2vpn_evpn']['enabled'] = True
+            state.mode = 'config-bgp-af'
+            return ""
 
         # ISSU の show（show install / show issu）は専用ハンドラ優先
         if (re.match(r'^show\s+(install|issu)\b', c) and
@@ -815,7 +832,9 @@ class RuleEngine:
         if state.mode in ("config", "config-if", "config-router", "config-vlan",
                           "config-crypto", "config-monitor",
                           "config-cmap", "config-pmap", "config-pmap-c",
-                          "config-vs-domain", "config-dhcp", "config-bba"):
+                          "config-vs-domain", "config-dhcp", "config-bba",
+                          "config-evpn", "config-evpn-vni", "config-nve-vni",
+                          "config-bgp-af"):
             return self._cmd_config(cmd, state)
 
         # ── ISSU / ソフトウェアアップグレード（Catalyst / Nexus）──
@@ -857,11 +876,25 @@ class RuleEngine:
             state.mode = "config-pmap"
             if hasattr(state, '_qos_class'):
                 delattr(state, '_qos_class')
+        # EVPN/VXLAN: ネストしたサブモードは一段だけ戻す
+        elif state.mode == "config-nve-vni":
+            # interface nve1 配下の member vni サブモード → interface(config-if)へ
+            state.mode = "config-if"
+            if hasattr(state, '_nve_member_vni'):
+                delattr(state, '_nve_member_vni')
+        elif state.mode == "config-evpn-vni":
+            # evpn 配下の vni <n> l2 サブモード → evpn サブモードへ
+            state.mode = "config-evpn"
+            if hasattr(state, '_evpn_vni'):
+                delattr(state, '_evpn_vni')
+        elif state.mode == "config-bgp-af":
+            # router bgp 配下の address-family サブモード → router bgpへ
+            state.mode = "config-router"
         elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
                              "config-crypto", "config-monitor",
                              "config-cmap", "config-pmap", "config-vs-domain",
                              "config-dhcp", "config-sg-tacacs", "config-ext-nacl",
-                             "config-bba"):
+                             "config-bba", "config-evpn"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
@@ -937,6 +970,17 @@ class RuleEngine:
                     }
                 else:
                     state.interfaces[ifname]['status'] = 'up'
+            # nve（VXLAN EVPNのオーバーレイ終端インタフェース）は
+            # 存在しなければ作成し、常にup扱い
+            elif ifname.lower().startswith('nve'):
+                if ifname not in state.interfaces:
+                    state.interfaces[ifname] = {
+                        'ip': '', 'prefix': 0, 'status': 'up',
+                        'speed': '', 'duplex': '', 'desc': '',
+                        'type': 'NVE',
+                    }
+                else:
+                    state.interfaces[ifname]['status'] = 'up'
         return ""
 
     def _cmd_router_mode(self, cmd, state):
@@ -975,6 +1019,7 @@ class RuleEngine:
             vid = int(m.group(1))
             if vid not in state.vlans:
                 state.vlans[vid] = {"name": f"VLAN{vid:04d}", "status": "active", "ports": []}
+            state._current_vlan = vid
             state.mode = "config-vlan"
         return ""
 
@@ -1139,6 +1184,13 @@ class RuleEngine:
             return self._format_show_pppoe_session(state)
         if re.match(r'^show\s+ip\s+local\s+pool', c):
             return self._format_show_ip_local_pool(state)
+        # ── show EVPN/VXLAN関連（Nexus）──
+        if re.match(r'^show\s+nve\s+peers', c):
+            return self._format_show_nve_peers(state)
+        if re.match(r'^show\s+nve\s+vni', c):
+            return self._format_show_nve_vni(state)
+        if re.match(r'^show\s+bgp\s+l2vpn\s+evpn', c):
+            return self._format_show_bgp_l2vpn_evpn(state)
         # ── show ip verify source（IP Source Guard）──
         if re.match(r'^show\s+ip\s+verify\s+source', c):
             return self._format_show_ip_verify(state)
@@ -4567,6 +4619,156 @@ Configuration Revision            : 5"""
             out.append(f'{name:<17}{p["start"]:<21}{p["end"]:<20}0     0')
         return '\n'.join(out)
 
+    # ════════════════════════════════════════════
+    # EVPN/VXLAN（Nexus: nve1 / evpn / address-family l2vpn evpn）
+    # ════════════════════════════════════════════
+    def _cmd_evpn(self, cmd, state):
+        if state.device_type != 'nexus':
+            return None
+        c = cmd.lower().strip()
+        if not hasattr(state, 'nve'): state.nve = {}
+        if not hasattr(state, 'vlan_vn_segment'): state.vlan_vn_segment = {}
+        if not hasattr(state, 'evpn_vnis'): state.evpn_vnis = {}
+
+        # config-evpn サブモード: vni <n> l2 → config-evpn-vni へ
+        if state.mode == 'config-evpn':
+            m = re.match(r'^vni\s+(\d+)\s+l2$', c)
+            if m:
+                vni = int(m.group(1))
+                state.evpn_vnis.setdefault(vni, {'rd': '', 'rt_import': '', 'rt_export': ''})
+                state._evpn_vni = vni
+                state.mode = 'config-evpn-vni'
+                return ""
+            return None
+
+        # config-evpn-vni サブモード: rd / route-target
+        if state.mode == 'config-evpn-vni':
+            vni = getattr(state, '_evpn_vni', None)
+            v = state.evpn_vnis.get(vni) if vni is not None else None
+            if v is None:
+                return ""
+            if re.match(r'^rd\s+auto$', c):
+                v['rd'] = 'auto'
+                return ""
+            m = re.match(r'^route-target\s+(import|export|both)\s+auto$', c)
+            if m:
+                which = m.group(1)
+                if which in ('import', 'both'):
+                    v['rt_import'] = 'auto'
+                if which in ('export', 'both'):
+                    v['rt_export'] = 'auto'
+                return ""
+            return None
+
+        # interface nve<n> 配下: source-interface / member vni
+        _cif = getattr(state, 'current_if', '') or ''
+        if _cif.lower().startswith('nve'):
+            nve = state.nve.setdefault(_cif, {'source_interface': '', 'members': {}})
+            m = re.match(r'^source-interface\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                nve['source_interface'] = self._resolve_ifname(m.group(1), state)
+                return ""
+            m = re.match(r'^member\s+vni\s+(\d+)(\s+associate-vrf)?', c)
+            if m:
+                vni = int(m.group(1))
+                nve['members'].setdefault(vni, {
+                    'associate_vrf': bool(m.group(2)),
+                    'ingress_replication': False, 'mcast_group': '',
+                })
+                state._nve_member_vni = vni
+                state.mode = 'config-nve-vni'
+                return ""
+
+        # config-nve-vni サブモード: ingress-replication / mcast-group
+        if state.mode == 'config-nve-vni':
+            vni = getattr(state, '_nve_member_vni', None)
+            nve = state.nve.get(_cif)
+            member = nve['members'].get(vni) if nve and vni is not None else None
+            if member is None:
+                return ""
+            if re.match(r'^ingress-replication\s+protocol\s+bgp$', c):
+                member['ingress_replication'] = True
+                return ""
+            m = re.match(r'^mcast-group\s+([\d.]+)', c)
+            if m:
+                member['mcast_group'] = m.group(1)
+                return ""
+            return None
+
+        # config-vlan サブモード: vn-segment <vni>
+        if state.mode == 'config-vlan':
+            m = re.match(r'^vn-segment\s+(\d+)', c)
+            if m:
+                vid = getattr(state, '_current_vlan', None)
+                if vid is not None:
+                    state.vlan_vn_segment[vid] = int(m.group(1))
+                return ""
+
+        # config-bgp-af（address-family l2vpn evpn）サブモード
+        if state.mode == 'config-bgp-af':
+            m = re.match(r'^neighbor\s+([\d.]+)\s+activate$', c)
+            if m and isinstance(getattr(state, 'bgp', None), dict):
+                state.bgp.setdefault('l2vpn_evpn', {
+                    'enabled': True, 'activated_neighbors': set(),
+                    'advertise_all_vni': False,
+                })['activated_neighbors'].add(m.group(1))
+                return ""
+            if c == 'advertise-all-vni' and isinstance(getattr(state, 'bgp', None), dict):
+                state.bgp.setdefault('l2vpn_evpn', {
+                    'enabled': True, 'activated_neighbors': set(),
+                    'advertise_all_vni': False,
+                })['advertise_all_vni'] = True
+                return ""
+            return None
+
+        return None
+
+    def _format_show_nve_peers(self, state):
+        rows = []
+        for ifname, nve in getattr(state, 'nve', {}).items():
+            if not nve.get('source_interface'):
+                continue
+            bgp = getattr(state, 'bgp', None) or {}
+            for peer_ip in sorted(bgp.get('l2vpn_evpn', {}).get('activated_neighbors', [])):
+                rows.append((ifname, peer_ip))
+        if not rows:
+            return 'Interface  Peer-IP          State LearnType Uptime   Router-Mac\n(NVEピアなし)'
+        out = ['Interface  Peer-IP          State LearnType Uptime   Router-Mac']
+        for ifname, peer_ip in rows:
+            out.append(f'{ifname:<11}{peer_ip:<17}Up    CP        00:00:10 n/a')
+        return '\n'.join(out)
+
+    def _format_show_nve_vni(self, state):
+        rows = []
+        for ifname, nve in getattr(state, 'nve', {}).items():
+            for vni, m in sorted(nve.get('members', {}).items()):
+                rows.append((ifname, vni, m))
+        if not rows:
+            return 'Interface VNI      Multicast-group  State Mode Type [BD/VRF]  Flags\n(VNI未設定)'
+        out = ['Interface VNI      Multicast-group  State Mode Type [BD/VRF]  Flags']
+        for ifname, vni, m in rows:
+            mcast = m.get('mcast_group') or 'n/a'
+            kind = 'L3' if m.get('associate_vrf') else 'L2'
+            mode = 'CP' if m.get('ingress_replication') else 'MCAST'
+            out.append(f'{ifname:<10}{vni:<9}{mcast:<17}Up    {mode:<5}{kind}')
+        return '\n'.join(out)
+
+    def _format_show_bgp_l2vpn_evpn(self, state):
+        bgp = getattr(state, 'bgp', None) or {}
+        af = bgp.get('l2vpn_evpn')
+        if not af or not af.get('enabled'):
+            return '% BGP l2vpn evpn address-family is not configured'
+        out = [f'BGP summary information for VRF default, address family L2VPN EVPN',
+               f'BGP router identifier {bgp.get("router_id") or "0.0.0.0"}, '
+               f'local AS number {bgp.get("asn") or "?"}',
+               'Neighbor        V    AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd']
+        for peer_ip in sorted(af.get('activated_neighbors', [])):
+            out.append(f'{peer_ip:<16}4 {bgp.get("asn") or "?":<5} {0:<7} {0:<7} {0:<8} {0:<4} {0:<4} 00:00:10  0')
+        if af.get('advertise_all_vni'):
+            out.append('')
+            out.append('advertise-all-vni: enabled')
+        return '\n'.join(out)
+
     def _format_show_dhcp_pool(self, state):
         pools = getattr(state, 'dhcp_pools', {})
         if not pools:
@@ -4778,6 +4980,11 @@ Configuration Revision            : 5"""
         pppoe_out = self._cmd_pppoe(cmd, state)
         if pppoe_out is not None:
             return pppoe_out
+
+        # ── EVPN/VXLAN（Nexus: nve / evpn / address-family l2vpn evpn）──
+        evpn_out = self._cmd_evpn(cmd, state)
+        if evpn_out is not None:
+            return evpn_out
 
         # ── port-security 詳細 ──
         ps_out = self._cmd_port_security(cmd, state)

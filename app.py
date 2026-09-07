@@ -3358,11 +3358,29 @@ def _build_running_config(device_id: str, state) -> str:
         lines.append(f'hostname {state.hostname}')
         lines.append('')
         # VLANs
+        _vn_seg = getattr(state, 'vlan_vn_segment', {})
         for vid, vinfo in sorted(vlan_engine.vlans.get(device_id, {}).items()):
             lines.append(f'vlan {vid}')
             if vinfo.name and vinfo.name != f'VLAN{vid:04d}':
                 lines.append(f'  name {vinfo.name}')
+            if vid in _vn_seg:
+                lines.append(f'  vn-segment {_vn_seg[vid]}')
         if vlan_engine.vlans.get(device_id):
+            lines.append('')
+        # EVPN（VXLANのコントロールプレーン設定）
+        evpn_vnis = getattr(state, 'evpn_vnis', {})
+        if evpn_vnis:
+            lines.append('evpn')
+            for vni, v in sorted(evpn_vnis.items()):
+                lines.append(f'  vni {vni} l2')
+                if v.get('rd'):
+                    lines.append(f'    rd {v["rd"]}')
+                if v.get('rt_import') and v.get('rt_export'):
+                    lines.append('    route-target both auto')
+                elif v.get('rt_import'):
+                    lines.append('    route-target import auto')
+                elif v.get('rt_export'):
+                    lines.append('    route-target export auto')
             lines.append('')
         # vPC domain
         lines.extend(vpc_engine.get_running_config(device_id))
@@ -3380,6 +3398,18 @@ def _build_running_config(device_id: str, state) -> str:
             if iinfo.get('ospf_area'):
                 body.append(f'  ip router ospf {iinfo.get("ospf_process", 1)} '
                             f'area {iinfo["ospf_area"]}')
+            # nve（VXLAN EVPNのオーバーレイ終端インタフェース）
+            _nve = getattr(state, 'nve', {}).get(ifname)
+            if _nve:
+                if _nve.get('source_interface'):
+                    body.append(f'  source-interface {_nve["source_interface"]}')
+                for vni, m in sorted(_nve.get('members', {}).items()):
+                    suffix = ' associate-vrf' if m.get('associate_vrf') else ''
+                    body.append(f'  member vni {vni}{suffix}')
+                    if m.get('ingress_replication'):
+                        body.append('    ingress-replication protocol bgp')
+                    if m.get('mcast_group'):
+                        body.append(f'    mcast-group {m["mcast_group"]}')
             if not body:
                 continue
             lines.append(f'interface {ifname}')
@@ -3407,6 +3437,13 @@ def _build_running_config(device_id: str, state) -> str:
             for nbr_ip, remote_as in getattr(state, '_bgp_configured_neighbors', {}).items():
                 if nbr_ip not in shown_neighbor_ips:
                     lines.append(f'  neighbor {nbr_ip} remote-as {remote_as}')
+            _af = getattr(state, 'bgp', {}).get('l2vpn_evpn') if isinstance(getattr(state, 'bgp', None), dict) else None
+            if _af and _af.get('enabled'):
+                lines.append('  address-family l2vpn evpn')
+                for nbr_ip in sorted(_af.get('activated_neighbors', [])):
+                    lines.append(f'    neighbor {nbr_ip} activate')
+                if _af.get('advertise_all_vni'):
+                    lines.append('    advertise-all-vni')
             lines.append('')
         # TACACS+ / AAA
         if getattr(state, 'tacacs_feature_enabled', False):
