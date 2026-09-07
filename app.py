@@ -3476,6 +3476,16 @@ def _build_running_config(device_id: str, state) -> str:
                     lines.append(' switchport mode trunk')
                 else:
                     lines.append(' no ip address')
+                # PPPoEサーバ: Virtual-Template配下の設定
+                if iinfo.get('unnumbered'):
+                    lines.append(f' ip unnumbered {iinfo["unnumbered"]}')
+                if iinfo.get('peer_pool'):
+                    lines.append(f' peer default ip address pool {iinfo["peer_pool"]}')
+                if iinfo.get('ppp_auth'):
+                    lines.append(f' ppp authentication {iinfo["ppp_auth"]}')
+                # PPPoEサーバ: 物理インタフェースへのbba-group適用
+                if iinfo.get('pppoe_group'):
+                    lines.append(f' pppoe enable group {iinfo["pppoe_group"]}')
                 # STP portfast / bpduguard
                 pcfg = stp_engine.port_config.get(device_id, {}).get(ifname, {})
                 stp_n = stp_engine.nodes.get(device_id, {})
@@ -3507,6 +3517,17 @@ def _build_running_config(device_id: str, state) -> str:
                 lines.append(f' ip address {iinfo["ip"]} {mask}')
                 lines.append(' no shutdown')
                 lines.append('!')
+        # ip local pool（PPPoE等のアドレスプール）
+        for pname, p in getattr(state, 'ip_local_pools', {}).items():
+            lines.append(f'ip local pool {pname} {p["start"]} {p["end"]}')
+        # bba-group pppoe（PPPoEサーバ）
+        for gname, g in getattr(state, 'bba_groups', {}).items():
+            lines.append('!')
+            lines.append(f'bba-group pppoe {gname}')
+            if g.get('virtual_template') is not None:
+                lines.append(f' virtual-template {g["virtual_template"]}')
+            if g.get('sessions_per_mac'):
+                lines.append(f' sessions per-mac limit {g["sessions_per_mac"]}')
         # ACL適用済みインタフェース
         # スタティックルート
         rib_node = rib_engine.nodes.get(device_id)

@@ -780,6 +780,10 @@ class RuleEngine:
             return self._cmd_router_mode(cmd, state)
         if re.match(r'^vlan\s+\d+$', c) and state.mode == "config":
             return self._cmd_vlan_mode(cmd, state)
+        # PPPoEサーバ: bba-group pppoe <name> → 専用サブモード
+        if re.match(r'^bba-group\s+pppoe\s+\S+', c) and state.mode == "config" \
+                and state.device_type in ("cisco", "catalyst", "srs"):
+            return self._cmd_bba_mode(cmd, state)
 
         # ISSU の show（show install / show issu）は専用ハンドラ優先
         if (re.match(r'^show\s+(install|issu)\b', c) and
@@ -811,7 +815,7 @@ class RuleEngine:
         if state.mode in ("config", "config-if", "config-router", "config-vlan",
                           "config-crypto", "config-monitor",
                           "config-cmap", "config-pmap", "config-pmap-c",
-                          "config-vs-domain", "config-dhcp"):
+                          "config-vs-domain", "config-dhcp", "config-bba"):
             return self._cmd_config(cmd, state)
 
         # ── ISSU / ソフトウェアアップグレード（Catalyst / Nexus）──
@@ -856,12 +860,13 @@ class RuleEngine:
         elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
                              "config-crypto", "config-monitor",
                              "config-cmap", "config-pmap", "config-vs-domain",
-                             "config-dhcp", "config-sg-tacacs", "config-ext-nacl"):
+                             "config-dhcp", "config-sg-tacacs", "config-ext-nacl",
+                             "config-bba"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
                          '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool',
-                         '_aaa_group_name', '_current_acl_name'):
+                         '_aaa_group_name', '_current_acl_name', '_bba_group'):
                 if hasattr(state, attr):
                     delattr(state, attr)
         elif state.mode == "config":
@@ -920,6 +925,18 @@ class RuleEngine:
                         'speed': '', 'duplex': '', 'desc': '',
                         'type': 'SVI',
                     }
+            # Virtual-Template（PPPoEサーバのセッション雛形IF）は
+            # 存在しなければ作成し、Loopback同様常にup扱い
+            elif ifname.lower().startswith('virtual-template'):
+                if ifname not in state.interfaces:
+                    state.interfaces[ifname] = {
+                        'ip': '', 'prefix': 0, 'status': 'up',
+                        'speed': '', 'duplex': '', 'desc': '',
+                        'type': 'Virtual-Access',
+                        'unnumbered': '', 'peer_pool': '', 'ppp_auth': '',
+                    }
+                else:
+                    state.interfaces[ifname]['status'] = 'up'
         return ""
 
     def _cmd_router_mode(self, cmd, state):
@@ -959,6 +976,18 @@ class RuleEngine:
             if vid not in state.vlans:
                 state.vlans[vid] = {"name": f"VLAN{vid:04d}", "status": "active", "ports": []}
             state.mode = "config-vlan"
+        return ""
+
+    def _cmd_bba_mode(self, cmd, state):
+        """PPPoEサーバ: bba-group pppoe <name> サブモード（実機のBBA構文）。"""
+        m = re.match(r'^bba-group\s+pppoe\s+(\S+)', cmd, re.I)
+        if m:
+            name = m.group(1)
+            if not hasattr(state, 'bba_groups'):
+                state.bba_groups = {}
+            state.bba_groups.setdefault(name, {'virtual_template': None})
+            state._bba_group = name
+            state.mode = "config-bba"
         return ""
 
     # ─── show コマンド ────────────────────────
@@ -1103,6 +1132,13 @@ class RuleEngine:
             return self._format_show_dhcp_pool(state)
         if re.match(r'^show\s+ip\s+dhcp\s+binding', c):
             return self._format_show_dhcp_binding(state)
+        # ── show PPPoEサーバ関連 ──
+        if re.match(r'^show\s+bba-group', c):
+            return self._format_show_bba_group(state)
+        if re.match(r'^show\s+pppoe\s+session', c):
+            return self._format_show_pppoe_session(state)
+        if re.match(r'^show\s+ip\s+local\s+pool', c):
+            return self._format_show_ip_local_pool(state)
         # ── show ip verify source（IP Source Guard）──
         if re.match(r'^show\s+ip\s+verify\s+source', c):
             return self._format_show_ip_verify(state)
@@ -4431,6 +4467,106 @@ Configuration Revision            : 5"""
             return None
         return None
 
+    # ════════════════════════════════════════════
+    # PPPoEサーバ（bba-group / Virtual-Template / ip local pool）
+    # ════════════════════════════════════════════
+    def _cmd_pppoe(self, cmd, state):
+        if state.device_type not in ('cisco', 'catalyst', 'srs'):
+            return None
+        c = cmd.lower().strip()
+        if not hasattr(state, 'ip_local_pools'): state.ip_local_pools = {}
+
+        # ip local pool <name> <start> [<end>]（PPPoE/VPN等のアドレスプール）
+        m = re.match(r'^ip\s+local\s+pool\s+(\S+)\s+([\d.]+)(?:\s+([\d.]+))?', cmd.strip(), re.I)
+        if m and state.mode == 'config':
+            name, start, end = m.group(1), m.group(2), m.group(3) or m.group(2)
+            state.ip_local_pools[name] = {'start': start, 'end': end}
+            return ""
+
+        # config-bba サブモード: virtual-template <n>
+        if state.mode == 'config-bba':
+            m = re.match(r'^virtual-template\s+(\d+)', c)
+            if m:
+                grp = state.bba_groups.get(getattr(state, '_bba_group', ''))
+                if grp is not None:
+                    grp['virtual_template'] = int(m.group(1))
+                return ""
+            m = re.match(r'^sessions\s+per-mac\s+limit\s+(\d+)', c)
+            if m:
+                grp = state.bba_groups.get(getattr(state, '_bba_group', ''))
+                if grp is not None:
+                    grp['sessions_per_mac'] = int(m.group(1))
+                return ""
+            return None
+
+        # interface config: Virtual-Template 配下の PPP/アドレスプール設定
+        _cif = getattr(state, 'current_if', '') or ''
+        if _cif.lower().startswith('virtual-template'):
+            info = state.interfaces.setdefault(_cif, {})
+            m = re.match(r'^ip\s+unnumbered\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                info['unnumbered'] = m.group(1)
+                return ""
+            m = re.match(r'^peer\s+default\s+ip\s+address\s+pool\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                info['peer_pool'] = m.group(1)
+                return ""
+            m = re.match(r'^ppp\s+authentication\s+(.+)', c)
+            if m:
+                info['ppp_auth'] = m.group(1).strip()
+                return ""
+
+        # 物理インターフェース: pppoe enable [group <name>]
+        m = re.match(r'^pppoe\s+enable(?:\s+group\s+(\S+))?', cmd.strip(), re.I)
+        if m and _cif and not _cif.lower().startswith('virtual-template'):
+            info = state.interfaces.setdefault(_cif, {})
+            info['pppoe_group'] = m.group(1) or 'global'
+            return ""
+
+        return None
+
+    def _format_show_bba_group(self, state):
+        groups = getattr(state, 'bba_groups', {})
+        if not groups:
+            return '% No BBA groups configured.'
+        out = []
+        for name, g in groups.items():
+            out.append(f'bba-group pppoe {name}')
+            vt = g.get('virtual_template')
+            out.append(f' virtual-template {vt if vt is not None else "(未設定)"}')
+            if g.get('sessions_per_mac'):
+                out.append(f' sessions per-mac limit {g["sessions_per_mac"]}')
+        return '\n'.join(out)
+
+    def _format_show_pppoe_session(self, state):
+        groups = getattr(state, 'bba_groups', {})
+        bound_ifaces = [name for name, i in state.interfaces.items()
+                        if i.get('pppoe_group')]
+        if not groups or not bound_ifaces:
+            return '  0 sessions'
+        header = ('   Uniq ID  PPPoE  RemMAC          Port                    VT VA        State\n'
+                   '           SID    LocMAC          VA-st, VA-vaccess')
+        rows = []
+        for ifname in bound_ifaces:
+            grp_name = state.interfaces[ifname]['pppoe_group']
+            grp = groups.get(grp_name)
+            if not grp or grp.get('virtual_template') is None:
+                continue
+            vt = f'Vi{grp["virtual_template"]}'
+            rows.append(f'   1        1      0000.0000.0001  {ifname:<24}{vt}         UP')
+        if not rows:
+            return '  0 sessions'
+        return header + '\n' + '\n'.join(rows)
+
+    def _format_show_ip_local_pool(self, state):
+        pools = getattr(state, 'ip_local_pools', {})
+        if not pools:
+            return '% No local pools configured.'
+        out = ['Pool             Begin                End                 Free  In use']
+        for name, p in pools.items():
+            out.append(f'{name:<17}{p["start"]:<21}{p["end"]:<20}0     0')
+        return '\n'.join(out)
+
     def _format_show_dhcp_pool(self, state):
         pools = getattr(state, 'dhcp_pools', {})
         if not pools:
@@ -4637,6 +4773,11 @@ Configuration Revision            : 5"""
         dhcp_out = self._cmd_dhcp(cmd, state)
         if dhcp_out is not None:
             return dhcp_out
+
+        # ── PPPoEサーバ（bba-group / Virtual-Template / pppoe enable）──
+        pppoe_out = self._cmd_pppoe(cmd, state)
+        if pppoe_out is not None:
+            return pppoe_out
 
         # ── port-security 詳細 ──
         ps_out = self._cmd_port_security(cmd, state)
