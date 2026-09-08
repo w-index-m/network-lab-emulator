@@ -227,6 +227,54 @@ catalyst`である限り両者は同じ挙動になる。実機での機種差�
 実際の装置の`show version` / `show restconf`の結果を別途照合する
 必要がある。
 
+## johann (flopach/johann-network-device-monitoring) を参考にした追加機能
+
+Cisco IOS-XE向けのOSS監視ツール
+[flopach/johann-network-device-monitoring](https://github.com/flopach/johann-network-device-monitoring)
+の設計を参考に、3つの機能を追加した。
+
+### 1. CSV一括デバイス登録（`tools/bulk_device_import.py`）
+
+johannの「CSVで複数デバイスを一括追加」機能を参考にした、
+このエミュレータの`/api/device`・`/api/link`向けCSVインポートツール。
+
+```bash
+python tools/bulk_device_import.py samples/bulk_import_example_devices.csv \
+  --links samples/bulk_import_example_links.csv \
+  --base-url http://127.0.0.1:8000
+```
+
+装置CSV（列: `id,type,hostname`）とリンクCSV（列: `a,b,iface_a,iface_b`）
+を分けて指定する。`--no-auth`で`NETLAB_AUTH_DISABLE=1`のサーバー向けに
+ログインをスキップできる。実際に3台・リンク2本を一括投入して動作確認済み。
+
+### 2. RESTCONFダッシュボードの時系列グラフ化
+
+johannのレポート/グラフ機能（Matplotlib）を参考に、SNMPダッシュボード
+（`snmp_dashboard.html`）で使っていたsparkline SVGの仕組みを移植。
+サーバー側で`/api/restconf/dashboard`がポーリングされるたびに
+device_idごとの`{t, up, down}`を直近60件分バッファし（`_restconf_history`、
+`_metrics_history`と同じ`deque(maxlen=60)`方式）、各装置カードに
+「Interfaces Up 推移」のスパークラインとして表示する。
+
+### 3. ダッシュボードからのshutdown/no shutdown操作
+
+johannの「RESTCONF設定ツール」を参考に、各インタフェース行に
+`shutdown`/`no shutdown`ボタンを追加。クリックすると
+`PUT /restconf/{device_id}/data/ietf-interfaces:interfaces/interface={ifname}`
+を直接叩く。RESTCONF本体はHTTP Basic認証のままのため、ダッシュボード上部の
+「設定する」ボタンでユーザー名/パスワードを入力し、**ブラウザの
+sessionStorageにのみ**保存する設計にした（サーバーには送らない・
+保存しない）。
+
+### 実際に確認した動作
+
+Playwrightで実際にブラウザ操作を再現し、資格情報設定→
+`GigabitEthernet1/0/1`の`no shutdown`ボタンをクリック→
+ボタン表示が`shutdown`に切り替わり、ドットが緑になることを
+スクリーンショットで確認した。裏側では実際にPUTリクエストが
+飛び、`state.interfaces`が書き換わっている。
+
 ## 関連ドキュメント
 
 - `docs/evpn-vxlan-nexus.md` — 同時期に実装したNexus Dashboard風ビュー

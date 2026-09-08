@@ -27,7 +27,7 @@
   }
   header {
     display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
+    margin-bottom: 16px; flex-wrap: wrap; gap: 12px;
   }
   header h1 {
     font-size: 20px; font-weight: 600;
@@ -45,6 +45,21 @@
     background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
     padding: 6px 10px; border-radius: 6px; font-size: 12px;
   }
+
+  .cred-bar {
+    display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-dim);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 14px; margin-bottom: 20px;
+  }
+  .cred-bar button, .action-btn {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer;
+  }
+  .cred-bar button:hover, .action-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .cred-status { font-weight: 600; }
+  .cred-status.set { color: var(--green); }
+  .cred-status.unset { color: var(--amber); }
+
   .stat-row {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 12px; margin-bottom: 24px;
@@ -60,7 +75,7 @@
   .value.red   { color: var(--red); }
 
   .device-grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
     gap: 16px;
   }
   .device-card {
@@ -79,7 +94,13 @@
   .kv-row { display: flex; justify-content: space-between; font-size: 12px; }
   .kv-row span:first-child { color: var(--text-dim); }
 
-  .iface-list { max-height: 200px; overflow-y: auto; font-size: 12px; }
+  .metric-block { display: flex; flex-direction: column; gap: 2px; }
+  .metric-head { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); }
+  .sparkline { width: 100%; height: 32px; display: block; }
+  .sparkline .fill { fill: rgba(63,185,80,.12); stroke: none; }
+  .sparkline .line { fill: none; stroke: var(--green); stroke-width: 1.5; }
+
+  .iface-list { max-height: 220px; overflow-y: auto; font-size: 12px; }
   .iface-row {
     display: flex; align-items: center; gap: 8px; padding: 3px 0;
     border-bottom: 1px solid var(--border);
@@ -120,6 +141,14 @@
   </div>
 </header>
 
+<div class="cred-bar">
+  <span>RESTCONF操作用の資格情報:</span>
+  <span id="cred-status" class="cred-status unset">未設定</span>
+  <button id="cred-set-btn">設定する</button>
+  <button id="cred-clear-btn">クリア</button>
+  <span style="margin-left:auto">操作(shutdown/no shutdown)ボタンを使うにはRESTCONFのBasic認証情報が必要です</span>
+</div>
+
 <div id="stat-row" class="stat-row"></div>
 <div id="device-grid" class="device-grid"></div>
 
@@ -132,15 +161,102 @@
   実際に外部からRESTCONF APIを叩けることの保証ではない
   （<code>ip http secure-server</code>も別途必要。詳細は
   <code>docs/restconf-catalyst.md</code>参照）。
+  インタフェース一覧の shutdown/no shutdown ボタンは
+  <code>PUT /restconf/&lt;device_id&gt;/data/ietf-interfaces:interfaces/interface=&lt;name&gt;</code>
+  を直接叩く（実機のRESTCONFと同じBasic認証。資格情報はこのブラウザの
+  sessionStorageにのみ保存され、サーバーには保存されない）。
 </div>
 
 <script>
 const SESSION_KEY = 'netlabToken_v1';
+const RESTCONF_CRED_KEY = 'netlabRestconfCred_v1';
+
 function getToken() {
   try {
     return localStorage.getItem(SESSION_KEY) ||
            new URLSearchParams(location.search).get('token') || '';
   } catch (e) { return ''; }
+}
+
+function getRestconfCred() {
+  try { return JSON.parse(sessionStorage.getItem(RESTCONF_CRED_KEY) || 'null'); }
+  catch (e) { return null; }
+}
+function setRestconfCred(user, pass) {
+  sessionStorage.setItem(RESTCONF_CRED_KEY, JSON.stringify({ user, pass }));
+}
+function clearRestconfCred() {
+  sessionStorage.removeItem(RESTCONF_CRED_KEY);
+}
+function restconfAuthHeader() {
+  const cred = getRestconfCred();
+  if (!cred) return null;
+  return 'Basic ' + btoa(`${cred.user}:${cred.pass}`);
+}
+function refreshCredUi() {
+  const cred = getRestconfCred();
+  const el = document.getElementById('cred-status');
+  if (cred) { el.textContent = `設定済み (${cred.user})`; el.className = 'cred-status set'; }
+  else { el.textContent = '未設定'; el.className = 'cred-status unset'; }
+}
+document.getElementById('cred-set-btn').addEventListener('click', () => {
+  const user = prompt('RESTCONFユーザー名（既定: admin）', 'admin');
+  if (user === null) return;
+  const pass = prompt('RESTCONFパスワード（既定: admin）', 'admin');
+  if (pass === null) return;
+  setRestconfCred(user, pass);
+  refreshCredUi();
+});
+document.getElementById('cred-clear-btn').addEventListener('click', () => {
+  clearRestconfCred();
+  refreshCredUi();
+});
+
+function sparkline(values, min, max, lineClass) {
+  if (!values || values.length < 2) {
+    return `<svg class="sparkline"><line x1="0" y1="16" x2="100%" y2="16" stroke="var(--border)" stroke-width="1"/></svg>`;
+  }
+  const w = 300, h = 32, pad = 2;
+  const lo = min !== null ? min : Math.min(...values);
+  const hi = max !== null ? max : Math.max(...values);
+  const span = (hi - lo) || 1;
+  const step = (w - pad * 2) / (values.length - 1);
+  const pts = values.map((v, i) => {
+    const x = pad + i * step;
+    const y = h - pad - ((v - lo) / span) * (h - pad * 2);
+    return [x, y];
+  });
+  const line = pts.map(p => p.join(',')).join(' ');
+  const fill = `${pad},${h - pad} ` + line + ` ${w - pad},${h - pad}`;
+  return `
+    <svg class="sparkline" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <polygon class="fill" points="${fill}"></polygon>
+      <polyline class="line ${lineClass}" points="${line}"></polyline>
+    </svg>`;
+}
+
+async function toggleInterface(deviceId, ifname, enable) {
+  const auth = restconfAuthHeader();
+  if (!auth) {
+    alert('先にRESTCONF資格情報を設定してください（上部の「設定する」ボタン）');
+    return;
+  }
+  try {
+    const res = await fetch(
+      `/restconf/${encodeURIComponent(deviceId)}/data/ietf-interfaces:interfaces/interface=${ifname}`,
+      {
+        method: 'PUT',
+        headers: { 'Authorization': auth, 'Content-Type': 'application/yang-data+json' },
+        body: JSON.stringify({ 'ietf-interfaces:interface': { enabled: enable } }),
+      });
+    if (!res.ok) {
+      alert(`操作失敗: HTTP ${res.status}${res.status === 401 ? '（資格情報が違います）' : ''}`);
+      return;
+    }
+    poll();
+  } catch (e) {
+    alert(`接続エラー: ${e}`);
+  }
 }
 
 function render(data) {
@@ -170,8 +286,19 @@ function render(data) {
           <span class="dot ${i.enabled ? 'up' : 'down'}"></span>
           <span class="iface-name">${i.name}</span>
           <span class="iface-ip">${ip}</span>
+          <button class="action-btn" data-device="${d.device_id}" data-iface="${i.name}"
+                  data-enable="${i.enabled ? 'false' : 'true'}">
+            ${i.enabled ? 'shutdown' : 'no shutdown'}
+          </button>
         </div>`;
     }).join('') || '<div class="empty">インタフェースなし</div>';
+
+    const upHist = (d.history || []).map(h => h.up);
+    const trendBlock = upHist.length >= 2 ? `
+      <div class="metric-block">
+        <div class="metric-head"><span>Interfaces Up 推移</span></div>
+        ${sparkline(upHist, 0, d.interface_count, '')}
+      </div>` : '';
 
     return `
       <div class="device-card">
@@ -185,9 +312,16 @@ function render(data) {
         <div class="kv-row"><span>ip http secure-server</span><span>${d.http_secure_server ? '有効' : '未設定'}</span></div>
         <div class="kv-row"><span>Interfaces</span><span>${d.interface_up} up / ${d.interface_down} down（計${d.interface_count}）</span></div>
         <div class="kv-row"><span>IPアドレス設定済み</span><span>${d.interface_with_ip}</span></div>
+        ${trendBlock}
         <div class="iface-list">${ifaceRows}</div>
       </div>`;
   }).join('');
+
+  grid.querySelectorAll('.action-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      toggleInterface(btn.dataset.device, btn.dataset.iface, btn.dataset.enable === 'true');
+    });
+  });
 }
 
 async function poll() {
@@ -219,6 +353,7 @@ function restartTimer() {
 document.getElementById('interval-select').addEventListener('change', restartTimer);
 document.getElementById('filter-input').addEventListener('input', poll);
 
+refreshCredUi();
 poll();
 restartTimer();
 </script>

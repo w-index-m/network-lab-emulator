@@ -1,0 +1,4 @@
+id,type,hostname
+bulk-leaf1,nexus,Bulk-NX-Leaf1
+bulk-leaf2,nexus,Bulk-NX-Leaf2
+bulk-cat1,catalyst,Bulk-CAT-1

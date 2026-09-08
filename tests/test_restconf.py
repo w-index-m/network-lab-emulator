@@ -168,3 +168,13 @@ class TestRestconfDashboardApi:
         assert data['summary']['device_count'] == len(data['devices'])
         assert data['summary']['restconf_ready_count'] == sum(
             1 for d in data['devices'] if d['restconf_enabled'])
+
+    def test_history_accumulates_across_polls(self):
+        _dev('rc-dash-4')
+        _run('rc-dash-4', RESTCONF_SETUP)
+        client.get('/api/restconf/dashboard')
+        client.get('/api/restconf/dashboard')
+        r = client.get('/api/restconf/dashboard')
+        entry = next(d for d in r.json()['devices'] if d['device_id'] == 'rc-dash-4')
+        assert len(entry['history']) >= 3
+        assert set(entry['history'][0].keys()) == {'t', 'up', 'down'}

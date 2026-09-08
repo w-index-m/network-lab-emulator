@@ -5412,6 +5412,12 @@ async def restconf_put_interface(device_id: str, ifname: str, body: dict):
                         media_type="application/yang-data+json")
 
 
+# device_id -> 直近60件の {t, up, down} サンプル（RESTCONFダッシュボードの
+# up/downインタフェース数の推移表示用）。/api/restconf/dashboard が
+# ポーリングされるたびに1件追記する。
+_restconf_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=60))
+
+
 @app.get("/api/restconf/dashboard")
 async def restconf_dashboard():
     """
@@ -5421,6 +5427,7 @@ async def restconf_dashboard():
     RESTCONF本体（/restconf/{device_id}/...）はHTTP Basic認証で別扱い
     だが、ここは集計結果を返すだけなので既存の認証方式に揃えている。
     """
+    now = time.time()
     devices = []
     for device_id, state in device_sessions.items():
         if state.device_type not in ('cisco', 'catalyst'):
@@ -5429,7 +5436,12 @@ async def restconf_dashboard():
         ifaces = getattr(state, 'interfaces', {})
         entries = [_restconf_ietf_interface(name, info) for name, info in ifaces.items()]
         up = sum(1 for e in entries if e['enabled'])
+        down = len(entries) - up
         with_ip = sum(1 for e in entries if 'ietf-ip:ipv4' in e)
+
+        history = _restconf_history[device_id]
+        history.append({'t': now, 'up': up, 'down': down})
+
         devices.append({
             "device_id": device_id,
             "hostname": state.hostname,
@@ -5437,13 +5449,14 @@ async def restconf_dashboard():
             "http_secure_server": getattr(state, 'http_secure_server', False),
             "interface_count": len(entries),
             "interface_up": up,
-            "interface_down": len(entries) - up,
+            "interface_down": down,
             "interface_with_ip": with_ip,
             "interfaces": entries,
+            "history": list(history),
         })
     devices.sort(key=lambda d: d["device_id"])
     return {
-        "polled_at": time.time(),
+        "polled_at": now,
         "summary": {
             "device_count": len(devices),
             "restconf_ready_count": sum(1 for d in devices if d["restconf_enabled"]),
