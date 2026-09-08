@@ -519,6 +519,21 @@ async def session_auth_middleware(request, call_next):
         if _AUTH_DISABLED or _valid_token(token):
             return await call_next(request)
         return _Response(status_code=403, content="認証が必要です")
+    # RESTCONF: 実機同様、セッショントークンではなくHTTP Basic認証
+    # （リクエスト毎にユーザー名/パスワードを渡す方式）を使う
+    if path.startswith("/restconf/"):
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Basic "):
+            import base64 as _b64
+            try:
+                user, pw = _b64.b64decode(auth_header[6:]).decode("utf-8").split(":", 1)
+            except Exception:
+                user, pw = "", ""
+            if _secrets.compare_digest(user, _AUTH_USER) and _secrets.compare_digest(pw, _AUTH_PASS):
+                return await call_next(request)
+        return _Response(
+            status_code=401, content="Unauthorized",
+            headers={"WWW-Authenticate": 'Basic realm="RESTCONF"'})
     # 通常APIはヘッダーまたはクエリパラメータでトークン検証
     token = request.headers.get("X-Session-Token", "") or request.query_params.get("token", "")
     if _valid_token(token):
@@ -3493,6 +3508,17 @@ def _build_running_config(device_id: str, state) -> str:
         lines.append('!')
         lines.append(f'hostname {state.hostname}')
         lines.append('!')
+        # RESTCONF/NETCONF
+        if getattr(state, 'http_secure_server', False):
+            lines.append('ip http secure-server')
+        if getattr(state, 'restconf_enabled', False):
+            lines.append('restconf')
+        if getattr(state, 'netconf_enabled', False):
+            lines.append('netconf-yang')
+        if (getattr(state, 'http_secure_server', False) or
+                getattr(state, 'restconf_enabled', False) or
+                getattr(state, 'netconf_enabled', False)):
+            lines.append('!')
         # インタフェース（state.interfacesの全ポートを表示）
         info = icmp_engine.device_ips.get(device_id, {})
         ip_map = {}
@@ -5290,6 +5316,100 @@ async def export_configs():
         "devices":      devices,
         "links":        links,
     }
+
+
+def _restconf_ietf_interface(ifname: str, iinfo: dict) -> dict:
+    entry = {
+        "name": ifname,
+        "type": "iana-if-type:ethernetCsmacd",
+        "enabled": iinfo.get("status") not in ("down", "notconnect", "disabled",
+                                                "administratively down"),
+    }
+    if iinfo.get("desc") or iinfo.get("description"):
+        entry["description"] = iinfo.get("desc") or iinfo.get("description")
+    if iinfo.get("ip"):
+        entry["ietf-ip:ipv4"] = {
+            "address": [{"ip": iinfo["ip"], "netmask": _prefix_to_mask(iinfo.get("prefix", 24))}]
+        }
+    return entry
+
+
+def _restconf_check(device_id: str):
+    """RESTCONFが有効か確認し、無効ならエラーレスポンスを返す（有効ならNone）"""
+    state = device_sessions.get(device_id)
+    if state is None:
+        return JSONResponse(status_code=404, content={
+            "ietf-restconf:errors": {"error": [{
+                "error-type": "application", "error-tag": "invalid-value",
+                "error-message": f"device '{device_id}' not found"}]}})
+    if state.device_type not in ('cisco', 'catalyst'):
+        return JSONResponse(status_code=404, content={
+            "ietf-restconf:errors": {"error": [{
+                "error-type": "application", "error-tag": "invalid-value",
+                "error-message": "RESTCONF is only supported on cisco/catalyst device_type"}]}})
+    if not getattr(state, 'restconf_enabled', False):
+        return JSONResponse(status_code=404, content={
+            "ietf-restconf:errors": {"error": [{
+                "error-type": "application", "error-tag": "invalid-value",
+                "error-message": ('RESTCONF is not enabled on this device '
+                                   '("restconf" must be configured first)')}]}})
+    return None
+
+
+@app.get("/restconf/{device_id}/data/ietf-interfaces:interfaces")
+async def restconf_get_interfaces(device_id: str):
+    """
+    RESTCONF (ietf-interfaces) 相当のGET。実機と違い、このエミュレータは
+    複数装置を1プロセスで扱うため、URLに device_id を含める形にしている
+    （実機は対象装置のIP自体でルーティングされるためこの区別は不要）。
+    """
+    err = _restconf_check(device_id)
+    if err is not None:
+        return err
+    state = device_sessions[device_id]
+    interfaces = [_restconf_ietf_interface(name, info)
+                  for name, info in getattr(state, 'interfaces', {}).items()]
+    return JSONResponse(content={"ietf-interfaces:interfaces": {"interface": interfaces}},
+                        media_type="application/yang-data+json")
+
+
+@app.get("/restconf/{device_id}/data/ietf-interfaces:interfaces/interface={ifname:path}")
+async def restconf_get_interface(device_id: str, ifname: str):
+    err = _restconf_check(device_id)
+    if err is not None:
+        return err
+    state = device_sessions[device_id]
+    info = getattr(state, 'interfaces', {}).get(ifname)
+    if info is None:
+        return JSONResponse(status_code=404, content={
+            "ietf-restconf:errors": {"error": [{
+                "error-type": "application", "error-tag": "invalid-value",
+                "error-message": f"interface '{ifname}' not found"}]}})
+    return JSONResponse(content={"ietf-interfaces:interface": _restconf_ietf_interface(ifname, info)},
+                        media_type="application/yang-data+json")
+
+
+@app.put("/restconf/{device_id}/data/ietf-interfaces:interfaces/interface={ifname:path}")
+async def restconf_put_interface(device_id: str, ifname: str, body: dict):
+    """
+    interfaceのenabled(=shutdown/no shutdown相当)を書き換える。
+    実機RESTCONFの部分実装で、対応しているのは enabled のみ。
+    """
+    err = _restconf_check(device_id)
+    if err is not None:
+        return err
+    state = device_sessions[device_id]
+    info = getattr(state, 'interfaces', {}).get(ifname)
+    if info is None:
+        return JSONResponse(status_code=404, content={
+            "ietf-restconf:errors": {"error": [{
+                "error-type": "application", "error-tag": "invalid-value",
+                "error-message": f"interface '{ifname}' not found"}]}})
+    payload = body.get("ietf-interfaces:interface", body)
+    if "enabled" in payload:
+        info["status"] = "up" if payload["enabled"] else "administratively down"
+    return JSONResponse(content={"ietf-interfaces:interface": _restconf_ietf_interface(ifname, info)},
+                        media_type="application/yang-data+json")
 
 
 @app.get("/api/nexus/dashboard")

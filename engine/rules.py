@@ -1191,6 +1191,11 @@ class RuleEngine:
             return self._format_show_nve_vni(state)
         if re.match(r'^show\s+bgp\s+l2vpn\s+evpn', c):
             return self._format_show_bgp_l2vpn_evpn(state)
+        # ── show RESTCONF/NETCONF状態（IOS-XE）──
+        if re.match(r'^show\s+restconf', c) and state.device_type in ('cisco', 'catalyst'):
+            return self._format_show_restconf(state)
+        if re.match(r'^show\s+netconf-yang', c) and state.device_type in ('cisco', 'catalyst'):
+            return self._format_show_netconf_yang(state)
         # ── show ip verify source（IP Source Guard）──
         if re.match(r'^show\s+ip\s+verify\s+source', c):
             return self._format_show_ip_verify(state)
@@ -4769,6 +4774,23 @@ Configuration Revision            : 5"""
             out.append('advertise-all-vni: enabled')
         return '\n'.join(out)
 
+    def _format_show_restconf(self, state):
+        enabled = getattr(state, 'restconf_enabled', False)
+        https = getattr(state, 'http_secure_server', False)
+        lines = [f'RESTCONF: {"Enabled" if enabled else "Disabled"}']
+        if enabled:
+            lines.append(f'HTTPS server: {"Enabled" if https else "Disabled (ip http secure-server が必要)"}')
+            lines.append('RESTCONF base URI: /restconf/data')
+        return '\n'.join(lines)
+
+    def _format_show_netconf_yang(self, state):
+        enabled = getattr(state, 'netconf_enabled', False)
+        if not enabled:
+            return ('NETCONF-YANG server status: Disabled\n'
+                    '  (configure "netconf-yang" first)')
+        return ('NETCONF-YANG server status: Enabled\n'
+                'NETCONF-YANG server ssh port: 830')
+
     def _format_show_dhcp_pool(self, state):
         pools = getattr(state, 'dhcp_pools', {})
         if not pools:
@@ -4938,6 +4960,27 @@ Configuration Revision            : 5"""
         if m:
             state.hostname = m.group(1)
             return ""
+
+        # RESTCONF/NETCONF有効化（IOS-XE: Catalyst/Cisco）
+        if state.device_type in ('cisco', 'catalyst'):
+            if c == 'ip http secure-server':
+                state.http_secure_server = True
+                return ""
+            if c == 'no ip http secure-server':
+                state.http_secure_server = False
+                return ""
+            if c == 'restconf':
+                state.restconf_enabled = True
+                return ""
+            if c == 'no restconf':
+                state.restconf_enabled = False
+                return ""
+            if c == 'netconf-yang':
+                state.netconf_enabled = True
+                return ""
+            if c == 'no netconf-yang':
+                state.netconf_enabled = False
+                return ""
 
         # NX-OS: feature ospf が入るまで "ip router ospf" は存在しない
         if state.device_type == 'nexus' and \
