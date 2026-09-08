@@ -182,6 +182,51 @@ RESTCONFが未有効化の装置、または`device_type`が`cisco`/`catalyst`
 - RESTCONFの`Accept`/`Content-Type`ヘッダー（`application/yang-data+json`）
   の厳密なネゴシエーション（現状は常にJSONを返すのみ）
 
+## RESTCONFヘルスダッシュボード（追記）
+
+複数のCisco/Catalyst装置を横断的にヘルスチェックできるダッシュボードを
+追加した。Nexus Dashboard風ビューと同じ構成（集計API + 静的HTML）。
+
+- **画面**: `/static/restconf_dashboard.html`
+- **データAPI**: `GET /api/restconf/dashboard`（こちらは`/restconf/*`と
+  違い、他の`/api/*`と同じセッショントークン認証。RESTCONF本体への
+  実際のアクセスはBasic認証のまま）
+
+返すJSONの例:
+
+```jsonc
+{
+  "summary": {"device_count": 2, "restconf_ready_count": 2,
+              "total_interfaces": 58, "total_interfaces_up": 9},
+  "devices": [
+    {
+      "device_id": "mock-cat3650", "hostname": "MOCK-CAT3650",
+      "restconf_enabled": true, "http_secure_server": true,
+      "interface_count": 29, "interface_up": 4, "interface_down": 25,
+      "interface_with_ip": 1,
+      "interfaces": [{"name": "GigabitEthernet1/0/1", "enabled": true, ...}]
+    }
+  ]
+}
+```
+
+### 実際に確認した動作
+
+`mock-cat3650`と`mock-cat9200`（どちらも`device_type: catalyst`）に
+`ip http secure-server` / `restconf`を投入し、`mock-cat3650`の
+`GigabitEthernet1/0/2`を`shutdown`した状態でダッシュボードを開いたところ:
+
+- 両カードとも「RESTCONF READY」バッジが表示された
+- `MOCK-CAT3650`側は「4 up / 25 down」、shutdownしたポートが
+  インタフェース一覧で赤ドット表示に切り替わった
+- `MOCK-CAT9200`側は変更していないため「5 up / 24 down」のまま
+
+前述の通り、このエミュレータは機種（3650/9200）によるIOS-XEバージョン
+差やRESTCONF対応可否の違いを再現していないため、`device_type:
+catalyst`である限り両者は同じ挙動になる。実機での機種差検証は
+実際の装置の`show version` / `show restconf`の結果を別途照合する
+必要がある。
+
 ## 関連ドキュメント
 
 - `docs/evpn-vxlan-nexus.md` — 同時期に実装したNexus Dashboard風ビュー

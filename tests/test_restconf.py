@@ -133,3 +133,38 @@ class TestRestconfNotEnabled:
         _dev('rc-r10', type_='sir')
         r = client.get('/restconf/rc-r10/data/ietf-interfaces:interfaces')
         assert r.status_code == 404
+
+
+class TestRestconfDashboardApi:
+    """RESTCONFヘルスダッシュボード（/api/restconf/dashboard）"""
+
+    def test_restconf_ready_device_appears_with_counts(self):
+        _dev('rc-dash-1')
+        _run('rc-dash-1', RESTCONF_SETUP)
+        r = client.get('/api/restconf/dashboard')
+        assert r.status_code == 200
+        data = r.json()
+        entry = next(d for d in data['devices'] if d['device_id'] == 'rc-dash-1')
+        assert entry['restconf_enabled'] is True
+        assert entry['http_secure_server'] is True
+        assert entry['interface_with_ip'] >= 1
+        assert entry['interface_up'] + entry['interface_down'] == entry['interface_count']
+
+    def test_non_restconf_device_marked_disabled(self):
+        _dev('rc-dash-2')
+        r = client.get('/api/restconf/dashboard')
+        entry = next(d for d in r.json()['devices'] if d['device_id'] == 'rc-dash-2')
+        assert entry['restconf_enabled'] is False
+
+    def test_non_cisco_device_excluded(self):
+        _dev('rc-dash-3', type_='sir')
+        r = client.get('/api/restconf/dashboard')
+        ids = [d['device_id'] for d in r.json()['devices']]
+        assert 'rc-dash-3' not in ids
+
+    def test_summary_counts_match_device_list(self):
+        r = client.get('/api/restconf/dashboard')
+        data = r.json()
+        assert data['summary']['device_count'] == len(data['devices'])
+        assert data['summary']['restconf_ready_count'] == sum(
+            1 for d in data['devices'] if d['restconf_enabled'])

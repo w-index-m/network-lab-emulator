@@ -5412,6 +5412,48 @@ async def restconf_put_interface(device_id: str, ifname: str, body: dict):
                         media_type="application/yang-data+json")
 
 
+@app.get("/api/restconf/dashboard")
+async def restconf_dashboard():
+    """
+    RESTCONF (ietf-interfaces) 経由でCisco/Catalyst装置を横断的に
+    ヘルスチェックするダッシュボード用データ。
+    このエンドポイント自体はセッショントークン方式（他の/api/*と同じ）。
+    RESTCONF本体（/restconf/{device_id}/...）はHTTP Basic認証で別扱い
+    だが、ここは集計結果を返すだけなので既存の認証方式に揃えている。
+    """
+    devices = []
+    for device_id, state in device_sessions.items():
+        if state.device_type not in ('cisco', 'catalyst'):
+            continue
+        restconf_enabled = getattr(state, 'restconf_enabled', False)
+        ifaces = getattr(state, 'interfaces', {})
+        entries = [_restconf_ietf_interface(name, info) for name, info in ifaces.items()]
+        up = sum(1 for e in entries if e['enabled'])
+        with_ip = sum(1 for e in entries if 'ietf-ip:ipv4' in e)
+        devices.append({
+            "device_id": device_id,
+            "hostname": state.hostname,
+            "restconf_enabled": restconf_enabled,
+            "http_secure_server": getattr(state, 'http_secure_server', False),
+            "interface_count": len(entries),
+            "interface_up": up,
+            "interface_down": len(entries) - up,
+            "interface_with_ip": with_ip,
+            "interfaces": entries,
+        })
+    devices.sort(key=lambda d: d["device_id"])
+    return {
+        "polled_at": time.time(),
+        "summary": {
+            "device_count": len(devices),
+            "restconf_ready_count": sum(1 for d in devices if d["restconf_enabled"]),
+            "total_interfaces": sum(d["interface_count"] for d in devices),
+            "total_interfaces_up": sum(d["interface_up"] for d in devices),
+        },
+        "devices": devices,
+    }
+
+
 @app.get("/api/nexus/dashboard")
 async def nexus_dashboard():
     """
