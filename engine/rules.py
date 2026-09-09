@@ -828,6 +828,16 @@ class RuleEngine:
                 return self._cmd_save(state)
             return f"% Invalid input detected at '^' marker.\n  do {sub}\n      ^"
 
+        # clear ip traffic（show ip trafficのICMPカウンタ等をリセット）。
+        # 実機同様、config系サブモード中でも実行できるexecコマンドなので
+        # config系モードへのディスパッチより前でハンドルする。
+        if c == "clear ip traffic" and state.device_type in ("cisco", "catalyst"):
+            from engine.protocols import icmp_engine
+            device_id = getattr(state, '_device_id', None)
+            if device_id:
+                icmp_engine.clear_icmp_stats(device_id)
+            return ""
+
         # 設定コマンド
         if state.mode in ("config", "config-if", "config-router", "config-vlan",
                           "config-crypto", "config-monitor",
@@ -1196,6 +1206,9 @@ class RuleEngine:
             return self._format_show_restconf(state)
         if re.match(r'^show\s+netconf-yang', c) and state.device_type in ('cisco', 'catalyst'):
             return self._format_show_netconf_yang(state)
+        # ── show ip traffic（ICMPカウンタ含む。累積値、clear ip trafficまで積み上げ）──
+        if re.match(r'^show\s+ip\s+traffic', c) and state.device_type in ('cisco', 'catalyst'):
+            return self._format_show_ip_traffic(state)
         # ── show ip verify source（IP Source Guard）──
         if re.match(r'^show\s+ip\s+verify\s+source', c):
             return self._format_show_ip_verify(state)
@@ -4790,6 +4803,51 @@ Configuration Revision            : 5"""
                     '  (configure "netconf-yang" first)')
         return ('NETCONF-YANG server status: Enabled\n'
                 'NETCONF-YANG server ssh port: 830')
+
+    def _format_show_ip_traffic(self, state):
+        """show ip traffic（ICMPセクションのみ実カウンタ、他は簡略表示）。
+
+        ICMPの送受信数は engine.protocols.icmp_engine が ping() 実行の
+        たびに実際に積み上げているカウンタをそのまま表示する
+        （clear ip trafficまでの累積値。実機と同じ挙動）。
+        IP/UDP/TCP/ARP等の他プロトコルは本エンジンでカウンタを保持して
+        いないため、実機の出力形式だけ合わせた簡略表示にとどめる。
+        """
+        from engine.protocols import icmp_engine
+        device_id = getattr(state, '_device_id', None)
+        s = icmp_engine.icmp_stats.get(device_id, {
+            'echo_sent': 0, 'echo_rcvd': 0,
+            'echo_reply_sent': 0, 'echo_reply_rcvd': 0,
+            'unreachable_sent': 0, 'unreachable_rcvd': 0,
+            'redirect_sent': 0, 'redirect_rcvd': 0,
+        })
+        return (
+            'IP statistics:\n'
+            '  Rcvd:  0 total, 0 local destination\n'
+            '         0 format errors, 0 checksum errors, 0 bad hop count\n'
+            '  Sent:  0 generated, 0 forwarded\n'
+            '\n'
+            'ICMP statistics:\n'
+            f'  Rcvd:  0 format errors, 0 checksum errors, '
+            f'{s["redirect_rcvd"]} redirects, {s["unreachable_rcvd"]} unreachable\n'
+            f'         {s["echo_rcvd"]} echo, {s["echo_reply_rcvd"]} echo reply, '
+            f'0 mask requests, 0 mask replies\n'
+            f'  Sent:  {s["redirect_sent"]} redirects, {s["unreachable_sent"]} unreachable, '
+            f'{s["echo_sent"]} echo, {s["echo_reply_sent"]} echo reply\n'
+            f'         0 mask requests, 0 mask replies\n'
+            '\n'
+            'UDP statistics:\n'
+            '  Rcvd: 0 total, 0 checksum errors, 0 no port\n'
+            '  Sent: 0 total, 0 forwarded broadcasts\n'
+            '\n'
+            'TCP statistics:\n'
+            '  Rcvd: 0 total, 0 checksum errors, 0 no port\n'
+            '  Sent: 0 total\n'
+            '\n'
+            'ARP statistics:\n'
+            '  Rcvd: 0 requests, 0 replies, 0 reverse, 0 other\n'
+            '  Sent: 0 requests, 0 replies (0 proxy), 0 reverse'
+        )
 
     def _format_show_dhcp_pool(self, state):
         pools = getattr(state, 'dhcp_pools', {})

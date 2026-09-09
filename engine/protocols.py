@@ -4120,6 +4120,26 @@ class IcmpEngine:
         # IPsecトンネル: {device_id: [{'local': ip, 'peer': ip, 'state': str, 'since': float}]}
         # state: 'established' | 'detecting' | 'down' | 'negotiating'
         self.ipsec_tunnels: Dict[str, list] = {}
+        # ICMPトラフィックカウンタ（"show ip traffic"のICMPセクション相当）。
+        # 起動時/clear ip traffic時からの累積値。ping()経由で実際に
+        # 到達性判定が行われた分だけカウントする（本物のパケット送受信は
+        # 無いが、シミュレーション上の「発生イベント」を1回=1パケットとして扱う）。
+        self.icmp_stats: Dict[str, dict] = {}
+
+    def _icmp_stats(self, device_id: str) -> dict:
+        return self.icmp_stats.setdefault(device_id, {
+            'echo_sent': 0, 'echo_rcvd': 0,
+            'echo_reply_sent': 0, 'echo_reply_rcvd': 0,
+            'unreachable_sent': 0, 'unreachable_rcvd': 0,
+            'redirect_sent': 0, 'redirect_rcvd': 0,
+        })
+
+    def clear_icmp_stats(self, device_id: str = None):
+        """clear ip traffic 相当。device_id省略時は全装置をクリア。"""
+        if device_id is None:
+            self.icmp_stats.clear()
+        else:
+            self.icmp_stats.pop(device_id, None)
 
     def register_ipsec(self, device_id: str, local_ip: str, peer_ip: str,
                        detect_sec: float = None, nego_sec: float = None):
@@ -4482,8 +4502,57 @@ class IcmpEngine:
             base = hop_count * random.uniform(0.2, 0.8)
             for _ in range(count):
                 rtts.append(round(base + random.uniform(0, 1.5), 3))
+
+        # ICMPトラフィックカウンタ（show ip traffic 相当）を更新
+        src_stats = self._icmp_stats(src_id)
+        dest_id = self._find_device_owning_ip(dest_ip)
+        if reachable:
+            src_stats['echo_sent'] += count
+            src_stats['echo_reply_rcvd'] += count
+            if dest_id:
+                dst_stats = self._icmp_stats(dest_id)
+                dst_stats['echo_rcvd'] += count
+                dst_stats['echo_reply_sent'] += count
+        else:
+            # 到達不可: 送信元は送っただけ（応答なし）、経路上でICMP
+            # Unreachableが生成されたとみなす（実機のpingタイムアウトに相当）
+            src_stats['echo_sent'] += count
+            src_stats['unreachable_rcvd'] += count
+
+        if reachable:
+            self._maybe_generate_redirect(src_id, dest_ip, result['hops'], count)
+
         return {'reachable': reachable, 'reason': result.get('reason', ''),
                 'ttl': ttl, 'rtts': rtts, 'count': count, 'hops': result['hops']}
+
+    def _maybe_generate_redirect(self, src_id: str, dest_ip: str, hops: list, count: int):
+        """ICMP Redirectが発生する典型的な条件を検出してカウンタに積み上げる。
+
+        実機の挙動: 送信元(H)がゲートウェイ(R1)へ送ったパケットに対して、
+        R1がその宛先への最適経路がH自身と同一サブネット上の別ルータ(R2)
+        経由だと判断した場合、R1はHから受信したのと同じインタフェースへ
+        パケットを転送しつつ、Hに「次からR2へ直接送るように」という
+        ICMP Redirectを送り返す。つまり典型的な発生条件は
+        「最初のホップ(R1)が持つ次ホップが、送信元と同一サブネット上に
+        いる」こと。ここではパケット自体のインタフェース単位追跡までは
+        行わず、この条件成立の有無だけを判定してカウントする。
+        """
+        if not hops:
+            return
+        first_hop = hops[0].get('device')
+        if not first_hop or first_hop == src_id:
+            return
+        next_device, next_ip = self._resolve_next_hop_detail(first_hop, dest_ip)
+        if not next_device or next_device == src_id or not next_ip:
+            return
+        src_info = self.device_ips.get(src_id, {})
+        on_src_subnet = any(
+            self._ip_in_network(next_ip, my_ip, prefix)
+            for my_ip, prefix in src_info.get('ips', {}).items()
+        )
+        if on_src_subnet:
+            self._icmp_stats(first_hop)['redirect_sent'] += count
+            self._icmp_stats(src_id)['redirect_rcvd'] += count
 
     def traceroute(self, src_id: str, dest_ip: str) -> dict:
         result = self.trace_path(src_id, dest_ip)

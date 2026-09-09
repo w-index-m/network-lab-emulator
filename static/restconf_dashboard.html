@@ -73,6 +73,9 @@
   .value.green { color: var(--green); }
   .value.amber { color: var(--amber); }
   .value.red   { color: var(--red); }
+  .green { color: var(--green); }
+  .amber { color: var(--amber); }
+  .red   { color: var(--red); }
 
   .device-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
@@ -165,6 +168,10 @@
   <code>PUT /restconf/&lt;device_id&gt;/data/ietf-interfaces:interfaces/interface=&lt;name&gt;</code>
   を直接叩く（実機のRESTCONFと同じBasic認証。資格情報はこのブラウザの
   sessionStorageにのみ保存され、サーバーには保存されない）。
+  CPU/トラフィックはSNMPエージェント（<code>/api/snmp/dashboard</code>と
+  同一データソース）から、ICMPパケット数は<code>show ip traffic</code>と
+  同じ実カウンタ（<code>ping</code>実行のたびに積み上げ、
+  <code>clear ip traffic</code>でリセット）から取得している。
 </div>
 
 <script>
@@ -211,6 +218,13 @@ document.getElementById('cred-clear-btn').addEventListener('click', () => {
   clearRestconfCred();
   refreshCredUi();
 });
+
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 ** 2) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 ** 3) return (n / 1024 ** 2).toFixed(1) + ' MB';
+  return (n / 1024 ** 3).toFixed(1) + ' GB';
+}
 
 function sparkline(values, min, max, lineClass) {
   if (!values || values.length < 2) {
@@ -270,6 +284,8 @@ function render(data) {
     <div class="stat-card"><div class="label">RESTCONF Ready</div><div class="value ${data.summary.restconf_ready_count > 0 ? 'green' : ''}">${data.summary.restconf_ready_count}</div></div>
     <div class="stat-card"><div class="label">Total Interfaces</div><div class="value">${data.summary.total_interfaces}</div></div>
     <div class="stat-card"><div class="label">Interfaces Up</div><div class="value green">${data.summary.total_interfaces_up}</div></div>
+    <div class="stat-card"><div class="label">累計トラフィック</div><div class="value amber" style="font-size:20px">${fmtBytes(data.summary.total_traffic_bytes)}</div></div>
+    <div class="stat-card"><div class="label">ICMPパケット累計</div><div class="value">${data.summary.total_icmp_packets}</div></div>
   `;
 
   const grid = document.getElementById('device-grid');
@@ -300,6 +316,41 @@ function render(data) {
         ${sparkline(upHist, 0, d.interface_count, '')}
       </div>` : '';
 
+    let cpuBlock = '';
+    if (d.cpu_percent !== null && d.cpu_percent !== undefined) {
+      const cpuHist = (d.history || []).map(h => h.cpu).filter(v => v !== null && v !== undefined);
+      const valCls = d.cpu_percent >= 80 ? 'red' : (d.cpu_percent >= 60 ? 'amber' : 'green');
+      cpuBlock = `
+        <div class="metric-block">
+          <div class="metric-head">
+            <span>CPU</span><span class="${valCls}">${d.cpu_percent}%</span>
+          </div>
+          ${sparkline(cpuHist, 0, 100, '')}
+        </div>`;
+    }
+
+    const bytesHist = (d.history || []).map(h => h.bytes);
+    const trafficBlock = bytesHist.length >= 2 ? `
+      <div class="metric-block">
+        <div class="metric-head">
+          <span>Traffic（累計bytes）</span><span>${fmtBytes(d.traffic_bytes)}</span>
+        </div>
+        ${sparkline(bytesHist, null, null, '')}
+      </div>` : '';
+
+    const icmpHist = (d.history || []).map(h => h.icmp_total);
+    const icmpBlock = `
+      <div class="metric-block">
+        <div class="metric-head">
+          <span>ICMPパケット累計</span><span>${d.icmp_total}</span>
+        </div>
+        ${icmpHist.length >= 2 ? sparkline(icmpHist, 0, null, '') : ''}
+        <div class="kv-row"><span>echo 送信/受信</span><span>${d.icmp.echo_sent} / ${d.icmp.echo_rcvd}</span></div>
+        <div class="kv-row"><span>echo reply 送信/受信</span><span>${d.icmp.echo_reply_sent} / ${d.icmp.echo_reply_rcvd}</span></div>
+        <div class="kv-row"><span>unreachable 送信/受信</span><span>${d.icmp.unreachable_sent} / ${d.icmp.unreachable_rcvd}</span></div>
+        <div class="kv-row"><span>redirect 送信/受信</span><span>${d.icmp.redirect_sent} / ${d.icmp.redirect_rcvd}</span></div>
+      </div>`;
+
     return `
       <div class="device-card">
         <div class="head">
@@ -313,6 +364,9 @@ function render(data) {
         <div class="kv-row"><span>Interfaces</span><span>${d.interface_up} up / ${d.interface_down} down（計${d.interface_count}）</span></div>
         <div class="kv-row"><span>IPアドレス設定済み</span><span>${d.interface_with_ip}</span></div>
         ${trendBlock}
+        ${cpuBlock}
+        ${trafficBlock}
+        ${icmpBlock}
         <div class="iface-list">${ifaceRows}</div>
       </div>`;
   }).join('');

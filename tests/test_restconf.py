@@ -177,4 +177,4 @@ class TestRestconfDashboardApi:
         r = client.get('/api/restconf/dashboard')
         entry = next(d for d in r.json()['devices'] if d['device_id'] == 'rc-dash-4')
         assert len(entry['history']) >= 3
-        assert set(entry['history'][0].keys()) == {'t', 'up', 'down'}
+        assert {'t', 'up', 'down', 'cpu', 'bytes', 'icmp_total'} == set(entry['history'][0].keys())

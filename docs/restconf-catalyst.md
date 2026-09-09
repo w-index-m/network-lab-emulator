@@ -275,6 +275,83 @@ Playwrightで実際にブラウザ操作を再現し、資格情報設定→
 スクリーンショットで確認した。裏側では実際にPUTリクエストが
 飛び、`state.interfaces`が書き換わっている。
 
+## トラフィック量・CPU使用率・ICMPカウンタの追加（さらに追記）
+
+「トラフィック量やCPU使用率もダッシュボードで見たい」「ICMP関連の
+流量も見たい」という要望を受けて、`/api/restconf/dashboard`と
+`restconf_dashboard.html`に3種類のメトリクスを追加した。
+
+### CPU使用率・トラフィック量
+
+新規のデータ収集エンジンは作らず、既存の`/api/snmp/dashboard`と
+**同じデータソース**（`snmp_agent._build_mib(device_id)`が持つ
+MIB-II/CISCO-PROCESS-MIB相当の値）を流用している。ダッシュボードの
+各装置カードに、SNMPダッシュボードと同じsparkline表示でCPU%と
+累計トラフィックバイト数の推移を追加した。
+
+### ICMPカウンタ（新規実装）
+
+これまで`show ip traffic`自体が未実装だった
+（過去の会話で「Catalyst 9300でICMP Redirectが発生する数をチェック
+する方法」を扱った際は実機の一般論としてサンプル出力を示しただけで、
+このエミュレータには入っていなかった）。今回、
+`engine.protocols.IcmpEngine`に`icmp_stats`（装置ごとのecho/echo reply/
+unreachable/redirectの送受信カウンタ）を追加し、`ping()`が呼ばれる
+たびに実際に加算するようにした:
+
+- 到達可能なping → 送信元の`echo_sent`/`echo_reply_rcvd`、宛先の
+  `echo_rcvd`/`echo_reply_sent`をそれぞれ加算
+- 到達不能なping → 送信元の`echo_sent`/`unreachable_rcvd`を加算
+  （実機のping timeoutでICMP Unreachableが返る状況に相当）
+
+`show ip traffic`（Cisco/Catalyst、新規実装）のICMPセクションに
+このカウンタをそのまま表示し、`clear ip traffic`でリセットできる。
+
+### ICMP Redirectの検出（新規実装）
+
+「pingの数ではなく、ICMP Redirectが多発しているかを知りたい」という
+要望を受けて、実際にRedirect発生条件を判定するロジックを追加した
+（`IcmpEngine._maybe_generate_redirect`）。
+
+実機でRedirectが発生する典型条件は、「ホストのデフォルトゲートウェイ
+(R1)が、宛先への最適経路として、ホストと同一サブネット上の別ルータ
+(R2)を持っている」場合。この時R1はホストから受け取ったパケットを
+R2へ転送しつつ、ホストに「次からR2へ直接送るように」というICMP
+Redirectを送り返す。今回はパケット単位のインタフェース追跡までは
+行わず、**ping一回ごとに「最初のホップの次ホップが送信元と同一
+サブネット上にあるか」を判定**し、条件成立時に該当ホップの
+`redirect_sent`と送信元の`redirect_rcvd`を加算する形にした。
+
+検証構成（`tests/test_icmp_traffic_counters.py::TestIcmpRedirectDetection`）:
+
+```
+[host] --- [switch] --- [R1] (defaultゲートウェイ)
+               |
+             [R2] --- [host2]
+```
+
+hostのデフォルトゲートウェイはR1だが、R1はhost2向けネットワークを
+「hostと同一サブネット上のR2」経由と学習している（非対称な経路）。
+この状態でhostからhost2へpingすると:
+
+- R1側の`show ip traffic`: `Sent: 5 redirects`
+- host側の`show ip traffic`: `Rcvd: ... 5 redirects`
+
+が実際に加算されることを確認した。逆に、ゲートウェイ自身が最終的な
+宛先であるなど「又貸し」が発生しない構成では、Redirectは0のまま
+であることも確認済み（`test_no_redirect_when_gateway_is_directly_on_path`）。
+
+### 実際に確認した動作
+
+`mock-cat3650` → `mock-cat9200`へ複数回ping、および到達不能な
+アドレスへのpingを実行した状態でダッシュボードを開いたところ、
+両カードにCPU%・トラフィック量(KB単位)・ICMPパケット累計数と、
+echo/echo reply/unreachable/redirectそれぞれの送受信内訳が
+正しく表示されることを確認した（スクリーンショット参照）。上記の
+非対称経路構成を実際にサーバー上で再現し、`show ip traffic`と
+`/api/restconf/dashboard`の両方でRedirectカウンタが増えることも
+別途確認済み。
+
 ## 関連ドキュメント
 
 - `docs/evpn-vxlan-nexus.md` — 同時期に実装したNexus Dashboard風ビュー

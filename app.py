@@ -5412,8 +5412,8 @@ async def restconf_put_interface(device_id: str, ifname: str, body: dict):
                         media_type="application/yang-data+json")
 
 
-# device_id -> 直近60件の {t, up, down} サンプル（RESTCONFダッシュボードの
-# up/downインタフェース数の推移表示用）。/api/restconf/dashboard が
+# device_id -> 直近60件の {t, up, down, cpu, bytes, icmp_total} サンプル
+# （RESTCONFダッシュボードの各種推移表示用）。/api/restconf/dashboard が
 # ポーリングされるたびに1件追記する。
 _restconf_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=60))
 
@@ -5426,6 +5426,11 @@ async def restconf_dashboard():
     このエンドポイント自体はセッショントークン方式（他の/api/*と同じ）。
     RESTCONF本体（/restconf/{device_id}/...）はHTTP Basic認証で別扱い
     だが、ここは集計結果を返すだけなので既存の認証方式に揃えている。
+
+    トラフィック量・CPU使用率はSNMPエージェント(snmp_agent)が持つ
+    MIB-II/CISCO-PROCESS-MIB相当の値を流用する（/api/snmp/dashboardと
+    同じデータソース）。ICMPカウンタはengine.protocols.icmp_engineが
+    ping()実行のたびに積み上げている実カウンタ（"show ip traffic"と同一）。
     """
     now = time.time()
     devices = []
@@ -5439,8 +5444,31 @@ async def restconf_dashboard():
         down = len(entries) - up
         with_ip = sum(1 for e in entries if 'ietf-ip:ipv4' in e)
 
+        # トラフィック/CPU（SNMPエージェントのMIBデータを流用）
+        cpu_percent = None
+        total_bytes = 0
+        if device_id in snmp_agent.devices:
+            mib = snmp_agent._build_mib(device_id)
+            by_oid = {oid: v for oid, _t, v in mib}
+            cpu_raw = by_oid.get('1.3.6.1.4.1.9.9.109.1.1.1.1.7.1')
+            cpu_percent = int(cpu_raw) if cpu_raw is not None else None
+            in_oids = [v for oid, v in by_oid.items() if oid.startswith('1.3.6.1.2.1.2.2.1.10.')]
+            out_oids = [v for oid, v in by_oid.items() if oid.startswith('1.3.6.1.2.1.2.2.1.16.')]
+            total_bytes = sum(int(v) for v in in_oids) + sum(int(v) for v in out_oids)
+
+        # ICMPトラフィックカウンタ（show ip traffic相当）
+        icmp = icmp_engine.icmp_stats.get(device_id, {
+            'echo_sent': 0, 'echo_rcvd': 0,
+            'echo_reply_sent': 0, 'echo_reply_rcvd': 0,
+            'unreachable_sent': 0, 'unreachable_rcvd': 0,
+            'redirect_sent': 0, 'redirect_rcvd': 0,
+        })
+        icmp_total = sum(icmp.values())
+
         history = _restconf_history[device_id]
-        history.append({'t': now, 'up': up, 'down': down})
+        history.append({'t': now, 'up': up, 'down': down,
+                        'cpu': cpu_percent, 'bytes': total_bytes,
+                        'icmp_total': icmp_total})
 
         devices.append({
             "device_id": device_id,
@@ -5452,6 +5480,10 @@ async def restconf_dashboard():
             "interface_down": down,
             "interface_with_ip": with_ip,
             "interfaces": entries,
+            "cpu_percent": cpu_percent,
+            "traffic_bytes": total_bytes,
+            "icmp": icmp,
+            "icmp_total": icmp_total,
             "history": list(history),
         })
     devices.sort(key=lambda d: d["device_id"])
@@ -5462,6 +5494,8 @@ async def restconf_dashboard():
             "restconf_ready_count": sum(1 for d in devices if d["restconf_enabled"]),
             "total_interfaces": sum(d["interface_count"] for d in devices),
             "total_interfaces_up": sum(d["interface_up"] for d in devices),
+            "total_traffic_bytes": sum(d["traffic_bytes"] for d in devices),
+            "total_icmp_packets": sum(d["icmp_total"] for d in devices),
         },
         "devices": devices,
     }
