@@ -730,7 +730,14 @@ async def cli_command(body: dict):
         return {"output": proto_output, "mode": state.mode, "hostname": state.hostname}
 
     # ── プロトコル設定コマンド検出 ──
-    await handle_protocol_config(device_id, command, state)
+    # 戻り値は基本的に使わない(ここでは主に副作用目的の呼び出し)が、
+    # エラーメッセージ文字列を返している箇所だけは黙殺せずCLI出力に反映する
+    # （以前は常に握り潰されており、不正値を入れてもエラーが一切
+    # 表示されなかった）。空文字列/Noneは従来通り後続のrule_engine処理に
+    # フォールスルーする。
+    config_out = await handle_protocol_config(device_id, command, state)
+    if config_out:
+        return {"output": config_out, "mode": state.mode, "hostname": state.hostname}
 
     # ── NX-OS TACACS+ / AAA 設定 ──
     tacacs_out = _handle_nexus_tacacs_config(device_id, command, state)
@@ -2578,12 +2585,70 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             pri = n['bridge_priority'] if (n and n.get('bridge_priority', 32768) != 32768) else 32768
         await stp_engine.start(device_id, hostname, mode, pri)
         return
-    # Si-R: "stp mode stp" / "stp mode rstp"
-    sir_stp_mode = re.match(r'^stp\s+mode\s+(stp|rstp)', c)
+    # Si-R: "stp mode disable|stp"（マニュアル5.1.1。rstpは実機には無いが
+    # 後方互換のため許容しておく）
+    sir_stp_mode = re.match(r'^stp\s+mode\s+(disable|stp|rstp)', c)
     if sir_stp_mode:
         mode = sir_stp_mode.group(1)
+        if mode == 'disable':
+            n = stp_engine.nodes.get(device_id)
+            if n:
+                n['enabled'] = False
+            return
         pri = getattr(state, '_stp_priority', 32768)
         await stp_engine.start(device_id, hostname, mode, pri)
+        return
+    # Si-R: "stp age <max_age>s"（マニュアル5.1.2。6〜40秒）
+    sir_stp_age = re.match(r'^stp\s+age\s+(\d+)s?$', c)
+    if sir_stp_age:
+        val = int(sir_stp_age.group(1))
+        if not (6 <= val <= 40):
+            return ('<ERROR> : 3 : format error\n'
+                    '  (最大有効時間は6〜40秒で指定してください)')
+        state._sir_stp_age = val
+        n = stp_engine.nodes.get(device_id)
+        if n:
+            n['max_age'] = val
+        return
+    # Si-R: "stp delay <delay_time>s"（マニュアル5.1.3。4〜30秒）
+    sir_stp_delay = re.match(r'^stp\s+delay\s+(\d+)s?$', c)
+    if sir_stp_delay:
+        val = int(sir_stp_delay.group(1))
+        if not (4 <= val <= 30):
+            return ('<ERROR> : 3 : format error\n'
+                    '  (最大中継遅延時間は4〜30秒で指定してください)')
+        state._sir_stp_delay = val
+        n = stp_engine.nodes.get(device_id)
+        if n:
+            n['forward_delay'] = val
+        return
+    # Si-R: "stp hello <time>s"（マニュアル5.1.4。1〜10秒）
+    sir_stp_hello = re.match(r'^stp\s+hello\s+(\d+)s?$', c)
+    if sir_stp_hello:
+        val = int(sir_stp_hello.group(1))
+        if not (1 <= val <= 10):
+            return ('<ERROR> : 3 : format error\n'
+                    '  (Helloメッセージ送信間隔は1〜10秒で指定してください)')
+        state._sir_stp_hello = val
+        n = stp_engine.nodes.get(device_id)
+        if n:
+            n['sir_hello_time'] = val
+        return
+    # Si-R: "stp domain <instance_id> priority <priority>"（マニュアル5.1.5。
+    # G210/G211/G120/G121はインスタンスID 0のみ。4096刻みの有効値のみ許容）
+    sir_stp_domain_pri = re.match(r'^stp\s+domain\s+(\d+)\s+priority\s+(\d+)$', c)
+    if sir_stp_domain_pri:
+        instance_id, priority = int(sir_stp_domain_pri.group(1)), int(sir_stp_domain_pri.group(2))
+        if instance_id != 0:
+            return ('<ERROR> : 3 : format error\n'
+                    '  (この機種のSTPインスタンスIDは0のみです)')
+        if not (0 <= priority <= 61440 and priority % 4096 == 0):
+            return ('<ERROR> : 3 : format error\n'
+                    '  (優先度は0〜61440の4096刻みで指定してください)')
+        state._stp_priority = priority
+        n = stp_engine.nodes.get(device_id)
+        if n and n.get('enabled'):
+            await stp_engine.start(device_id, hostname, n['mode'], priority)
         return
     # Cisco: "spanning-tree vlan <vlan-id> priority <priority>"
     stp_vlan_pri = re.match(r'^spanning-tree\s+vlan\s+(\d+)\s+priority\s+(\d+)', c)
@@ -3094,6 +3159,8 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     if re.match(r'^show\s+spanning-tree', c):
         n = stp_engine.nodes.get(device_id)
         if n and n.get('enabled'):
+            if state.device_type == 'sir':
+                return _format_spanning_tree_sir(device_id, state)
             return stp_engine.format_show_spanning_tree(device_id)
 
     # プロトコルログ表示
@@ -4539,6 +4606,60 @@ def _pick_ospf_default_router_id(state, device_id: str = None) -> str:
             other_ips.append(ip)
     pool = loopback_ips or linked_ips or other_ips
     return max(pool, key=_ip_key) if pool else ''
+
+
+def _format_spanning_tree_sir(device_id: str, state) -> str:
+    """Si-R形式の show spanning-tree（コマンドリファレンス 61.3.1）。
+
+    Cisco形式(VLAN別/Rapid-PVST+前提)とは見出し・列構成が異なり、
+    実機はポートを"ether <group> <port>"名で表示しIEEE 802.1D固定
+    (RSTPは無い)。stp age/delay/helloで設定したタイマー値はここでの
+    表示にのみ反映し(未指定時はマニュアル記載のデフォルト20/15/2秒)、
+    BPDU送信間隔などプロトコル側の実動作までは変更しない
+    （実装コストとのトレードオフ。必要なら別途エンジンに配線する）。
+    """
+    n = stp_engine.nodes.get(device_id)
+    if not n or not n.get('enabled'):
+        return '<ERROR> Spanning tree is not configured.'
+    is_root = n.get('root_bridge_id') == n.get('bridge_id')
+    age = getattr(state, '_sir_stp_age', 20)
+    delay = getattr(state, '_sir_stp_delay', 15)
+    hello = getattr(state, '_sir_stp_hello', 2)
+
+    lines = ['Spanning tree enabled protocol IEEE']
+    lines.append('Root ID    Priority    ' + str(n['bridge_priority'] if is_root
+                 else int(n['root_bridge_id'].split('.', 1)[0])
+                 if '.' in n.get('root_bridge_id', '') else n['bridge_priority']))
+    root_mac = n['bridge_mac'] if is_root else n.get('root_bridge_id', '').split('.', 1)[-1]
+    lines.append(f'           Address     {root_mac}')
+    if not is_root:
+        lines.append(f'           Cost        {n.get("root_path_cost", 0)}')
+    lines.append(f'           Hello Time {hello}sec  Max Age {age}sec  '
+                 f'Forward Delay {delay}sec')
+    lines.append('')
+    lines.append(f'Bridge ID  Priority    {n["bridge_priority"]}')
+    lines.append(f'           Address     {n["bridge_mac"]}')
+    lines.append(f'           Hello Time {hello}sec  Max Age {age}sec  '
+                 f'Forward Delay {delay}sec')
+    stp_mode_disp = 'stp' if n.get('mode') != 'rstp' else 'rstp'
+    lines.append(f'STP Mode   {stp_mode_disp}')
+    lines.append('')
+    lines.append('Interface       Port ID  Status(Role)          Designated Bridge ID')
+    for port in n.get('ports', {}).values():
+        lan = port.get('name', '')
+        grp_port = None
+        for (grp, p) in rule_engine._sir_ether_ports(state):
+            if rule_engine._sir_lan_for_ether(state, grp, p) == lan:
+                grp_port = f'ether {grp} {p}'
+                break
+        iface_disp = grp_port or lan
+        role = port.get('role', 'DESIGNATED').capitalize()
+        pstate = {'FORWARDING': 'Forwarding', 'BLOCKING': 'Blocking',
+                  'DISCARDING': 'Blocking', 'LEARNING': 'Learning',
+                  'LISTENING': 'Listening'}.get(port.get('state', ''), port.get('state', ''))
+        lines.append(f'{iface_disp:<16}128.1    {pstate}({role})'
+                     f'{"":<10}{n["bridge_priority"]} {n["bridge_mac"]}')
+    return '\n'.join(lines)
 
 
 def _format_ospf_neighbor_sir(device_id: str) -> str:
