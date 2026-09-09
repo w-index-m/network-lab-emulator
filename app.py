@@ -31,7 +31,7 @@ from engine.protocols import (
     vnet, rip_engine, ospf_engine, bgp_engine, eigrp_engine, stp_engine, rib_engine,
     icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
     nat_engine, cef_engine, dp_engine, snmp_agent,
-    genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine,
+    genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine, mpls_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
 from engine.syslog_sender import syslog_dispatcher, snmp_dispatcher, ntp_client
@@ -2650,6 +2650,28 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         if n and n.get('enabled'):
             await stp_engine.start(device_id, hostname, n['mode'], priority)
         return
+
+    # ── MPLS(LDP) ── Cisco IOS-XE/NX-OS: グローバル有効化
+    if c == 'mpls ip' and state.mode == 'config':
+        mpls_engine.enable_global(device_id)
+        mpls_engine.refresh_neighbors(device_id)
+        for peer_id in vnet.get_neighbors(device_id):
+            mpls_engine.refresh_neighbors(peer_id)
+        return
+    # インタフェース単位の有効化: "mpls ip"（config-ifモード内）
+    if c == 'mpls ip' and state.mode == 'config-if' and state.current_if:
+        mpls_engine.enable_interface(device_id, state.current_if)
+        mpls_engine.refresh_neighbors(device_id)
+        for peer_id in vnet.get_neighbors(device_id):
+            mpls_engine.refresh_neighbors(peer_id)
+        return
+    if c == 'no mpls ip' and state.mode == 'config-if' and state.current_if:
+        mpls_engine.disable_interface(device_id, state.current_if)
+        mpls_engine.refresh_neighbors(device_id)
+        for peer_id in vnet.get_neighbors(device_id):
+            mpls_engine.refresh_neighbors(peer_id)
+        return
+
     # Cisco: "spanning-tree vlan <vlan-id> priority <priority>"
     stp_vlan_pri = re.match(r'^spanning-tree\s+vlan\s+(\d+)\s+priority\s+(\d+)', c)
     if stp_vlan_pri:
@@ -3162,6 +3184,16 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
             if state.device_type == 'sir':
                 return _format_spanning_tree_sir(device_id, state)
             return stp_engine.format_show_spanning_tree(device_id)
+
+    # MPLS(LDP)
+    if re.match(r'^show\s+mpls\s+interfaces?', c):
+        return mpls_engine.format_show_mpls_interfaces(device_id, state)
+    if re.match(r'^show\s+mpls\s+ldp\s+neighbor', c):
+        return mpls_engine.format_show_mpls_ldp_neighbor(device_id, device_sessions)
+    if re.match(r'^show\s+mpls\s+ldp\s+bindings?', c):
+        return mpls_engine.format_show_mpls_ldp_bindings(device_id)
+    if re.match(r'^show\s+mpls\s+forwarding-table', c):
+        return mpls_engine.format_show_mpls_forwarding_table(device_id)
 
     # プロトコルログ表示
     if re.match(r'^show\s+(protocol\s+)?log', c) or c == 'show logging protocol':

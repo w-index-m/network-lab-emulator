@@ -10096,4 +10096,166 @@ class ApresiaMessageEngine:
         return '\n'.join(lines)
 
 
+class MplsEngine:
+    """
+    MPLS(LDP)の簡易実装。Cisco IOS-XE/NX-OSでのラベル配布動作を模擬する。
+
+    実装範囲:
+    - グローバル有効化(mpls ip)、インタフェース単位の有効化
+    - 隣接リンク上で双方が mpls ip 有効ならLDPネイバーをOperationalにする
+      （実際のHello/Session確立シーケンスは省略し即時Operational扱い）
+    - rib_engineのベストルートから宛先ごとにローカルラベルを採番
+    - show mpls interfaces / show mpls ldp neighbor / show mpls ldp
+      bindings / show mpls forwarding-table
+
+    対象外(実装していない): LSPのホップ単位でのラベルスワップ計算、
+    RSVP-TE、MPLS-VPN/VRF、TTL/QoS処理。show mpls forwarding-tableの
+    outgoing labelは実際にLDPで配布された値ではなく、宛先ネットワーク
+    ごとに決定的に算出した表示用の値であることに注意
+    （毎回同じ入力なら同じ値になるが、実際のLDPネゴシエーション結果
+    ではない）。
+    """
+
+    def __init__(self):
+        self.nodes: Dict[str, dict] = {}
+
+    def _node(self, device_id: str) -> dict:
+        if device_id not in self.nodes:
+            self.nodes[device_id] = {
+                'enabled': False,
+                'interfaces': set(),
+                'neighbors': {},
+                '_next_label': 16,
+                'labels': {},   # (network, prefix) -> local_label
+            }
+        return self.nodes[device_id]
+
+    def enable_global(self, device_id: str):
+        self._node(device_id)['enabled'] = True
+
+    def enable_interface(self, device_id: str, iface: str):
+        n = self._node(device_id)
+        n['interfaces'].add(iface)
+        n['enabled'] = True
+
+    def disable_interface(self, device_id: str, iface: str):
+        self._node(device_id)['interfaces'].discard(iface)
+
+    def is_enabled(self, device_id: str) -> bool:
+        n = self.nodes.get(device_id)
+        return bool(n and n['enabled'])
+
+    def _label_for(self, device_id: str, network: str, prefix: int) -> int:
+        n = self._node(device_id)
+        key = (network, prefix)
+        if key not in n['labels']:
+            n['labels'][key] = n['_next_label']
+            n['_next_label'] += 1
+        return n['labels'][key]
+
+    def refresh_neighbors(self, device_id: str):
+        """vnetで実際にリンクしている相手のうち、双方でMPLSがインタ
+        フェース単位で有効な組み合わせだけをLDPネイバーとして認識する。"""
+        n = self._node(device_id)
+        n['neighbors'] = {}
+        if not n['enabled']:
+            return
+        for peer_id in vnet.get_neighbors(device_id):
+            local_iface = vnet.interface_links.get(device_id, {}).get(peer_id)
+            peer_iface = vnet.interface_links.get(peer_id, {}).get(device_id)
+            if not local_iface or local_iface not in n['interfaces']:
+                continue
+            peer_n = self.nodes.get(peer_id)
+            if not peer_n or not peer_n['enabled']:
+                continue
+            if not peer_iface or peer_iface not in peer_n['interfaces']:
+                continue
+            n['neighbors'][peer_id] = {'iface': local_iface, 'state': 'Operational'}
+
+    def format_show_mpls_interfaces(self, device_id: str, state) -> str:
+        n = self.nodes.get(device_id)
+        lines = ['Interface              IP            Tunnel   BGP  Static  Operational']
+        if not n or not n['interfaces']:
+            lines.append('(no MPLS interfaces)')
+            return '\n'.join(lines)
+        for iface in sorted(n['interfaces']):
+            info = state.interfaces.get(iface, {})
+            ip = 'Yes' if info.get('ip') else 'No'
+            up = info.get('status') == 'up'
+            lines.append(f'{iface:<23}{ip:<14}No       No   No      {"Yes" if up else "No"}')
+        return '\n'.join(lines)
+
+    def format_show_mpls_ldp_neighbor(self, device_id: str, device_sessions) -> str:
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return '% MPLS LDP is not configured on this device.'
+        if not n['neighbors']:
+            return '(No LDP neighbors)'
+        lines = []
+        for peer_id, info in n['neighbors'].items():
+            peer_state = device_sessions.get(peer_id)
+            peer_hostname = peer_state.hostname if peer_state else peer_id
+            peer_iface_info = (peer_state.interfaces.get(
+                vnet.interface_links.get(peer_id, {}).get(device_id, ''), {})
+                if peer_state else {})
+            peer_ip = peer_iface_info.get('ip', '0.0.0.0')
+            lines.append(f'    Peer LDP Ident: {peer_ip}:0; Local LDP Ident {peer_hostname}')
+            lines.append(f'\tTCP connection: {peer_ip}.646 - {info["iface"]}')
+            lines.append(f'\tState: {info["state"]}; Msgs sent/rcvd: 0/0; Downstream')
+            lines.append(f'\tUp time: 00:00:10')
+            lines.append(f'\tLDP discovery sources:')
+            lines.append(f'\t  {info["iface"]}, Src IP addr: {peer_ip}')
+            lines.append('')
+        return '\n'.join(lines).rstrip()
+
+    def format_show_mpls_ldp_bindings(self, device_id: str) -> str:
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return '% MPLS LDP is not configured on this device.'
+        routes = rib_engine.get_best_routes(device_id)
+        if not routes:
+            return '(No LDP bindings)'
+        lines = []
+        for r in routes:
+            net, prefix = r['network'], r['prefix']
+            label = self._label_for(device_id, net, prefix)
+            local_tag = 'imp-null' if r.get('source') == 'connected' else str(label)
+            lines.append(f'  {net}/{prefix}')
+            lines.append(f'\tlocal binding:  label: {local_tag}')
+        return '\n'.join(lines)
+
+    def format_show_mpls_forwarding_table(self, device_id: str) -> str:
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return '% MPLS is not configured on this device.'
+        routes = rib_engine.get_best_routes(device_id)
+        lines = ['Local      Outgoing   Prefix           Bytes Label   Outgoing   Next Hop',
+                  'Label      Label      or Tunnel Id      Switched    interface']
+        if not routes:
+            lines.append('(no MPLS forwarding entries)')
+            return '\n'.join(lines)
+        for r in routes:
+            net, prefix = r['network'], r['prefix']
+            local_label = self._label_for(device_id, net, prefix)
+            if r.get('source') == 'connected':
+                out_label = 'Pop Label'
+            else:
+                # 実際のLDPで配布された値ではなく、宛先ごとに決定的に
+                # 算出した表示専用の値（クラスdocstring参照）
+                out_label = str(16 + (abs(hash((device_id, net, prefix))) % 900))
+            iface = r.get('iface', '-') or '-'
+            next_hop = r.get('next_hop') or None
+            if r.get('source') == 'connected' or not next_hop or next_hop == '0.0.0.0':
+                next_hop_disp = 'point2point'
+            else:
+                next_hop_disp = next_hop
+            lines.append(
+                f'{local_label:<11}{out_label:<11}{net + "/" + str(prefix):<18}'
+                f'{0:<12}{iface:<23}{next_hop_disp}')
+        return '\n'.join(lines)
+
+
+mpls_engine = MplsEngine()
+
+
 apresia_msg = ApresiaMessageEngine()
