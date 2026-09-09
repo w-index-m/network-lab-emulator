@@ -240,6 +240,11 @@ class DeviceState:
             # ether <group> <port> snmp trap linkdown/linkup <enable|disable>
             # 未設定時はいずれも enable（マニュアル 4.9.1）
             self.sir_ether_trap = {}
+            # ether <group> <port> mode <speed>。未設定時は auto（マニュアル 4.1.4）
+            self.sir_ether_mode = {}
+            # ether <group> <port> duplex <full|half>。未設定時は full（マニュアル 4.1.5）
+            # mode が auto または 1000 の場合はこの設定は無視される。
+            self.sir_ether_duplex = {}
 
         self.routes = [
             {"fp":"*C","dest":"192.168.1.0/24","gw":"192.168.1.1","dist":0, "iface":"lan0"},
@@ -2195,15 +2200,35 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             return 'down'
         return 'up' if info.get('ip') else 'down'
 
+    def _sir_effective_speed_duplex(self, state, grp, port):
+        """ether mode/duplex の設定から実効的な速度/デュプレックスを求める。
+
+        マニュアル 4.1.4/4.1.5 の仕様:
+        - mode 未設定時は auto、duplex 未設定時は full
+        - mode 1000 を指定した場合、duplex の設定は無効になり常に full
+        - mode auto を指定した場合も duplex の設定は無効になり、
+          対向とのネゴシエーション結果次第（エミュレータではリンクアップ
+          時は1000M Fullで揃うものとして扱う）
+        - mode 100/10 を指定した場合のみ duplex の設定が有効になる
+        """
+        mode = getattr(state, 'sir_ether_mode', {}).get((grp, port), 'auto')
+        duplex = getattr(state, 'sir_ether_duplex', {}).get((grp, port), 'full')
+        if mode in ('auto', '1000'):
+            return mode, '1000M', 'full'
+        return mode, f'{mode}M', duplex
+
     def _show_ether(self, state):
         lines = []
         for (grp, port) in self._sir_ether_ports(state):
             status = self._sir_port_status(state, grp, port)
             lan = self._sir_lan_for_ether(state, grp, port) or '-'
+            mode = getattr(state, 'sir_ether_mode', {}).get((grp, port), 'auto')
             lines.append(f"[ETHER GROUP-{grp} PORT-{port}]")
             lines.append(f"description      : Ether_Group_{grp}_Port_{port}")
             if status == 'up':
-                lines.append("status           : auto 1000M Full MDI-X")
+                _, speed_str, duplex = self._sir_effective_speed_duplex(state, grp, port)
+                neg = 'auto' if mode == 'auto' else 'fixed'
+                lines.append(f"status           : {neg} {speed_str} {duplex.capitalize()} MDI-X")
                 lines.append("media            : Metal")
                 lines.append("flow control     : send on, receive on")
             elif status == 'disable':
@@ -2217,7 +2242,7 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             lines.append("type             : Normal")
             lines.append(f"since            : "
                          f"{state.startup_time.strftime('%b %d %H:%M:%S %Y')}")
-            lines.append("config           : mode(auto), mdi(auto), media(-)")
+            lines.append(f"config           : mode({mode}), mdi(auto), media(-)")
             lines.append(f"                   (lan: {lan})")
             lines.append("")
         return "\n".join(lines)
@@ -2230,7 +2255,8 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         for (grp, port) in self._sir_ether_ports(state):
             status = self._sir_port_status(state, grp, port)
             if status == 'up':
-                media, mdi, speed, duplex, flow = 'metal', 'MDIX', '1000M', 'full', 'TxRx'
+                _, speed, duplex = self._sir_effective_speed_duplex(state, grp, port)
+                media, mdi, flow = 'metal', 'MDIX', 'TxRx'
             else:
                 media = mdi = speed = duplex = flow = '-'
             lines.append(
@@ -5255,6 +5281,34 @@ Configuration Revision            : 5"""
                             f"  (ether group {grp} port {port} は"
                             f"この装置に存在しません)")
                 state.sir_ether_use[(grp, port)] = mode_on
+            return ""
+
+        # Si-R: ether <group> <port> mode <auto|1000|100|10>（マニュアル 4.1.4）
+        m_mode = re.match(r'^ether\s+(\d+)\s+([\d,\-]+)\s+mode\s+(auto|1000|100|10)$', c)
+        if m_mode and state.device_type in ('sir', 'srs'):
+            grp = int(m_mode.group(1))
+            speed = m_mode.group(3)
+            for port in _expand_port_list(m_mode.group(2)):
+                if (grp, port) not in getattr(state, 'sir_ether_vlan', {}):
+                    return (f"<ERROR> : 3 : format error\n"
+                            f"  (ether group {grp} port {port} は"
+                            f"この装置に存在しません)")
+                state.sir_ether_mode[(grp, port)] = speed
+            return ""
+
+        # Si-R: ether <group> <port> duplex <full|half>（マニュアル 4.1.5）
+        # mode で 1000 または auto を指定した場合、この設定は無効になる
+        # （実機動作をshow ether/show ether briefでも反映する）。
+        m_duplex = re.match(r'^ether\s+(\d+)\s+([\d,\-]+)\s+duplex\s+(full|half)$', c)
+        if m_duplex and state.device_type in ('sir', 'srs'):
+            grp = int(m_duplex.group(1))
+            duplex = m_duplex.group(3)
+            for port in _expand_port_list(m_duplex.group(2)):
+                if (grp, port) not in getattr(state, 'sir_ether_vlan', {}):
+                    return (f"<ERROR> : 3 : format error\n"
+                            f"  (ether group {grp} port {port} は"
+                            f"この装置に存在しません)")
+                state.sir_ether_duplex[(grp, port)] = duplex
             return ""
 
         # Si-R: ether <group> <port> snmp trap linkdown|linkup <enable|disable>
