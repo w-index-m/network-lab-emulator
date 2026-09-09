@@ -927,10 +927,19 @@ class RipEngine:
         lines = ['FP Destination/Mask     Gateway           Metric   Time    Interface']
         for r in n['table']:
             fp = '*C' if r.learned_from == 'direct' else '*R'
-            age = 'none' if r.learned_from == 'direct' else \
-                  f'{int((time.time()-r.timestamp)//60):02d}:{int((time.time()-r.timestamp)%60):02d}'
-            via = '0.0.0.0' if r.learned_from == 'direct' else r.learned_from_hostname or r.next_hop
-            lines.append(f'{fp:<3}{r.network}/{r.prefix:<20}{via:<18}{str(r.metric):<9}{age:<8}lan0')
+            if r.learned_from == 'direct':
+                gateway = '0.0.0.0'
+                age = 'none'
+                iface = rib_engine._iface_for_network(device_id, r.network, r.prefix) or 'lan0'
+            else:
+                # ゲートウェイ欄は実機同様にネクストホップIPを表示する
+                # （ホスト名ではない）。Timeも「学習からの経過時間」ではなく
+                # 「タイムアウトまでの残り時間」のカウントダウン表示。
+                gateway = r.next_hop
+                remaining = max(0, 180 - int(time.time() - r.timestamp))
+                age = f'{remaining // 60:02d}:{remaining % 60:02d}'
+                iface = rib_engine._iface_for_nexthop(device_id, r.next_hop) or 'lan0'
+            lines.append(f'{fp:<3}{r.network}/{r.prefix:<20}{gateway:<18}{str(r.metric):<9}{age:<8}{iface}')
         lines.append(f'The number of entries : {len(n["table"])}')
         return '\n'.join(lines)
 

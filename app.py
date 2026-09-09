@@ -3023,6 +3023,8 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     if re.match(r'^show\s+ip\s+ospf\s+interface', c):
         return ospf_engine.format_show_ospf_interface(device_id)
     if re.match(r'^show\s+ip\s+ospf\s+neighbor', c):
+        if state.device_type == 'sir':
+            return _format_ospf_neighbor_sir(device_id)
         return ospf_engine.format_show_ospf_neighbor(device_id)
     if re.match(r'^show\s+ip\s+ospf\s+database', c):
         return ospf_engine.format_show_ospf_database(device_id)
@@ -4522,6 +4524,58 @@ def _pick_ospf_default_router_id(state) -> str:
             other_ips.append(ip)
     pool = loopback_ips or other_ips
     return max(pool, key=_ip_key) if pool else ''
+
+
+def _format_ospf_neighbor_sir(device_id: str) -> str:
+    """Si-R形式の show ip ospf neighbor（コマンドリファレンス 50.1.5）。
+
+    Ciscoスタイル(1行1テーブル)とは異なり、実機はインタフェースごとに
+    見出し("Neighbor with lan0 result:")を分けて表示する。DDL/ReqL/RtrLは
+    DBD/LSR/LSRxmtキューの長さだが、このエミュレータはそれらのキューを
+    個別追跡していないため0固定とする(Full到達後は実機でも通常0)。
+    """
+    n = ospf_engine.nodes.get(device_id)
+    if not n or not n.get('enabled'):
+        return '<ERROR> No OSPF is configured.'
+    if not n['neighbors']:
+        return ('Neighbor information with all interfaces, result:\n'
+                '(No neighbors)')
+
+    by_iface: dict = {}
+    for nid, nbr in n['neighbors'].items():
+        iface = nbr.iface if getattr(nbr, 'iface', None) else 'lan0'
+        by_iface.setdefault(iface, []).append((nid, nbr))
+
+    lines = ['Neighbor information with all interfaces, result:']
+    for iface in sorted(by_iface):
+        lines.append(f'Neighbor with {iface} result:')
+        lines.append('Neighbor ID     Pri  State        Deadtime  Address          DDL  ReqL  RtrL')
+        for nid, nbr in by_iface[iface]:
+            role = getattr(nbr, 'role', None)
+            if not role:
+                if n.get('dr') == nid:
+                    role = 'DR'
+                elif n.get('bdr') == nid:
+                    role = 'BDR'
+                else:
+                    role = 'Other'
+            state_str = f'{nbr.state}/{role}'
+            elapsed = time.time() - nbr.uptime
+            dead_left = max(0, n['dead_interval'] - (elapsed % n['dead_interval']))
+            h = int(dead_left // 3600)
+            m = int((dead_left % 3600) // 60)
+            s_ = int(dead_left % 60)
+            dead_str = f'{h:02d}:{m:02d}:{s_:02d}'
+            peer_node = ospf_engine.nodes.get(nid, {})
+            peer_ips = list(peer_node.get('_peer_ips', {}).values())
+            peer_ip = (getattr(nbr, 'ip', None)
+                       or (peer_ips[0] if peer_ips else nbr.router_id))
+            lines.append(
+                f'{nbr.router_id:<16}{1:<5}{state_str:<13}{dead_str:<10}'
+                f'{peer_ip:<17}{0:<5}{0:<6}{0}'
+            )
+        lines.append('')
+    return '\n'.join(lines).rstrip()
 
 
 def _format_ospf_route_sir(device_id: str) -> str:
