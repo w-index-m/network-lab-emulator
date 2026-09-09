@@ -61,12 +61,6 @@ RESTCONF_SETUP = [
 
 
 class TestRestconfEnable:
-    def test_show_restconf_reports_enabled(self):
-        _dev('rc-r1')
-        _run('rc-r1', RESTCONF_SETUP)
-        out = _cli('rc-r1', 'show restconf')
-        assert 'Enabled' in out
-
     def test_running_config_reflects_restconf(self):
         _dev('rc-r2')
         _run('rc-r2', RESTCONF_SETUP)
@@ -74,10 +68,20 @@ class TestRestconfEnable:
         assert 'ip http secure-server' in out
         assert 'restconf' in out
 
-    def test_restconf_disabled_by_default(self):
+    def test_restconf_disabled_by_default_not_in_running_config(self):
         _dev('rc-r3')
-        out = _cli('rc-r3', 'show restconf')
-        assert 'Disabled' in out
+        out = _cli('rc-r3', 'show running-config')
+        assert 'restconf' not in out
+
+    def test_show_restconf_is_not_a_real_command(self):
+        """実機に"show restconf"というコマンドは存在しない
+        （RESTCONFはHTTPSベースのプロトコルでCLIのshowコマンドを
+        持たない）。誤って実装していたため削除し、実機同様
+        invalid inputになることを確認する。"""
+        _dev('rc-r1')
+        _run('rc-r1', RESTCONF_SETUP)
+        out = _cli('rc-r1', 'show restconf')
+        assert 'Invalid input' in out
 
 
 class TestRestconfApiEnabled:
@@ -110,13 +114,17 @@ class TestRestconfApiEnabled:
         assert r.status_code == 404
 
     def test_put_disables_interface(self):
+        """RFC 8040準拠: 既存リソースへのPUT成功は204 No Content（本文なし）。
+        実際にIOS-XEをRESTCONFで叩くサンプル実装(GitHub:
+        sajustin/RESTCONF_IOS_XE)でも204を成功判定に使っており、
+        200+JSONボディは実機の挙動と異なると判明したため修正済み。"""
         _dev('rc-r8')
         _run('rc-r8', RESTCONF_SETUP)
         r = client.put(
             '/restconf/rc-r8/data/ietf-interfaces:interfaces/interface=GigabitEthernet0/1',
             json={'ietf-interfaces:interface': {'enabled': False}})
-        assert r.status_code == 200
-        assert r.json()['ietf-interfaces:interface']['enabled'] is False
+        assert r.status_code == 204
+        assert r.content == b''
         # CLI側にも反映されていること
         out = _cli('rc-r8', 'show ip interface brief')
         assert 'administratively down' in out.lower()
@@ -139,9 +147,9 @@ class TestRestconfNotEnabled:
         実機ではHTTPSリスナー自体が無いためRESTCONFに到達できない。"""
         _dev('rc-r11')
         _run('rc-r11', ['configure terminal', 'restconf', 'end'])
-        out = _cli('rc-r11', 'show restconf')
-        assert 'HTTPS server: Disabled' in out
-        assert 'ip http secure-server' in out
+        out = _cli('rc-r11', 'show running-config')
+        assert 'restconf' in out
+        assert 'ip http secure-server' not in out
 
         r = client.get('/restconf/rc-r11/data/ietf-interfaces:interfaces')
         assert r.status_code == 503

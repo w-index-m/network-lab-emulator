@@ -40,12 +40,16 @@ end
 
 確認コマンド:
 ```
-show restconf
 show running-config
 ```
 
-`show restconf`は`RESTCONF: Enabled`、`show running-config`には
-`ip http secure-server` / `restconf`が投入した通りに反映される。
+`show running-config`に`ip http secure-server` / `restconf`が投入した
+通りに反映される。
+
+**注意**: `show restconf`という専用のshowコマンドは**実機に存在しない**
+（後述の訂正を参照）。RESTCONFの有効/無効を確認する専用CLIコマンドは
+無く、`show running-config`で設定行の有無を見るか、実際にHTTPで
+`/restconf/...`を叩いてみるしかない。
 
 ## RESTCONF APIの認証
 
@@ -224,8 +228,8 @@ RESTCONFが未有効化の装置、または`device_type`が`cisco`/`catalyst`
 前述の通り、このエミュレータは機種（3650/9200）によるIOS-XEバージョン
 差やRESTCONF対応可否の違いを再現していないため、`device_type:
 catalyst`である限り両者は同じ挙動になる。実機での機種差検証は
-実際の装置の`show version` / `show restconf`の結果を別途照合する
-必要がある。
+実際の装置の`show version`の結果や、実際にRESTCONF APIを叩いた結果を
+別途照合する必要がある。
 
 ## johann (flopach/johann-network-device-monitoring) を参考にした追加機能
 
@@ -371,9 +375,6 @@ HTTPSリスナー自体が起動しておらずTCP接続すら確立できない
   （実機の「TCP接続すら確立できない」状態を、このエミュレータの
   制約上503で表現している。実機はそもそも接続自体が失敗するため
   HTTPステータスコードにすらならない点に注意）
-- `show restconf`: `HTTPS server: Disabled`の場合に
-  `% Warning: HTTPS server is not running ...`と
-  `ip http secure-server`を促す警告行を追加
 - `restconf_dashboard.html`: `restconf`は設定済みだが
   `ip http secure-server`が無い装置を、緑の「RESTCONF READY」ではなく
   黄色の「HTTPS未起動」バッジ＋警告バナーで区別するようにした
@@ -385,17 +386,6 @@ HTTPSリスナー自体が起動しておらずTCP接続すら確立できない
 
 `restconf`だけ設定した装置(`ip http secure-server`無し)に対して:
 
-```
-show restconf
-```
-```
-RESTCONF: Enabled
-HTTPS server: Disabled
-% Warning: HTTPS server is not running — RESTCONF requests will not reach this device.
-  Enable it with: ip http secure-server
-RESTCONF base URI: /restconf/data
-```
-
 ```bash
 curl -o /dev/null -w "%{http_code}\n" http://.../restconf/<device_id>/data/ietf-interfaces:interfaces
 ```
@@ -403,6 +393,69 @@ curl -o /dev/null -w "%{http_code}\n" http://.../restconf/<device_id>/data/ietf-
 
 ダッシュボードでも黄色バッジ＋警告バナーで表示されることをスクリーン
 ショットで確認済み。
+
+## 訂正: `show restconf` は実在しないコマンドだった
+
+ユーザーから「このエミュレータのCatalyst実装はCisco公式マニュアルを
+見て作っているのか」という質問を受け、実際にWeb検索でCisco公式
+ドキュメント（Programmability Configuration Guide各バージョン、
+Cisco Learning Networkのフォーラム投稿）を確認したところ、
+**`show restconf`というCLIコマンドは実機に存在しない**ことが判明した。
+
+- RESTCONFはRFC 8040のHTTPSベースのプロトコルで、CLIのshowコマンドは
+  持たない。有効/無効の確認方法は「`show running-config`で
+  `restconf`/`ip http secure-server`の行を見る」か「実際にHTTPで
+  `/restconf/...`を叩いてみる」のいずれかしかない
+- 対照的にNETCONFには`show netconf-yang status`（ソフトウェア
+  プロセスの状態）や`show netconf-yang sessions`（アクティブ
+  セッション）という実在のCLIコマンドがある。このエミュレータの
+  `show netconf-yang`はこちらに相当し、こちらは実在コマンドなので
+  そのまま残した
+
+このエミュレータには以前`show restconf`という架空のコマンドを実装
+してしまっていたため、**削除して実機同様`% Invalid input`を返す
+ようにした**。RESTCONFの有効/無効確認は`show running-config`で
+行う形に統一している。
+
+参考にした情報源:
+- [Cisco Command Reference, IOS XE Fuji 16.9.x (Catalyst 9300) - IP Addressing Services Commands](https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/16-9/command_reference/b_169_9300_cr/ip_commands.html)
+- [Cisco Security Configuration Guide, IOS XE Bengaluru 17.4.x (Catalyst 9300) - Configuring Secure Socket Layer HTTP](https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-4/configuration_guide/sec/b_174_sec_9300_cg/configuring_secure_socket_layer_http.html)
+- [Cisco Programmability Configuration Guide, IOS XE Amsterdam 17.1.x - RESTCONF Protocol](https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/prog/configuration/171/b_171_programmability_cg/restconf_protocol.html)
+- [Cisco Learning Network: "Getting an error when using RESTCONF on IOS-XE"](https://learningnetwork.cisco.com/s/question/0D56e0000E3NNpYCQW/getting-an-error-when-using-restconf-on-iosxe)（`show netconf-yang sessions`が正しいコマンドである旨の回答）
+
+なお`www.cisco.com`はこのエミュレータの開発環境（サンドボックス）の
+egressプロキシでブロックされており直接フェッチはできなかったため、
+検索エンジンのスニペット経由での確認にとどまる。実機やCisco公式サイトに
+直接アクセスできる環境で、上記URLの内容を一次情報として再確認する
+ことを推奨する（`ja.manuals.plus`のようなミラーサイトも同様に
+ブロックされていたが、`github.com`は許可されていたため、GitHub上の
+実装例を経由した確認は可能だった）。
+
+## 訂正2: PUTの成功レスポンスを204 No Contentに修正
+
+`github.com/sajustin/RESTCONF_IOS_XE`（実際にIOS-XE機器を
+RESTCONFで操作するPythonスクリプト、対象デバイス: Catalyst 9300）
+のソースコードを確認したところ、次の点が判明した:
+
+- ヘッダーは`Accept`/`Content-Type`とも`application/yang-data+json`
+  （このエミュレータの実装と一致）
+- 認証はHTTP Basic Auth（このエミュレータの実装と一致）
+- `ietf-interfaces:interfaces`のレスポンスJSON構造
+  `{"ietf-interfaces:interfaces": {"interface": [...]}}`
+  （このエミュレータの実装と一致）
+- **PUTでの設定変更成功時は`status_code == 204`を成功判定に使って
+  いる**（RFC 8040準拠: 既存リソースへのPUT成功は204 No Content、
+  本文なし）
+
+このエミュレータの実装は元々PUT成功時に**200 + 更新後のJSONボディ**を
+返しており、この点だけ実機と異なっていたため、**204 No Content
+（本文なし）を返すよう修正した**。フロントエンド
+(`restconf_dashboard.html`)は元々PUTのレスポンス本文を読んでおらず
+`res.ok`しか見ていなかったため、影響なく修正できた。
+
+参考にした情報源:
+- [GitHub: sajustin/RESTCONF_IOS_XE](https://github.com/sajustin/RESTCONF_IOS_XE) — README
+- [GitHub: sajustin/RESTCONF_IOS_XE/iosxeREST.py](https://raw.githubusercontent.com/sajustin/RESTCONF_IOS_XE/master/iosxeREST.py) — 実装本体
 
 ## 関連ドキュメント
 

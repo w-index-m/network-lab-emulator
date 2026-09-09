@@ -2775,8 +2775,8 @@ class BgpEngine:
 # ══════════════════════════════════════════
 PORT_STATE = {'BLOCKING': 'BLK', 'LISTENING': 'LIS', 'LEARNING': 'LRN',
               'FORWARDING': 'FWD', 'DISABLED': 'DIS'}
-PORT_ROLE  = {'ROOT': 'Root', 'DESIGNATED': 'Desgn', 'ALTERNATE': 'Altn',
-              'BACKUP': 'Backup', 'DISABLED': 'Disabled'}
+PORT_ROLE  = {'ROOT': 'Root', 'DESIGNATED': 'Desg', 'ALTERNATE': 'Altn',
+              'BACKUP': 'Back', 'DISABLED': 'Disabled'}
 
 
 def _bid_key(bid: str):
@@ -3627,7 +3627,13 @@ class StpEngine:
         if is_root:
             lines.append('             This bridge is the root')
         else:
-            lines.append(f'             Cost        {n.get("root_path_cost", 0)}')
+            root_port_name = n.get('root_port')
+            # ポート番号(Prio.Nbr の Nbr部分)は本エンジンでは個別管理して
+            # おらず、show spanning-tree vlan の一覧表示側でも "1" 固定で
+            # 出しているのに合わせる（実機では実際のポートインデックス）。
+            port_str = f'1   ({root_port_name})' if root_port_name else '0'
+            lines.append(f'             Cost        {n.get("root_path_cost", 0)}'
+                          f'  Port {port_str}')
             lines.append('             Hello Time  2 sec  Max Age 20 sec  Forward Delay 15 sec')
         lines += [
             '',
@@ -3649,8 +3655,8 @@ class StpEngine:
             rg_str = ' RG' if port.get('root_guard') else ''
             pf_str = ' P' if port.get('portfast') else ''
             role_short = {
-                'ROOT': 'Root ', 'DESIGNATED': 'Desgn', 'ALTERNATE': 'Altn ',
-                'BACKUP': 'Bkup ', 'DISABLED': 'Dis  ',
+                'ROOT': 'Root ', 'DESIGNATED': 'Desg ', 'ALTERNATE': 'Altn ',
+                'BACKUP': 'Back ', 'DISABLED': 'Dis  ',
             }.get(port['role'], port['role'][:5])
             lines.append(
                 f'{port["name"]:<20}{role_short} {state_short} {str(port["cost"]):<10}'

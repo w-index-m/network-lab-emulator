@@ -5405,6 +5405,12 @@ async def restconf_put_interface(device_id: str, ifname: str, body: dict):
     """
     interfaceのenabled(=shutdown/no shutdown相当)を書き換える。
     実機RESTCONFの部分実装で、対応しているのは enabled のみ。
+
+    RFC 8040準拠: 既存リソースへのPUT成功時は204 No Content（本文なし）
+    を返す。実際にIOS-XE機器のRESTCONFを叩いているサンプル実装
+    （GitHub: sajustin/RESTCONF_IOS_XE の iosxeREST.py）でも
+    `status_code == 204` を成功判定に使っており、200+JSONボディでは
+    ないことを確認したため、それに合わせて修正した。
     """
     err = _restconf_check(device_id)
     if err is not None:
@@ -5419,8 +5425,7 @@ async def restconf_put_interface(device_id: str, ifname: str, body: dict):
     payload = body.get("ietf-interfaces:interface", body)
     if "enabled" in payload:
         info["status"] = "up" if payload["enabled"] else "administratively down"
-    return JSONResponse(content={"ietf-interfaces:interface": _restconf_ietf_interface(ifname, info)},
-                        media_type="application/yang-data+json")
+    return _Response(status_code=204)
 
 
 # device_id -> 直近60件の {t, up, down, cpu, bytes, icmp_total} サンプル

@@ -1201,9 +1201,13 @@ class RuleEngine:
             return self._format_show_nve_vni(state)
         if re.match(r'^show\s+bgp\s+l2vpn\s+evpn', c):
             return self._format_show_bgp_l2vpn_evpn(state)
-        # ── show RESTCONF/NETCONF状態（IOS-XE）──
-        if re.match(r'^show\s+restconf', c) and state.device_type in ('cisco', 'catalyst'):
-            return self._format_show_restconf(state)
+        # ── show NETCONF-YANG状態（IOS-XE）──
+        # 注意: "show restconf" は実機に存在しないコマンド。RESTCONFは
+        # HTTPSベースのプロトコルでCLIのshowコマンドを持たず、有効/無効の
+        # 確認は show running-config（restconf/ip http secure-serverの
+        # 行の有無）か、実際にHTTPで叩いてみるしかない（実機のCisco公式
+        # ドキュメントで確認済み。以前実装していた"show restconf"は誤り
+        # だったため削除した）。
         if re.match(r'^show\s+netconf-yang', c) and state.device_type in ('cisco', 'catalyst'):
             return self._format_show_netconf_yang(state)
         # ── show ip traffic（ICMPカウンタ含む。累積値、clear ip trafficまで積み上げ）──
@@ -2539,9 +2543,9 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
 
 Interface           Role Sts Cost      Prio.Nbr Type
 ------------------- ---- --- --------- -------- --------------------------------
-Gi1/0/1             Desgn FWD 4         128.1    P2p
-Gi1/0/2             Desgn FWD 4         128.2    P2p
-Gi1/0/24            Root  FWD 4         128.24   P2p"""
+Gi1/0/1             Desg FWD 4         128.1    P2p
+Gi1/0/2             Desg FWD 4         128.2    P2p
+Gi1/0/24            Root FWD 4         128.24   P2p"""
 
     # ─── show cdp ─────────────────────────────
     @staticmethod
@@ -4786,19 +4790,6 @@ Configuration Revision            : 5"""
             out.append('')
             out.append('advertise-all-vni: enabled')
         return '\n'.join(out)
-
-    def _format_show_restconf(self, state):
-        enabled = getattr(state, 'restconf_enabled', False)
-        https = getattr(state, 'http_secure_server', False)
-        lines = [f'RESTCONF: {"Enabled" if enabled else "Disabled"}']
-        if enabled:
-            lines.append(f'HTTPS server: {"Enabled" if https else "Disabled"}')
-            if not https:
-                lines.append('% Warning: HTTPS server is not running — RESTCONF requests '
-                              'will not reach this device.')
-                lines.append('  Enable it with: ip http secure-server')
-            lines.append('RESTCONF base URI: /restconf/data')
-        return '\n'.join(lines)
 
     def _format_show_netconf_yang(self, state):
         enabled = getattr(state, 'netconf_enabled', False)
