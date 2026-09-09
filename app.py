@@ -2313,7 +2313,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                  state._ospf_networks,
                                  getattr(state, '_ospf_area', '0.0.0.0'))
         ospf_engine.ensure_auto_router_id(
-            device_id, _pick_ospf_default_router_id(state))
+            device_id, _pick_ospf_default_router_id(state, device_id))
         from engine.real_ospf_agent import ensure_ospf_agent
         ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
@@ -2351,7 +2351,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                 state._ospf_networks,
                                 state._ospf_area)
         ospf_engine.ensure_auto_router_id(
-            device_id, _pick_ospf_default_router_id(state))
+            device_id, _pick_ospf_default_router_id(state, device_id))
         from engine.real_ospf_agent import ensure_ospf_agent
         ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return ''
@@ -2389,7 +2389,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                  state._ospf_networks,
                                  state._ospf_area)
         ospf_engine.ensure_auto_router_id(
-            device_id, _pick_ospf_default_router_id(state))
+            device_id, _pick_ospf_default_router_id(state, device_id))
         from engine.real_ospf_agent import ensure_ospf_agent
         ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
@@ -2409,7 +2409,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                  getattr(state, '_ospf_process', 1),
                                  state._ospf_networks, area)
         ospf_engine.ensure_auto_router_id(
-            device_id, _pick_ospf_default_router_id(state))
+            device_id, _pick_ospf_default_router_id(state, device_id))
         from engine.real_ospf_agent import ensure_ospf_agent
         ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
@@ -4500,17 +4500,30 @@ def _network_address(ip: str, prefix: int) -> str:
         return f'{ip}/{prefix}'
 
 
-def _pick_ospf_default_router_id(state) -> str:
+def _pick_ospf_default_router_id(state, device_id: str = None) -> str:
     """`router-id`未設定時のOSPF Router ID自動選出（Cisco仕様）。
     稼働中(up)のLoopbackインタフェースの最大IPを優先し、
-    無ければ稼働中の他インタフェースの最大IPを返す。該当が無ければ''。"""
+    無ければ稼働中の他インタフェースの最大IPを返す。該当が無ければ''。
+
+    device_idを渡した場合、実際にvnetでリンクされているインタフェースを
+    優先する。Si-R/Catalyst等は未接続でも同一の工場出荷時デフォルトIP
+    (wan1=203.0.113.1等)を全装置で共有しているため、それをそのまま
+    採用すると無関係な複数装置のRouter IDが衝突してしまう
+    （実機ではケーブル未接続のポートに他機と同じIPが刺さったままに
+    なることは無い）。リンク済みインタフェースの候補が無い場合のみ、
+    未接続でも従来通りの選出にフォールバックする。"""
     def _ip_key(ip):
         try:
             return tuple(int(x) for x in ip.split('.'))
         except Exception:
             return (0, 0, 0, 0)
 
+    linked_ifaces = set()
+    if device_id:
+        linked_ifaces = set(vnet.interface_links.get(device_id, {}).values())
+
     loopback_ips = []
+    linked_ips = []
     other_ips = []
     for name, info in state.interfaces.items():
         ip = info.get('ip')
@@ -4520,9 +4533,11 @@ def _pick_ospf_default_router_id(state) -> str:
             continue
         if name.lower().startswith('loopback'):
             loopback_ips.append(ip)
+        elif name in linked_ifaces:
+            linked_ips.append(ip)
         else:
             other_ips.append(ip)
-    pool = loopback_ips or other_ips
+    pool = loopback_ips or linked_ips or other_ips
     return max(pool, key=_ip_key) if pool else ''
 
 
