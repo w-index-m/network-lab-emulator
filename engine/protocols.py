@@ -2989,13 +2989,26 @@ class StpEngine:
                         f'(sys-id-ext {vlan}) configured')
         }))
 
+    @staticmethod
+    def _port_name_for_peer(device_id: str, peer_id: str, fallback: str) -> str:
+        """
+        リンクの実インタフェース名（vnet.interface_links）が分かれば
+        それを使い、無ければ従来通り "ether N" にフォールバックする。
+
+        以前は常に "ether N" という合成名を使っていたため、Catalyst等
+        実機のインタフェース名(GigabitEthernet1/0/1等)を期待する
+        show spanning-tree の出力が実機と食い違っていた。
+        """
+        real = vnet.interface_links.get(device_id, {}).get(peer_id)
+        return real or fallback
+
     def _init_ports(self, device_id: str):
         n = self.nodes.get(device_id)
         if not n:
             return
         # 接続済みの隣接ノードからポートを生成
         for i, peer_id in enumerate(vnet.get_neighbors(device_id), 1):
-            port_name = f'ether {i}'
+            port_name = self._port_name_for_peer(device_id, peer_id, f'ether {i}')
             if port_name not in n['ports']:
                 n['ports'][port_name] = {
                     'name': port_name, 'state': 'FORWARDING',
@@ -3464,7 +3477,7 @@ class StpEngine:
         port_num = 1
         while f'ether {port_num}' in n['ports']:
             port_num += 1
-        port_name = f'ether {port_num}'
+        port_name = self._port_name_for_peer(device_id, peer_id, f'ether {port_num}')
         n['ports'][port_name] = {
             'name': port_name,
             'state': 'DISCARDING' if n['mode'] == 'rstp' else 'BLOCKING',
@@ -3784,6 +3797,12 @@ class RibEngine:
                     if is_connected and not iface:
                         iface = self._iface_for_network(
                             device_id, r.network, r.prefix) or ''
+                    elif not is_connected and not iface:
+                        # 実機は"ip route <net> <mask> <next-hop>"のように
+                        # インタフェースを省略しても、次ホップと同一セグメント
+                        # にあるインタフェース名をshow ip routeに表示する。
+                        # 以前はr.ifaceが未設定のままだと空欄になっていた。
+                        iface = self._iface_for_nexthop(device_id, r.next_hop) or ''
                     candidates.append({
                         'network': r.network, 'prefix': r.prefix,
                         'next_hop': r.next_hop, 'ad': r.ad,
