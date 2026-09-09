@@ -352,6 +352,58 @@ echo/echo reply/unreachable/redirectそれぞれの送受信内訳が
 `/api/restconf/dashboard`の両方でRedirectカウンタが増えることも
 別途確認済み。
 
+## `ip http secure-server` 未設定時の挙動を修正（さらに追記）
+
+「httpがオンになっていなくてもAPIでの取得はできるのか」という質問を
+機に確認したところ、**修正前はできてしまっていた**（`restconf`さえ
+入っていれば`ip http secure-server`が無くても200が返る、実機とは
+異なる挙動）。実機はRESTCONFがHTTPS(または`ip http server`のHTTP)を
+トランスポートとして使うため、`ip http secure-server`が無いと
+HTTPSリスナー自体が起動しておらずTCP接続すら確立できない。
+これに合わせて修正した。
+
+### 修正内容
+
+- `/restconf/{device_id}/...`のAPI: `restconf`は有効だが
+  `ip http secure-server`が無い場合、**503**
+  （`ietf-restconf:errors`、`ip http secure-server`を有効にする
+  よう促すメッセージ付き）を返すようにした
+  （実機の「TCP接続すら確立できない」状態を、このエミュレータの
+  制約上503で表現している。実機はそもそも接続自体が失敗するため
+  HTTPステータスコードにすらならない点に注意）
+- `show restconf`: `HTTPS server: Disabled`の場合に
+  `% Warning: HTTPS server is not running ...`と
+  `ip http secure-server`を促す警告行を追加
+- `restconf_dashboard.html`: `restconf`は設定済みだが
+  `ip http secure-server`が無い装置を、緑の「RESTCONF READY」ではなく
+  黄色の「HTTPS未起動」バッジ＋警告バナーで区別するようにした
+- `/api/restconf/dashboard`のレスポンスに`restconf_reachable`
+  （`restconf_enabled && http_secure_server`の両方が揃っているか）
+  を追加。サマリの`restconf_ready_count`もこちらを使うよう修正
+
+### 実際に確認した動作
+
+`restconf`だけ設定した装置(`ip http secure-server`無し)に対して:
+
+```
+show restconf
+```
+```
+RESTCONF: Enabled
+HTTPS server: Disabled
+% Warning: HTTPS server is not running — RESTCONF requests will not reach this device.
+  Enable it with: ip http secure-server
+RESTCONF base URI: /restconf/data
+```
+
+```bash
+curl -o /dev/null -w "%{http_code}\n" http://.../restconf/<device_id>/data/ietf-interfaces:interfaces
+```
+→ `503`
+
+ダッシュボードでも黄色バッジ＋警告バナーで表示されることをスクリーン
+ショットで確認済み。
+
 ## 関連ドキュメント
 
 - `docs/evpn-vxlan-nexus.md` — 同時期に実装したNexus Dashboard風ビュー

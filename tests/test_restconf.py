@@ -134,6 +134,20 @@ class TestRestconfNotEnabled:
         r = client.get('/restconf/rc-r10/data/ietf-interfaces:interfaces')
         assert r.status_code == 404
 
+    def test_api_503_when_restconf_enabled_but_https_not_started(self):
+        """restconfだけ入れてip http secure-serverを入れ忘れたケース。
+        実機ではHTTPSリスナー自体が無いためRESTCONFに到達できない。"""
+        _dev('rc-r11')
+        _run('rc-r11', ['configure terminal', 'restconf', 'end'])
+        out = _cli('rc-r11', 'show restconf')
+        assert 'HTTPS server: Disabled' in out
+        assert 'ip http secure-server' in out
+
+        r = client.get('/restconf/rc-r11/data/ietf-interfaces:interfaces')
+        assert r.status_code == 503
+        assert 'ietf-restconf:errors' in r.json()
+        assert 'ip http secure-server' in r.json()['ietf-restconf:errors']['error'][0]['error-message']
+
 
 class TestRestconfDashboardApi:
     """RESTCONFヘルスダッシュボード（/api/restconf/dashboard）"""
@@ -147,6 +161,7 @@ class TestRestconfDashboardApi:
         entry = next(d for d in data['devices'] if d['device_id'] == 'rc-dash-1')
         assert entry['restconf_enabled'] is True
         assert entry['http_secure_server'] is True
+        assert entry['restconf_reachable'] is True
         assert entry['interface_with_ip'] >= 1
         assert entry['interface_up'] + entry['interface_down'] == entry['interface_count']
 
@@ -155,6 +170,16 @@ class TestRestconfDashboardApi:
         r = client.get('/api/restconf/dashboard')
         entry = next(d for d in r.json()['devices'] if d['device_id'] == 'rc-dash-2')
         assert entry['restconf_enabled'] is False
+        assert entry['restconf_reachable'] is False
+
+    def test_restconf_enabled_without_https_is_not_reachable(self):
+        _dev('rc-dash-5')
+        _run('rc-dash-5', ['configure terminal', 'restconf', 'end'])
+        r = client.get('/api/restconf/dashboard')
+        entry = next(d for d in r.json()['devices'] if d['device_id'] == 'rc-dash-5')
+        assert entry['restconf_enabled'] is True
+        assert entry['http_secure_server'] is False
+        assert entry['restconf_reachable'] is False
 
     def test_non_cisco_device_excluded(self):
         _dev('rc-dash-3', type_='sir')
@@ -167,7 +192,7 @@ class TestRestconfDashboardApi:
         data = r.json()
         assert data['summary']['device_count'] == len(data['devices'])
         assert data['summary']['restconf_ready_count'] == sum(
-            1 for d in data['devices'] if d['restconf_enabled'])
+            1 for d in data['devices'] if d['restconf_reachable'])
 
     def test_history_accumulates_across_polls(self):
         _dev('rc-dash-4')

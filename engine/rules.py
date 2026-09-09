@@ -4792,7 +4792,11 @@ Configuration Revision            : 5"""
         https = getattr(state, 'http_secure_server', False)
         lines = [f'RESTCONF: {"Enabled" if enabled else "Disabled"}']
         if enabled:
-            lines.append(f'HTTPS server: {"Enabled" if https else "Disabled (ip http secure-server が必要)"}')
+            lines.append(f'HTTPS server: {"Enabled" if https else "Disabled"}')
+            if not https:
+                lines.append('% Warning: HTTPS server is not running — RESTCONF requests '
+                              'will not reach this device.')
+                lines.append('  Enable it with: ip http secure-server')
             lines.append('RESTCONF base URI: /restconf/data')
         return '\n'.join(lines)
 

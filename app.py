@@ -5353,6 +5353,17 @@ def _restconf_check(device_id: str):
                 "error-type": "application", "error-tag": "invalid-value",
                 "error-message": ('RESTCONF is not enabled on this device '
                                    '("restconf" must be configured first)')}]}})
+    if not getattr(state, 'http_secure_server', False):
+        # 実機ではip http secure-serverが無いとHTTPS自体が待ち受けておらず
+        # TCP接続すら確立できない（restconfコマンドだけでは動かない）。
+        # このエミュレータは1プロセスで全装置のHTTPを受けているため
+        # 本物の接続拒否は再現できないが、503でその状態を表現する。
+        return JSONResponse(status_code=503, content={
+            "ietf-restconf:errors": {"error": [{
+                "error-type": "application", "error-tag": "operation-not-supported",
+                "error-message": ('HTTPS server is not running on this device. '
+                                   'Configure "ip http secure-server" to enable it '
+                                   '(restconf alone does not start the HTTPS listener).')}]}})
     return None
 
 
@@ -5470,11 +5481,16 @@ async def restconf_dashboard():
                         'cpu': cpu_percent, 'bytes': total_bytes,
                         'icmp_total': icmp_total})
 
+        http_secure_server = getattr(state, 'http_secure_server', False)
         devices.append({
             "device_id": device_id,
             "hostname": state.hostname,
             "restconf_enabled": restconf_enabled,
-            "http_secure_server": getattr(state, 'http_secure_server', False),
+            "http_secure_server": http_secure_server,
+            # restconfコマンドが入っていても、ip http secure-serverが無いと
+            # 実機ではHTTPSリスナー自体が起動しておらずAPIに到達できない。
+            # 両方揃って初めて実際に叩ける状態。
+            "restconf_reachable": restconf_enabled and http_secure_server,
             "interface_count": len(entries),
             "interface_up": up,
             "interface_down": down,
@@ -5491,7 +5507,7 @@ async def restconf_dashboard():
         "polled_at": now,
         "summary": {
             "device_count": len(devices),
-            "restconf_ready_count": sum(1 for d in devices if d["restconf_enabled"]),
+            "restconf_ready_count": sum(1 for d in devices if d["restconf_reachable"]),
             "total_interfaces": sum(d["interface_count"] for d in devices),
             "total_interfaces_up": sum(d["interface_up"] for d in devices),
             "total_traffic_bytes": sum(d["traffic_bytes"] for d in devices),
