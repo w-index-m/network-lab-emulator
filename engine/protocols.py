@@ -3644,7 +3644,8 @@ class StpEngine:
             # ポート番号(Prio.Nbr の Nbr部分)は本エンジンでは個別管理して
             # おらず、show spanning-tree vlan の一覧表示側でも "1" 固定で
             # 出しているのに合わせる（実機では実際のポートインデックス）。
-            port_str = f'1   ({root_port_name})' if root_port_name else '0'
+            port_str = (f'1   ({dp_engine._short_port(root_port_name)})'
+                        if root_port_name else '0')
             lines.append(f'             Cost        {n.get("root_path_cost", 0)}'
                           f'  Port {port_str}')
             lines.append('             Hello Time  2 sec  Max Age 20 sec  Forward Delay 15 sec')
@@ -3671,8 +3672,9 @@ class StpEngine:
                 'ROOT': 'Root ', 'DESIGNATED': 'Desg ', 'ALTERNATE': 'Altn ',
                 'BACKUP': 'Back ', 'DISABLED': 'Dis  ',
             }.get(port['role'], port['role'][:5])
+            short_name = dp_engine._short_port(port["name"])
             lines.append(
-                f'{port["name"]:<20}{role_short} {state_short} {str(port["cost"]):<10}'
+                f'{short_name:<20}{role_short} {state_short} {str(port["cost"]):<10}'
                 f'{str(port["priority"])+".1":<9}P2p{pf_str}{rg_str}'
             )
         return '\n'.join(lines)
