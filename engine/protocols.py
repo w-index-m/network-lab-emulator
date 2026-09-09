@@ -1812,7 +1812,12 @@ class OspfEngine:
             })
 
     # ── show コマンド出力 ──────────────────
-    def format_show_ospf_neighbor(self, device_id: str) -> str:
+    _OSPF_STATE_RANK = {
+        'Full': 6, 'Loading': 5, 'Exchange': 4, 'ExStart': 3,
+        'TwoWay': 2, '2-Way': 2, 'Init': 1, 'Down': 0,
+    }
+
+    def format_show_ospf_neighbor(self, device_id: str, device_sessions: dict = None) -> str:
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
             return '% OSPF is not configured on this device.'
@@ -1822,7 +1827,21 @@ class OspfEngine:
         if not n['neighbors']:
             lines.append('(No neighbors)')
             return '\n'.join(lines)
+
+        # 同一router_idに対して、内部エンジン(device_id をキーに保持し
+        # Helloで正しくFullまで進む)と実UDPリスナー(engine/real_ospf_agent.py。
+        # router_id文字列をキーに保持し、DBD交換までは進まずInitのまま
+        # 残ることがある)の二重登録が起きることがある。表示上は
+        # router_idごとに最も進んだstateのエントリ1件だけを残す。
+        best_by_rid = {}
         for nid, nbr in n['neighbors'].items():
+            rid = nbr.router_id
+            rank = self._OSPF_STATE_RANK.get(nbr.state, 0)
+            cur = best_by_rid.get(rid)
+            if cur is None or rank > self._OSPF_STATE_RANK.get(cur[1].state, 0):
+                best_by_rid[rid] = (nid, nbr)
+
+        for nid, nbr in best_by_rid.values():
             nbr_node = self.nodes.get(nid)
             pri = nbr_node.get('priority', 1) if nbr_node else 1
             # DR/BDR/DROther判定
@@ -1842,15 +1861,25 @@ class OspfEngine:
             m = int((dead_left % 3600) // 60)
             s_ = int(dead_left % 60)
             dead_str = f'{h:02d}:{m:02d}:{s_:02d}'
-            # ネイバーIPは相手ノードのIPから推定（実IPがあれば使用）。
-            # 実OSPFリスナー(engine/real_ospf_agent.py)経由の外部ピアは
-            # ospf_engine.nodes に登録が無いので、ネイバー自身が持つ
-            # 実IPを優先する
-            peer_node = self.nodes.get(nid, {})
-            peer_ips = list(peer_node.get('_peer_ips', {}).values())
-            peer_ip = (getattr(nbr, 'ip', None)
-                       or (peer_ips[0] if peer_ips else f'10.0.{abs(hash(nid))%200+1}.1'))
-            iface = nbr.iface if hasattr(nbr, 'iface') and nbr.iface else 'GigabitEthernet0/0/0'
+            # ネイバーIP/インタフェースは、vnetの実リンク情報と相手側の
+            # 実インタフェースIPから解決する（device_sessionsが渡された
+            # 場合のみ）。解決できない場合のみ従来通りのフォールバック。
+            iface = getattr(nbr, 'iface', None)
+            peer_ip = getattr(nbr, 'ip', None)
+            local_iface = vnet.interface_links.get(device_id, {}).get(nid)
+            if local_iface and not iface:
+                iface = local_iface
+            if device_sessions is not None and not peer_ip:
+                peer_state = device_sessions.get(nid)
+                peer_iface = vnet.interface_links.get(nid, {}).get(device_id)
+                if peer_state and peer_iface:
+                    peer_ip = peer_state.interfaces.get(peer_iface, {}).get('ip')
+            if not peer_ip:
+                peer_node = self.nodes.get(nid, {})
+                peer_ips = list(peer_node.get('_peer_ips', {}).values())
+                peer_ip = peer_ips[0] if peer_ips else f'10.0.{abs(hash(nid))%200+1}.1'
+            if not iface:
+                iface = 'GigabitEthernet0/0/0'
             lines.append(
                 f'{nbr.router_id:<16}{pri:<6}{state_str:<16}{dead_str:<12}'
                 f'{peer_ip:<16}{iface}'

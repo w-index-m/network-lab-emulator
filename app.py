@@ -3112,7 +3112,7 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     if re.match(r'^show\s+ip\s+ospf\s+neighbor', c):
         if state.device_type == 'sir':
             return _format_ospf_neighbor_sir(device_id)
-        return ospf_engine.format_show_ospf_neighbor(device_id)
+        return ospf_engine.format_show_ospf_neighbor(device_id, device_sessions)
     if re.match(r'^show\s+ip\s+ospf\s+database', c):
         return ospf_engine.format_show_ospf_database(device_id)
     if re.match(r'^show\s+ip\s+ospf\s+route', c):
