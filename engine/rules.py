@@ -3370,8 +3370,8 @@ Configuration Revision            : 5"""
             return '  No IPsec SA established.'
         advance_all_sir_dpd(state)
         lines = [
-            '  Remote       Local        Protocol  SPI(In)    SPI(Out)   State',
-            '  -----------  -----------  --------  ---------  ---------  -----------',
+            '  Remote           Local            Protocol  SPI(In)    SPI(Out)   State',
+            '  ---------------  ---------------  --------  ---------  ---------  -----------',
         ]
         for tid, t in tunnels.items():
             remote = t.get('remote_ip', '?.?.?.?')
@@ -3382,7 +3382,7 @@ Configuration Revision            : 5"""
             if t.get('dpd_state') == 'detecting':
                 spi_in = spi_out = '-'
                 state_str = 'DPD-DETECT'
-                lines.append(f'  {remote:<13}{local:<13}{proto:<10}{spi_in:<11}{spi_out:<11}{state_str}')
+                lines.append(f'  {remote:<17}{local:<17}{proto:<10}{spi_in:<11}{spi_out:<11}{state_str}')
                 continue
             if status == 'established' and phase2 == 'MATURE':
                 spi_in  = t.get('spi_in',  f'0x{abs(hash(remote+str(tid)))%0xffffffff:08x}')
@@ -3394,7 +3394,7 @@ Configuration Revision            : 5"""
             else:
                 spi_in = spi_out = '-'
                 state_str = 'LARVAL'
-            lines.append(f'  {remote:<13}{local:<13}{proto:<10}{spi_in:<11}{spi_out:<11}{state_str}')
+            lines.append(f'  {remote:<17}{local:<17}{proto:<10}{spi_in:<11}{spi_out:<11}{state_str}')
         return '\n'.join(lines)
 
     def _sir_show_ipsec_tunnel(self, state: DeviceState) -> str:
@@ -5368,10 +5368,14 @@ Configuration Revision            : 5"""
             return ""
 
         # remote 1 ap 0 ipsec ike preshared-key <key>
+        # 事前共有鍵は大文字小文字を区別するため、小文字化済みの c ではなく
+        # 元の大文字小文字を保持した cmd から抽出する。
         m_psk = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key\s+(\S+)', c)
+        m_psk_orig = re.match(r'^remote\s+\d+\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key\s+(\S+)', cmd, re.I)
         if m_psk and state.device_type in ('sir', 'srs'):
             tid = int(m_psk.group(1))
-            state.ipsec_tunnels.setdefault(tid, {})['preshared'] = m_psk.group(2)
+            key = m_psk_orig.group(1) if m_psk_orig else m_psk.group(2)
+            state.ipsec_tunnels.setdefault(tid, {})['preshared'] = key
             state.ipsec_tunnels[tid]['status'] = 'established'  # 鍵設定でNEG開始を模擬
             state.ipsec_tunnels[tid]['phase1'] = 'MATURE'
             state.ipsec_tunnels[tid]['phase2'] = 'MATURE'
