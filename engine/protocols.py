@@ -8366,10 +8366,25 @@ class VpcEngine:
         if peer_id and peer_id in self.domains:
             peer_role = self.domains[peer_id].role
 
+        # 実機は「Peer status」と「vPC keep-alive status」で別々の文言を使う
+        # （同じ内部状態でもフィールドごとに表現が異なる）。以前はどちらも
+        # 内部状態(alive/dead/pending)をそのまま出しており、実機の
+        # "peer adjacency formed ok" 等の文言と食い違っていた。
+        _peer_status_text = {
+            'alive': 'peer adjacency formed ok',
+            'dead': 'peer adjacency not formed',
+            'pending': 'peer adjacency not formed',
+        }.get(d.keepalive_state, d.keepalive_state)
+        _keepalive_text = {
+            'alive': 'peer is alive',
+            'dead': 'peer is not alive',
+            'pending': 'peer is not alive',
+        }.get(d.keepalive_state, d.keepalive_state)
+
         lines = [
             f'vPC domain id                     : {d.domain_id}',
-            f'Peer status                        : {d.keepalive_state}',
-            f'vPC keep-alive status              : {d.keepalive_state}',
+            f'Peer status                        : {_peer_status_text}',
+            f'vPC keep-alive status              : {_keepalive_text}',
             'Configuration consistency status   : success',
             'Per-vlan consistency status        : success',
             'Type-2 consistency status          : success',

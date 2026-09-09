@@ -99,8 +99,10 @@ async def test_show_vpc_reports_peer_and_keepalive_alive(two_nexus):
     await _setup_vpc(e)
 
     out = e.format_show_vpc('n1')
-    assert 'Peer status                        : alive' in out, out
-    assert 'vPC keep-alive status              : alive' in out, out
+    # 実機は"Peer status"と"vPC keep-alive status"で別々の文言を使う
+    # （内部状態は同じ'alive'だが表示テキストは異なる）
+    assert 'Peer status                        : peer adjacency formed ok' in out, out
+    assert 'vPC keep-alive status              : peer is alive' in out, out
     assert 'vPC role                           : primary' in out, out
 
 
@@ -151,9 +153,8 @@ async def test_single_switch_stays_pending(two_nexus):
     assert e.domains['n1'].keepalive_state != 'alive', \
         '対向不在なのにキープアライブがaliveになっている'
     out = e.format_show_vpc('n1')
-    # "keep-alive" という語自体に 'alive' が含まれるため、値の行で判定する
-    assert 'Peer status                        : pending' in out, out
-    assert 'vPC keep-alive status              : pending' in out, out
+    assert 'Peer status                        : peer adjacency not formed' in out, out
+    assert 'vPC keep-alive status              : peer is not alive' in out, out
 
 
 # ── Peer-Keepalive が実際に届いているかの検証 ──────────────

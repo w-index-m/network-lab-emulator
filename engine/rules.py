@@ -2874,15 +2874,33 @@ Link ID         ADV Router      Age         Seq#       Checksum Link count
         return "\n".join(lines)
 
     def _show_eigrp_topology(self, state):
+        # 実機は1件目の via をサマリ行(P .../FD is X)と同じ行に出し、
+        # 各via行にはインタフェース名も付く（例: "via 10.1.2.2
+        # (31232/30976), GigabitEthernet0/0"）。以前はサマリ行を単独で
+        # 出し、via行にインタフェースが付いていなかった。
+        from engine.protocols import rib_engine
         n = self._eigrp_node(state)
         if not n:
             return "% EIGRP is not configured on this device."
+        device_id = getattr(state, '_device_id', None)
         rid = n.get('router_id') or '0.0.0.0'
         lines = [f"EIGRP-IPv4 Topology Table for AS({n['asn']})/ID({rid})",
                  "Codes: P - Passive, A - Active, U - Update, Q - Query, "
                  "R - Reply,",
                  "       r - reply Status, s - sia Status",
                  ""]
+
+        def _via(r):
+            if r.learned_from == 'direct':
+                iface = rib_engine._iface_for_network(device_id, r.network, r.prefix) \
+                    if device_id else None
+                return f"Connected, {iface}" if iface else "Connected"
+            iface = rib_engine._iface_for_nexthop(device_id, r.next_hop) if device_id else ''
+            tail = f", {iface}" if iface else ""
+            # (FD/RD) の並びは実機と同じ。RD < FD がフィージビリティ
+            # 条件で、これを満たす経路が即時の代替になる
+            return f"{r.next_hop} ({r.fd}/{r.rd}){tail}"
+
         # 宛先ごとにまとめ、FD最小をサクセサとして先頭に出す
         by_dest = {}
         for r in n['topology']:
@@ -2892,14 +2910,9 @@ Link ID         ADV Router      Age         Seq#       Checksum Link count
             best_fd = routes[0].fd
             successors = [r for r in routes if r.fd == best_fd]
             lines.append(f"P {net}/{plen}, {len(successors)} successors, "
-                         f"FD is {best_fd}")
-            for r in routes:
-                if r.learned_from == 'direct':
-                    lines.append("        via Connected")
-                else:
-                    # (FD/RD) の並びは実機と同じ。RD < FD がフィージビリティ
-                    # 条件で、これを満たす経路が即時の代替になる
-                    lines.append(f"        via {r.next_hop} ({r.fd}/{r.rd})")
+                         f"FD is {best_fd} via {_via(routes[0])}")
+            for r in routes[1:]:
+                lines.append(f"        via {_via(r)}")
         if not by_dest:
             lines.append("(経路なし)")
         return "\n".join(lines)
