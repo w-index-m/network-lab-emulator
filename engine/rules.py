@@ -2321,8 +2321,7 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             "        I - stand-alone s - suspended",
             "        H - Hot-standby (LACP only)",
             "        R - Layer3      S - Layer2",
-            "        U - in use      N - not in use, no aggregation",
-            "        f - failed to allocate aggregator",
+            "        U - in use      f - failed to allocate aggregator",
             "",
             "        M - not in use, minimum links not met",
             "        u - unsuitable for bundling",
@@ -2341,14 +2340,14 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             grp = cgs[grp_id]
             mode = grp.get('mode', 'on')
             proto = "LACP" if mode in ('active', 'passive') else "PAgP"
-            po_name = f"Po{grp_id}"
             po_status = "SU" if grp.get('members') else "SD"
+            po_field = f"Po{grp_id}({po_status})"
             member_strs = []
             for m in grp.get('members', []):
                 short = m.replace("GigabitEthernet", "Gi").replace("TenGigabitEthernet", "Te").replace("Ethernet", "Et")
                 flag = "P" if mode in ('active', 'passive', 'on') else "I"
                 member_strs.append(f"{short}({flag})")
-            lines.append(f"{grp_id:<7}{po_name:<14}({po_status}) {proto:<12}" + " ".join(member_strs))
+            lines.append(f"{grp_id:<7}{po_field:<14}{proto:<12}" + " ".join(member_strs))
         return "\n".join(lines)
 
     def _show_etherchannel_detail(self, state):
@@ -2974,10 +2973,14 @@ The number of entries : {len(state.rip_table)}"""
                  "",
                  "Vlan    Mac Address       Type        Ports",
                  "----    -----------       --------    -----"]
+        # Cisco機器のMACはドット区切り4桁3組（例: 001a.2b3c.4d5e）が正しい表記。
+        # コロン区切りはCisco機器の出力には存在しない（dp_engineの
+        # cisco_mac()と同じ規則。この経路はcatalyst/srs/nexus以外の
+        # フォールバックだが、投入する値だけは表記を合わせておく）。
         macs = [
-            ("10","00:1a:2b:3c:4d:5e","DYNAMIC","Gi1/0/1"),
-            ("10","00:2b:3c:4d:5e:6f","DYNAMIC","Gi1/0/2"),
-            ("1", "ff:ff:ff:ff:ff:ff","STATIC", "CPU"),
+            ("10", "001a.2b3c.4d5e", "DYNAMIC", "Gi1/0/1"),
+            ("10", "002b.3c4d.5e6f", "DYNAMIC", "Gi1/0/2"),
+            ("1", "ffff.ffff.ffff", "STATIC", "CPU"),
         ]
         for m in macs:
             lines.append(f" {m[0]:<8}{m[1]:<20}{m[2]:<12}{m[3]}")
