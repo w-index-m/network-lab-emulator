@@ -2665,8 +2665,12 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             await stp_engine.start(device_id, hostname, n['mode'], priority)
         return
 
-    # ── MPLS(LDP) ── Cisco IOS-XE/NX-OS: グローバル有効化
+    # ── MPLS(LDP) ── Cisco IOS-XE/NX-OS専用（Si-Rは実機に機能自体が無く、
+    # Apresiaはレイヤー2スイッチのためMPLSは対象外。device_typeで除外する）
+    _mpls_capable = state.device_type in ('cisco', 'catalyst', 'nexus')
     if c == 'mpls ip' and state.mode == 'config':
+        if not _mpls_capable:
+            return "% Invalid input detected at '^' marker."
         mpls_engine.enable_global(device_id)
         mpls_engine.refresh_neighbors(device_id)
         for peer_id in vnet.get_neighbors(device_id):
@@ -2674,12 +2678,16 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         return
     # インタフェース単位の有効化: "mpls ip"（config-ifモード内）
     if c == 'mpls ip' and state.mode == 'config-if' and state.current_if:
+        if not _mpls_capable:
+            return "% Invalid input detected at '^' marker."
         mpls_engine.enable_interface(device_id, state.current_if)
         mpls_engine.refresh_neighbors(device_id)
         for peer_id in vnet.get_neighbors(device_id):
             mpls_engine.refresh_neighbors(peer_id)
         return
     if c == 'no mpls ip' and state.mode == 'config-if' and state.current_if:
+        if not _mpls_capable:
+            return "% Invalid input detected at '^' marker."
         mpls_engine.disable_interface(device_id, state.current_if)
         mpls_engine.refresh_neighbors(device_id)
         for peer_id in vnet.get_neighbors(device_id):
