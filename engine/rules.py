@@ -849,7 +849,8 @@ class RuleEngine:
                           "config-cmap", "config-pmap", "config-pmap-c",
                           "config-vs-domain", "config-dhcp", "config-bba",
                           "config-evpn", "config-evpn-vni", "config-nve-vni",
-                          "config-bgp-af", "config-sec-zone", "config-sec-zone-pair"):
+                          "config-bgp-af", "config-sec-zone", "config-sec-zone-pair",
+                          "config-track"):
             return self._cmd_config(cmd, state)
 
         # ── ISSU / ソフトウェアアップグレード（Catalyst / Nexus）──
@@ -910,13 +911,14 @@ class RuleEngine:
                              "config-cmap", "config-pmap", "config-vs-domain",
                              "config-dhcp", "config-sg-tacacs", "config-ext-nacl",
                              "config-bba", "config-evpn",
-                             "config-sec-zone", "config-sec-zone-pair"):
+                             "config-sec-zone", "config-sec-zone-pair",
+                             "config-track"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
                          '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool',
                          '_aaa_group_name', '_current_acl_name', '_bba_group',
-                         '_zbfw_zone', '_zbfw_pair'):
+                         '_zbfw_zone', '_zbfw_pair', '_track_obj'):
                 if hasattr(state, attr):
                     delattr(state, attr)
         elif state.mode == "config":
@@ -1223,6 +1225,14 @@ class RuleEngine:
         # ── show ip verify source（IP Source Guard）──
         if re.match(r'^show\s+ip\s+verify\s+source', c):
             return self._format_show_ip_verify(state)
+
+        # ── show track（拡張オブジェクトトラッキング）──
+        m = re.match(r'^show\s+track(?:\s+(\d+))?\s*$', c)
+        if m and state.device_type in ('cisco', 'catalyst', 'nexus'):
+            from engine.protocols import track_engine
+            _did = getattr(state, '_device_id', None) or state.hostname
+            return track_engine.format_show_track(
+                _did, int(m.group(1)) if m.group(1) else None, state)
 
         # ── ZBFW(Zone-Based Firewall) ──
         if re.match(r'^show\s+zone\s+security', c):
@@ -3817,6 +3827,13 @@ Configuration Revision            : 5"""
                                  + (' native' if _enc.get('native') else ''))
                 if ip:
                     lines.append(f" ip address {ip} {mask}")
+                if ifdata.get('ipv6'):
+                    lines.append(f" ipv6 address {ifdata['ipv6']}/"
+                                 f"{ifdata.get('ipv6_prefix', 64)}")
+                elif ifdata.get('ipv6_enabled'):
+                    lines.append(" ipv6 enable")
+                if ifdata.get('tcp_mss'):
+                    lines.append(f" ip tcp adjust-mss {ifdata['tcp_mss']}")
                 # Auto-QoS が自動生成する行（実機の running-config と同じ順）
                 if ifdata.get('trust_device'):
                     lines.append(f" trust device {ifdata['trust_device']}")
@@ -5286,6 +5303,136 @@ Configuration Revision            : 5"""
     # ════════════════════════════════════════════
     # DAI / IP Source Guard
     # ════════════════════════════════════════════
+    def _cmd_ip_services(self, cmd, state):
+        """IPアドレッシングサービス系（Catalyst 9300 IP Addressing Services
+        Configuration Guide 相当）の設定コマンド。
+
+        - 拡張オブジェクトトラッキング（track <n> ...）
+        - TCP MSS調整（ip tcp adjust-mss）
+        - IPv6基本（ipv6 unicast-routing / ipv6 address / ipv6 enable）
+        該当しなければ None を返す。
+        """
+        dt = state.device_type
+        if dt not in ('cisco', 'catalyst', 'nexus'):
+            return None
+        from engine.protocols import track_engine
+        c = cmd.lower().strip()
+        device_id = getattr(state, '_device_id', None) or state.hostname
+
+        # ── track <n> interface <iface> {line-protocol|ip routing} ──
+        m = re.match(r'^track\s+(\d+)\s+interface\s+(\S+)\s+'
+                     r'(line-protocol|ip\s+routing)$', c)
+        if m and state.mode == 'config':
+            m2 = re.match(r'^track\s+\d+\s+interface\s+(\S+)\s+', cmd.strip(), re.I)
+            iface = self._expand_if_name(m2.group(1)) if m2 else m.group(2)
+            kind = 'ip routing' if 'routing' in m.group(3) else 'line-protocol'
+            track_engine.add_interface_object(device_id, int(m.group(1)),
+                                              iface, kind)
+            track_engine.refresh(device_id, state)
+            state._track_obj = int(m.group(1))
+            state.mode = 'config-track'
+            return ""
+
+        # ── track <n> ip route <prefix>/<len>|<prefix> <mask> reachability ──
+        m = re.match(r'^track\s+(\d+)\s+ip\s+route\s+([\d.]+)(?:/(\d+)|\s+([\d.]+))'
+                     r'\s+reachability$', c)
+        if m and state.mode == 'config':
+            prefix = int(m.group(3)) if m.group(3) else \
+                (sum(bin(int(o)).count('1') for o in m.group(4).split('.'))
+                 if m.group(4) else 24)
+            track_engine.add_route_object(device_id, int(m.group(1)),
+                                          m.group(2), prefix)
+            track_engine.refresh(device_id, state)
+            state._track_obj = int(m.group(1))
+            state.mode = 'config-track'
+            return ""
+
+        # ── track <n> list boolean and|or ──
+        m = re.match(r'^track\s+(\d+)\s+list\s+boolean\s+(and|or)$', c)
+        if m and state.mode == 'config':
+            track_engine.add_list_object(device_id, int(m.group(1)), m.group(2))
+            state._track_obj = int(m.group(1))
+            state.mode = 'config-track'
+            return ""
+
+        # ── no track <n> ──
+        m = re.match(r'^no\s+track\s+(\d+)$', c)
+        if m and state.mode == 'config':
+            track_engine.remove(device_id, int(m.group(1)))
+            return ""
+
+        # ── config-track サブモード: delay / object ──
+        if state.mode == 'config-track':
+            num = getattr(state, '_track_obj', None)
+            obj = track_engine.get(device_id, num) if num is not None else None
+            if obj is None:
+                return ""
+            m = re.match(r'^delay\s+(up|down)\s+(\d+)$', c)
+            if m:
+                obj[f'delay_{m.group(1)}'] = int(m.group(2))
+                return ""
+            m = re.match(r'^object\s+(\d+)$', c)
+            if m and obj['type'] == 'list':
+                child = int(m.group(1))
+                if child not in obj['members']:
+                    obj['members'].append(child)
+                track_engine.refresh(device_id, state)
+                return ""
+            return None
+
+        # ── ip tcp adjust-mss <500-1460>（インタフェース配下）──
+        m = re.match(r'^(no\s+)?ip\s+tcp\s+adjust-mss(?:\s+(\d+))?$', c)
+        if m and state.current_if:
+            if m.group(1):
+                state.interfaces.setdefault(state.current_if, {}).pop('tcp_mss', None)
+                return ""
+            if not m.group(2):
+                return self._incomplete_error(cmd, state)
+            mss = int(m.group(2))
+            if not (500 <= mss <= 1460):
+                return self._range_error(cmd, state, 'MSS', 500, 1460, mss)
+            state.interfaces.setdefault(state.current_if, {})['tcp_mss'] = mss
+            return ""
+
+        # ── IPv6 基本 ──
+        if c in ('ipv6 unicast-routing', 'no ipv6 unicast-routing'):
+            state.ipv6_unicast_routing = not c.startswith('no')
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+address\s+([0-9A-Fa-f:]+)/(\d+)$', cmd.strip(), re.I)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('ipv6', None)
+                info.pop('ipv6_prefix', None)
+            else:
+                info['ipv6'] = m.group(2)
+                info['ipv6_prefix'] = int(m.group(3))
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+enable$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            info['ipv6_enabled'] = not m.group(1)
+            return ""
+
+        return None
+
+    def _expand_if_name(self, name: str) -> str:
+        """Gi1/0/1 のような短縮表記をフル表記へ（既存の展開表と同じ規則）"""
+        table = [('tengigabitethernet', 'TenGigabitEthernet'),
+                 ('gigabitethernet', 'GigabitEthernet'),
+                 ('fastethernet', 'FastEthernet'),
+                 ('port-channel', 'Port-channel'),
+                 ('loopback', 'Loopback'), ('vlan', 'Vlan'),
+                 ('tunnel', 'Tunnel'), ('te', 'TenGigabitEthernet'),
+                 ('gi', 'GigabitEthernet'), ('fa', 'FastEthernet'),
+                 ('po', 'Port-channel'), ('lo', 'Loopback'),
+                 ('vl', 'Vlan'), ('tu', 'Tunnel')]
+        low = name.lower()
+        for pfx, full in table:
+            if low.startswith(pfx):
+                return full + name[len(pfx):]
+        return name
+
     def _cmd_l2security(self, cmd, state):
         if state.device_type not in ('catalyst', 'srs', 'cisco'):
             return None
@@ -5430,6 +5577,11 @@ Configuration Revision            : 5"""
         sec_out = self._cmd_l2security(cmd, state)
         if sec_out is not None:
             return sec_out
+
+        # ── 拡張オブジェクトトラッキング / TCP MSS / IPv6基本 ──
+        ipsvc_out = self._cmd_ip_services(cmd, state)
+        if ipsvc_out is not None:
+            return ipsvc_out
 
         # ── VSS / デュアルアクティブ検知（Catalyst）──
         vss_out = self._cmd_vss(cmd, state)

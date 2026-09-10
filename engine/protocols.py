@@ -7714,6 +7714,139 @@ class VrrpEngine:
 vrrp_engine = VrrpEngine()
 
 
+class TrackEngine:
+    """
+    拡張オブジェクトトラッキング（Enhanced Object Tracking）
+
+    実機の `track <object-number> ...` は、インタフェースの回線状態や
+    経路の到達性を「オブジェクト」として抽象化し、HSRP/VRRP/GLBPの
+    priority減算やスタティックルートの有効/無効に紐付ける仕組み。
+
+    対応:
+      track <n> interface <iface> line-protocol
+      track <n> interface <iface> ip routing
+      track <n> ip route <prefix>/<len> reachability
+      track <n> list boolean and|or          （object <n> で子を列挙）
+      （サブモード: delay up <sec> / delay down <sec>）
+
+    未対応（実機との差）:
+      track ip sla / track stub-object / threshold weight・percentage
+    """
+
+    def __init__(self):
+        # device_id -> {obj_num: {...}}
+        self.objects: Dict[str, Dict[int, dict]] = defaultdict(dict)
+
+    def add_interface_object(self, device_id: str, num: int, iface: str,
+                             kind: str = 'line-protocol'):
+        self.objects[device_id][num] = {
+            'type': 'interface', 'iface': iface, 'kind': kind,
+            'state': 'Up', 'delay_up': 0, 'delay_down': 0,
+        }
+        return self.objects[device_id][num]
+
+    def add_route_object(self, device_id: str, num: int, network: str,
+                         prefix: int):
+        self.objects[device_id][num] = {
+            'type': 'route', 'network': network, 'prefix': prefix,
+            'kind': 'reachability', 'state': 'Down',
+            'delay_up': 0, 'delay_down': 0,
+        }
+        return self.objects[device_id][num]
+
+    def add_list_object(self, device_id: str, num: int, op: str):
+        self.objects[device_id][num] = {
+            'type': 'list', 'op': op, 'members': [],
+            'kind': f'boolean {op}', 'state': 'Down',
+            'delay_up': 0, 'delay_down': 0,
+        }
+        return self.objects[device_id][num]
+
+    def remove(self, device_id: str, num: int):
+        self.objects.get(device_id, {}).pop(num, None)
+
+    def get(self, device_id: str, num: int):
+        return self.objects.get(device_id, {}).get(num)
+
+    def refresh(self, device_id: str, state=None):
+        """装置の現在の状態からオブジェクトの Up/Down を再評価する"""
+        objs = self.objects.get(device_id)
+        if not objs:
+            return
+        down_ifaces = {vnet._norm_iface(x)
+                       for x in vnet.down_interfaces.get(device_id, set())}
+        routes = None
+        for num, o in objs.items():
+            if o['type'] == 'interface':
+                iface = o['iface']
+                admin_down = vnet._norm_iface(iface) in down_ifaces
+                if state is not None and not admin_down:
+                    info = state.interfaces.get(iface)
+                    if info is None:
+                        admin_down = True
+                    elif info.get('status') in ('down', 'administratively down',
+                                                 'notconnect', 'disabled'):
+                        admin_down = True
+                    elif o['kind'] == 'ip routing' and not info.get('ip'):
+                        # "ip routing" はIPが載っていることも条件になる
+                        admin_down = True
+                o['state'] = 'Down' if admin_down else 'Up'
+            elif o['type'] == 'route':
+                if routes is None:
+                    routes = {(r['network'], r['prefix'])
+                              for r in rib_engine.get_best_routes(device_id)}
+                o['state'] = ('Up' if (o['network'], o['prefix']) in routes
+                              else 'Down')
+        # listオブジェクトは他オブジェクトの結果に依存するので後で評価
+        for num, o in objs.items():
+            if o['type'] != 'list':
+                continue
+            members = [objs.get(m) for m in o['members']]
+            states = [m['state'] == 'Up' for m in members if m]
+            if not states:
+                o['state'] = 'Down'
+            elif o['op'] == 'and':
+                o['state'] = 'Up' if all(states) else 'Down'
+            else:
+                o['state'] = 'Up' if any(states) else 'Down'
+
+    def format_show_track(self, device_id: str, num: int = None,
+                          state=None) -> str:
+        self.refresh(device_id, state)
+        objs = self.objects.get(device_id, {})
+        if not objs:
+            return '%No tracking process'
+        lines = []
+        for n in sorted(objs):
+            if num is not None and n != num:
+                continue
+            o = objs[n]
+            if o['type'] == 'interface':
+                lines.append(f'Track {n}')
+                lines.append(f'  Interface {o["iface"]} {o["kind"]}')
+                lines.append(f'  {o["kind"].capitalize()} is {o["state"]}')
+            elif o['type'] == 'route':
+                lines.append(f'Track {n}')
+                lines.append(f'  IP route {o["network"]}/{o["prefix"]} reachability')
+                lines.append(f'  Reachability is {o["state"]}')
+            else:
+                lines.append(f'Track {n}')
+                lines.append(f'  List boolean {o["op"]}')
+                lines.append(f'  Boolean {o["op"]} is {o["state"]}')
+                for m in o['members']:
+                    mo = objs.get(m)
+                    if mo:
+                        lines.append(f'    {m} object {mo["state"]}')
+            lines.append(f'    {0} changes, last change never')
+            lines.append('')
+        if not lines:
+            return f'%Track object {num} does not exist'
+        return '\n'.join(lines).rstrip()
+
+
+track_engine = TrackEngine()
+
+
 # ══════════════════════════════════════════
 # VLAN エンジン（IEEE 802.1Q準拠）
 # ══════════════════════════════════════════
