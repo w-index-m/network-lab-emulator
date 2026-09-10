@@ -2279,7 +2279,13 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             return
 
     # ── OSPF ──
+    # Apresia(ApresiaLightGM200等)は実機マニュアルにOSPF自体のコマンド
+    # 体系が存在しない(L2アクセススイッチのため)。他機種と違い
+    # device_typeでの除外が無かったため、実機では通らないはずの
+    # "router ospf"がそのまま受理されOSPFが起動してしまっていた。
     ospf_m = re.match(r'^router\s+ospf\s+(\d+)', c)
+    if ospf_m and state.device_type == 'apresia':
+        return "% Invalid input detected at '^' marker."
     if ospf_m and not (state.device_type == 'nexus' and
                        'ospf' not in getattr(state, 'nx_features', set())):
         state._routing_mode = 'ospf'
@@ -2290,7 +2296,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         state._bgp_pending = False
         # ★ returnしない → RuleEngineがmode='config-router'に遷移する
     # Si-R: "ospf use on" / "ospf area <area>"
-    if re.match(r'^ospf\s+use\s+on', c):
+    if re.match(r'^ospf\s+use\s+on', c) and state.device_type != 'apresia':
         state._routing_mode = 'ospf'
         state._ospf_process = getattr(state, '_ospf_process', 1)
         state._ospf_networks = getattr(state, '_ospf_networks', [])
