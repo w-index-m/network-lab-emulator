@@ -3912,6 +3912,21 @@ class RibEngine:
                                                         r['prefix_len']) or '',
                 })
 
+        # shutdown中のインタフェースを出口とする経路はRIBから外す。
+        # 実機はインタフェースをshutdownした時点で、そのIFの直結経路
+        # (C/L)も、そのIFを出口として学習した動的経路も即座に
+        # ルーティングテーブルから取り除く。ここで除外しないと、
+        # リンクを落としても show ip route に古い経路が残り続け、
+        # 転送判定にもその経路が使われてしまう。
+        down_ifaces = {vnet._norm_iface(x)
+                       for x in vnet.down_interfaces.get(device_id, set())}
+        if down_ifaces:
+            candidates = [
+                c for c in candidates
+                if not (c.get('iface')
+                        and vnet._norm_iface(c['iface']) in down_ifaces)
+            ]
+
         # 宛先ごとにAD最小（同ADならmetric最小）を選択
         best = {}
         for c in candidates:
