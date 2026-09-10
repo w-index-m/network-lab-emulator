@@ -850,7 +850,7 @@ class RuleEngine:
                           "config-vs-domain", "config-dhcp", "config-bba",
                           "config-evpn", "config-evpn-vni", "config-nve-vni",
                           "config-bgp-af", "config-sec-zone", "config-sec-zone-pair",
-                          "config-track"):
+                          "config-track", "config-dhcpv6"):
             return self._cmd_config(cmd, state)
 
         # ── ISSU / ソフトウェアアップグレード（Catalyst / Nexus）──
@@ -912,13 +912,13 @@ class RuleEngine:
                              "config-dhcp", "config-sg-tacacs", "config-ext-nacl",
                              "config-bba", "config-evpn",
                              "config-sec-zone", "config-sec-zone-pair",
-                             "config-track"):
+                             "config-track", "config-dhcpv6"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
                          '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool',
                          '_aaa_group_name', '_current_acl_name', '_bba_group',
-                         '_zbfw_zone', '_zbfw_pair', '_track_obj'):
+                         '_zbfw_zone', '_zbfw_pair', '_track_obj', '_dhcpv6_pool'):
                 if hasattr(state, attr):
                     delattr(state, attr)
         elif state.mode == "config":
@@ -1225,6 +1225,39 @@ class RuleEngine:
         # ── show ip verify source（IP Source Guard）──
         if re.match(r'^show\s+ip\s+verify\s+source', c):
             return self._format_show_ip_verify(state)
+
+        # ── show ipv6 dhcp pool / show ipv6 interface brief ──
+        if re.match(r'^show\s+ipv6\s+dhcp\s+pool', c) and \
+                state.device_type in ('cisco', 'catalyst'):
+            pools = getattr(state, 'dhcpv6_pools', {}) or {}
+            if not pools:
+                return '% No IPv6 DHCP pools configured'
+            out = []
+            for name, p in pools.items():
+                out.append(f'DHCPv6 pool: {name}')
+                if p.get('prefix'):
+                    out.append(f'  Address allocation prefix: {p["prefix"]}')
+                if p.get('dns'):
+                    out.append(f'  DNS server: {p["dns"]}')
+                if p.get('domain'):
+                    out.append(f'  Domain name: {p["domain"]}')
+                for code, val in sorted(p.get('options', {}).items()):
+                    out.append(f'  Option {code}: {val}')
+                out.append('')
+            return '\n'.join(out).rstrip()
+
+        if re.match(r'^show\s+ipv6\s+interface\s+brief', c) and \
+                state.device_type in ('cisco', 'catalyst', 'nexus'):
+            out = []
+            for ifn, i in state.interfaces.items():
+                if not (i.get('ipv6') or i.get('ipv6_enabled')):
+                    continue
+                st = i.get('status', 'down')
+                out.append(f'{ifn:<24}[{"up" if st in ("up","connected") else "down"}/'
+                           f'{"up" if st in ("up","connected") else "down"}]')
+                if i.get('ipv6'):
+                    out.append(f'    {i["ipv6"]}')
+            return '\n'.join(out) if out else '% No IPv6 interfaces configured'
 
         # ── show glbp / show ip nhrp / show ip wccp ──
         if re.match(r'^show\s+glbp', c) and \
@@ -3855,8 +3888,18 @@ Configuration Revision            : 5"""
                                  f"{ifdata.get('ipv6_prefix', 64)}")
                 elif ifdata.get('ipv6_enabled'):
                     lines.append(" ipv6 enable")
+                for _h in ifdata.get('helper_addresses', []) or []:
+                    lines.append(f" ip helper-address {_h}")
                 if ifdata.get('tcp_mss'):
                     lines.append(f" ip tcp adjust-mss {ifdata['tcp_mss']}")
+                if ifdata.get('nd_cache_expire'):
+                    lines.append(f" ipv6 nd cache expire {ifdata['nd_cache_expire']}"
+                                 + (" refresh" if ifdata.get('nd_cache_refresh') else ""))
+                if ifdata.get('nd_proxy'):
+                    lines.append(" ipv6 nd proxy")
+                for _d, _di in ifdata.get('dhcpv6_relay_dest', []) or []:
+                    lines.append(f" ipv6 dhcp relay destination {_d}"
+                                 + (f" {_di}" if _di else ""))
                 # Auto-QoS が自動生成する行（実機の running-config と同じ順）
                 if ifdata.get('trust_device'):
                     lines.append(f" trust device {ifdata['trust_device']}")
@@ -4915,7 +4958,174 @@ Configuration Revision            : 5"""
             if m: p['domain'] = m.group(1); return ""
             m = re.match(r'^lease\s+(.+)', c)
             if m: p['lease'] = m.group(1).strip(); return ""
+            # ── DHCPオプションのサポート ──
+            # option <code> {ascii|hex|ip} <value>
+            m = re.match(r'^option\s+(\d+)\s+(ascii|hex|ip)\s+(.+)$',
+                         cmd.strip(), re.I)
+            if m:
+                p.setdefault('options', {})[int(m.group(1))] = (
+                    m.group(2).lower(), m.group(3).strip())
+                return ""
+            m = re.match(r'^no\s+option\s+(\d+)$', c)
+            if m:
+                p.get('options', {}).pop(int(m.group(1)), None)
+                return ""
             return None
+
+        # ── DHCPリレー（ip helper-address / relay information）──
+        m = re.match(r'^(no\s+)?ip\s+helper-address\s+([\d.]+)$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            helpers = info.setdefault('helper_addresses', [])
+            if m.group(1):
+                if m.group(2) in helpers:
+                    helpers.remove(m.group(2))
+            elif m.group(2) not in helpers:
+                helpers.append(m.group(2))
+            return ""
+        m = re.match(r'^(no\s+)?ip\s+dhcp\s+relay\s+information\s+(\S+)', c)
+        if m:
+            if not hasattr(state, 'dhcp_relay'):
+                state.dhcp_relay = {}
+            if m.group(1):
+                state.dhcp_relay.pop(m.group(2), None)
+            else:
+                state.dhcp_relay[m.group(2)] = True
+            return ""
+
+        # ── DHCPグリーニング ──
+        # ip dhcp snooping glean（グローバル）/ ip dhcp glean（インタフェース）
+        m = re.match(r'^(no\s+)?ip\s+dhcp\s+snooping\s+glean$', c)
+        if m:
+            state.dhcp_snoop['glean'] = not m.group(1)
+            return ""
+        m = re.match(r'^(no\s+)?ip\s+dhcp\s+glean$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('dhcp_glean', None)
+            else:
+                info['dhcp_glean'] = True
+            return ""
+
+        return None
+
+    def _cmd_dhcpv6(self, cmd, state):
+        """DHCPv6（プール / オプション / リレー / リレーソース）"""
+        if state.device_type not in ('cisco', 'catalyst'):
+            return None
+        c = cmd.lower().strip()
+        if not hasattr(state, 'dhcpv6_pools'):
+            state.dhcpv6_pools = {}
+
+        # ipv6 dhcp pool <name> → サブモード
+        m = re.match(r'^ipv6\s+dhcp\s+pool\s+(\S+)$', cmd.strip(), re.I)
+        if m and state.mode == 'config':
+            name = m.group(1)
+            state.dhcpv6_pools.setdefault(
+                name, {'prefix': '', 'dns': '', 'domain': '', 'options': {}})
+            state._dhcpv6_pool = name
+            state.mode = 'config-dhcpv6'
+            return ""
+
+        if state.mode == 'config-dhcpv6':
+            p = state.dhcpv6_pools.get(getattr(state, '_dhcpv6_pool', ''))
+            if p is None:
+                return ""
+            m = re.match(r'^address\s+prefix\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                p['prefix'] = m.group(1)
+                return ""
+            m = re.match(r'^dns-server\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                p['dns'] = m.group(1)
+                return ""
+            m = re.match(r'^domain-name\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                p['domain'] = m.group(1)
+                return ""
+            # DHCPv6オプションのサポート
+            m = re.match(r'^option\s+(\d+)\s+(.+)$', cmd.strip(), re.I)
+            if m:
+                p['options'][int(m.group(1))] = m.group(2).strip()
+                return ""
+            return None
+
+        # ipv6 dhcp relay destination <addr> [<iface>]（インタフェース配下）
+        m = re.match(r'^(no\s+)?ipv6\s+dhcp\s+relay\s+destination\s+(\S+)'
+                     r'(?:\s+(\S+))?$', cmd.strip(), re.I)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            dests = info.setdefault('dhcpv6_relay_dest', [])
+            entry = (m.group(2), m.group(3) or '')
+            if m.group(1):
+                if entry in dests:
+                    dests.remove(entry)
+            elif entry not in dests:
+                dests.append(entry)
+            return ""
+
+        # DHCPv6リレーソース設定
+        #   ipv6 dhcp-relay source-interface <iface>（グローバル）
+        #   ipv6 dhcp relay source-interface <iface>（インタフェース）
+        m = re.match(r'^(no\s+)?ipv6\s+dhcp-relay\s+source-interface\s+(\S+)$',
+                     cmd.strip(), re.I)
+        if m and state.mode == 'config':
+            if m.group(1):
+                state.dhcpv6_relay_source = ''
+            else:
+                state.dhcpv6_relay_source = m.group(2)
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+dhcp\s+relay\s+source-interface\s+(\S+)$',
+                     cmd.strip(), re.I)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('dhcpv6_relay_source', None)
+            else:
+                info['dhcpv6_relay_source'] = m.group(2)
+            return ""
+
+        # ── IPv6 ネイバー探索（拡張NDキャッシュ管理 / NDプロキシ）──
+        m = re.match(r'^(no\s+)?ipv6\s+nd\s+cache\s+expire\s+(\d+)'
+                     r'(\s+refresh)?$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('nd_cache_expire', None)
+            else:
+                info['nd_cache_expire'] = int(m.group(2))
+                info['nd_cache_refresh'] = bool(m.group(3))
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+nd\s+cache\s+interface-limit\s+(\d+)$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('nd_cache_limit', None)
+            else:
+                info['nd_cache_limit'] = int(m.group(2))
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+nd\s+proxy$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('nd_proxy', None)
+            else:
+                info['nd_proxy'] = True
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+nd\s+(ra\s+suppress|dad\s+attempts\s+\d+|'
+                     r'reachable-time\s+\d+|ns-interval\s+\d+)$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            nd = info.setdefault('nd_options', [])
+            val = ' '.join(m.group(2).split())
+            if m.group(1):
+                if val in nd:
+                    nd.remove(val)
+            elif val not in nd:
+                nd.append(val)
+            return ""
+
         return None
 
     # ════════════════════════════════════════════
@@ -5235,6 +5445,8 @@ Configuration Revision            : 5"""
             net = f'{p["network"]} / {p["mask"]}' if p['network'] else '(未設定)'
             out.append(f' Subnet: {net}')
             out.append(f' Default router: {p["router"] or "-"}   DNS: {p["dns"] or "-"}')
+            for code, (kind, val) in sorted(p.get('options', {}).items()):
+                out.append(f' Option {code} ({kind}): {val}')
             out.append('')
         return '\n'.join(out).rstrip()
 
@@ -5739,6 +5951,11 @@ Configuration Revision            : 5"""
         sec_out = self._cmd_l2security(cmd, state)
         if sec_out is not None:
             return sec_out
+
+        # ── DHCPv6 / IPv6 ネイバー探索 ──
+        dhcpv6_out = self._cmd_dhcpv6(cmd, state)
+        if dhcpv6_out is not None:
+            return dhcpv6_out
 
         # ── 拡張オブジェクトトラッキング / TCP MSS / IPv6基本 ──
         ipsvc_out = self._cmd_ip_services(cmd, state)

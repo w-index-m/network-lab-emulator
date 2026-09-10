@@ -202,3 +202,89 @@ def test_wccp_service_is_shown():
     assert 'Service Identifier: 61' in out
     assert '239.1.1.1' in out
     assert s.interfaces['GigabitEthernet1/0/1']['wccp_redirect']['in'] == '61'
+
+
+# ── DHCP オプション / リレー / グリーニング ──────────────
+def test_dhcp_option_is_stored_and_shown():
+    e, s = _sw('SW-DHCPOPT')
+    _cfg(e, s, 'ip dhcp pool LAN', 'network 10.5.0.0 255.255.255.0',
+         'option 150 ip 10.5.0.10', 'exit')
+    assert s.dhcp_pools['LAN']['options'][150] == ('ip', '10.5.0.10')
+    out = e.process('show ip dhcp pool', s)
+    assert 'Option 150' in out and '10.5.0.10' in out
+
+
+def test_ip_helper_address_is_relay_config():
+    """DHCPリレー: 複数のhelper-addressを保持しrunning-configに出る"""
+    e, s = _sw('SW-RELAY')
+    _cfg(e, s, 'interface GigabitEthernet1/0/1',
+         'ip helper-address 10.9.9.9', 'ip helper-address 10.9.9.10', 'exit')
+    helpers = s.interfaces['GigabitEthernet1/0/1']['helper_addresses']
+    assert helpers == ['10.9.9.9', '10.9.9.10']
+    rc = e.process('show running-config', s)
+    assert 'ip helper-address 10.9.9.9' in rc
+    assert 'ip helper-address 10.9.9.10' in rc
+
+    _cfg(e, s, 'interface GigabitEthernet1/0/1',
+         'no ip helper-address 10.9.9.9', 'exit')
+    assert s.interfaces['GigabitEthernet1/0/1']['helper_addresses'] == ['10.9.9.10']
+
+
+def test_dhcp_gleaning():
+    e, s = _sw('SW-GLEAN')
+    _cfg(e, s, 'ip dhcp snooping glean',
+         'interface GigabitEthernet1/0/1', 'ip dhcp glean', 'exit')
+    assert s.dhcp_snoop['glean'] is True
+    assert s.interfaces['GigabitEthernet1/0/1']['dhcp_glean'] is True
+
+
+# ── DHCPv6 ─────────────────────────────────────────────
+def test_dhcpv6_pool_with_options():
+    e, s = _sw('SW-V6POOL')
+    _cfg(e, s, 'ipv6 dhcp pool V6POOL', 'address prefix 2001:db8:5::/64',
+         'dns-server 2001:db8::53', 'option 17 vendor-specific', 'exit')
+    out = e.process('show ipv6 dhcp pool', s)
+    assert '2001:db8:5::/64' in out
+    assert 'Option 17' in out
+
+
+def test_dhcpv6_relay_destination_and_source():
+    """DHCPv6リレー先とリレーソース設定"""
+    e, s = _sw('SW-V6RELAY')
+    _cfg(e, s, 'ipv6 dhcp-relay source-interface Loopback0',
+         'interface GigabitEthernet1/0/1',
+         'ipv6 dhcp relay destination 2001:db8:9::1 GigabitEthernet1/0/2',
+         'ipv6 dhcp relay source-interface Loopback0', 'exit')
+    assert s.dhcpv6_relay_source == 'Loopback0'
+    info = s.interfaces['GigabitEthernet1/0/1']
+    assert ('2001:db8:9::1', 'GigabitEthernet1/0/2') in info['dhcpv6_relay_dest']
+    assert info['dhcpv6_relay_source'] == 'Loopback0'
+    assert 'ipv6 dhcp relay destination 2001:db8:9::1' in \
+        e.process('show running-config', s)
+
+
+# ── IPv6 ネイバー探索 ──────────────────────────────────
+def test_ipv6_nd_cache_management_and_proxy():
+    e, s = _sw('SW-ND')
+    _cfg(e, s, 'interface GigabitEthernet1/0/1',
+         'ipv6 nd cache expire 300 refresh',
+         'ipv6 nd cache interface-limit 1000',
+         'ipv6 nd proxy', 'ipv6 nd ra suppress', 'exit')
+    info = s.interfaces['GigabitEthernet1/0/1']
+    assert info['nd_cache_expire'] == 300
+    assert info['nd_cache_refresh'] is True
+    assert info['nd_cache_limit'] == 1000
+    assert info['nd_proxy'] is True
+    assert 'ra suppress' in info['nd_options']
+    rc = e.process('show running-config', s)
+    assert 'ipv6 nd cache expire 300 refresh' in rc
+    assert 'ipv6 nd proxy' in rc
+
+
+def test_show_ipv6_interface_brief():
+    e, s = _sw('SW-V6BRIEF')
+    _cfg(e, s, 'interface GigabitEthernet1/0/1',
+         'ipv6 address 2001:db8:5::1/64', 'exit')
+    out = e.process('show ipv6 interface brief', s)
+    assert 'GigabitEthernet1/0/1' in out
+    assert '2001:db8:5::1' in out
