@@ -692,6 +692,14 @@ async def cli_command(body: dict):
     if device_id not in device_sessions:
         dev = DEFAULT_DEVICES.get(device_id, {"type": "cisco", "hostname": device_id})
         device_sessions[device_id] = DeviceState(dev["type"], dev["hostname"])
+        # /api/deviceでの作成時は直後にrib_engine等へ登録しているが、
+        # /api/cli経由の自動生成ではこれが抜けており、生成直後1回目の
+        # "show ip route"だけがrib_engine未登録のためルールエンジン側の
+        # (実インタフェースと無関係な)デフォルト表示にフォールバックし、
+        # 2回目以降の呼び出しと結果が食い違う不具合があった。ここで
+        # 即座に登録しておくことで初回から一貫した結果にする。
+        _register_icmp(device_id)
+        vnet.device_types[device_id] = device_sessions[device_id].device_type
 
     state = device_sessions[device_id]
     state._device_id = device_id   # rules.py からデータプレーン参照用
