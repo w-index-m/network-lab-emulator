@@ -1239,6 +1239,11 @@ class RuleEngine:
             out = self._format_show_zone_pair_security(state)
             return out if out else '% No zone-pairs configured.'
 
+        # ── show auto qos（Auto-QoS 適用インタフェース一覧）──
+        if re.match(r'^show\s+auto\s+qos', c):
+            out = self._format_show_auto_qos(state)
+            return out if out else 'AutoQoS not enabled on any interface'
+
         # ── show QoS（MQC / 各社固有）──
         if re.match(r'^show\s+class-map', c):
             return self._format_show_class_map(state)
@@ -1246,7 +1251,12 @@ class RuleEngine:
             return self._format_show_policy_map_interface(state)
         m = re.match(r'^show\s+policy-map(?:\s+type\s+\S+)?(?:\s+(\S+))?$', c)
         if m and not (m.group(1) and m.group(1) == 'interface'):
-            return self._format_show_policy_map(state, m.group(1))
+            # policy-map名は大文字小文字を保持したまま検索する
+            # （AutoQos-4.0-... のような名前が見つからなくなるため）
+            m2 = re.match(r'^show\s+policy-map(?:\s+type\s+\S+)?(?:\s+(\S+))?$',
+                          cmd.strip(), re.I)
+            name = (m2.group(1) if m2 else None) or m.group(1)
+            return self._format_show_policy_map(state, name)
         # APRESIA / Si-R: show qos / show mls qos
         if re.match(r'^show\s+(mls\s+qos|qos)', c):
             if state.device_type in ('apresia', 'sir'):
@@ -3807,6 +3817,16 @@ Configuration Revision            : 5"""
                                  + (' native' if _enc.get('native') else ''))
                 if ip:
                     lines.append(f" ip address {ip} {mask}")
+                # Auto-QoS が自動生成する行（実機の running-config と同じ順）
+                if ifdata.get('trust_device'):
+                    lines.append(f" trust device {ifdata['trust_device']}")
+                if ifdata.get('auto_qos'):
+                    lines.append(f" auto qos {ifdata['auto_qos']}")
+                _sp = ifdata.get('service_policy') or {}
+                if _sp.get('input'):
+                    lines.append(f" service-policy input {_sp['input']}")
+                if _sp.get('output'):
+                    lines.append(f" service-policy output {_sp['output']}")
                 if status == 'up':
                     lines.append(" no shutdown")
                 else:
@@ -4048,6 +4068,123 @@ Configuration Revision            : 5"""
             state.qos_pmaps = {}   # {name: {'type','classes': {cname: [actions]}}}
         return state.qos_cmaps, state.qos_pmaps
 
+    # ── Auto-QoS (AutoQos-4.0) ────────────────────────────────
+    # Catalyst 9200/9300(IOS-XE)が "auto qos ..." 1コマンドで自動生成する
+    # class-map / policy-map 一式。名前・match条件・帯域配分は下記を参照:
+    #   https://www.cisco.com/c/en/us/support/docs/switches/
+    #     catalyst-9200-series-switches/222225-configure-autoqos-on-catalyst-9000-switc.html
+    #   https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/
+    #     software/release/17-15/configuration_guide/qos/b_1715_qos_9300_cg/
+    #     configuring_auto_qos.html
+    # 出力ポリシー(AutoQos-4.0-Output-Policy)は全モード共通。
+    _AUTOQOS_INPUT_CMAPS = {
+        'AutoQos-4.0-Voip-Data-Class':   ('match-all', ['dscp ef']),
+        'AutoQos-4.0-Voip-Signal-Class': ('match-all', ['dscp cs3']),
+        'AutoQos-4.0-Default-Class':     ('match-any', ['access-group name AutoQos-4.0-Acl-Default']),
+    }
+    _AUTOQOS_OUTPUT_CMAPS = {
+        'AutoQos-4.0-Output-Priority-Queue':      ('match-any', ['dscp cs4  cs5  ef', 'cos  5']),
+        'AutoQos-4.0-Output-Control-Mgmt-Queue':  ('match-any', ['dscp cs2  cs3  cs6  cs7', 'cos  3']),
+        'AutoQos-4.0-Output-Multimedia-Conf-Queue': ('match-any', ['dscp af41 af42 af43', 'cos  4']),
+        'AutoQos-4.0-Output-Trans-Data-Queue':    ('match-any', ['dscp af21 af22 af23', 'cos  2']),
+        'AutoQos-4.0-Output-Bulk-Data-Queue':     ('match-any', ['dscp af11 af12 af13', 'cos  1']),
+        'AutoQos-4.0-Output-Scavenger-Queue':     ('match-any', ['dscp cs1']),
+        'AutoQos-4.0-Output-Multimedia-Strm-Queue': ('match-any', ['dscp af31 af32 af33']),
+    }
+    _AUTOQOS_OUTPUT_POLICY = [
+        ('AutoQos-4.0-Output-Priority-Queue',
+         ['priority level 1', 'police rate percent 30']),
+        ('AutoQos-4.0-Output-Control-Mgmt-Queue',
+         ['bandwidth remaining percent 10', 'queue-buffers ratio 10']),
+        ('AutoQos-4.0-Output-Multimedia-Conf-Queue',
+         ['bandwidth remaining percent 10', 'queue-buffers ratio 10']),
+        ('AutoQos-4.0-Output-Trans-Data-Queue',
+         ['bandwidth remaining percent 10', 'queue-buffers ratio 10']),
+        ('AutoQos-4.0-Output-Bulk-Data-Queue',
+         ['bandwidth remaining percent 4', 'queue-buffers ratio 10']),
+        ('AutoQos-4.0-Output-Scavenger-Queue',
+         ['bandwidth remaining percent 1', 'queue-buffers ratio 10']),
+        ('AutoQos-4.0-Output-Multimedia-Strm-Queue',
+         ['bandwidth remaining percent 10', 'queue-buffers ratio 10']),
+        ('class-default',
+         ['bandwidth remaining percent 25', 'queue-buffers ratio 25']),
+    ]
+    # モード → (入力ポリシー名, trust device 値)
+    _AUTOQOS_MODES = {
+        'voip cisco-phone':      ('AutoQos-4.0-CiscoPhone-Input-Policy', 'cisco-phone'),
+        'voip cisco-softphone':  ('AutoQos-4.0-CiscoSoftPhone-Input-Policy', None),
+        'voip trust':            (None, None),
+        'video cts':             ('AutoQos-4.0-CTS-Input-Policy', 'cts'),
+        'video ip-camera':       ('AutoQos-4.0-IPCamera-Input-Policy', 'ip-camera'),
+        'video media-player':    ('AutoQos-4.0-MediaPlayer-Input-Policy', 'media-player'),
+        'classify':              ('AutoQos-4.0-Classify-Input-Policy', None),
+        'classify police':       ('AutoQos-4.0-Classify-Police-Input-Policy', None),
+        'trust cos':             (None, None),
+        'trust dscp':            (None, None),
+    }
+
+    def _autoqos_apply(self, state, iface: str, mode: str):
+        """auto qos <mode> をインタフェースに適用し、実機同様に
+        グローバルのclass-map/policy-mapと、インタフェースの
+        trust device / service-policy を自動生成する。"""
+        cmaps, pmaps = self._qos_store(state)
+        in_policy, trust_dev = self._AUTOQOS_MODES[mode]
+
+        # 入力側（入力ポリシーを持つモードのみ）
+        if in_policy:
+            for name, (mt, matches) in self._AUTOQOS_INPUT_CMAPS.items():
+                cmaps.setdefault(name, {'match_type': mt, 'matches': list(matches)})
+            pmaps.setdefault(in_policy, {'type': 'qos', 'classes': {}})
+            pmaps[in_policy]['classes'].setdefault(
+                'AutoQos-4.0-Voip-Data-Class',
+                ['set dscp ef', 'police cir 128000 bc 8000'])
+            pmaps[in_policy]['classes'].setdefault(
+                'AutoQos-4.0-Voip-Signal-Class',
+                ['set dscp cs3', 'police cir 32000 bc 8000'])
+            pmaps[in_policy]['classes'].setdefault(
+                'AutoQos-4.0-Default-Class',
+                ['set dscp default', 'police cir 10000000 bc 8000'])
+
+        # 出力側（全モード共通）
+        for name, (mt, matches) in self._AUTOQOS_OUTPUT_CMAPS.items():
+            cmaps.setdefault(name, {'match_type': mt, 'matches': list(matches)})
+        pmaps.setdefault('AutoQos-4.0-Output-Policy', {'type': 'qos', 'classes': {}})
+        for cname, actions in self._AUTOQOS_OUTPUT_POLICY:
+            pmaps['AutoQos-4.0-Output-Policy']['classes'].setdefault(
+                cname, list(actions))
+
+        info = state.interfaces.setdefault(iface, {})
+        info['auto_qos'] = mode
+        if trust_dev:
+            info['trust_device'] = trust_dev
+        if mode == 'trust cos':
+            info['qos_trust'] = 'cos'
+        elif mode == 'trust dscp':
+            info['qos_trust'] = 'dscp'
+        sp = info.setdefault('service_policy', {})
+        if in_policy:
+            sp['input'] = in_policy
+        sp['output'] = 'AutoQos-4.0-Output-Policy'
+
+    def _autoqos_remove(self, state, iface: str):
+        info = state.interfaces.get(iface, {})
+        info.pop('auto_qos', None)
+        info.pop('trust_device', None)
+        info.pop('qos_trust', None)
+        info.pop('service_policy', None)
+
+    def _format_show_auto_qos(self, state):
+        rows = [(ifn, i['auto_qos']) for ifn, i in state.interfaces.items()
+                if i.get('auto_qos')]
+        if not rows:
+            return ''
+        out = []
+        for ifn, mode in rows:
+            out.append(f'{ifn}')
+            out.append(f'auto qos {mode}')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
     def _zbfw_store(self, state):
         """Zone-Based Firewall設定の保存領域をstateに用意して返す"""
         if not hasattr(state, 'zbfw_zones'):
@@ -4119,6 +4256,40 @@ Configuration Revision            : 5"""
                     state.qos_simple = []
                 state.qos_simple.append(cmd.strip())
                 state.qos_enabled = True
+                return ""
+
+        # ── Auto-QoS（Catalyst/Cisco IOS-XE。インタフェース配下）──
+        #   auto qos voip {cisco-phone|cisco-softphone|trust}
+        #   auto qos video {cts|ip-camera|media-player}
+        #   auto qos classify [police]
+        #   auto qos trust {cos|dscp}
+        if dt in ('cisco', 'catalyst') and state.mode == 'config-if':
+            m = re.match(r'^(no\s+)?auto\s+qos\b(.*)$', c)
+            if m:
+                iface = state.current_if or ''
+                if m.group(1):          # no auto qos
+                    self._autoqos_remove(state, iface)
+                    return ""
+                arg = ' '.join(m.group(2).split())
+                # 実機の制約: 自動QoSはSVI(Vlanインタフェース)では
+                # サポートされない
+                if iface.lower().startswith('vlan'):
+                    return ('% Auto-QoS is not supported on SVI interface '
+                            f'{iface}')
+                if arg not in self._AUTOQOS_MODES:
+                    return self._cmd_error(cmd, state, reason='invalid')
+                self._autoqos_apply(state, iface, arg)
+                return ""
+        # インタフェース配下の trust device（Auto-QoSが自動生成する行を
+        # 手で投入した場合も受理する）
+        if dt in ('cisco', 'catalyst') and state.current_if:
+            m = re.match(r'^(no\s+)?trust\s+device\s+(\S+)$', c)
+            if m:
+                info = state.interfaces.setdefault(state.current_if, {})
+                if m.group(1):
+                    info.pop('trust_device', None)
+                else:
+                    info['trust_device'] = m.group(2)
                 return ""
 
         # ── MQC: class-map [type qos] [match-any|match-all] NAME ──
