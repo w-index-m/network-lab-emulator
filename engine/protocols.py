@@ -606,8 +606,12 @@ class RipEngine:
             parts = net.split('/')
             if len(parts) == 2:
                 self._add_route(device_id, RipRoute(
+                    # 直結ネットワークのRIPメトリックは0（実機Cisco準拠）。
+                    # 受信側が+1して1になるため、隣接ルータの直結網は
+                    # show ip route で [120/1] と表示される。ここを1に
+                    # すると全ての学習経路が実機より1大きくなる。
                     network=parts[0], prefix=int(parts[1]),
-                    metric=1, next_hop='0.0.0.0',
+                    metric=0, next_hop='0.0.0.0',
                     learned_from='direct'
                 ))
 
@@ -706,8 +710,10 @@ class RipEngine:
             for net in n['networks']:
                 parts = net.split('/')
                 if len(parts) == 2:
+                    # 直結ネットワークはメトリック0で広告する（受信側で
+                    # +1され、実機同様に隣接では[120/1]になる）
                     entries.append({'network': parts[0], 'prefix': int(parts[1]),
-                                    'metric': 1, 'next_hop': '0.0.0.0'})
+                                    'metric': 0, 'next_hop': '0.0.0.0'})
             # 再配信ルート（他プロトコルから注入されたもの）
             for net, info in n.get('redistributed', {}).items():
                 parts = net.split('/')
@@ -2108,7 +2114,12 @@ class BgpEngine:
             self.nodes[device_id] = {
                 'enabled': False,
                 'local_as': None,
-                'router_id': f'10.1.0.{device_id}',
+                # Router IDは start() で「明示設定 > 実インタフェースIP >
+                # フォールバック」の順に決める。ここで f'10.1.0.{device_id}'
+                # のような値を入れると、device_idが数値でない場合に
+                # "10.1.0.test-dev" のような不正なIDになる（従来は start()
+                # が毎回上書きしていたため表面化していなかった）。
+                'router_id': '',
                 'hostname': device_id,
                 'sessions': {},    # neighbor_id -> BgpSession
                 'rib_in': [],      # List[BgpRoute]
@@ -2206,12 +2217,20 @@ class BgpEngine:
                 route.communities = list(rm['communities'])
         return route
 
-    async def start(self, device_id: str, hostname: str, local_as: int):
+    async def start(self, device_id: str, hostname: str, local_as: int,
+                    router_id: str = ''):
         n = self._node(device_id)
         n['enabled'] = True
         n['local_as'] = int(local_as)
         n['hostname'] = hostname
-        n['router_id'] = f'10.1.0.{abs(hash(device_id)) % 254 + 1}'
+        # Router IDは実機同様「明示設定 > 実インタフェースのIP」の順で
+        # 決める。以前はhash由来の架空IP(10.1.0.x)を毎回無条件に代入して
+        # おり、show ip bgp summary に実在しないIDが出るうえ、
+        # "bgp router-id" で設定した値も router bgp のたびに潰れていた。
+        if router_id:
+            n['router_id'] = router_id
+        elif not n.get('router_id'):
+            n['router_id'] = f'10.1.0.{abs(hash(device_id)) % 254 + 1}'
         await vnet.send_to(device_id, {
             'type': 'bgp_log',
             'message': vendor_log.bgp_start(vnet.ws_send_callbacks.get(f'_type_{device_id}','cisco'), n['hostname'], local_as, n['router_id'])
@@ -10236,14 +10255,21 @@ class MplsEngine:
         if not n['neighbors']:
             return '(No LDP neighbors)'
         lines = []
+        local_state = device_sessions.get(device_id)
         for peer_id, info in n['neighbors'].items():
             peer_state = device_sessions.get(peer_id)
-            peer_hostname = peer_state.hostname if peer_state else peer_id
             peer_iface_info = (peer_state.interfaces.get(
                 vnet.interface_links.get(peer_id, {}).get(device_id, ''), {})
                 if peer_state else {})
             peer_ip = peer_iface_info.get('ip', '0.0.0.0')
-            lines.append(f'    Peer LDP Ident: {peer_ip}:0; Local LDP Ident {peer_hostname}')
+            # Local LDP Identは「自分側のLDP識別子(IP:ラベル空間)」。
+            # 以前は対向のホスト名を出しており実機と食い違っていた。
+            local_ip = '0.0.0.0'
+            if local_state:
+                local_ip = (local_state.interfaces.get(info.get('iface', ''), {})
+                            .get('ip') or '0.0.0.0')
+            lines.append(f'    Peer LDP Ident: {peer_ip}:0; '
+                         f'Local LDP Ident {local_ip}:0')
             lines.append(f'\tTCP connection: {peer_ip}.646 - {info["iface"]}')
             lines.append(f'\tState: {info["state"]}; Msgs sent/rcvd: 0/0; Downstream')
             lines.append(f'\tUp time: 00:00:10')

@@ -2479,7 +2479,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if bgp_m:
         state._routing_mode = 'bgp'
         state._bgp_as = int(bgp_m.group(1))
-        await bgp_engine.start(device_id, hostname, state._bgp_as)
+        await bgp_engine.start(device_id, hostname, state._bgp_as,
+                               _pick_ospf_default_router_id(state, device_id))
         return
     # Si-R: "bgp use on"
     if re.match(r'^bgp\s+use\s+on', c):
@@ -2491,7 +2492,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if sir_bgp_as:
         state._routing_mode = 'bgp'
         state._bgp_as = int(sir_bgp_as.group(1))
-        await bgp_engine.start(device_id, hostname, state._bgp_as)
+        await bgp_engine.start(device_id, hostname, state._bgp_as,
+                               _pick_ospf_default_router_id(state, device_id))
         return
     # Si-R: "bgp neighbor <n> address <ip> remote-as <as>"
     sir_bgp_nbr = re.match(r'^bgp\s+neighbor\s+\d+\s+(?:address\s+)?(\S+)\s+remote-as\s+(\d+)', c)

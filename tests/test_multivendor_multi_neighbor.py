@@ -90,8 +90,9 @@ class TestRipMultiNeighbor:
         assert '192.168.1.0' in r3_routes, "R3がR1の経路を学習していない"
         assert '192.168.2.0' in r3_routes, "R3がR2の経路を学習していない"
 
-        # メトリック確認: R1→R3 は 2ホップ → metric=3
-        assert r1_routes['192.168.3.0'].metric == 3, \
+        # メトリック確認: R1→R3 は 2ホップ → metric=2（実機Cisco準拠。
+        # 直結網はメトリック0で広告されるため、ホップ数=メトリックになる）
+        assert r1_routes['192.168.3.0'].metric == 2, \
             f"R1からR3へのmetric異常: {r1_routes['192.168.3.0'].metric}"
 
         await e['rip'].stop('R1')
