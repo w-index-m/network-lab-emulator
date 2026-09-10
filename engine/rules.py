@@ -849,7 +849,7 @@ class RuleEngine:
                           "config-cmap", "config-pmap", "config-pmap-c",
                           "config-vs-domain", "config-dhcp", "config-bba",
                           "config-evpn", "config-evpn-vni", "config-nve-vni",
-                          "config-bgp-af"):
+                          "config-bgp-af", "config-sec-zone", "config-sec-zone-pair"):
             return self._cmd_config(cmd, state)
 
         # ── ISSU / ソフトウェアアップグレード（Catalyst / Nexus）──
@@ -909,12 +909,14 @@ class RuleEngine:
                              "config-crypto", "config-monitor",
                              "config-cmap", "config-pmap", "config-vs-domain",
                              "config-dhcp", "config-sg-tacacs", "config-ext-nacl",
-                             "config-bba", "config-evpn"):
+                             "config-bba", "config-evpn",
+                             "config-sec-zone", "config-sec-zone-pair"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
                          '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool',
-                         '_aaa_group_name', '_current_acl_name', '_bba_group'):
+                         '_aaa_group_name', '_current_acl_name', '_bba_group',
+                         '_zbfw_zone', '_zbfw_pair'):
                 if hasattr(state, attr):
                     delattr(state, attr)
         elif state.mode == "config":
@@ -1221,6 +1223,21 @@ class RuleEngine:
         # ── show ip verify source（IP Source Guard）──
         if re.match(r'^show\s+ip\s+verify\s+source', c):
             return self._format_show_ip_verify(state)
+
+        # ── ZBFW(Zone-Based Firewall) ──
+        if re.match(r'^show\s+zone\s+security', c):
+            out = self._format_show_zone_security(state)
+            return out if out else '% No security zones configured.'
+        m = re.match(r'^show\s+policy-map\s+type\s+inspect\s+zone-pair(?:\s+(\S+))?$', c)
+        if m:
+            m2 = re.match(r'^show\s+policy-map\s+type\s+inspect\s+zone-pair(?:\s+(\S+))?$',
+                          cmd.strip(), re.I)
+            name = (m2.group(1) if m2 else None) or m.group(1)
+            out = self._format_show_zone_pair_security(state, name)
+            return out if out else '% No zone-pairs configured.'
+        if re.match(r'^show\s+zone-pair\s+security', c):
+            out = self._format_show_zone_pair_security(state)
+            return out if out else '% No zone-pairs configured.'
 
         # ── show QoS（MQC / 各社固有）──
         if re.match(r'^show\s+class-map', c):
@@ -4031,6 +4048,54 @@ Configuration Revision            : 5"""
             state.qos_pmaps = {}   # {name: {'type','classes': {cname: [actions]}}}
         return state.qos_cmaps, state.qos_pmaps
 
+    def _zbfw_store(self, state):
+        """Zone-Based Firewall設定の保存領域をstateに用意して返す"""
+        if not hasattr(state, 'zbfw_zones'):
+            state.zbfw_zones = {}    # {name: {'description'}}
+        if not hasattr(state, 'zbfw_pairs'):
+            state.zbfw_pairs = {}    # {name: {'source','destination','policy'}}
+        return state.zbfw_zones, state.zbfw_pairs
+
+    def _format_show_zone_security(self, state):
+        zones = getattr(state, 'zbfw_zones', {}) or {}
+        if not zones:
+            return ''
+        out = []
+        for name, info in zones.items():
+            members = [ifn for ifn, iinfo in state.interfaces.items()
+                       if iinfo.get('zone_member') == name]
+            out.append(f'zone {name}')
+            if info.get('description'):
+                out.append(f'  Description: {info["description"]}')
+            out.append(f'  Member Interfaces:')
+            if members:
+                for m in members:
+                    out.append(f'    {m}')
+            else:
+                out.append('    (none)')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
+    def _format_show_zone_pair_security(self, state, name=None):
+        pairs = getattr(state, 'zbfw_pairs', {}) or {}
+        pmaps = getattr(state, 'qos_pmaps', {}) or {}
+        if not pairs:
+            return ''
+        out = []
+        for pname, info in pairs.items():
+            if name and pname != name:
+                continue
+            policy = info.get('policy') or '(none)'
+            out.append(f'Zone-pair name {pname}')
+            out.append(f'  Source-Zone {info["source"]}  Destination-Zone {info["destination"]}')
+            out.append(f'  service-policy {policy}')
+            pol = pmaps.get(info.get('policy'), {})
+            for cname, actions in pol.get('classes', {}).items():
+                action_str = actions[-1] if actions else '(no action)'
+                out.append(f'    Class-map: {cname} ({action_str})')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
     def _cmd_qos(self, cmd, state):
         """
         QoS設定（Modular QoS CLI と各社固有）。
@@ -4095,9 +4160,10 @@ Configuration Revision            : 5"""
             return ""
 
         # config-pmap 内: class NAME → config-pmap-c
+        # ("class type inspect NAME"のように型指定が挟まることがある)
         if state.mode == 'config-pmap':
             pname = getattr(state, '_qos_pmap', None)
-            m = re.match(r'^class\s+(\S+)', cmd.strip(), re.I)
+            m = re.match(r'^class(?:\s+type\s+\S+)?\s+(\S+)', cmd.strip(), re.I)
             if m and pname is not None:
                 cname = m.group(1)
                 pmaps[pname]['classes'].setdefault(cname, [])
@@ -4112,8 +4178,8 @@ Configuration Revision            : 5"""
             cname = getattr(state, '_qos_class', None)
             if pname is None or cname is None:
                 return ""
-            # 別class に切り替え
-            m = re.match(r'^class\s+(\S+)', cmd.strip(), re.I)
+            # 別class に切り替え（"class type inspect NAME"の型指定にも対応）
+            m = re.match(r'^class(?:\s+type\s+\S+)?\s+(\S+)', cmd.strip(), re.I)
             if m:
                 cname = m.group(1)
                 pmaps[pname]['classes'].setdefault(cname, [])
@@ -4125,6 +4191,12 @@ Configuration Revision            : 5"""
             if m:
                 pmaps[pname]['classes'][cname].append(cmd.strip())
                 return ""
+            # ── ZBFW(Zone-Based Firewall): policy-map type inspect 内の
+            # class type inspect アクション ──
+            m = re.match(r'^(inspect|drop|pass)$', cmd.strip(), re.I)
+            if m and pmaps[pname].get('type') == 'inspect':
+                pmaps[pname]['classes'][cname].append(cmd.strip().lower())
+                return ""
             return None
 
         # ── interface: service-policy {input|output} NAME ──
@@ -4135,6 +4207,58 @@ Configuration Revision            : 5"""
             sp = state.interfaces.setdefault(state.current_if, {}).setdefault('service_policy', {})
             sp[m.group(1)] = pname
             return ""
+
+        # ── ZBFW(Zone-Based Firewall): zone security <name> ──
+        if dt in ('cisco', 'catalyst', 'nexus'):
+            zones, pairs = self._zbfw_store(state)
+            m = re.match(r'^zone\s+security\s+(\S+)$', c)
+            if m and state.mode == 'config':
+                m2 = re.match(r'^zone\s+security\s+(\S+)$', cmd.strip(), re.I)
+                name = m2.group(1) if m2 else m.group(1)
+                zones.setdefault(name, {'description': ''})
+                state._zbfw_zone = name
+                state.mode = 'config-sec-zone'
+                return ""
+            if state.mode == 'config-sec-zone':
+                name = getattr(state, '_zbfw_zone', None)
+                if name is None:
+                    return ""
+                m = re.match(r'^description\s+(.+)$', cmd.strip(), re.I)
+                if m:
+                    zones[name]['description'] = m.group(1)
+                    return ""
+                return None
+
+            # ── zone-pair security <name> source <src> destination <dst> ──
+            m = re.match(
+                r'^zone-pair\s+security\s+(\S+)\s+source\s+(\S+)\s+destination\s+(\S+)$', c)
+            if m and state.mode == 'config':
+                m2 = re.match(
+                    r'^zone-pair\s+security\s+(\S+)\s+source\s+(\S+)\s+destination\s+(\S+)$',
+                    cmd.strip(), re.I)
+                name, src, dst = (m2.group(1), m2.group(2), m2.group(3)) if m2 else \
+                    (m.group(1), m.group(2), m.group(3))
+                pairs[name] = {'source': src, 'destination': dst, 'policy': None}
+                state._zbfw_pair = name
+                state.mode = 'config-sec-zone-pair'
+                return ""
+            if state.mode == 'config-sec-zone-pair':
+                name = getattr(state, '_zbfw_pair', None)
+                if name is None:
+                    return ""
+                m = re.match(r'^service-policy\s+type\s+inspect\s+(\S+)$', cmd.strip(), re.I)
+                if m:
+                    pairs[name]['policy'] = m.group(1)
+                    return ""
+                return None
+
+            # ── interface: zone-member security <name> ──
+            m = re.match(r'^zone-member\s+security\s+(\S+)$', c)
+            if m and state.current_if:
+                m2 = re.match(r'^zone-member\s+security\s+(\S+)$', cmd.strip(), re.I)
+                name = m2.group(1) if m2 else m.group(1)
+                state.interfaces.setdefault(state.current_if, {})['zone_member'] = name
+                return ""
 
         return None
 
