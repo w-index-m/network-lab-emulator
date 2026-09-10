@@ -2667,6 +2667,25 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             await stp_engine.start(device_id, hostname, n['mode'], priority)
         return
 
+    # ── NETCONF-YANG ── netconf-yang を入れると実機同様
+    # SSHの netconf サブシステム(TCP 830)が待ち受けを始める。
+    # ncclient等の実物のNETCONFクライアントから接続できる。
+    if c in ('netconf-yang', 'no netconf-yang') and \
+            state.device_type in ('cisco', 'catalyst'):
+        # 先にrules.py側でstate.netconf_enabledが立つよう、ここでは
+        # フラグを直接見ずコマンド文字列で判断する
+        from engine.netconf_agent import ensure_netconf_agent, stop_netconf_agent
+        if c == 'netconf-yang':
+            state.netconf_enabled = True
+            _register_icmp(device_id)
+            ensure_netconf_agent(device_id, device_sessions,
+                                 on_change=lambda: _register_icmp(device_id))
+        else:
+            state.netconf_enabled = False
+            stop_netconf_agent(device_id)
+        # rules.py側でも running-config 用のフラグ処理をさせるため
+        # ここではreturnしない
+
     # ── MPLS(LDP) ── Cisco IOS-XE/NX-OS専用（Si-Rは実機に機能自体が無く、
     # Apresiaはレイヤー2スイッチのためMPLSは対象外。device_typeで除外する）
     _mpls_capable = state.device_type in ('cisco', 'catalyst', 'nexus')
