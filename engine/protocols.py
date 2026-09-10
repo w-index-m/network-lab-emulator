@@ -1233,6 +1233,77 @@ class OspfEngine:
             await self._send_hello(device_id)
             await asyncio.sleep(n['hello_interval'])
 
+    def ospf_enabled_ifaces(self, device_id: str):
+        """network文でOSPFが有効になっているインタフェース名の集合を返す。
+
+        実機のOSPFは `network <addr> <wildcard> area <n>` に一致した
+        インタフェースの上でしか動かない。これを見ずに全リンクへHelloを
+        流していたため、OSPFに入れていないバックアップ回線の上でも隣接が
+        成立し、主回線をshutdownしてもOSPF経路が生き残って
+        フローティングスタティックへ切り替わらなかった。
+
+        戻り値 None は「networkが未設定で判断できない」を表し、
+        呼び出し側は従来どおり全インタフェースを対象にする。
+        """
+        import ipaddress
+        n = self.nodes.get(device_id) or {}
+        nets = []
+        for net in (n.get('networks') or []):
+            try:
+                nets.append(ipaddress.ip_network(net, strict=False))
+            except ValueError:
+                continue
+        if not nets:
+            return None
+        out = set()
+        ifaces = icmp_engine.device_ips.get(device_id, {}).get('interfaces', {})
+        for name, info in ifaces.items():
+            ip = info.get('ip') if isinstance(info, dict) else None
+            if not ip:
+                continue
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            if any(addr in net for net in nets):
+                out.add(name)
+        return out
+
+    def _non_ospf_peers(self, device_id: str) -> set:
+        """OSPFが有効なインタフェースが1本も無いピアの集合。
+
+        同一ペア間に並列リンクがある場合、interface_links は
+        {peer -> iface} と1本しか覚えていないため、そちらを見ると
+        「主回線はOSPF、予備回線は非OSPF」という構成で判定を誤る。
+        並列リンクを全部持っている link_ifaces を使う。
+        """
+        enabled = self.ospf_enabled_ifaces(device_id)
+        if enabled is None:
+            return set()
+        norm = {vnet._norm_iface(x) for x in enabled}
+        lifaces = getattr(vnet, 'link_ifaces', {})
+        out = set()
+        for peer in vnet.links.get(device_id, set()):
+            ifs = set(lifaces.get(device_id, {}).get(peer, set()))
+            single = vnet.interface_links.get(device_id, {}).get(peer)
+            if single:
+                ifs.add(single)
+            if not ifs:
+                continue          # iface情報が無ければ従来どおり許可
+            ospf_ifs = [x for x in ifs if vnet._norm_iface(x) in norm]
+            if not ospf_ifs:
+                out.add(peer)
+                continue
+            # OSPFが有効なリンクが全部shutdownされていれば到達不能。
+            # broadcast_to_neighbors は peer→iface を1本しか覚えていない
+            # ため、並列リンク構成では主回線を落としても予備回線側で
+            # 送信できてしまう。ここで明示的に落とす。
+            down = {vnet._norm_iface(x)
+                    for x in vnet.down_interfaces.get(device_id, set())}
+            if all(vnet._norm_iface(x) in down for x in ospf_ifs):
+                out.add(peer)
+        return out
+
     async def _send_hello(self, device_id: str):
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
@@ -1262,13 +1333,19 @@ class OspfEngine:
             'auth_mode': n.get('auth_mode', ''),
             'auth_key': n.get('auth_key', ''),
         }
-        await vnet.broadcast_to_neighbors(device_id, pkt)
+        # OSPFに入れていないインタフェースの先へはHelloを出さない
+        await vnet.broadcast_to_neighbors(
+            device_id, pkt, exclude=self._non_ospf_peers(device_id))
 
     async def receive_hello(self, receiver_id: str, msg: dict):
         n = self.nodes.get(receiver_id)
         if not n or not n['enabled']:
             return
         src_id = msg.get('src_id')
+        # 受信側でも、OSPFが有効でないインタフェースに届いたHelloは無視する
+        # （送信側が古い実装/別ベンダでも隣接が張られてしまわないように）
+        if src_id in self._non_ospf_peers(receiver_id):
+            return
         src_hostname = msg.get('src_hostname', src_id)
         router_id = msg.get('router_id', src_id)
         area_id = msg.get('area_id')
@@ -3887,7 +3964,16 @@ class RibEngine:
         # OSPF
         onode = ospf_engine.nodes.get(device_id)
         if onode and onode.get('enabled'):
+            _own_rid = onode.get('router_id') or ''
             for r in onode.get('routes', []):
+                # 自分自身のrouter-idを次ホップとするOSPF経路は採用しない。
+                # 自分のLSA由来で「自分の直結NWへ自分経由で行く」経路が
+                # 生まれており、直結経路がshutdownで消えた瞬間に
+                # "O 10.90.1.0/24 via <自分> , Loopback0" という
+                # 実機に存在しない経路として表面化していた。
+                if (r.get('via') != 'direct' and _own_rid
+                        and r.get('next_hop') == _own_rid):
+                    continue
                 src = 'connected' if r['via'] == 'direct' else 'ospf'
                 ad = AD_VALUES['connected'] if src == 'connected' else AD_VALUES['ospf']
                 candidates.append({
@@ -3940,10 +4026,25 @@ class RibEngine:
         down_ifaces = {vnet._norm_iface(x)
                        for x in vnet.down_interfaces.get(device_id, set())}
         if down_ifaces:
+            def _exit_iface(c):
+                """この経路の出口IF。動的経路は next_hop に内部ID/router-id
+                が入っていて iface が空のことがあり、そのままだと
+                「ifaceが無い経路」として下のフィルタを素通りしてしまう。
+                （主リンクをshutdownしてもOSPF経路が残り、フローティング
+                  スタティックへ切り替わらない原因になっていた）"""
+                if c.get('iface'):
+                    return c['iface']
+                if c['source'] in ('rip', 'ospf', 'bgp', 'eigrp'):
+                    nh = icmp_engine.resolve_learned_next_hop(
+                        device_id, c.get('next_hop', ''))
+                    if nh:
+                        return self._iface_for_nexthop(device_id, nh) or ''
+                return ''
+
             candidates = [
                 c for c in candidates
-                if not (c.get('iface')
-                        and vnet._norm_iface(c['iface']) in down_ifaces)
+                if not (_exit_iface(c)
+                        and vnet._norm_iface(_exit_iface(c)) in down_ifaces)
             ]
 
         # 宛先ごとにAD最小（同ADならmetric最小）を選択
@@ -4094,6 +4195,92 @@ class RibEngine:
                     f"via {disp_next_hop}, {disp_iface}"
                 )
         return '\n'.join(lines)
+
+    def format_show_ip_route_proto(self, device_id: str, proto: str) -> str:
+        """show ip route {connected|static|ospf|rip|bgp|eigrp}
+
+        指定プロトコル由来の経路だけに絞って表示する。以前は引数を
+        まったく見ずに全テーブルを返していた。"""
+        full = self.format_show_ip_route(device_id)
+        head, _, body = full.partition('\n\n')
+        code_of = {'connected': 'C', 'static': 'S', 'rip': 'R',
+                   'ospf': 'O', 'bgp': 'B', 'eigrp': 'D'}
+        want = code_of.get(proto)
+        kept = []
+        for ln in body.split('\n'):
+            if not ln.strip() or ln.startswith('Gateway of last resort'):
+                continue
+            first = ln[0]
+            if want == 'C' and first in ('C', 'L'):
+                kept.append(ln)
+            elif want and first == want:
+                kept.append(ln)
+        return '\n'.join([head, ''] + kept) if kept else head + '\n'
+
+    def format_show_ip_route_detail(self, device_id: str, target: str) -> str:
+        """show ip route <A.B.C.D>
+
+        実機は該当経路の詳細ブロック(Routing entry for ...)を返す。
+        以前は引数を無視して全テーブルを出していたため、どの経路が
+        実際に採用されているのか(AD/メトリック/学習元)が確認できなかった。
+        """
+        try:
+            tgt = vnet._ip_to_int(target)
+        except Exception:
+            return '% Invalid input detected'
+        best = None
+        for r in self.get_best_routes(device_id):
+            p = int(r['prefix'])
+            mask = (0xffffffff << (32 - p)) & 0xffffffff if p else 0
+            try:
+                if (vnet._ip_to_int(r['network']) & mask) != (tgt & mask):
+                    continue
+            except Exception:
+                continue
+            # ロンゲストマッチ
+            if best is None or p > int(best['prefix']):
+                best = r
+        if best is None:
+            return f'% Network not in table'
+        net = f"{best['network']}/{best['prefix']}"
+        src = best['source']
+        known = {
+            'connected': 'connected', 'static': 'static',
+            'ospf': f'"ospf {ospf_engine.nodes.get(device_id, {}).get("process_id", 1)}"',
+            'rip': '"rip"', 'eigrp': '"eigrp"', 'bgp': '"bgp"',
+        }.get(src, f'"{src}"')
+        out = [f'Routing entry for {net}']
+        if src == 'connected':
+            out.append(f'  Known via "connected", distance 0, metric 0 '
+                       f'(connected, via interface)')
+            out.append('  Routing Descriptor Blocks:')
+            out.append(f"  * directly connected, via {best['iface']}")
+            out.append('      Route metric is 0, traffic share count is 1')
+            return '\n'.join(out)
+        nh = best['next_hop']
+        if src in ('rip', 'ospf', 'bgp', 'eigrp'):
+            nh = icmp_engine.resolve_learned_next_hop(device_id, nh) or nh
+        # 動的経路は next_hop が内部ID/router-idのことがあり、その場合
+        # iface が空のまま渡ってくる。表示直前に実IPから解決する。
+        if not best.get('iface'):
+            best = dict(best)
+            best['iface'] = (self._iface_for_nexthop(device_id, nh)
+                             or self._iface_for_network(
+                                 device_id, best['network'],
+                                 int(best['prefix'])) or '')
+        extra = ', type intra area' if src == 'ospf' else ''
+        out.append(f"  Known via {known}, distance {best['ad']}, "
+                   f"metric {best['metric']}{extra}")
+        if src == 'static':
+            out.append('  Routing Descriptor Blocks:')
+            out.append(f"  * {nh}, via {best['iface']}")
+        else:
+            out.append(f"  Last update from {nh} on {best['iface']}")
+            out.append('  Routing Descriptor Blocks:')
+            out.append(f"  * {nh}, from {nh}, via {best['iface']}")
+        out.append(f"      Route metric is {best['metric']}, "
+                   f"traffic share count is 1")
+        return '\n'.join(out)
 
     @staticmethod
     def _iface_for_network(device_id: str, network: str,

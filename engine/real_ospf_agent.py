@@ -60,11 +60,18 @@ class DeviceOspfResponder(OSPFNeighborFaker):
     """OSPFNeighborFakerを、装置側の"実OSPFプロセス"として使うための
     サブクラス。External-LSA受信時にospf_engineへ書き込みを行う。"""
 
-    def __init__(self, device_id: str, ospf_engine, loop, **kwargs):
+    def __init__(self, device_id: str, ospf_engine, loop,
+                 local_iface_name: str = '', **kwargs):
         super().__init__(on_log=self._on_log, **kwargs)
         self.device_id = device_id
         self.ospf_engine = ospf_engine
         self.loop = loop
+        # show ip ospf neighbor の Interface 列に出す装置側のIF名。
+        # 実リスナーは全装置が 'lo' を共有して待ち受けているため、
+        # self.iface をそのまま出すと実機ではありえない "lo" になる。
+        self.local_iface_name = local_iface_name or self.iface
+        # 最後にHelloを受信した時刻。Deadタイマー判定に使う。
+        self.last_hello_rx = None
 
     def _on_log(self, msg: str):
         print(f"[OSPF:{self.device_id}] {msg}")
@@ -110,9 +117,61 @@ class DeviceOspfResponder(OSPFNeighborFaker):
         # （nodesは自装置の登録簿であり、そこへ偽のノードを足すと
         #   全ノードを走査する処理が壊れる）ため、ネイバー側に持たせる
         nbr = nbrs[nid]
-        nbr.iface = self.iface
+        nbr.iface = self.local_iface_name
         if self.peer_ip:
             nbr.ip = self.peer_ip
+
+    # ── Deadタイマー ───────────────────────────────────
+    #
+    # 流用元の OSPFNeighborFaker は「経路を注入し続ける」ためのツールで、
+    # dead_interval を自分のHelloに載せて広告するだけで、相手のHelloが
+    # 途絶えたときに隣接を落とす受信側の処理を持っていない。
+    # そのため、対向がshutdownされても隣接がFullのまま残り続け、
+    # 学習した経路も撤回されず、フローティングスタティック等の
+    # バックアップ経路へ切り替わらない（実機と挙動が食い違う）。
+
+    def start(self):
+        super().start()
+        import threading
+        threading.Thread(target=self._dead_loop, daemon=True).start()
+
+    def _dead_loop(self):
+        import time
+        while not self.stop_event.wait(1.0):
+            if self.state == self.STATE_DOWN or self.last_hello_rx is None:
+                continue
+            if time.time() - self.last_hello_rx <= self.dead_interval:
+                continue
+            self._log(f"Deadタイマー({self.dead_interval}秒)満了: "
+                      f"ネイバー {self.peer_router_id} を落とします")
+            self.expire_neighbor('dead timer expired')
+
+    def expire_neighbor(self, reason: str = 'interface down'):
+        """隣接を強制的にDOWNへ落とし、学習した経路を撤回する。
+        Deadタイマー満了とインタフェースshutdownの共通処理。"""
+        peer = self.peer_router_id
+        n = self.ospf_engine.nodes.get(self.device_id) or {}
+        self._set_state(self.STATE_DOWN)      # _sync_neighbor_to_engineでnbr削除
+        self.peer_router_id = None
+        self.peer_ip = None
+        self.last_hello_rx = None
+        self.exstart_sent = False
+        self.is_master = None
+        self.my_ddseq = None
+        self.peer_ddseq = None
+        self.full_event.clear()
+        # この隣接から学習していた経路を撤回する。残したままだと
+        # show ip route に到達不能な経路が居座り続ける。
+        try:
+            learned = n.get('_learned_external')
+            if learned:
+                learned.clear()
+            self.ospf_engine._recalc_routes(self.device_id)
+        except Exception as e:
+            self._log(f"[WARN] 経路撤回に失敗: {e}")
+        if peer:
+            print(f"[OSPF:{self.device_id}] %OSPF-5-ADJCHG: "
+                  f"Nbr {peer} {reason}, changing state from FULL to DOWN")
 
     def _same_subnet(self, src_ip: str) -> bool:
         """送信元が自分と同じOSPFセグメントに居るか"""
@@ -124,6 +183,12 @@ class DeviceOspfResponder(OSPFNeighborFaker):
             return True
 
     def _on_packet(self, pkt):
+        # stop()後もscapyのsniffは受信済みパケットを処理し続けるため、
+        # ここで止めないと停止したはずのリスナーが状態遷移を再開し、
+        # 隣接がDOWN→INIT→…と復活してしまう（shutdownしたIFの隣接が
+        # 消えない原因になっていた）。
+        if self.stop_event.is_set():
+            return
         # 全装置の実リスナーが lo を共有しているため、224.0.0.5宛のHelloは
         # セグメントの違う装置にも届いてしまう。実機のOSPFは同一セグメント
         # の相手としか隣接しないので、ここで落とす。
@@ -133,6 +198,17 @@ class DeviceOspfResponder(OSPFNeighborFaker):
             from scapy.all import IP
             if IP in pkt and not self._same_subnet(pkt[IP].src):
                 return
+        except Exception:
+            pass
+        # Deadタイマー用に、同一セグメントからのHello受信時刻を記録する。
+        # (自分が送ったHelloは _on_packet 側で src チェックにより弾かれる)
+        try:
+            from scapy.all import IP as _IP
+            from scapy.contrib.ospf import OSPF_Hdr as _Hdr
+            if (_IP in pkt and _Hdr in pkt and pkt[_Hdr].type == 1
+                    and pkt[_IP].src != self.my_ip):
+                import time as _t
+                self.last_hello_rx = _t.time()
         except Exception:
             pass
         try:
@@ -214,6 +290,39 @@ def _pick_ospf_ip(state, node) -> Optional[str]:
     return _pick_management_ip(state)
 
 
+def _iface_name_for_ip(state, ip: str) -> str:
+    """装置のインタフェース一覧から、そのIPを持つIF名を引く。
+    show ip ospf neighbor の Interface 列に実機同様のIF名を出すために使う。"""
+    for name, info in (getattr(state, 'interfaces', {}) or {}).items():
+        if isinstance(info, dict) and info.get('ip') == ip:
+            return name
+    return ''
+
+
+def stop_ospf_agent(device_id: str, reason: str = 'interface down'):
+    """実OSPFリスナーを停止し、隣接と学習経路を撤回する。
+
+    インタフェースのshutdownや "no router ospf" で呼ぶ。これをやらないと
+    リスナーがHelloを送受信し続け、装置をダウンさせても隣接がFullのまま
+    残る（Deadタイマーも相手側が生きている限り満了しない）。
+    """
+    responder = _running_agents.pop(device_id, None)
+    if responder is None:
+        return False
+    # 先に停止フラグを立てる。撤回してから止めると、その隙間に届いた
+    # Helloで隣接が復活してしまう。
+    try:
+        responder.stop()
+    except Exception as e:
+        print(f"[OSPF] {device_id} リスナー停止に失敗: {e}")
+    try:
+        responder.expire_neighbor(reason)
+    except Exception as e:
+        print(f"[OSPF] {device_id} 隣接撤回に失敗: {e}")
+    print(f"[OSPF] {device_id} 実リスナーを停止しました ({reason})")
+    return True
+
+
 def ensure_ospf_agent(device_id: str, device_sessions: dict, ospf_engine):
     """指定装置のOSPFが有効化された直後に呼び出す。既に実リスナーが
     起動済みならなにもしない（CLIで router ospf が設定された時点で
@@ -243,6 +352,7 @@ def ensure_ospf_agent(device_id: str, device_sessions: dict, ospf_engine):
         responder = DeviceOspfResponder(
             device_id=device_id, ospf_engine=ospf_engine, loop=loop,
             iface='lo', my_ip=ip, router_id=router_id, area=str(area),
+            local_iface_name=_iface_name_for_ip(state, ip),
             mask='255.255.255.0',
             hello_interval=n.get('hello_interval', 10),
             dead_interval=n.get('dead_interval', 40),
@@ -282,6 +392,7 @@ def start_all_ospf_agents(device_sessions: dict, ospf_engine):
             responder = DeviceOspfResponder(
                 device_id=device_id, ospf_engine=ospf_engine, loop=loop,
                 iface='lo', my_ip=ip, router_id=router_id, area=str(area),
+                local_iface_name=_iface_name_for_ip(state, ip),
                 mask='255.255.255.0',
                 hello_interval=n.get('hello_interval', 10),
                 dead_interval=n.get('dead_interval', 40),

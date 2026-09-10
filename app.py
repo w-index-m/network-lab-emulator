@@ -920,6 +920,16 @@ async def _flap_interface_down(device_id: str, state, iface_for_flap: str):
     # HSRP object tracking: このIFをtrack対象にしているグループがあれば
     # priorityを下げる（グループ自体のIFがdownする場合とは別経路）
     await vrrp_engine.hsrp_track_down(device_id, iface_for_flap)
+    # 実OSPFリスナーは lo 上で待ち受けているため、装置側のIFをshutdown
+    # しても勝手には落ちない。落としたIFのIPで待ち受けているリスナーを
+    # 明示的に停止しないと、隣接がFullのまま残って学習経路も撤回されず、
+    # フローティングスタティック等のバックアップ経路へ切り替わらない。
+    _down_ip = state.interfaces.get(iface_for_flap, {}).get('ip', '')
+    if _down_ip:
+        from engine.real_ospf_agent import _running_agents, stop_ospf_agent
+        _resp = _running_agents.get(device_id)
+        if _resp is not None and getattr(_resp, 'my_ip', '') == _down_ip:
+            stop_ospf_agent(device_id, 'interface shutdown')
     peer_ids = vnet.get_peers_on_interface(device_id, iface_for_flap)
     if peer_ids:
         await ospf_engine.interface_down(device_id, peer_ids)
@@ -977,6 +987,11 @@ async def _flap_interface_up(device_id: str, state, iface_for_flap: str):
     # EIGRP: 復旧したリンクの相手と隣接を張り直す
     await eigrp_engine.interface_up(
         device_id, vnet.get_peers_on_interface(device_id, iface_for_flap))
+    # OSPF: shutdownで停止した実リスナーを再起動して隣接を張り直す
+    _on = ospf_engine.nodes.get(device_id)
+    if _on and _on.get('enabled'):
+        from engine.real_ospf_agent import ensure_ospf_agent
+        ensure_ospf_agent(device_id, device_sessions, ospf_engine)
     # STP: リンク回復を両端に通知（ポート再追加・再収束）
     _peers_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
     if stp_engine.nodes.get(device_id, {}).get('enabled') or any(
@@ -2291,6 +2306,25 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # 体系が存在しない(L2アクセススイッチのため)。他機種と違い
     # device_typeでの除外が無かったため、実機では通らないはずの
     # "router ospf"がそのまま受理されOSPFが起動してしまっていた。
+    # "no router ospf <n>" はどのハンドラにも一致せず素通りしていたため、
+    # OSPFプロセスが消えず(show ip protocolsに残る)、学習経路も
+    # show ip route に残り続けていた。実機同様にプロセスごと落とす。
+    no_ospf_m = re.match(r'^no\s+router\s+ospf(?:\s+(\d+))?\s*$', c)
+    if no_ospf_m and state.device_type != 'apresia':
+        from engine.real_ospf_agent import stop_ospf_agent
+        stop_ospf_agent(device_id, 'process removed')
+        await ospf_engine.stop(device_id)
+        onode = ospf_engine.nodes.get(device_id)
+        if onode:
+            onode['routes'] = []
+            onode['networks'] = []
+            onode['lsdb'] = {}
+            onode.get('_learned_external', {}).clear()
+        state._routing_mode = None
+        state._ospf_networks = []
+        state._ospf_pending = False
+        return ''
+
     ospf_m = re.match(r'^router\s+ospf\s+(\d+)', c)
     if ospf_m and state.device_type == 'apresia':
         return "% Invalid input detected at '^' marker."
@@ -3132,6 +3166,18 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
             bgp_engine.nodes.get(device_id, {}).get('enabled'),
         ])
         if has_static or has_dynamic:
+            # 実機は引数で表示を絞る。以前は引数を無視して常に全経路を
+            # 返していたため、"show ip route <宛先>" で採用中の経路の
+            # AD/メトリック/学習元を確認できなかった。
+            m_detail = re.match(r'^show\s+ip\s+route\s+(\d+\.\d+\.\d+\.\d+)\s*$', c)
+            if m_detail:
+                return rib_engine.format_show_ip_route_detail(
+                    device_id, m_detail.group(1))
+            m_proto = re.match(r'^show\s+ip\s+route\s+'
+                               r'(connected|static|ospf|rip|bgp|eigrp)\s*$', c)
+            if m_proto:
+                return rib_engine.format_show_ip_route_proto(
+                    device_id, m_proto.group(1))
             return rib_engine.format_show_ip_route(device_id, state.hostname)
         # どちらもなければルールベースのデフォルト表示に任せる
 
@@ -3772,7 +3818,18 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append('!')
             lines.append(f'router ospf {on["process_id"]}')
             for net in on['networks']:
-                lines.append(f' network {net.split("/")[0]} 0.0.0.255 area {on["area_id"]}')
+                # ワイルドカードは実際のプレフィックス長から復元する。
+                # 常に 0.0.0.255 を出していたため、"network <lo> 0.0.0.0"
+                # (ループバックの/32) を入れても running-config には
+                # /24 相当で出てしまい、投入した設定と食い違っていた。
+                _n, _, _p = net.partition('/')
+                try:
+                    _wc_int = (0xffffffff >> int(_p)) if _p else 0xffffffff
+                except ValueError:
+                    _wc_int = 0x000000ff
+                _wc = '.'.join(str((_wc_int >> s) & 0xff)
+                               for s in (24, 16, 8, 0))
+                lines.append(f' network {_n} {_wc} area {on["area_id"]}')
             for _aid, _atype in sorted(on.get('area_types', {}).items()):
                 if _atype in ('nssa', 'stub'):
                     lines.append(f' area {_aid} {_atype}')
