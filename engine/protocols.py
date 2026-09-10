@@ -7714,6 +7714,202 @@ class VrrpEngine:
 vrrp_engine = VrrpEngine()
 
 
+@dataclass
+class GlbpGroup:
+    group_id: int
+    vip: str = ''
+    priority: int = 100
+    preempt: bool = False           # GLBPもデフォルトpreempt無効
+    state: str = 'Init'             # Init / Listen / Standby / Active(AVG)
+    interface: str = ''
+    hello_interval: int = 3         # 実機デフォルト hello 3秒 / hold 10秒
+    hold_time: int = 10
+    load_balancing: str = 'round-robin'
+    weighting: int = 100
+    hello_task: Optional[Any] = None
+    dead_task: Optional[Any] = None
+    peer_id: str = ''
+    peer_ip: str = ''
+    peer_priority: int = 0
+    # AVF(仮想フォワーダ)。forwarder番号 -> {'owner','state','vmac'}
+    forwarders: Dict[int, dict] = field(default_factory=dict)
+
+
+class GlbpEngine:
+    """
+    GLBP（Gateway Load Balancing Protocol）
+
+    HSRP/VRRPと違い、1グループ内で AVG(Active Virtual Gateway) が1台、
+    各ルータが AVF(Active Virtual Forwarder) として別々の仮想MACを持ち、
+    ARP応答時にAVGが仮想MACを振り分けることで負荷分散する。
+
+    実装している範囲:
+      - AVG選出（priority比較、同値ならIPが大きい方。preempt対応）
+      - 仮想フォワーダ(AVF)の割り当てと仮想MAC 0007.b400.XXYY
+      - weighting による転送能力の表現
+      - show glbp / show glbp brief
+
+    未対応（実機との差）:
+      - weighting track による自動降格、client cache、認証、
+        load-balancing の実際のARP応答振り分け
+    """
+
+    def __init__(self):
+        self.groups: Dict[str, Dict[int, GlbpGroup]] = defaultdict(dict)
+
+    def _g(self, device_id: str, gid: int) -> GlbpGroup:
+        if gid not in self.groups[device_id]:
+            self.groups[device_id][gid] = GlbpGroup(group_id=gid)
+        return self.groups[device_id][gid]
+
+    @staticmethod
+    def virtual_mac(gid: int, forwarder: int) -> str:
+        """GLBPの仮想MACは 0007.b400.xxyy（xx=グループ, yy=フォワーダ番号）"""
+        return f'0007.b400.{gid:02x}{forwarder:02x}'
+
+    def set_ip(self, device_id: str, gid: int, vip: str, iface: str = ''):
+        g = self._g(device_id, gid)
+        g.vip = vip
+        if iface:
+            g.interface = iface
+        return g
+
+    def set_priority(self, device_id: str, gid: int, priority: int):
+        self._g(device_id, gid).priority = priority
+
+    def set_preempt(self, device_id: str, gid: int, enabled: bool = True):
+        self._g(device_id, gid).preempt = enabled
+
+    def set_weighting(self, device_id: str, gid: int, weight: int):
+        self._g(device_id, gid).weighting = weight
+
+    def set_load_balancing(self, device_id: str, gid: int, mode: str):
+        self._g(device_id, gid).load_balancing = mode
+
+    def set_timers(self, device_id: str, gid: int, hello: int, hold: int):
+        g = self._g(device_id, gid)
+        g.hello_interval = hello
+        g.hold_time = hold
+
+    def remove(self, device_id: str, gid: int):
+        self.groups.get(device_id, {}).pop(gid, None)
+
+    def _peers(self, device_id: str, gid: int):
+        """同一グループを設定していて、かつ実際にリンクしている装置"""
+        out = []
+        for peer_id in vnet.get_neighbors(device_id):
+            pg = self.groups.get(peer_id, {}).get(gid)
+            if pg and pg.vip:
+                out.append((peer_id, pg))
+        return out
+
+    def elect(self, device_id: str, gid: int, device_sessions=None):
+        """AVG選出とAVF割り当てを行う。
+
+        実機は priority が大きい方がAVG、同値ならインタフェースIPが
+        大きい方が勝つ。preemptが無効なら、既にAVGが居る場合は
+        priorityが高くても奪わない。
+        """
+        g = self.groups.get(device_id, {}).get(gid)
+        if not g or not g.vip:
+            return
+        peers = self._peers(device_id, gid)
+        my_ip = self._iface_ip(device_id, g, device_sessions)
+
+        best_id, best_g, best_ip = device_id, g, my_ip
+        for pid, pg in peers:
+            pip = self._iface_ip(pid, pg, device_sessions)
+            if (pg.priority, pip) > (best_g.priority, best_ip):
+                best_id, best_g, best_ip = pid, pg, pip
+
+        # preempt無効時は、既にActiveの装置が居ればそのまま維持する
+        active = [(pid, pg) for pid, pg in peers if pg.state == 'Active']
+        if active and not g.preempt and best_id == device_id and \
+                g.state != 'Active':
+            best_id = active[0][0]
+
+        g.state = 'Active' if best_id == device_id else 'Standby'
+        if peers:
+            g.peer_id = peers[0][0]
+            g.peer_ip = self._iface_ip(peers[0][0], peers[0][1], device_sessions)
+            g.peer_priority = peers[0][1].priority
+
+        # AVF割り当て: AVGが自分と各ピアにフォワーダ番号を1から振る
+        members = [device_id] + [pid for pid, _ in peers]
+        members.sort()
+        g.forwarders = {}
+        for i, m in enumerate(members, 1):
+            g.forwarders[i] = {
+                'owner': m,
+                'state': 'Active' if m == device_id else 'Listen',
+                'vmac': self.virtual_mac(gid, i),
+            }
+
+    @staticmethod
+    def _iface_ip(device_id: str, g: GlbpGroup, device_sessions=None) -> str:
+        if device_sessions is None:
+            return ''
+        st = device_sessions.get(device_id)
+        if st is None:
+            return ''
+        if g.interface:
+            return st.interfaces.get(g.interface, {}).get('ip', '') or ''
+        for info in st.interfaces.values():
+            if info.get('ip') and info['ip'] != '127.0.0.1':
+                return info['ip']
+        return ''
+
+    def format_show_glbp(self, device_id: str, device_sessions=None) -> str:
+        groups = self.groups.get(device_id, {})
+        if not groups:
+            return ''
+        lines = []
+        for gid in sorted(groups):
+            g = groups[gid]
+            self.elect(device_id, gid, device_sessions)
+            lines.append(f'{g.interface or "Vlan1"} - Group {gid}')
+            lines.append(f'  State is {g.state}')
+            lines.append(f'  Virtual IP address is {g.vip}')
+            lines.append(f'  Hello time {g.hello_interval} sec, '
+                         f'hold time {g.hold_time} sec')
+            lines.append(f'  Priority {g.priority} (default 100)')
+            lines.append(f'  Weighting {g.weighting} (default 100), '
+                         f'thresholds: lower 1, upper 100')
+            lines.append(f'  Load balancing: {g.load_balancing}')
+            lines.append(f'  Group members:')
+            for num, f in sorted(g.forwarders.items()):
+                lines.append(f'    Forwarder {num} - {f["owner"]} '
+                             f'({f["vmac"]}) state {f["state"]}')
+            lines.append('')
+        return '\n'.join(lines).rstrip()
+
+    def format_show_glbp_brief(self, device_id: str, device_sessions=None) -> str:
+        groups = self.groups.get(device_id, {})
+        if not groups:
+            return ''
+        lines = ['Interface   Grp  Fwd Pri State    Address         '
+                 'Active router   Standby router']
+        for gid in sorted(groups):
+            g = groups[gid]
+            self.elect(device_id, gid, device_sessions)
+            # 実機の show glbp brief はインタフェース名を短縮表記で出す
+            # （列幅がフル名を想定していないため、そのまま出すと崩れる）
+            ifn = dp_engine._short_port(g.interface or 'Vlan1')
+            act = 'local' if g.state == 'Active' else (g.peer_ip or 'unknown')
+            sby = (g.peer_ip or 'unknown') if g.state == 'Active' else 'local'
+            lines.append(f'{ifn:<12}{gid:<5}{"-":<4}'
+                         f'{g.priority:<4}{g.state:<9}{g.vip:<16}'
+                         f'{act:<16}{sby}')
+            for num, f in sorted(g.forwarders.items()):
+                owner = 'local' if f['owner'] == device_id else f['owner']
+                lines.append(f'{ifn:<12}{gid:<5}{num:<4}'
+                             f'{"-":<4}{f["state"]:<9}{f["vmac"]:<16}{owner}')
+        return '\n'.join(lines)
+
+
+glbp_engine = GlbpEngine()
+
+
 class TrackEngine:
     """
     拡張オブジェクトトラッキング（Enhanced Object Tracking）

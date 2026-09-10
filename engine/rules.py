@@ -1226,6 +1226,29 @@ class RuleEngine:
         if re.match(r'^show\s+ip\s+verify\s+source', c):
             return self._format_show_ip_verify(state)
 
+        # ── show glbp / show ip nhrp / show ip wccp ──
+        if re.match(r'^show\s+glbp', c) and \
+                state.device_type in ('cisco', 'catalyst', 'nexus'):
+            from engine.protocols import glbp_engine
+            _did = getattr(state, '_device_id', None) or state.hostname
+            try:
+                from app import device_sessions as _ds
+            except Exception:
+                _ds = None
+            if 'brief' in c:
+                out = glbp_engine.format_show_glbp_brief(_did, _ds)
+            else:
+                out = glbp_engine.format_show_glbp(_did, _ds)
+            return out if out else '% GLBP is not configured'
+
+        if re.match(r'^show\s+ip\s+nhrp', c) and \
+                state.device_type in ('cisco', 'catalyst'):
+            return self._format_show_ip_nhrp(state)
+
+        if re.match(r'^show\s+ip\s+wccp', c) and \
+                state.device_type in ('cisco', 'catalyst'):
+            return self._format_show_ip_wccp(state)
+
         # ── show track（拡張オブジェクトトラッキング）──
         m = re.match(r'^show\s+track(?:\s+(\d+))?\s*$', c)
         if m and state.device_type in ('cisco', 'catalyst', 'nexus'):
@@ -5303,6 +5326,42 @@ Configuration Revision            : 5"""
     # ════════════════════════════════════════════
     # DAI / IP Source Guard
     # ════════════════════════════════════════════
+    def _format_show_ip_nhrp(self, state):
+        rows = [(ifn, i['nhrp']) for ifn, i in state.interfaces.items()
+                if i.get('nhrp')]
+        if not rows:
+            return ''
+        out = []
+        for ifn, n in rows:
+            for target, nbma in n.get('maps', []):
+                out.append(f'{target}/32 via {target}')
+                out.append(f'   {ifn} created 00:00:10, never expire')
+                out.append(f'   Type: static, NBMA address: {nbma or "-"}')
+                out.append('')
+        if not out:
+            for ifn, n in rows:
+                out.append(f'{ifn}: network-id {n.get("network-id", "-")}, '
+                           f'NHS {", ".join(n.get("nhs", [])) or "none"}')
+        return '\n'.join(out).rstrip()
+
+    def _format_show_ip_wccp(self, state):
+        svcs = getattr(state, 'wccp_services', {}) or {}
+        if not svcs:
+            return ''
+        out = []
+        for name, info in svcs.items():
+            out.append(f'Global WCCP information:')
+            out.append(f'    Router information:')
+            out.append(f'        Service Identifier: {name}')
+            out.append(f'        Number of Service Group Clients: 0')
+            out.append(f'        Number of Service Group Routers: 1')
+            if info.get('group_address'):
+                out.append(f'        Group Address: {info["group_address"]}')
+            if info.get('redirect_list'):
+                out.append(f'        Redirect access-list: {info["redirect_list"]}')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
     def _cmd_ip_services(self, cmd, state):
         """IPアドレッシングサービス系（Catalyst 9300 IP Addressing Services
         Configuration Guide 相当）の設定コマンド。
@@ -5392,6 +5451,109 @@ Configuration Revision            : 5"""
             if not (500 <= mss <= 1460):
                 return self._range_error(cmd, state, 'MSS', 500, 1460, mss)
             state.interfaces.setdefault(state.current_if, {})['tcp_mss'] = mss
+            return ""
+
+        # ── GLBP（インタフェース配下）──
+        if state.current_if:
+            from engine.protocols import glbp_engine
+            m = re.match(r'^glbp\s+(\d+)\s+ip\s+([\d.]+)$', c)
+            if m:
+                glbp_engine.set_ip(device_id, int(m.group(1)), m.group(2),
+                                   state.current_if)
+                return ""
+            m = re.match(r'^glbp\s+(\d+)\s+priority\s+(\d+)$', c)
+            if m:
+                pri = int(m.group(2))
+                if not (1 <= pri <= 255):
+                    return self._range_error(cmd, state, 'GLBP priority',
+                                             1, 255, pri)
+                glbp_engine.set_priority(device_id, int(m.group(1)), pri)
+                return ""
+            m = re.match(r'^(no\s+)?glbp\s+(\d+)\s+preempt', c)
+            if m:
+                glbp_engine.set_preempt(device_id, int(m.group(2)),
+                                        not m.group(1))
+                return ""
+            m = re.match(r'^glbp\s+(\d+)\s+weighting\s+(\d+)$', c)
+            if m:
+                glbp_engine.set_weighting(device_id, int(m.group(1)),
+                                          int(m.group(2)))
+                return ""
+            m = re.match(r'^glbp\s+(\d+)\s+load-balancing\s+'
+                         r'(round-robin|weighted|host-dependent)$', c)
+            if m:
+                glbp_engine.set_load_balancing(device_id, int(m.group(1)),
+                                               m.group(2))
+                return ""
+            m = re.match(r'^glbp\s+(\d+)\s+timers\s+(\d+)\s+(\d+)$', c)
+            if m:
+                glbp_engine.set_timers(device_id, int(m.group(1)),
+                                       int(m.group(2)), int(m.group(3)))
+                return ""
+            m = re.match(r'^no\s+glbp\s+(\d+)(\s+ip.*)?$', c)
+            if m:
+                glbp_engine.remove(device_id, int(m.group(1)))
+                return ""
+
+            # ── NHRP（DMVPN等。トンネルインタフェース配下）──
+            m = re.match(r'^(no\s+)?ip\s+nhrp\s+(.+)$', cmd.strip(), re.I)
+            if m:
+                info = state.interfaces.setdefault(state.current_if, {})
+                nhrp = info.setdefault('nhrp', {})
+                arg = ' '.join(m.group(2).split())
+                low = arg.lower()
+                if m.group(1):
+                    if low.startswith('map'):
+                        nhrp.get('maps', []).clear()
+                    else:
+                        nhrp.pop(low.split()[0], None)
+                    return ""
+                m2 = re.match(r'^network-id\s+(\d+)$', low)
+                if m2:
+                    nhrp['network-id'] = int(m2.group(1))
+                    return ""
+                m2 = re.match(r'^nhs\s+([\d.]+)$', low)
+                if m2:
+                    nhrp.setdefault('nhs', []).append(m2.group(1))
+                    return ""
+                m2 = re.match(r'^map\s+(?:multicast\s+)?(\S+)(?:\s+(\S+))?$', arg)
+                if m2:
+                    nhrp.setdefault('maps', []).append(
+                        (m2.group(1), m2.group(2) or ''))
+                    return ""
+                m2 = re.match(r'^(holdtime|authentication|registration)\s+(\S+)$', low)
+                if m2:
+                    nhrp[m2.group(1)] = m2.group(2)
+                    return ""
+                nhrp.setdefault('other', []).append(arg)
+                return ""
+
+            # ── WCCP（インタフェース配下の redirect）──
+            m = re.match(r'^(no\s+)?ip\s+wccp\s+(\S+)\s+redirect\s+(in|out)$', c)
+            if m:
+                info = state.interfaces.setdefault(state.current_if, {})
+                red = info.setdefault('wccp_redirect', {})
+                if m.group(1):
+                    red.pop(m.group(3), None)
+                else:
+                    red[m.group(3)] = m.group(2)
+                return ""
+
+        # ── WCCP（グローバル）──
+        m = re.match(r'^(no\s+)?ip\s+wccp\s+(\d+|web-cache)'
+                     r'(?:\s+group-address\s+([\d.]+))?'
+                     r'(?:\s+redirect-list\s+(\S+))?$', c)
+        if m and state.mode == 'config':
+            if not hasattr(state, 'wccp_services'):
+                state.wccp_services = {}
+            svc = m.group(2)
+            if m.group(1):
+                state.wccp_services.pop(svc, None)
+            else:
+                state.wccp_services[svc] = {
+                    'group_address': m.group(3) or '',
+                    'redirect_list': m.group(4) or '',
+                }
             return ""
 
         # ── IPv6 基本 ──
