@@ -2778,6 +2778,152 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                            if u.get('name') != m_no_user.group(1)]
             return ''
 
+    # ── モデル駆動型テレメトリ（MDT / telemetry ietf subscription）──
+    # 実機構文:
+    #   telemetry ietf subscription <id>
+    #    encoding encode-kvgpb | encode-json
+    #    filter xpath <xpath>
+    #    source-address <ip>
+    #    stream yang-push | native
+    #    update-policy periodic <centiseconds> | on-change
+    #    receiver ip address <ip> <port> protocol grpc-tcp|cntp-tcp|native
+    if state.device_type in ('cisco', 'catalyst'):
+        m_mdt = re.match(r'^(no\s+)?telemetry\s+ietf\s+subscription\s+(\d+)\s*$', c)
+        if m_mdt:
+            subs = getattr(state, 'mdt_subscriptions', None)
+            if subs is None:
+                subs = state.mdt_subscriptions = {}
+            sid = int(m_mdt.group(2))
+            if m_mdt.group(1):
+                subs.pop(sid, None)
+                return ''
+            subs.setdefault(sid, {
+                'id': sid, 'type': 'Configured', 'stream': '',
+                'encoding': '', 'xpath': '', 'source_address': '',
+                'trigger': '', 'period': None, 'receivers': [],
+            })
+            state.mode = 'config-mdt'
+            state._mdt_sub = sid
+            return ''
+        if state.mode == 'config-mdt':
+            sub = (getattr(state, 'mdt_subscriptions', {}) or {}).get(
+                getattr(state, '_mdt_sub', None))
+            if sub is not None:
+                m = re.match(r'^encoding\s+(encode-kvgpb|encode-json|encode-xml)$', c)
+                if m:
+                    sub['encoding'] = m.group(1)
+                    return ''
+                m = re.match(r'^filter\s+xpath\s+(\S+)$', orig, re.I)
+                if m:
+                    sub['xpath'] = m.group(1)
+                    return ''
+                m = re.match(r'^source-address\s+([\d.]+)$', c)
+                if m:
+                    sub['source_address'] = m.group(1)
+                    return ''
+                m = re.match(r'^stream\s+(yang-push|native)$', c)
+                if m:
+                    sub['stream'] = m.group(1)
+                    return ''
+                m = re.match(r'^update-policy\s+periodic\s+(\d+)$', c)
+                if m:
+                    period = int(m.group(1))
+                    # 実機は100～4294967295センチ秒
+                    if period < 100:
+                        return ('% Period must be at least 100 centiseconds '
+                                '(1 second)')
+                    sub['trigger'] = 'periodic'
+                    sub['period'] = period
+                    return ''
+                if re.match(r'^update-policy\s+on-change$', c):
+                    sub['trigger'] = 'on-change'
+                    sub['period'] = None
+                    return ''
+                m = re.match(r'^receiver\s+ip\s+address\s+([\d.]+)\s+(\d+)'
+                             r'\s+protocol\s+(grpc-tcp|cntp-tcp|native|tls)$', c)
+                if m:
+                    rcv = {'address': m.group(1), 'port': int(m.group(2)),
+                           'protocol': m.group(3), 'state': 'Connected'}
+                    sub['receivers'] = [r for r in sub['receivers']
+                                        if not (r['address'] == rcv['address']
+                                                and r['port'] == rcv['port'])]
+                    sub['receivers'].append(rcv)
+                    return ''
+                m = re.match(r'^no\s+receiver\s+ip\s+address\s+([\d.]+)\s+(\d+)', c)
+                if m:
+                    sub['receivers'] = [
+                        r for r in sub['receivers']
+                        if not (r['address'] == m.group(1)
+                                and r['port'] == int(m.group(2)))]
+                    return ''
+
+    # ── gNMI / gNXI（IOS-XE 17.3以降は gnmi-yang ではなく gnxi 系）──
+    #   gnxi                 … 機能の有効化
+    #   gnxi server          … 非TLSサーバ（既定ポート 50052）
+    #   gnxi port <n>
+    #   gnxi secure-init / secure-server / secure-port <n> / secure-password-auth
+    if state.device_type in ('cisco', 'catalyst'):
+        m_gnxi = re.match(r'^(no\s+)?gnxi'
+                          r'(?:\s+(server|secure-server|secure-init|'
+                          r'secure-password-auth|secure-allow-self-signed-trustpoint))?'
+                          r'(?:\s+(port|secure-port)\s+(\d+))?\s*$', c)
+        if m_gnxi:
+            from engine.gnmi_agent import (ensure_gnmi_agent,
+                                           stop_gnmi_agent)
+            neg = bool(m_gnxi.group(1))
+            sub = m_gnxi.group(2)
+            portkind, portnum = m_gnxi.group(3), m_gnxi.group(4)
+            if portkind:
+                p = int(portnum)
+                if not 1 <= p <= 65535:
+                    return '% Invalid port number'
+                if portkind == 'port':
+                    state.gnxi_port = 50052 if neg else p
+                else:
+                    state.gnxi_secure_port = 9339 if neg else p
+                # ポート変更は再起動しないと効かない
+                stop_gnmi_agent(device_id)
+                ensure_gnmi_agent(device_id, device_sessions,
+                                  on_change=lambda: _register_icmp(device_id))
+                return ''
+            if sub is None:
+                state.gnxi_enabled = not neg
+                if neg:
+                    state.gnxi_server = False
+                    state.gnxi_secure_server = False
+                    stop_gnmi_agent(device_id)
+                return ''
+            if sub == 'server':
+                if not getattr(state, 'gnxi_enabled', False):
+                    return '% Enable "gnxi" first'
+                state.gnxi_server = not neg
+                _register_icmp(device_id)
+                if neg:
+                    stop_gnmi_agent(device_id)
+                else:
+                    ensure_gnmi_agent(device_id, device_sessions,
+                                      on_change=lambda: _register_icmp(device_id))
+                return ''
+            if sub == 'secure-server':
+                if not getattr(state, 'gnxi_enabled', False):
+                    return '% Enable "gnxi" first'
+                if not getattr(state, 'gnxi_secure_init', False):
+                    return ('% Run "gnxi secure-init" before enabling '
+                            'the secure server')
+                state.gnxi_secure_server = not neg
+                return ''
+            if sub == 'secure-init':
+                state.gnxi_secure_init = not neg
+                if not neg:
+                    state.gnxi_trustpoint = 'gnxi-cert'
+                return ''
+            if sub == 'secure-password-auth':
+                state.gnxi_secure_password_auth = not neg
+                return ''
+            if sub == 'secure-allow-self-signed-trustpoint':
+                state.gnxi_self_signed = not neg
+                return ''
+
     # ── NETCONF/RESTCONF サービスレベルACL ──
     # 実機構文:
     #   netconf-yang ssh {ipv4|ipv6} access-list name <acl>
@@ -3266,6 +3412,64 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
         if state.device_type == 'apresia':
             return None
         return arp_engine.format_show_arp(device_id, state.device_type)
+
+    # ── モデル駆動型テレメトリ（MDT）状態表示 ──
+    if state.device_type in ('cisco', 'catalyst'):
+        subs = getattr(state, 'mdt_subscriptions', {}) or {}
+        m_tshow = re.match(r'^show\s+telemetry\s+ietf\s+subscription\s+'
+                           r'(all|\d+)(\s+detail|\s+receiver)?\s*$', c)
+        if m_tshow:
+            what = m_tshow.group(1)
+            mode = (m_tshow.group(2) or '').strip()
+            if what == 'all':
+                out = ['Telemetry subscription brief', '',
+                       'ID               Type        State       Filter type',
+                       '-' * 53]
+                for sid in sorted(subs):
+                    sub = subs[sid]
+                    ftype = 'xpath' if sub['xpath'] else '-'
+                    st_ = 'Valid' if _mdt_valid(sub) else 'Invalid'
+                    out.append(f'{sid:<17}{sub["type"]:<12}{st_:<12}{ftype}')
+                return '\n'.join(out)
+            sid = int(what)
+            sub = subs.get(sid)
+            if sub is None:
+                return f'% Subscription {sid} not found'
+            if mode == 'receiver':
+                if not sub['receivers']:
+                    return f'Subscription ID: {sid}\n(No receivers configured)'
+                out = []
+                for r in sub['receivers']:
+                    out += [f'Subscription ID: {sid}',
+                            f'Address: {r["address"]}',
+                            f'Port: {r["port"]}',
+                            f'Protocol: {r["protocol"]}',
+                            f'State: {r["state"]}']
+                return '\n'.join(out)
+            out = [f'Subscription ID: {sid}',
+                   f'Type: {sub["type"]}',
+                   f'State: {"Valid" if _mdt_valid(sub) else "Invalid"}',
+                   f'Stream: {sub["stream"] or "(not set)"}',
+                   f'Filter type: {"xpath" if sub["xpath"] else "(not set)"}',
+                   f'XPath: {sub["xpath"] or "(not set)"}',
+                   f'Update Trigger: {sub["trigger"] or "(not set)"}']
+            if sub['trigger'] == 'periodic':
+                out.append(f'Period: {sub["period"]}')
+            out += [f'Encoding: {sub["encoding"] or "(not set)"}',
+                    f'Source Address: {sub["source_address"] or "(not set)"}',
+                    '', 'Receivers:',
+                    'Address          Port             Protocol',
+                    '-' * 66]
+            for r in sub['receivers']:
+                out.append(f'{r["address"]:<17}{r["port"]:<17}{r["protocol"]}')
+            return '\n'.join(out)
+
+    # ── gNXI / gNMI 状態表示 ──
+    m_gnxi_show = re.match(r'^show\s+gnxi\s+state(\s+detail)?\s*$', c)
+    if m_gnxi_show and state.device_type in ('cisco', 'catalyst'):
+        from engine.gnmi_agent import format_show_gnxi_state
+        state._device_id = device_id
+        return format_show_gnxi_state(state, detail=bool(m_gnxi_show.group(1)))
 
     # ── ACL / パケットフィルタ表示 ──
     if re.match(r'^show\s+(ip\s+)?access-list', c) or re.match(r'^show\s+acl', c):
@@ -3838,6 +4042,40 @@ def _build_running_config(device_id: str, state) -> str:
         # RESTCONF/NETCONF
         if getattr(state, 'http_secure_server', False):
             lines.append('ip http secure-server')
+        for _sid in sorted(getattr(state, 'mdt_subscriptions', {}) or {}):
+            _sub = state.mdt_subscriptions[_sid]
+            lines.append(f'telemetry ietf subscription {_sid}')
+            if _sub['encoding']:
+                lines.append(f' encoding {_sub["encoding"]}')
+            if _sub['xpath']:
+                lines.append(f' filter xpath {_sub["xpath"]}')
+            if _sub['source_address']:
+                lines.append(f' source-address {_sub["source_address"]}')
+            if _sub['stream']:
+                lines.append(f' stream {_sub["stream"]}')
+            if _sub['trigger'] == 'periodic':
+                lines.append(f' update-policy periodic {_sub["period"]}')
+            elif _sub['trigger'] == 'on-change':
+                lines.append(' update-policy on-change')
+            for _r in _sub['receivers']:
+                lines.append(f' receiver ip address {_r["address"]} '
+                             f'{_r["port"]} protocol {_r["protocol"]}')
+            lines.append('!')
+        if getattr(state, 'gnxi_enabled', False):
+            lines.append('gnxi')
+            if getattr(state, 'gnxi_secure_init', False):
+                lines.append('gnxi secure-init')
+            if getattr(state, 'gnxi_server', False):
+                lines.append('gnxi server')
+            if getattr(state, 'gnxi_port', 50052) != 50052:
+                lines.append(f'gnxi port {state.gnxi_port}')
+            if getattr(state, 'gnxi_secure_server', False):
+                lines.append('gnxi secure-server')
+            if getattr(state, 'gnxi_secure_port', 9339) != 9339:
+                lines.append(f'gnxi secure-port {state.gnxi_secure_port}')
+            if getattr(state, 'gnxi_secure_password_auth', False):
+                lines.append('gnxi secure-password-auth')
+            lines.append('!')
         if getattr(state, 'restconf_enabled', False):
             lines.append('restconf')
         for _af, _acl in (getattr(state, 'restconf_service_acl', {}) or {}).items():
@@ -5820,6 +6058,13 @@ def _restconf_ietf_interface(ifname: str, iinfo: dict) -> dict:
             "address": [{"ip": iinfo["ip"], "netmask": _prefix_to_mask(iinfo.get("prefix", 24))}]
         }
     return entry
+
+
+def _mdt_valid(sub: dict) -> bool:
+    """実機は stream / encoding / filter / receiver が揃って初めて Valid になる"""
+    return bool(sub.get('stream') and sub.get('encoding')
+                and sub.get('xpath') and sub.get('receivers')
+                and sub.get('trigger'))
 
 
 def _restconf_check(device_id: str, request=None):

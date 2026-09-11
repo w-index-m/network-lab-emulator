@@ -855,7 +855,8 @@ class RuleEngine:
                           "config-evpn", "config-evpn-vni", "config-nve-vni",
                           "config-bgp-af", "config-sec-zone", "config-sec-zone-pair",
                           "config-track", "config-dhcpv6",
-                          "config-std-nacl", "config-ext-nacl"):
+                          "config-std-nacl", "config-ext-nacl",
+                          "config-mdt"):
             return self._cmd_config(cmd, state)
 
         # ── ISMU(データモデル更新) / ISSU(ソフトウェア更新) ──
@@ -923,13 +924,14 @@ class RuleEngine:
                              "config-bba", "config-evpn",
                              "config-sec-zone", "config-sec-zone-pair",
                              "config-track", "config-dhcpv6",
-                             "config-std-nacl"):
+                             "config-std-nacl", "config-mdt"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
                          '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool',
                          '_aaa_group_name', '_current_acl_name', '_bba_group',
-                         '_zbfw_zone', '_zbfw_pair', '_track_obj', '_dhcpv6_pool'):
+                         '_zbfw_zone', '_zbfw_pair', '_track_obj', '_dhcpv6_pool',
+                         '_mdt_sub'):
                 if hasattr(state, attr):
                     delattr(state, attr)
         elif state.mode == "config":

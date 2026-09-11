@@ -4,3 +4,7 @@ httpx>=0.27.0
 python-dotenv>=1.0.0
 websockets>=12.0
 rank_bm25>=0.2.2
+# gNMI(gRPC)サーバ用。未導入でも engine/gnmi_agent.py は
+# _HAS_GRPC=False で無効化されるだけでアプリは起動する。
+grpcio>=1.60
+grpcio-tools>=1.60
