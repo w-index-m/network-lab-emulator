@@ -290,6 +290,23 @@ def _pick_ospf_ip(state, node) -> Optional[str]:
     return _pick_management_ip(state)
 
 
+def _mask_for_ip(state, ip: str) -> str:
+    """そのIPが付いているインタフェースの実際のサブネットマスクを返す。
+
+    以前は全装置で 255.255.255.0 を決め打ちしていたため、
+    198.51.100.0/24 の中を /30 で細かく分けたラボでも「同一セグメント」と
+    誤判定し、本来届かないはずの装置のHelloを受け取って隣接を張って
+    いた（全装置の実リスナーが lo を共有しているため物理的には全部届く）。
+    テストが前のケースの装置を拾って落ちる原因にもなっていた。
+    """
+    for info in (getattr(state, 'interfaces', {}) or {}).values():
+        if isinstance(info, dict) and info.get('ip') == ip:
+            prefix = int(info.get('prefix') or 24)
+            m = (0xffffffff << (32 - prefix)) & 0xffffffff if prefix else 0
+            return '.'.join(str((m >> sh) & 0xff) for sh in (24, 16, 8, 0))
+    return '255.255.255.0'
+
+
 def _iface_name_for_ip(state, ip: str) -> str:
     """装置のインタフェース一覧から、そのIPを持つIF名を引く。
     show ip ospf neighbor の Interface 列に実機同様のIF名を出すために使う。"""
@@ -353,7 +370,7 @@ def ensure_ospf_agent(device_id: str, device_sessions: dict, ospf_engine):
             device_id=device_id, ospf_engine=ospf_engine, loop=loop,
             iface='lo', my_ip=ip, router_id=router_id, area=str(area),
             local_iface_name=_iface_name_for_ip(state, ip),
-            mask='255.255.255.0',
+            mask=_mask_for_ip(state, ip),
             hello_interval=n.get('hello_interval', 10),
             dead_interval=n.get('dead_interval', 40),
             debug=True,
@@ -393,7 +410,7 @@ def start_all_ospf_agents(device_sessions: dict, ospf_engine):
                 device_id=device_id, ospf_engine=ospf_engine, loop=loop,
                 iface='lo', my_ip=ip, router_id=router_id, area=str(area),
                 local_iface_name=_iface_name_for_ip(state, ip),
-                mask='255.255.255.0',
+                mask=_mask_for_ip(state, ip),
                 hello_interval=n.get('hello_interval', 10),
                 dead_interval=n.get('dead_interval', 40),
                 debug=True,

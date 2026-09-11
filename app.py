@@ -2728,6 +2728,56 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             await stp_engine.start(device_id, hostname, n['mode'], priority)
         return
 
+    # ── モデルベースAAA(NACM)の前提となるAAA設定 ──
+    # 実機もNETCONF/RESTCONFを使うには aaa new-model と
+    # aaa authorization exec が要る。IOSのコマンドなのでIOS系のみ。
+    if state.device_type in ('cisco', 'catalyst'):
+        if re.match(r'^aaa\s+new-model$', c):
+            state.aaa_new_model = True
+            return ''
+        if re.match(r'^no\s+aaa\s+new-model$', c):
+            state.aaa_new_model = False
+            return ''
+        m_aaa_exec = re.match(
+            r'^aaa\s+authorization\s+exec\s+default\s+'
+            r'(?:group\s+(\S+)(\s+local)?|(local))$', c)
+        if m_aaa_exec:
+            m_o = re.match(r'^aaa\s+authorization\s+exec\s+default\s+'
+                           r'(?:group\s+(\S+)(\s+local)?|(local))$',
+                           orig, re.I)
+            state.aaa_authorization_exec = {
+                'group': (m_o or m_aaa_exec).group(1) or '',
+                'local_fallback': bool(m_aaa_exec.group(2)
+                                       or m_aaa_exec.group(3)),
+            }
+            return ''
+        if re.match(r'^no\s+aaa\s+authorization\s+exec\s+default', c):
+            state.aaa_authorization_exec = None
+            return ''
+
+        # username <name> [privilege <0-15>] {password|secret} [0|5|7] <pw>
+        # 従来は受理するだけで装置状態に保存しておらず、NETCONFの認証も
+        # NACMのグループ判定も admin 固定でしか試せなかった。
+        m_user = re.match(
+            r'^username\s+(\S+)(?:\s+privilege\s+(\d+))?'
+            r'(?:\s+(?:password|secret)(?:\s+[057])?\s+(\S+))?\s*$', orig, re.I)
+        if m_user and state.mode == 'config':
+            name = m_user.group(1)
+            priv = int(m_user.group(2)) if m_user.group(2) else 1
+            if not 0 <= priv <= 15:
+                return '% Invalid privilege level'
+            users = [u for u in (getattr(state, 'users', []) or [])
+                     if u.get('name') != name]
+            users.append({'name': name, 'privilege': priv,
+                          'password': m_user.group(3) or ''})
+            state.users = users
+            return ''
+        m_no_user = re.match(r'^no\s+username\s+(\S+)', orig, re.I)
+        if m_no_user and state.mode == 'config':
+            state.users = [u for u in (getattr(state, 'users', []) or [])
+                           if u.get('name') != m_no_user.group(1)]
+            return ''
+
     # ── NETCONF/RESTCONF サービスレベルACL ──
     # 実機構文:
     #   netconf-yang ssh {ipv4|ipv6} access-list name <acl>
@@ -3765,6 +3815,26 @@ def _build_running_config(device_id: str, state) -> str:
         lines.append('!')
         lines.append(f'hostname {state.hostname}')
         lines.append('!')
+        # ローカルユーザ（NETCONFの認証とNACMのグループ判定に使う）
+        _users = getattr(state, 'users', None) or []
+        if _users:
+            for _u in _users:
+                _p = f' privilege {_u["privilege"]}' if _u.get('privilege', 1) != 1 else ''
+                _pw = f' secret {_u["password"]}' if _u.get('password') else ''
+                lines.append(f'username {_u["name"]}{_p}{_pw}')
+            lines.append('!')
+        # AAA（モデルベースAAAの前提。NETCONF/RESTCONFを使うには必要）
+        if getattr(state, 'aaa_new_model', False):
+            lines.append('aaa new-model')
+            _ax = getattr(state, 'aaa_authorization_exec', None)
+            if _ax:
+                if _ax.get('group'):
+                    _sfx = ' local' if _ax.get('local_fallback') else ''
+                    lines.append('aaa authorization exec default group '
+                                 f'{_ax["group"]}{_sfx}')
+                else:
+                    lines.append('aaa authorization exec default local')
+            lines.append('!')
         # RESTCONF/NETCONF
         if getattr(state, 'http_secure_server', False):
             lines.append('ip http secure-server')
@@ -3793,6 +3863,13 @@ def _build_running_config(device_id: str, state) -> str:
         if state_ifaces:
             for ifname, iinfo in state_ifaces.items():
                 lines.append(f'interface {ifname}')
+                # description は実機のrunning-configにも出るが未出力だった。
+                # NETCONF/RESTCONFで description を書いた結果がCLI側の
+                # running-configに現れず、反映されたのか分からなかった。
+                _desc = (state.interfaces.get(ifname, {}).get('desc')
+                         or state.interfaces.get(ifname, {}).get('description'))
+                if _desc:
+                    lines.append(f' description {_desc}')
                 # サブインタフェースはIPより先にencapsulationを出す（実機と同じ順）
                 _enc = iinfo.get('encapsulation')
                 if _enc:

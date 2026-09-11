@@ -807,9 +807,13 @@ class RuleEngine:
             state.mode = 'config-bgp-af'
             return ""
 
-        # ISSU の show（show install / show issu）は専用ハンドラ優先
+        # ISSU/ISMU の show（show install / show issu）は専用ハンドラ優先。
+        # ISMU(データモデル更新)を先に見て、該当しなければISSU(イメージ)へ。
         if (re.match(r'^show\s+(install|issu)\b', c) and
                 state.device_type in ('catalyst', 'nexus')):
+            ismu_show = self._cmd_ismu(cmd, state)
+            if ismu_show is not None:
+                return ismu_show
             issu_show = self._cmd_issu(cmd, state)
             if issu_show is not None:
                 return issu_show
@@ -854,7 +858,12 @@ class RuleEngine:
                           "config-std-nacl", "config-ext-nacl"):
             return self._cmd_config(cmd, state)
 
-        # ── ISSU / ソフトウェアアップグレード（Catalyst / Nexus）──
+        # ── ISMU(データモデル更新) / ISSU(ソフトウェア更新) ──
+        # どちらも install コマンドを共有するため、.dmp.bin を扱うISMUを
+        # 先に判定し、対象外(None)なら従来のISSU処理へ回す。
+        ismu_out = self._cmd_ismu(cmd, state)
+        if ismu_out is not None:
+            return ismu_out
         issu_out = self._cmd_issu(cmd, state)
         if issu_out is not None:
             return issu_out
@@ -4718,6 +4727,242 @@ Configuration Revision            : 5"""
             }
         return state.issu
 
+    # ── ISMU（In-Service Model Update）───────────────────
+    #
+    # ISSUが「ソフトウェアイメージ」を入れ替えるのに対し、ISMUは
+    # リロードせずに **データモデル(YANG)だけ** を更新する仕組み。
+    # パッケージは .dmp.bin で、命名規則は
+    #   <プラットフォーム>-<ライセンス>.<リリース>.<DDTS ID>.dmp.bin
+    #   例) cat9k-universalk9.17.09.03.CSCvk58435.dmp.bin
+    # 実機は add / activate 時にイメージとプラットフォームの一致を確認し、
+    # 食い違っていればインストールを失敗させる。
+    _DMP_RE = re.compile(
+        r'^(?:(?P<dev>[\w-]+):)?(?P<plat>[a-z0-9]+)-(?P<lic>[\w]+)\.'
+        r'(?P<rel>\d+\.\d+\.\d+)\.(?P<ddts>CSC\w+)\.dmp\.bin$', re.I)
+
+    def _ismu_store(self, state):
+        if not hasattr(state, 'ismu'):
+            state.ismu = {'packages': [], 'log': []}
+        return state.ismu
+
+    @staticmethod
+    def _ismu_platform(state):
+        return {'catalyst': 'cat9k', 'nexus': 'nxos'}.get(state.device_type, 'cat9k')
+
+    def _ismu_parse(self, state, path):
+        """.dmp.bin のファイル名を解析。ISMU対象でなければ None。
+        戻り値は (情報dict, エラーメッセージ) のどちらか一方が None。"""
+        # "flash:xxx.dmp.bin" のような装置プレフィックスとディレクトリを外す
+        base = path.split('/')[-1].split(':')[-1]
+        m = self._DMP_RE.match(base)
+        if not m:
+            if base.lower().endswith('.dmp.bin'):
+                return None, (f'FAILED: install_add : Invalid package name "{base}". '
+                              'Expected <platform>-<license>.<release>.'
+                              '<DDTS>.dmp.bin')
+            return None, None                      # ISMU対象外(通常のイメージ)
+        issu = self._issu_store(state)
+        plat = self._ismu_platform(state)
+        if m.group('plat').lower() != plat:
+            return None, (f'FAILED: install_add : Platform mismatch. '
+                          f'Package is for "{m.group("plat")}", '
+                          f'this device is "{plat}"')
+        if m.group('rel') != issu['current']:
+            return None, (f'FAILED: install_add : Image version mismatch. '
+                          f'Package targets {m.group("rel")}, '
+                          f'running version is {issu["current"]}')
+        return {'file': path, 'base': base, 'platform': m.group('plat'),
+                'license': m.group('lic'), 'release': m.group('rel'),
+                'ddts': m.group('ddts'), 'st': 'I'}, None
+
+    def _ismu_find(self, state, path):
+        base = path.split('/')[-1].split(':')[-1]
+        for p in self._ismu_store(state)['packages']:
+            if p['base'] == base:
+                return p
+        return None
+
+    def _ismu_log(self, state, msg):
+        self._ismu_store(state)['log'].append(msg)
+
+    def _cmd_ismu(self, cmd, state):
+        """データモデル更新パッケージ(.dmp.bin)のinstallワークフロー。
+        ISMU対象でなければ None を返し、従来のISSU(IMG)処理に任せる。"""
+        if state.device_type != 'catalyst':
+            return None
+        c = cmd.lower().strip()
+        orig = cmd.strip()
+        store = self._ismu_store(state)
+
+        def _path(m, group=1):
+            """小文字化前の元コマンドからファイルパスを取り出す。
+            cのマッチ結果をそのまま使うと DDTS ID (CSCvk58435) まで
+            小文字になり、実機と表示が食い違う。"""
+            om = re.match(m.re.pattern, orig, re.I)
+            return (om.group(group) if om and om.group(group)
+                    else m.group(group))
+
+        m_add = re.match(r'^install\s+add\s+file\s+(\S+)'
+                         r'((?:\s+activate)?(?:\s+commit)?)\s*$', c)
+        if m_add:
+            info, err = self._ismu_parse(state, _path(m_add))
+            if err:
+                self._ismu_log(state, err)
+                return err
+            if info is None:
+                return None                        # 通常のイメージ → ISSU側へ
+            existing = self._ismu_find(state, info['file'])
+            if existing:
+                return (f'FAILED: install_add : Package {info["base"]} '
+                        'is already added')
+            store['packages'].append(info)
+            out = [f'install_add: START {info["file"]}',
+                   'install_add: Adding DMP',
+                   '--- Starting Add ---',
+                   'Performing Add on all members',
+                   '  [1] Add package(s) on switch 1',
+                   '  [1] Finished Add on switch 1',
+                   'Checking status of Add on [1]',
+                   'Add: Passed on [1]',
+                   'Finished Add',
+                   '',
+                   f'SUCCESS: install_add {info["file"]}']
+            tail = m_add.group(2) or ''
+            if 'activate' in tail:
+                info['st'] = 'U'
+                out.append('install_activate: Activating DMP '
+                           '(no reload required for model update)')
+                out.append(f'SUCCESS: install_activate {info["base"]}')
+            if 'commit' in tail:
+                info['st'] = 'C'
+                out.append(f'SUCCESS: install_commit {info["base"]}')
+            self._ismu_log(state, f'install_add {info["base"]} -> {info["st"]}')
+            return '\n'.join(out)
+
+        m_act = re.match(r'^install\s+activate\s+file\s+(\S+)\s*(commit)?\s*$', c)
+        if m_act:
+            info, err = self._ismu_parse(state, _path(m_act))
+            if err:
+                return err
+            if info is None:
+                return None
+            pkg = self._ismu_find(state, _path(m_act))
+            if pkg is None:
+                return (f'FAILED: install_activate : Package {info["base"]} '
+                        'is not added. Run "install add file ..." first.')
+            pkg['st'] = 'C' if m_act.group(2) else 'U'
+            self._ismu_log(state, f'install_activate {pkg["base"]} -> {pkg["st"]}')
+            return '\n'.join([
+                f'install_activate: START {pkg["file"]}',
+                'install_activate: Activating DMP',
+                'Following packages shall be activated:',
+                f'  {pkg["base"]}',
+                'Model update does not require a reload.',
+                f'SUCCESS: install_activate {pkg["base"]}',
+            ] + ([] if m_act.group(2) else [
+                '',
+                '※ commit するには "install commit" を実行してください'
+                '（未commitは自動ロールバック対象）']))
+
+        m_deact = re.match(r'^install\s+deactivate\s+file\s+(\S+)\s*$', c)
+        if m_deact:
+            pkg = self._ismu_find(state, _path(m_deact))
+            if pkg is None:
+                return None
+            if pkg['st'] not in ('U', 'C'):
+                return (f'FAILED: install_deactivate : {pkg["base"]} '
+                        'is not activated')
+            pkg['st'] = 'D'
+            self._ismu_log(state, f'install_deactivate {pkg["base"]}')
+            return '\n'.join([
+                f'install_deactivate: START {pkg["file"]}',
+                f'SUCCESS: install_deactivate {pkg["base"]}',
+            ])
+
+        m_rm = re.match(r'^install\s+remove\s+(?:file\s+(\S+)|(inactive))\s*$', c)
+        if m_rm:
+            if m_rm.group(2):
+                removed = [p for p in store['packages'] if p['st'] in ('I', 'D')]
+                if not removed:
+                    return None
+                store['packages'] = [p for p in store['packages']
+                                     if p['st'] not in ('I', 'D')]
+                self._ismu_log(state, 'install_remove inactive')
+                return '\n'.join(
+                    ['install_remove: START'] +
+                    [f'  Removing {p["base"]}' for p in removed] +
+                    ['SUCCESS: install_remove'])
+            pkg = self._ismu_find(state, _path(m_rm))
+            if pkg is None:
+                return None
+            if pkg['st'] in ('U', 'C'):
+                return (f'FAILED: install_remove : {pkg["base"]} is active. '
+                        'Deactivate it first.')
+            store['packages'].remove(pkg)
+            self._ismu_log(state, f'install_remove {pkg["base"]}')
+            return f'SUCCESS: install_remove {pkg["base"]}'
+
+        if re.match(r'^install\s+rollback\s+to\s+committed\s*$', c):
+            uncommitted = [p for p in store['packages'] if p['st'] == 'U']
+            if not uncommitted:
+                return None
+            for p in uncommitted:
+                p['st'] = 'I'
+            self._ismu_log(state, 'install_rollback to committed')
+            return '\n'.join(
+                ['install_rollback: START'] +
+                [f'  Rolling back {p["base"]}' for p in uncommitted] +
+                ['SUCCESS: install_rollback to committed'])
+
+        if re.match(r'^install\s+commit\s*$', c):
+            pending = [p for p in store['packages'] if p['st'] == 'U']
+            if not pending:
+                return None                        # IMG側のcommitに任せる
+            for p in pending:
+                p['st'] = 'C'
+            self._ismu_log(state, 'install_commit')
+            return '\n'.join(
+                ['install_commit: START', 'install_commit: Committing DMP'] +
+                [f'  {p["base"]}' for p in pending] +
+                ['Finished Commit operations', 'SUCCESS: install_commit'])
+
+        m_showpkg = re.match(r'^show\s+install\s+package\s+(\S+)\s*$', c)
+        if m_showpkg:
+            pkg = self._ismu_find(state, _path(m_showpkg))
+            if pkg is None:
+                return None
+            import hashlib
+            sha1 = hashlib.sha1(pkg['base'].encode()).hexdigest()
+            return '\n'.join([
+                f'Package: {pkg["base"]}',
+                f'  Size: {180000 + len(pkg["base"]) * 97}',
+                '  Timestamp: 2026-09-11 05:23:00 UTC',
+                f'  Canonical path: /flash/{pkg["base"]}',
+                f'  Raw disk-file SHA1sum: {sha1}',
+                '  Header size: 1000 bytes',
+                '  Package type: DMP',
+                f'  Package released: {pkg["release"]}',
+                f'  Package platform: {pkg["platform"]}',
+                f'  Package DDTS: {pkg["ddts"]}',
+                f'  Package state: {self._ISMU_ST_NAME[pkg["st"]]}',
+            ])
+
+        if re.match(r'^show\s+install\s+log\s*$', c):
+            if not store['log']:
+                return None
+            return '\n'.join(
+                [f'[{i}] install_op: {msg}'
+                 for i, msg in enumerate(store['log'], 1)])
+
+        return None
+
+    _ISMU_ST_NAME = {
+        'I': 'Inactive',
+        'U': 'Activated & Uncommitted',
+        'C': 'Activated & Committed',
+        'D': 'Deactivated & Uncommitted',
+    }
+
     def _cmd_issu(self, cmd, state):
         """
         ISSU（In-Service Software Upgrade）/ ソフトウェアアップグレードを仮想実装。
@@ -4810,20 +5055,25 @@ Configuration Revision            : 5"""
                 return '% Nothing to abort.'
 
             if re.match(r'^show\s+install\s+summary', c):
-                st = issu['state'].upper()
-                imgs = []
-                imgs.append(f'  IMG   C  {issu["current"]}   (committed)')
+                rows = []
+                # ISMUで入れたデータモデル更新パッケージ(DMP)も併記する。
+                # 実機の show install summary は IMG と DMP を同じ表に出す。
+                for p in self._ismu_store(state)['packages']:
+                    rows.append(f'DMP   {p["st"]}    {p["file"]}')
+                rows.append(f'IMG   C    {issu["current"]}')
                 if issu['state'] in ('added', 'activated') and issu['target']:
-                    flag = 'A' if issu['state'] == 'activated' else 'I'
-                    imgs.append(f'  IMG   {flag}  {issu["target"]}   ({issu["state"]})')
+                    flag = 'U' if issu['state'] == 'activated' else 'I'
+                    rows.append(f'IMG   {flag}    {issu["target"]}')
+                sep = '-' * 78
                 return '\n'.join([
                     '[ Switch 1 ] Installed Package(s) Information:',
-                    'State (St): I-Inactive, U-Activated & Uncommitted,',
-                    '            C-Activated & Committed, D-Deactivated & Uncommitted',
-                    '--------------------------------------------------------------',
-                    'Type  St   Version',
-                    '--------------------------------------------------------------',
-                ] + imgs)
+                    'State (St): I - Inactive, U - Activated & Uncommitted,',
+                    '            C - Activated & Committed, '
+                    'D - Deactivated & Uncommitted',
+                    sep,
+                    'Type  St   Filename/Version',
+                    sep,
+                ] + rows + [sep])
 
             if re.match(r'^show\s+issu\s+state', c):
                 return '\n'.join([
@@ -5867,6 +6117,22 @@ Configuration Revision            : 5"""
 
     def _cmd_config(self, cmd, state):
         c = cmd.lower().strip()
+
+        # description <text> / no description（インタフェース配下）
+        # 実装がApresia専用ハンドラにしか無く、Cisco/Catalystでは
+        # _cmd_config 末尾の「不明な設定コマンドは静かに受け付け」に
+        # 落ちて黙って捨てられていた（既定の説明のまま残る）。
+        if state.mode == 'config-if' and state.current_if:
+            _if = state.current_if
+            m_desc = re.match(r'^description\s+(.+)$', cmd.strip(), re.I)
+            if m_desc:
+                state.interfaces.setdefault(_if, {})
+                state.interfaces[_if]['desc'] = m_desc.group(1).strip()
+                return ""
+            if re.match(r'^no\s+description\s*$', c):
+                state.interfaces.setdefault(_if, {})
+                state.interfaces[_if]['desc'] = ''
+                return ""
 
         # hostname / sysname / switchname(NX-OS)
         m = re.match(r'^(?:hostname|sysname|switchname)\s+(\S+)', cmd, re.I)

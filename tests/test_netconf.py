@@ -35,6 +35,12 @@ def _rpc(op_xml: str) -> ET.Element:
     return ET.fromstring(op_xml)
 
 
+# 注: edit-config 系は user='admin' を渡している。NACM(RFC 8341)の既定は
+# write-default=deny なので、書き込みには認証済みセッションが要る。
+# 実際のNETCONFセッションはSSH認証を通ってからでないと handle_rpc に
+# 到達しないため、ユーザ名なしの呼び出しは「未認証」として拒否される。
+
+
 # ── hello / capabilities ───────────────────────────────
 def test_server_hello_is_valid_xml_and_has_session_id():
     """helloがXMLとして妥当であること
@@ -121,7 +127,7 @@ def test_edit_config_updates_device_state():
               </interfaces>
             </config>
           </edit-config>
-        </rpc>''')
+        </rpc>''', user='admin')
     assert '<ok/>' in reply
     info = state.interfaces['GigabitEthernet1/0/2']
     assert info['ip'] == '192.0.2.5'
@@ -147,7 +153,7 @@ def test_edit_config_unknown_interface_is_rpc_error():
               </interfaces>
             </config>
           </edit-config>
-        </rpc>''')
+        </rpc>''', user='admin')
     root = ET.fromstring(reply)          # 妥当なXMLであること
     assert root.find(f'{{{NS["nc"]}}}rpc-error') is not None
     assert 'does not exist' in reply
@@ -167,7 +173,7 @@ def test_edit_config_delete_removes_address():
               </interfaces>
             </config>
           </edit-config>
-        </rpc>''')
+        </rpc>''', user='admin')
     assert '<ok/>' in reply
     assert state.interfaces['GigabitEthernet1/0/1']['ip'] == ''
 
