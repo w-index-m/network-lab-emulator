@@ -11,7 +11,7 @@ from typing import Dict, Optional
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -1786,11 +1786,38 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         ipfilter_engine.add_rule(device_id, num, action, proto, src, dst,
                                  dst_port=port)
         return
+    # Cisco名前付き標準ACL: "ip access-list standard MGMT_ACL" → サブモードへ
+    # NETCONF/RESTCONFのサービスレベルACL(送信元アドレスだけで絞る)は
+    # 標準ACLで書くのが通例だが、標準ACL自体が未実装だった。
+    m_std_acl = re.match(r'^ip\s+access-list\s+standard\s+(\S+)\s*$', orig, re.I)
+    if m_std_acl:
+        state.mode = 'config-std-nacl'
+        state._current_acl_name = m_std_acl.group(1)
+        ipfilter_engine.acls[device_id].setdefault(m_std_acl.group(1), [])
+        ipfilter_engine.acl_kind[device_id][m_std_acl.group(1)] = 'standard'
+        return
+    if state.mode == 'config-std-nacl':
+        # [<seq>] permit|deny {any | host A.B.C.D | A.B.C.D W.W.W.W | A.B.C.D}
+        m_std_rule = re.match(
+            r'^(?:(\d+)\s+)?(permit|deny)\s+'
+            r'(any|host\s+[\d.]+|[\d.]+(?:\s+[\d.]+)?)\s*$', orig, re.I)
+        if m_std_rule:
+            acl_name = getattr(state, '_current_acl_name', None)
+            if acl_name:
+                ipfilter_engine.add_rule(
+                    device_id, acl_name, m_std_rule.group(2).lower(),
+                    protocol='ip', src=m_std_rule.group(3).strip(), dst='any',
+                    seq=int(m_std_rule.group(1)) if m_std_rule.group(1) else None)
+            return
+        if re.match(r'^remark\s+', orig, re.I):
+            return
+
     # Cisco名前付き拡張ACL: "ip access-list extended TEST_ACL" → サブモードへ
     m_named_acl = re.match(r'^ip\s+access-list\s+extended\s+(\S+)', orig, re.I)
     if m_named_acl:
         state.mode = 'config-ext-nacl'
         state._current_acl_name = m_named_acl.group(1)
+        ipfilter_engine.acl_kind[device_id][m_named_acl.group(1)] = 'extended'
         return
     # 名前付き拡張ACLサブモード内: "permit ip 10.0.0.0 0.0.0.255 any" 等
     if state.mode == 'config-ext-nacl':
@@ -2700,6 +2727,46 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         if n and n.get('enabled'):
             await stp_engine.start(device_id, hostname, n['mode'], priority)
         return
+
+    # ── NETCONF/RESTCONF サービスレベルACL ──
+    # 実機構文:
+    #   netconf-yang ssh {ipv4|ipv6} access-list name <acl>
+    #   netconf-yang ssh port <n>
+    #   restconf {ipv4|ipv6} access-list name <acl>
+    # インタフェースACLと違い、サービスへの着信を送信元アドレスだけで絞る。
+    if state.device_type in ('cisco', 'catalyst'):
+        m_nc_acl = re.match(
+            r'^(no\s+)?netconf-yang\s+ssh\s+(ipv4|ipv6)\s+'
+            r'access-list\s+name\s+(\S+)', orig, re.I)
+        if m_nc_acl:
+            acls = getattr(state, 'netconf_service_acl', {}) or {}
+            if m_nc_acl.group(1):
+                acls.pop(m_nc_acl.group(2).lower(), None)
+            else:
+                acls[m_nc_acl.group(2).lower()] = m_nc_acl.group(3)
+            state.netconf_service_acl = acls
+            return ''
+        m_nc_port = re.match(r'^(no\s+)?netconf-yang\s+ssh\s+port\s+(\d+)', c)
+        if m_nc_port:
+            if m_nc_port.group(1):
+                state.netconf_ssh_port = 830
+            else:
+                port = int(m_nc_port.group(2))
+                if not 1 <= port <= 65535:
+                    return '% Invalid port number'
+                state.netconf_ssh_port = port
+            return ''
+        m_rc_acl = re.match(
+            r'^(no\s+)?restconf\s+(ipv4|ipv6)\s+access-list\s+name\s+(\S+)',
+            orig, re.I)
+        if m_rc_acl:
+            acls = getattr(state, 'restconf_service_acl', {}) or {}
+            if m_rc_acl.group(1):
+                acls.pop(m_rc_acl.group(2).lower(), None)
+            else:
+                acls[m_rc_acl.group(2).lower()] = m_rc_acl.group(3)
+            state.restconf_service_acl = acls
+            return ''
 
     # ── NETCONF-YANG ── netconf-yang を入れると実機同様
     # SSHの netconf サブシステム(TCP 830)が待ち受けを始める。
@@ -3703,8 +3770,14 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append('ip http secure-server')
         if getattr(state, 'restconf_enabled', False):
             lines.append('restconf')
+        for _af, _acl in (getattr(state, 'restconf_service_acl', {}) or {}).items():
+            lines.append(f'restconf {_af} access-list name {_acl}')
         if getattr(state, 'netconf_enabled', False):
             lines.append('netconf-yang')
+        for _af, _acl in (getattr(state, 'netconf_service_acl', {}) or {}).items():
+            lines.append(f'netconf-yang ssh {_af} access-list name {_acl}')
+        if getattr(state, 'netconf_ssh_port', 830) != 830:
+            lines.append(f'netconf-yang ssh port {state.netconf_ssh_port}')
         if (getattr(state, 'http_secure_server', False) or
                 getattr(state, 'restconf_enabled', False) or
                 getattr(state, 'netconf_enabled', False)):
@@ -3852,6 +3925,22 @@ def _build_running_config(device_id: str, state) -> str:
         acls = ipfilter_engine.acls.get(device_id, {})
         for name, rules in acls.items():
             lines.append('!')
+            kind = ipfilter_engine.acl_kind.get(device_id, {}).get(name)
+            if kind and not name.isdigit():
+                # 実機(IOS-XE)の名前付きACLは
+                #   ip access-list standard NAME
+                #    10 permit 10.0.0.0 0.0.0.255
+                # という入れ子で出る。ASA形式の1行表記で出していたため、
+                # running-configをそのまま投入し直せなかった。
+                lines.append(f'ip access-list {kind} {name}')
+                for r in rules:
+                    if kind == 'standard':
+                        lines.append(f' {r.seq} {r.action} {r.src}')
+                    else:
+                        portstr = f' eq {r.dst_port}' if r.dst_port else ''
+                        lines.append(f' {r.seq} {r.action} {r.protocol} '
+                                     f'{r.src} {r.dst}{portstr}')
+                continue
             for r in rules:
                 if r.protocol == 'ip' and r.dst == 'any' and not r.dst_port:
                     lines.append(f'access-list {name} {r.action} {r.src}')
@@ -5656,7 +5745,7 @@ def _restconf_ietf_interface(ifname: str, iinfo: dict) -> dict:
     return entry
 
 
-def _restconf_check(device_id: str):
+def _restconf_check(device_id: str, request=None):
     """RESTCONFが有効か確認し、無効ならエラーレスポンスを返す（有効ならNone）"""
     state = device_sessions.get(device_id)
     if state is None:
@@ -5686,17 +5775,30 @@ def _restconf_check(device_id: str):
                 "error-message": ('HTTPS server is not running on this device. '
                                    'Configure "ip http secure-server" to enable it '
                                    '(restconf alone does not start the HTTPS listener).')}]}})
+    # サービスレベルACL: 送信元アドレスで着信を絞る
+    # (restconf ipv4 access-list name <acl>)
+    acl_name = (getattr(state, 'restconf_service_acl', {}) or {}).get('ipv4')
+    if acl_name and request is not None:
+        src_ip = getattr(getattr(request, 'client', None), 'host', '') or ''
+        if src_ip and not ipfilter_engine.check_source(device_id, acl_name, src_ip):
+            # 実機はACLで落とされた場合そもそも応答しないが、
+            # ここでは理由が分かるよう403で返す
+            return JSONResponse(status_code=403, content={
+                "ietf-restconf:errors": {"error": [{
+                    "error-type": "transport", "error-tag": "access-denied",
+                    "error-message": (f'source {src_ip} denied by RESTCONF '
+                                      f'service ACL "{acl_name}"')}]}})
     return None
 
 
 @app.get("/restconf/{device_id}/data/ietf-interfaces:interfaces")
-async def restconf_get_interfaces(device_id: str):
+async def restconf_get_interfaces(device_id: str, request: Request):
     """
     RESTCONF (ietf-interfaces) 相当のGET。実機と違い、このエミュレータは
     複数装置を1プロセスで扱うため、URLに device_id を含める形にしている
     （実機は対象装置のIP自体でルーティングされるためこの区別は不要）。
     """
-    err = _restconf_check(device_id)
+    err = _restconf_check(device_id, request)
     if err is not None:
         return err
     state = device_sessions[device_id]
@@ -5707,8 +5809,8 @@ async def restconf_get_interfaces(device_id: str):
 
 
 @app.get("/restconf/{device_id}/data/ietf-interfaces:interfaces/interface={ifname:path}")
-async def restconf_get_interface(device_id: str, ifname: str):
-    err = _restconf_check(device_id)
+async def restconf_get_interface(device_id: str, ifname: str, request: Request):
+    err = _restconf_check(device_id, request)
     if err is not None:
         return err
     state = device_sessions[device_id]
@@ -5723,7 +5825,8 @@ async def restconf_get_interface(device_id: str, ifname: str):
 
 
 @app.put("/restconf/{device_id}/data/ietf-interfaces:interfaces/interface={ifname:path}")
-async def restconf_put_interface(device_id: str, ifname: str, body: dict):
+async def restconf_put_interface(device_id: str, ifname: str, body: dict,
+                                 request: Request = None):
     """
     interfaceのenabled(=shutdown/no shutdown相当)を書き換える。
     実機RESTCONFの部分実装で、対応しているのは enabled のみ。
@@ -5734,7 +5837,7 @@ async def restconf_put_interface(device_id: str, ifname: str, body: dict):
     `status_code == 204` を成功判定に使っており、200+JSONボディでは
     ないことを確認したため、それに合わせて修正した。
     """
-    err = _restconf_check(device_id)
+    err = _restconf_check(device_id, request)
     if err is not None:
         return err
     state = device_sessions[device_id]

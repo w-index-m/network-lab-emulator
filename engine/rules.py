@@ -850,7 +850,8 @@ class RuleEngine:
                           "config-vs-domain", "config-dhcp", "config-bba",
                           "config-evpn", "config-evpn-vni", "config-nve-vni",
                           "config-bgp-af", "config-sec-zone", "config-sec-zone-pair",
-                          "config-track", "config-dhcpv6"):
+                          "config-track", "config-dhcpv6",
+                          "config-std-nacl", "config-ext-nacl"):
             return self._cmd_config(cmd, state)
 
         # ── ISSU / ソフトウェアアップグレード（Catalyst / Nexus）──
@@ -912,7 +913,8 @@ class RuleEngine:
                              "config-dhcp", "config-sg-tacacs", "config-ext-nacl",
                              "config-bba", "config-evpn",
                              "config-sec-zone", "config-sec-zone-pair",
-                             "config-track", "config-dhcpv6"):
+                             "config-track", "config-dhcpv6",
+                             "config-std-nacl"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',

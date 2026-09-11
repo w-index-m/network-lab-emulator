@@ -6097,6 +6097,10 @@ class IpFilterEngine:
         self.acls: Dict[str, Dict[str, list]] = defaultdict(lambda: defaultdict(list))
         # device_id -> {(iface, direction) -> acl_name}
         self.applied: Dict[str, Dict[tuple, str]] = defaultdict(dict)
+        # device_id -> {acl_name -> 'standard'|'extended'}
+        # 名前付きACLは名前から種別を判別できないため明示的に覚えておく
+        # （standardなのに "Extended IP access list" と表示されていた）
+        self.acl_kind: Dict[str, Dict[str, str]] = defaultdict(dict)
 
     def add_rule(self, device_id: str, acl_name: str, action: str,
                  protocol: str = 'ip', src: str = 'any', dst: str = 'any',
@@ -6127,6 +6131,18 @@ class IpFilterEngine:
             return True
         if spec.startswith('host '):
             return spec.split()[1] == ip
+        # Cisco形式の「アドレス + ワイルドカードマスク」(10.0.0.0 0.0.0.255)。
+        # 名前付きACLの permit/deny 行はこの形で入るため、対応していないと
+        # どのルールにもマッチせず暗黙denyになってしまう。
+        parts = spec.split()
+        if len(parts) == 2 and all(p.count('.') == 3 for p in parts):
+            try:
+                wc = self._ip_to_int(parts[1])
+                mask = (~wc) & 0xffffffff
+                return (self._ip_to_int(ip) & mask) == \
+                       (self._ip_to_int(parts[0]) & mask)
+            except Exception:
+                return False
         if '/' in spec:
             net, prefix = spec.split('/')
             prefix = int(prefix)
@@ -6136,6 +6152,24 @@ class IpFilterEngine:
             except Exception:
                 return False
         return spec == ip
+
+    def check_source(self, device_id: str, acl_name: str, src_ip: str) -> bool:
+        """送信元IPが名前付きACLで許可されるか（サービスレベルACL用）。
+
+        NETCONF/RESTCONFの `... access-list name <acl>` は、インタフェース
+        ではなくサービスへの着信を送信元アドレスだけで絞る。存在しない
+        ACL名を指定した場合、実機は「一致するものが無い＝全拒否」ではなく
+        素通しになるため、ここでもTrueを返す。
+        """
+        if not acl_name:
+            return True
+        rules = self.acls.get(device_id, {}).get(acl_name, [])
+        if not rules:
+            return True
+        for rule in rules:
+            if self._match_addr(rule.src, src_ip):
+                return rule.action == 'permit'
+        return False        # 暗黙deny
 
     def check_packet(self, device_id: str, iface: str, direction: str,
                      src_ip: str, dst_ip: str, protocol: str = 'ip',
@@ -6173,11 +6207,27 @@ class IpFilterEngine:
         lines = []
         for name, rules in acls.items():
             if device_type in ('catalyst', 'cisco'):
-                # 数字なら standard/extended 判定
-                kind = 'Standard' if name.isdigit() and int(name) < 100 else 'Extended'
-                lines.append(f'{kind} IP access list {name}')
+                kind = self.acl_kind.get(device_id, {}).get(name)
+                if not kind:
+                    # 番号付きACLは番号帯で決まる（1-99/1300-1999が標準）
+                    kind = ('standard' if name.isdigit() and int(name) < 100
+                            else 'extended')
+                lines.append(f'{kind.capitalize()} IP access list {name}')
                 for r in rules:
-                    if r.protocol == 'ip' and r.dst == 'any' and not r.dst_port:
+                    if kind == 'standard':
+                        # 実機の標準ACL表記:
+                        #   10 permit 10.99.0.0, wildcard bits 0.0.0.255
+                        #   20 permit 192.0.2.7
+                        #   30 deny   any
+                        src = r.src.strip()
+                        parts = src.split()
+                        if len(parts) == 2 and all(x.count('.') == 3
+                                                   for x in parts):
+                            src = f'{parts[0]}, wildcard bits {parts[1]}'
+                        elif src.startswith('host '):
+                            src = src.split()[1]
+                        lines.append(f'    {r.seq} {r.action:<6} {src}')
+                    elif r.protocol == 'ip' and r.dst == 'any' and not r.dst_port:
                         lines.append(f'    {r.seq} {r.action} {r.src}')
                     else:
                         portstr = f' eq {r.dst_port}' if r.dst_port else ''

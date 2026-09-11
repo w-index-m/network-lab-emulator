@@ -423,12 +423,35 @@ class NetconfServer:
                 client, _addr = self._sock.accept()
             except OSError:
                 return
+            # サービスレベルACL(netconf-yang ssh ipv4 access-list name <acl>)。
+            # 実機は許可されていない送信元からのTCP接続をそのまま落とすので、
+            # SSHのネゴシエーションに入る前に切る。
+            if not self._acl_allows(_addr[0] if _addr else ''):
+                print(f'[NETCONF] {self.device_id} {_addr[0]} を '
+                      f'サービスレベルACLで拒否しました')
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                continue
             self._session_id += 1
             threading.Thread(
                 target=serve_connection,
                 args=(client, self.state, self.host_key, self._session_id,
                       self.on_change),
                 daemon=True).start()
+
+    def _acl_allows(self, src_ip: str) -> bool:
+        """送信元がサービスレベルACLで許可されているか"""
+        acl_name = (getattr(self.state, 'netconf_service_acl', {})
+                    or {}).get('ipv4')
+        if not acl_name or not src_ip:
+            return True
+        try:
+            from engine.protocols import ipfilter_engine
+            return ipfilter_engine.check_source(self.device_id, acl_name, src_ip)
+        except Exception:
+            return True
 
     def stop(self):
         self._stop.set()
@@ -460,6 +483,8 @@ def ensure_netconf_agent(device_id: str, device_sessions: dict,
             break
     if not ip:
         return None
+    # netconf-yang ssh port <n> で待ち受けポートを変更できる
+    port = int(getattr(state, 'netconf_ssh_port', port) or port)
     try:
         srv = NetconfServer(device_id, ip, state, port=port, on_change=on_change)
         srv.start()
