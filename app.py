@@ -1021,6 +1021,29 @@ async def _flap_interface_up(device_id: str, state, iface_for_flap: str):
 # ══════════════════════════════════════════
 # プロトコルコマンド処理
 # ══════════════════════════════════════════
+def orig_groups(m, orig):
+    """小文字化したコマンドでのマッチ結果から、大小文字を保った値を取り出す。
+
+    このコードベースは判定用に `c = command.lower()` を使う慣習だが、
+    その match オブジェクトから値（名前・鍵・ホスト名・ファイル名など）を
+    そのまま取り出すと大小文字が潰れる。実害が出た例:
+      - snmp-server community / neighbor password / tacacs-server key
+        … 認証情報が小文字化され、本物のクライアントから認証できない
+      - route-map / ACL 名 … running-config が投入した名前と食い違う
+      - ZBFW の policy-map 名、Si-Rの事前共有鍵、ISMUのファイル名、
+        MDTのxpath … 過去に同じ原因で4件のバグを出している
+    同じパターンを元コマンドに当て直して、大小文字を保った match を返す。
+    元コマンドに当たらなければ元の match をそのまま返す（安全側）。
+    """
+    if m is None:
+        return None
+    try:
+        om = re.match(m.re.pattern, orig, m.re.flags | re.IGNORECASE)
+    except re.error:
+        return m
+    return om or m
+
+
 async def handle_protocol_config(device_id: str, command: str, state: DeviceState):
     """設定コマンドを検出してプロトコルエンジンを起動/更新"""
     c = command.lower().strip()
@@ -1236,9 +1259,10 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # "route-map AWS-PRIMARY-IN permit 10"
     rm_def = re.match(r'^route-map\s+(\S+)\s+(permit|deny)(?:\s+(\d+))?', c)
     if rm_def:
-        state._current_route_map = rm_def.group(1)
+        _og = orig_groups(rm_def, orig)
+        state._current_route_map = _og.group(1)
         # 空のマップを用意（set句が無くても存在させる）
-        bgp_engine.add_route_map(device_id, rm_def.group(1))
+        bgp_engine.add_route_map(device_id, _og.group(1))
         return
     # route-map内 "set as-path prepend 65000 65000"
     rm_prepend = re.match(r'^set\s+as-path\s+prepend\s+([\d\s]+)', c)
@@ -1855,8 +1879,9 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ACL適用: Cisco "ip access-group 10 in" / Si-R "lan 0 acl NAME in"
     acl_apply = re.match(r'^ip\s+access-group\s+(\S+)\s+(in|out)', c)
     if acl_apply:
+        _og = orig_groups(acl_apply, orig)
         ipfilter_engine.apply_acl(device_id, 'lan0', acl_apply.group(2),
-                                  acl_apply.group(1))
+                                  _og.group(1))
         return
     sir_acl_apply = re.match(r'^lan\s+(\d+)\s+acl\s+(\S+)\s+(in|out)', orig, re.I)
     if sir_acl_apply:
@@ -1965,7 +1990,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # Cisco: "snmp-server community public ro"
     snmp_comm = re.match(r'^snmp-server\s+community\s+(\S+)\s+(ro|rw|read-only|read-write)', c)
     if snmp_comm:
-        name, perm = snmp_comm.group(1), snmp_comm.group(2)
+        _og = orig_groups(snmp_comm, orig)
+        name, perm = _og.group(1), snmp_comm.group(2)
         perm = 'ro' if perm in ('ro', 'read-only') else 'rw'
         if not any(c_['name'] == name for c_ in state.snmp_community):
             state.snmp_community.append({'name': name, 'perm': perm})
@@ -2048,7 +2074,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # (実機と同様、直前に選択されたユーザーへの「カレント」設定として動作する)
     sir_snmp_user_name = re.match(r'^snmp\s+user\s+name\s+(\S+)$', c)
     if sir_snmp_user_name and hasattr(state, 'sir_snmp_users'):
-        _name = sir_snmp_user_name.group(1)
+        _name = orig_groups(sir_snmp_user_name, orig).group(1)
         state.sir_snmp_users.setdefault(_name, {
             'address': '', 'auth': 'none', 'priv': 'none',
             'write': 'none', 'read': 'all', 'read_view': None,
@@ -2598,7 +2624,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ── AWS DX/VPN: neighbor <ip> password <pw>（TCP MD5認証）──
     bgp_pw = re.match(r'^neighbor\s+([\d.]+)\s+password\s+(?:\d\s+)?(\S+)', c)
     if bgp_pw and getattr(state, '_routing_mode', '') == 'bgp':
-        nip, pw = bgp_pw.group(1), bgp_pw.group(2)
+        _og = orig_groups(bgp_pw, orig)
+        nip, pw = bgp_pw.group(1), _og.group(2)
         peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
         if peer_id:
             bgp_engine.set_neighbor_password(device_id, peer_id, pw)
@@ -2606,7 +2633,9 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ── neighbor <ip> route-map <name> in|out（AS-path prepend / local-pref適用）──
     bgp_rm = re.match(r'^neighbor\s+([\d.]+)\s+route-map\s+(\S+)\s+(in|out)', c)
     if bgp_rm and getattr(state, '_routing_mode', '') == 'bgp':
-        nip, rmname, direction = bgp_rm.group(1), bgp_rm.group(2), bgp_rm.group(3)
+        _og = orig_groups(bgp_rm, orig)
+        nip, rmname, direction = (bgp_rm.group(1), _og.group(2),
+                                  bgp_rm.group(3))
         peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
         if peer_id:
             bgp_engine.set_neighbor_route_map(device_id, peer_id, rmname, direction)
@@ -4575,8 +4604,9 @@ def _handle_nexus_tacacs_config(device_id: str, command: str, state: DeviceState
     if m_tac_host:
         if not hasattr(state, 'tacacs_hosts'):
             state.tacacs_hosts = []
+        _og = orig_groups(m_tac_host, orig)
         ip = m_tac_host.group(1)
-        key = m_tac_host.group(2) or ''
+        key = _og.group(2) or ''
         port = int(m_tac_host.group(3)) if m_tac_host.group(3) else 49
         existing = next((h for h in state.tacacs_hosts if h['host'] == ip), None)
         if existing:

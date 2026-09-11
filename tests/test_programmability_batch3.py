@@ -53,10 +53,15 @@ def _run(dev, cmds):
 # ══════════════════════════════════════════
 def _applet(dev='t-eem'):
     _mk(dev, 'EEMSW')
+    # 実機のEEMは action cli command を exec コンテキストで実行するため、
+    # 設定を変えるには applet 内で configure terminal を通す必要がある
+    # （これが定石。いきなり hostname を書いても効かない）。
     _run(dev, ['configure terminal', 'event manager applet TEST', 'event none',
                'action 1.0 syslog msg "applet fired"',
-               'action 2.0 cli command "hostname RENAMED-BY-EEM"',
-               'action 3.0 puts "done"', 'end'])
+               'action 2.0 cli command "configure terminal"',
+               'action 3.0 cli command "hostname RENAMED-BY-EEM"',
+               'action 4.0 cli command "end"',
+               'action 5.0 puts "done"', 'end'])
     return dev
 
 
@@ -64,7 +69,8 @@ def test_applet_events_and_actions_are_stored():
     dev = _applet()
     ap = eem_engine.applets[dev]['TEST']
     assert [e['type'] for e in ap['events']] == ['none']
-    assert [a['type'] for a in ap['actions']] == ['syslog', 'cli', 'puts']
+    assert [a['type'] for a in ap['actions']] == [
+        'syslog', 'cli', 'cli', 'cli', 'puts']
 
 
 def test_actions_execute_in_sequence_number_order():
@@ -106,7 +112,9 @@ def test_syslog_event_triggers_applet_and_runs_cli():
     dev = _mk('t-eem-syslog', 'SYSLOGSW')
     _run(dev, ['configure terminal', 'event manager applet ONLINK',
                'event syslog pattern "LINK-3-UPDOWN"',
-               'action 1.0 cli command "hostname FIRED"', 'end'])
+               'action 1.0 cli command "configure terminal"',
+               'action 2.0 cli command "hostname FIRED"',
+               'action 3.0 cli command "end"', 'end'])
     st = app_module.device_sessions[dev]
     fired = eem_engine.notify_syslog(
         dev, '%LINK-3-UPDOWN: Interface Gi1/0/1, changed state to down',
@@ -135,6 +143,7 @@ def test_show_policy_registered_lists_applet_and_actions():
     assert 'applet    user    none' in out
     assert 'TEST' in out
     assert 'syslog msg "applet fired"' in out
+    assert 'cli command "configure terminal"' in out
     assert 'cli command "hostname RENAMED-BY-EEM"' in out
 
 
@@ -382,7 +391,8 @@ def test_running_config_emits_eem_applet():
     assert 'event manager applet TEST' in out
     assert ' event none' in out
     assert ' action 1.0 syslog msg "applet fired"' in out
-    assert ' action 2.0 cli command "hostname RENAMED-BY-EEM"' in out
+    assert ' action 2.0 cli command "configure terminal"' in out
+    assert ' action 3.0 cli command "hostname RENAMED-BY-EEM"' in out
 
 
 def test_running_config_emits_app_hosting():

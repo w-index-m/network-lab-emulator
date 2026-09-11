@@ -7117,14 +7117,28 @@ class EigrpEngine:
             elif existing.learned_from == 'direct':
                 continue                       # 直結が常に優先
             elif fd < existing.fd or existing.learned_from == src_id:
-                existing.fd = fd
-                existing.rd = rd
-                existing.next_hop = next_hop
-                existing.learned_from = src_id
-                existing.learned_from_hostname = msg.get('src_hostname', src_id)
-                existing.external = bool(e.get('external'))
+                # 実機のEIGRPは「トポロジテーブルが実際に変化したとき」
+                # だけUpdateを出す。以前は同じ隣接から同じ経路を再受信
+                # しただけでも changed=True にしていたため、
+                #   receive -> _send_update -> send_to -> receive -> ...
+                # とUpdateを撃ち返し合って無限再帰し、2台構成でEIGRPを
+                # 設定した瞬間にRecursionErrorでAPIが500を返していた。
+                # (vnet.send_to は receive を直接awaitするので、
+                #  メッセージループではなくスタックが伸び続ける)
+                external = bool(e.get('external'))
+                if (existing.fd, existing.rd, existing.next_hop,
+                        existing.learned_from, existing.external) != (
+                        fd, rd, next_hop, src_id, external):
+                    existing.fd = fd
+                    existing.rd = rd
+                    existing.next_hop = next_hop
+                    existing.learned_from = src_id
+                    existing.learned_from_hostname = msg.get('src_hostname',
+                                                             src_id)
+                    existing.external = external
+                    changed = True
+                # 変化が無くても生存確認としてタイムスタンプは更新する
                 existing.timestamp = time.time()
-                changed = True
         if changed:
             await self._send_update(receiver_id)
 

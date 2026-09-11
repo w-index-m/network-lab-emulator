@@ -432,6 +432,60 @@ def _expand_port_list(raw: str):
     return ports
 
 
+# ══════════════════════════════════════════════════════════
+# 設定サブモードの登録簿
+# ══════════════════════════════════════════════════════════
+# 新しい設定サブモードを足すときは **ここに1行追加するだけ** でよい。
+#   parent : exit したときに戻るモード
+#   attrs  : exit 時に消すコンテキスト属性（このモード専用のもの）
+#
+# 以前は
+#   (1) process() の「設定コマンドを通すモード」許可リスト
+#   (2) _cmd_exit() の戻り先リスト
+# の2か所に別々に書く必要があり、片方を忘れるとコマンドがハンドラに
+# 届かず "% Invalid input detected" になった。ZBFW実装時に実際に踏み、
+# 原因特定に時間を溶かしている。両方をこの1つの表から導出する。
+#
+# 正しく登録されているかは tests/test_config_submodes.py が
+# 全モードを総当たりで検証する。
+CONFIG_SUBMODES = {
+    # モード名                  親モード              exit時に消す属性
+    "config-if":               ("config",            ()),
+    "config-router":           ("config",            ()),
+    "config-vlan":             ("config",            ()),
+    "config-crypto":           ("config",            ('_ike_policy_num',)),
+    "config-monitor":          ("config",            ('_monitor_sid',)),
+    "config-cmap":             ("config",            ('_cmap_name', '_cmap_seq',
+                                                      '_qos_cmap')),
+    "config-pmap":             ("config",            ('_qos_pmap',)),
+    "config-pmap-c":           ("config-pmap",       ('_qos_class',)),
+    "config-vs-domain":        ("config",            ()),
+    "config-vpc-domain":       ("config",            ()),
+    "config-dhcp":             ("config",            ('_dhcp_pool',)),
+    "config-dhcpv6":           ("config",            ('_dhcpv6_pool',)),
+    "config-bba":              ("config",            ('_bba_group',)),
+    "config-evpn":             ("config",            ()),
+    "config-evpn-vni":         ("config-evpn",       ('_evpn_vni',)),
+    "config-nve-vni":          ("config-if",         ('_nve_member_vni',)),
+    "config-bgp-af":           ("config-router",     ()),
+    "config-sec-zone":         ("config",            ('_zbfw_zone',)),
+    "config-sec-zone-pair":    ("config",            ('_zbfw_pair',)),
+    "config-track":            ("config",            ('_track_obj',)),
+    "config-sg-tacacs":        ("config",            ('_aaa_group_name',)),
+    "config-std-nacl":         ("config",            ('_current_acl_name',)),
+    "config-ext-nacl":         ("config",            ('_current_acl_name',)),
+    "config-mdt":              ("config",            ('_mdt_sub',)),
+    "config-applet":           ("config",            ('_eem_applet',)),
+    "config-app-hosting":      ("config",            ('_app_id', '_app_vnic_mode',
+                                                      '_app_vnic_gi')),
+    "config-openflow":         ("config",            ()),
+    "config-openflow-switch":  ("config-openflow",   ('_of_switch',)),
+}
+
+# 設定コマンドを _cmd_config に通すモード一覧（config本体＋全サブモード）
+CONFIG_MODES = frozenset({"config"}) | frozenset(CONFIG_SUBMODES)
+
+
 class RuleEngine:
 
     # ── CLI略称展開テーブル（Cisco IOS準拠）──────────────────
@@ -756,6 +810,11 @@ class RuleEngine:
             return self._bigip_process(cmd, c, state)
 
         # モード遷移
+        # 実機の end は「どの設定モードからでも特権EXECへ一気に戻る」。
+        # 以前は exit と同じ扱いで一段だけ戻していたため、
+        # interface配下で end しても config のままだった。
+        if c == "end" and state.mode in CONFIG_MODES:
+            return self._cmd_end(state)
         if c in ("exit", "end", "quit"):
             return self._cmd_exit(cmd, state)
         if c == "exit-address-family" and state.mode == "config-bgp-af":
@@ -847,18 +906,8 @@ class RuleEngine:
                 icmp_engine.clear_icmp_stats(device_id)
             return ""
 
-        # 設定コマンド
-        if state.mode in ("config", "config-if", "config-router", "config-vlan",
-                          "config-crypto", "config-monitor",
-                          "config-cmap", "config-pmap", "config-pmap-c",
-                          "config-vs-domain", "config-dhcp", "config-bba",
-                          "config-evpn", "config-evpn-vni", "config-nve-vni",
-                          "config-bgp-af", "config-sec-zone", "config-sec-zone-pair",
-                          "config-track", "config-dhcpv6",
-                          "config-std-nacl", "config-ext-nacl",
-                          "config-mdt", "config-applet",
-                          "config-app-hosting", "config-openflow",
-                          "config-openflow-switch"):
+        # 設定コマンド（許可モードは CONFIG_SUBMODES 登録簿から導出する）
+        if state.mode in CONFIG_MODES:
             return self._cmd_config(cmd, state)
 
         # ── ISMU(データモデル更新) / ISSU(ソフトウェア更新) ──
@@ -898,54 +947,41 @@ class RuleEngine:
 
     # ─── モード遷移 ───────────────────────────
     def _cmd_exit(self, cmd, state):
-        if state.mode == "config-if":
-            state.mode = "config"
-        elif state.mode == "config-pmap-c":
-            # policy-map class サブモード → policy-map サブモードへ戻る
-            state.mode = "config-pmap"
-            if hasattr(state, '_qos_class'):
-                delattr(state, '_qos_class')
-        # EVPN/VXLAN: ネストしたサブモードは一段だけ戻す
-        elif state.mode == "config-nve-vni":
-            # interface nve1 配下の member vni サブモード → interface(config-if)へ
-            state.mode = "config-if"
-            if hasattr(state, '_nve_member_vni'):
-                delattr(state, '_nve_member_vni')
-        elif state.mode == "config-evpn-vni":
-            # evpn 配下の vni <n> l2 サブモード → evpn サブモードへ
-            state.mode = "config-evpn"
-            if hasattr(state, '_evpn_vni'):
-                delattr(state, '_evpn_vni')
-        elif state.mode == "config-bgp-af":
-            # router bgp 配下の address-family サブモード → router bgpへ
-            state.mode = "config-router"
-        elif state.mode == "config-openflow-switch":
-            # openflow 配下の switch <n> pipeline <p> サブモード → openflowへ
-            state.mode = "config-openflow"
-            if hasattr(state, '_of_switch'):
-                delattr(state, '_of_switch')
-        elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
-                             "config-crypto", "config-monitor",
-                             "config-cmap", "config-pmap", "config-vs-domain",
-                             "config-dhcp", "config-sg-tacacs", "config-ext-nacl",
-                             "config-bba", "config-evpn",
-                             "config-sec-zone", "config-sec-zone-pair",
-                             "config-track", "config-dhcpv6",
-                             "config-std-nacl", "config-mdt",
-                             "config-applet", "config-app-hosting",
-                             "config-openflow"):
-            state.mode = "config"
-            # Clear sub-context pointers
-            for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
-                         '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool',
-                         '_aaa_group_name', '_current_acl_name', '_bba_group',
-                         '_zbfw_zone', '_zbfw_pair', '_track_obj', '_dhcpv6_pool',
-                         '_mdt_sub', '_eem_applet', '_app_id',
-                         '_app_vnic_mode', '_app_vnic_gi', '_of_switch'):
+        """一段だけ上のモードへ戻る。
+
+        戻り先と消すコンテキスト属性は CONFIG_SUBMODES 登録簿から引く。
+        以前はここに戻り先リストを直書きしており、process() 側の許可
+        リストと二重管理になっていた（片方の登録漏れでコマンドが
+        ハンドラに届かない事故を実際に起こしている）。
+        """
+        entry = CONFIG_SUBMODES.get(state.mode)
+        if entry is not None:
+            parent, attrs = entry
+            state.mode = parent
+            for attr in attrs:
                 if hasattr(state, attr):
                     delattr(state, attr)
-        elif state.mode == "config":
+            return ""
+        if state.mode == "config":
             state.mode = "exec"
+        return ""
+
+    def _cmd_end(self, state):
+        """end: どの設定サブモードからでも特権EXECまで戻る。
+
+        途中のサブモードが持っていたコンテキスト属性は全部消す
+        （残すと次に入ったサブモードが古い名前を掴む）。
+        """
+        mode = state.mode
+        seen = set()
+        while mode in CONFIG_SUBMODES and mode not in seen:
+            seen.add(mode)
+            parent, attrs = CONFIG_SUBMODES[mode]
+            for attr in attrs:
+                if hasattr(state, attr):
+                    delattr(state, attr)
+            mode = parent
+        state.mode = "exec"
         return ""
 
     def _cmd_configure(self, state):

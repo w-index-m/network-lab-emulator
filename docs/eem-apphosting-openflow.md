@@ -41,13 +41,29 @@ show event manager directory user
 
 ### 実際の出力
 
+設定例（**実機のEEMは `action cli command` を exec コンテキストで
+実行するので、設定を変えるには applet 内で `configure terminal` を
+通す必要がある**。これが定石）:
+
+```
+event manager applet TEST-APPLET
+ event none
+ action 1.0 syslog msg "applet fired"
+ action 2.0 cli command "configure terminal"
+ action 3.0 cli command "hostname RENAMED-BY-EEM"
+ action 4.0 cli command "end"
+ action 5.0 puts "done"
+```
+
 ```
 P3B# show event manager policy registered
 No.  Class     Type    Event Type          Trap  Time Registered           Name
 1    applet    user    none                Off   Fri Sep11 12:07:24 2026  TEST-APPLET
  1.0 syslog msg "applet fired"
- 2.0 cli command "hostname RENAMED-BY-EEM"
- 3.0 puts "done"
+ 2.0 cli command "configure terminal"
+ 3.0 cli command "hostname RENAMED-BY-EEM"
+ 4.0 cli command "end"
+ 5.0 puts "done"
 ```
 
 ```
@@ -71,6 +87,11 @@ No.  Job Id Proc Status   Time of Event             Event Type    Name
 
 ### 実機どおりの制約
 
+- **`action cli command` は exec コンテキストで実行される。**
+  設定変更するappletは `configure terminal` を明示的に通す
+  （この挙動は `end` の修正で判明した。修正前は `end` がサブモードを
+  一段しか戻らなかったため、装置がconfigモードに居座って
+  `hostname` が直接効いてしまっていた）
 - **`event none` のappletだけが手動実行できる。**
   syslogトリガのappletに `event manager run` すると拒否される
   （実機でもappletのテストには `event none` を使うのが定石）
@@ -272,14 +293,15 @@ Port    Interface Name   Config-State     Link-State
 
 ## ハマりどころ
 
-1. **入れ子サブモードは `_cmd_exit` に専用分岐が要る。**
-   `config-openflow-switch` から `exit` したら `config-openflow` に
-   戻さないといけない（`config` まで一気に戻ると実機と違う）。
-   `config-bgp-af` や `config-evpn-vni` と同じ扱い。
-2. **新しい設定サブモードは2か所に登録。**
-   `process()` のモード許可リストと `_cmd_exit()` の両方。今回は
-   `config-applet` / `config-app-hosting` / `config-openflow` /
-   `config-openflow-switch` の4つを追加した。
+1. **設定サブモードは `engine/rules.py` の `CONFIG_SUBMODES` 登録簿に
+   1行足すだけでよい**（親モードと exit 時に消す属性を書く）。
+   以前は `process()` のモード許可リストと `_cmd_exit()` の2か所に
+   別々に書く必要があり、片方を忘れるとコマンドがハンドラに届かず
+   `% Invalid input detected` になった。現在は両方をこの表から導出し、
+   `tests/test_config_submodes.py` が全モードを総当たりで検証する。
+2. **入れ子サブモードは親を登録簿に書くだけ。**
+   `config-openflow-switch` の親は `config-openflow`。`exit` は
+   一段ずつ戻り、`end` はどこからでも exec まで戻る。
 3. **引用符を含むコマンドはシェル経由でテストしない。**
    `curl -d '{"command":"action 1.0 syslog msg \"x\""}'` はシェルの
    クォート処理で壊れる。検証中これで「アクションが保存されない」と
