@@ -856,7 +856,9 @@ class RuleEngine:
                           "config-bgp-af", "config-sec-zone", "config-sec-zone-pair",
                           "config-track", "config-dhcpv6",
                           "config-std-nacl", "config-ext-nacl",
-                          "config-mdt"):
+                          "config-mdt", "config-applet",
+                          "config-app-hosting", "config-openflow",
+                          "config-openflow-switch"):
             return self._cmd_config(cmd, state)
 
         # ── ISMU(データモデル更新) / ISSU(ソフトウェア更新) ──
@@ -917,6 +919,11 @@ class RuleEngine:
         elif state.mode == "config-bgp-af":
             # router bgp 配下の address-family サブモード → router bgpへ
             state.mode = "config-router"
+        elif state.mode == "config-openflow-switch":
+            # openflow 配下の switch <n> pipeline <p> サブモード → openflowへ
+            state.mode = "config-openflow"
+            if hasattr(state, '_of_switch'):
+                delattr(state, '_of_switch')
         elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
                              "config-crypto", "config-monitor",
                              "config-cmap", "config-pmap", "config-vs-domain",
@@ -924,14 +931,17 @@ class RuleEngine:
                              "config-bba", "config-evpn",
                              "config-sec-zone", "config-sec-zone-pair",
                              "config-track", "config-dhcpv6",
-                             "config-std-nacl", "config-mdt"):
+                             "config-std-nacl", "config-mdt",
+                             "config-applet", "config-app-hosting",
+                             "config-openflow"):
             state.mode = "config"
             # Clear sub-context pointers
             for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
                          '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool',
                          '_aaa_group_name', '_current_acl_name', '_bba_group',
                          '_zbfw_zone', '_zbfw_pair', '_track_obj', '_dhcpv6_pool',
-                         '_mdt_sub'):
+                         '_mdt_sub', '_eem_applet', '_app_id',
+                         '_app_vnic_mode', '_app_vnic_gi', '_of_switch'):
                 if hasattr(state, attr):
                     delattr(state, attr)
         elif state.mode == "config":

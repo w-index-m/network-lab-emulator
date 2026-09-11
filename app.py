@@ -34,6 +34,9 @@ from engine.protocols import (
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine, mpls_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
+from engine.programmability import (
+    app_hosting_engine, eem_engine, openflow_engine,
+)
 from engine.syslog_sender import syslog_dispatcher, snmp_dispatcher, ntp_client
 from engine.ike_engine import (
     negotiate_ipsec, negotiate_manual_ipsec, sir_link_down, sir_link_up,
@@ -2778,6 +2781,12 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                            if u.get('name') != m_no_user.group(1)]
             return ''
 
+    # ── EEM / アプリケーションホスティング / OpenFlow ──
+    if state.device_type in ('cisco', 'catalyst'):
+        _p = _handle_programmability(device_id, command, orig, c, state)
+        if _p is not None:
+            return _p
+
     # ── モデル駆動型テレメトリ（MDT / telemetry ietf subscription）──
     # 実機構文:
     #   telemetry ietf subscription <id>
@@ -4042,6 +4051,76 @@ def _build_running_config(device_id: str, state) -> str:
         # RESTCONF/NETCONF
         if getattr(state, 'http_secure_server', False):
             lines.append('ip http secure-server')
+        # EEM applet
+        for _an, _ap in (eem_engine.applets.get(device_id, {}) or {}).items():
+            _bypass = (' authorization bypass'
+                       if _ap.get('authorization_bypass') else '')
+            lines.append(f'event manager applet {_an}{_bypass}')
+            for _ev in _ap['events']:
+                if _ev['type'] == 'none':
+                    lines.append(' event none')
+                elif _ev['type'] == 'syslog':
+                    lines.append(f' event syslog pattern "{_ev["pattern"]}"')
+                elif _ev['type'] == 'cli':
+                    lines.append(f' event cli pattern "{_ev["pattern"]}" '
+                                 f'sync {_ev.get("sync", "no")}')
+                elif _ev['type'] == 'timer':
+                    lines.append(f' event timer watchdog time {_ev["time"]}')
+            for _ac in _ap['actions']:
+                if _ac['type'] == 'syslog':
+                    lines.append(f' action {_ac["seq"]} syslog msg "{_ac["arg"]}"')
+                elif _ac['type'] == 'cli':
+                    lines.append(f' action {_ac["seq"]} cli command "{_ac["arg"]}"')
+                else:
+                    lines.append(f' action {_ac["seq"]} {_ac["type"]} "{_ac["arg"]}"')
+            lines.append('!')
+        for _pf, _pd in (eem_engine.policies.get(device_id, {}) or {}).items():
+            lines.append(f'event manager policy {_pf} type {_pd["type"]}')
+        # アプリケーションホスティング
+        if app_hosting_engine.iox_enabled(device_id):
+            lines.append('iox')
+            lines.append('!')
+        for _aid, _app in (app_hosting_engine.apps.get(device_id, {})
+                           or {}).items():
+            lines.append(f'app-hosting appid {_aid}')
+            if _app['vnics']:
+                lines.append(' app-vnic AppGigabitEthernet trunk')
+                for _v in _app['vnics']:
+                    lines.append(f'  vlan {_v["vlan"]} guest-interface '
+                                 f'{_v["guest_interface"]}')
+                    if _v.get('ip'):
+                        lines.append(f'   guest-ipaddress {_v["ip"]} '
+                                     f'netmask {_v["netmask"]}')
+            if _app['gateway']:
+                lines.append(f' app-default-gateway {_app["gateway"]} '
+                             f'guest-interface {_app["gateway_gi"]}')
+            if _app['type'] == 'docker':
+                lines.append(' app-resource docker')
+            if _app['profile'] and _app['profile'] != 'default':
+                lines.append(f' app-resource profile {_app["profile"]}')
+                for _k, _lbl in (('cpu', 'cpu'), ('memory', 'memory'),
+                                 ('disk', 'persist-disk'), ('vcpu', 'vcpu')):
+                    if _app[_k]:
+                        lines.append(f'  {_lbl} {_app[_k]}')
+            if _app['nameserver']:
+                lines.append(f' name-server0 {_app["nameserver"]}')
+            if _app['auto_start']:
+                lines.append(' start')
+            lines.append('!')
+        # OpenFlow
+        _ofn = openflow_engine.nodes.get(device_id)
+        if _ofn and _ofn['feature']:
+            lines.append('feature openflow')
+            lines.append('openflow')
+            for _sid, _sw in _ofn['switches'].items():
+                lines.append(f' switch {_sid} pipeline {_sw["pipeline"]}')
+                for _ct in _sw['controllers']:
+                    _vrf = f' vrf {_ct["vrf"]}' if _ct['vrf'] else ''
+                    lines.append(f'  controller ipv4 {_ct["ip"]} '
+                                 f'port {_ct["port"]}{_vrf} '
+                                 f'security {_ct["security"]}')
+                lines.append(f'  datapath-id {_sw["dpid"]}')
+            lines.append('!')
         for _sid in sorted(getattr(state, 'mdt_subscriptions', {}) or {}):
             _sub = state.mdt_subscriptions[_sid]
             lines.append(f'telemetry ietf subscription {_sid}')
@@ -6058,6 +6137,275 @@ def _restconf_ietf_interface(ifname: str, iinfo: dict) -> dict:
             "address": [{"ip": iinfo["ip"], "netmask": _prefix_to_mask(iinfo.get("prefix", 24))}]
         }
     return entry
+
+
+def _handle_programmability(device_id, command, orig, c, state):
+    """EEM / app-hosting / OpenFlow の設定・show を処理する。
+    対象外なら None を返して後続のハンドラに任せる。"""
+
+    # ══════ EEM ══════
+    m = re.match(r'^(no\s+)?event\s+manager\s+applet\s+(\S+)'
+                 r'(\s+authorization\s+bypass)?\s*$', orig, re.I)
+    if m:
+        if m.group(1):
+            eem_engine.remove_applet(device_id, m.group(2))
+            return ''
+        eem_engine.add_applet(device_id, m.group(2), bool(m.group(3)))
+        state.mode = 'config-applet'
+        state._eem_applet = m.group(2)
+        return ''
+
+    if state.mode == 'config-applet':
+        name = getattr(state, '_eem_applet', '')
+        if re.match(r'^event\s+none\s*$', c):
+            eem_engine.add_event(device_id, name, 'none', {})
+            return ''
+        m = re.match(r'^event\s+syslog\s+pattern\s+"(.*)"\s*$', orig, re.I)
+        if m:
+            eem_engine.add_event(device_id, name, 'syslog',
+                                 {'pattern': m.group(1)})
+            return ''
+        m = re.match(r'^event\s+cli\s+pattern\s+"(.*)"'
+                     r'(?:\s+sync\s+(yes|no))?\s*$', orig, re.I)
+        if m:
+            eem_engine.add_event(device_id, name, 'cli',
+                                 {'pattern': m.group(1),
+                                  'sync': m.group(2) or 'no'})
+            return ''
+        m = re.match(r'^event\s+timer\s+watchdog\s+time\s+(\d+)\s*$', c)
+        if m:
+            eem_engine.add_event(device_id, name, 'timer',
+                                 {'time': int(m.group(1))})
+            return ''
+        # action <seq> syslog msg "..." / cli command "..." / puts "..."
+        m = re.match(r'^action\s+(\S+)\s+syslog\s+msg\s+"(.*)"\s*$', orig, re.I)
+        if m:
+            eem_engine.add_action(device_id, name, m.group(1), 'syslog',
+                                  m.group(2))
+            return ''
+        m = re.match(r'^action\s+(\S+)\s+cli\s+command\s+"(.*)"\s*$', orig, re.I)
+        if m:
+            eem_engine.add_action(device_id, name, m.group(1), 'cli',
+                                  m.group(2))
+            return ''
+        m = re.match(r'^action\s+(\S+)\s+puts\s+"(.*)"\s*$', orig, re.I)
+        if m:
+            eem_engine.add_action(device_id, name, m.group(1), 'puts',
+                                  m.group(2))
+            return ''
+
+    m = re.match(r'^(no\s+)?event\s+manager\s+policy\s+(\S+)'
+                 r'(?:\s+type\s+(user|system))?\s*$', orig, re.I)
+    if m:
+        if m.group(1):
+            eem_engine.unregister_policy(device_id, m.group(2))
+            return ''
+        eem_engine.register_policy(device_id, m.group(2), m.group(3) or 'user')
+        return ''
+
+    m = re.match(r'^event\s+manager\s+directory\s+user\s+policy\s+(\S+)\s*$',
+                 orig, re.I)
+    if m:
+        eem_engine.policy_dir[device_id] = m.group(1)
+        return ''
+
+    m = re.match(r'^event\s+manager\s+run\s+(\S+)\s*$', orig, re.I)
+    if m:
+        # action cli command を実際にルールエンジンへ流す。
+        # これによりappletから装置の設定を本当に変更できる。
+        def _exec(cmd_text):
+            return rule_engine.process(cmd_text, state)
+        out, _ok = eem_engine.run_applet(device_id, m.group(1), cli_exec=_exec)
+        return out
+
+    if re.match(r'^show\s+event\s+manager\s+policy\s+registered', c):
+        return eem_engine.format_policy_registered(device_id)
+    if re.match(r'^show\s+event\s+manager\s+policy\s+available', c):
+        return eem_engine.format_policy_available(device_id)
+    if re.match(r'^show\s+event\s+manager\s+history\s+events', c):
+        return eem_engine.format_history_events(device_id)
+    if re.match(r'^show\s+event\s+manager\s+statistics', c):
+        return eem_engine.format_statistics(device_id)
+    if re.match(r'^show\s+event\s+manager\s+directory\s+user', c):
+        return eem_engine.format_directory_user(device_id)
+
+    # ══════ アプリケーションホスティング ══════
+    if re.match(r'^(no\s+)?iox\s*$', c):
+        app_hosting_engine.set_iox(device_id, not c.startswith('no'))
+        return ''
+
+    m = re.match(r'^(no\s+)?app-hosting\s+appid\s+(\S+)\s*$', orig, re.I)
+    if m and state.mode in ('config', 'config-app-hosting'):
+        if m.group(1):
+            app_hosting_engine.remove_app(device_id, m.group(2))
+            return ''
+        app_hosting_engine.config_app(device_id, m.group(2))
+        state.mode = 'config-app-hosting'
+        state._app_id = m.group(2)
+        return ''
+
+    if state.mode == 'config-app-hosting':
+        app = app_hosting_engine._dev(device_id).get(
+            getattr(state, '_app_id', ''))
+        if app is not None:
+            m = re.match(r'^app-vnic\s+AppGigabitEthernet\s+(trunk|vlan-access)',
+                         orig, re.I)
+            if m:
+                state._app_vnic_mode = m.group(1).lower()
+                return ''
+            m = re.match(r'^vlan\s+(\d+)\s+guest-interface\s+(\d+)\s*$', c)
+            if m:
+                vlan, gi = int(m.group(1)), int(m.group(2))
+                app['vnics'] = [v for v in app['vnics']
+                                if v['guest_interface'] != gi]
+                app['vnics'].append({'vlan': vlan, 'guest_interface': gi,
+                                     'ip': '', 'netmask': ''})
+                state._app_vnic_gi = gi
+                return ''
+            m = re.match(r'^guest-ipaddress\s+([\d.]+)\s+netmask\s+([\d.]+)\s*$', c)
+            if m:
+                gi = getattr(state, '_app_vnic_gi', None)
+                for v in app['vnics']:
+                    if v['guest_interface'] == gi:
+                        v['ip'], v['netmask'] = m.group(1), m.group(2)
+                        return ''
+                return '% Configure "vlan <id> guest-interface <n>" first'
+            m = re.match(r'^app-default-gateway\s+([\d.]+)'
+                         r'\s+guest-interface\s+(\d+)\s*$', c)
+            if m:
+                app['gateway'], app['gateway_gi'] = m.group(1), m.group(2)
+                return ''
+            m = re.match(r'^app-resource\s+docker\s*$', c)
+            if m:
+                app['type'] = 'docker'
+                return ''
+            m = re.match(r'^app-resource\s+profile\s+(\S+)\s*$', c)
+            if m:
+                app['profile'] = m.group(1)
+                return ''
+            m = re.match(r'^(cpu|memory|persist-disk|vcpu)\s+(\d+)\s*$', c)
+            if m:
+                key = {'cpu': 'cpu', 'memory': 'memory',
+                       'persist-disk': 'disk', 'vcpu': 'vcpu'}[m.group(1)]
+                app[key] = int(m.group(2))
+                return ''
+            m = re.match(r'^name-server\d*\s+([\d.]+)\s*$', c)
+            if m:
+                app['nameserver'] = m.group(1)
+                return ''
+            m = re.match(r'^run-opts\s+\d+\s+"(.*)"\s*$', orig, re.I)
+            if m:
+                app['run_opts'] = m.group(1)
+                return ''
+            if re.match(r'^start\s*$', c):
+                app['auto_start'] = True
+                return ''
+
+    m = re.match(r'^app-hosting\s+(install|activate|start|stop|deactivate|'
+                 r'uninstall)\s+appid\s+(\S+)(?:\s+package\s+(\S+))?\s*$',
+                 orig, re.I)
+    if m:
+        op, appid, pkg = m.group(1).lower(), m.group(2), m.group(3)
+        if op == 'install':
+            if not pkg:
+                return '% package <url> is required'
+            out, _ = app_hosting_engine.install(device_id, appid, pkg)
+            return out
+        out, _ = getattr(app_hosting_engine, op)(device_id, appid)
+        return out
+
+    if re.match(r'^show\s+app-hosting\s+list\s*$', c):
+        return app_hosting_engine.format_list(device_id)
+    m = re.match(r'^show\s+app-hosting\s+detail\s+appid\s+(\S+)\s*$', orig, re.I)
+    if m:
+        return app_hosting_engine.format_detail(device_id, m.group(1))
+    if re.match(r'^show\s+app-hosting\s+resource\s*$', c):
+        return app_hosting_engine.format_resource(device_id)
+    if re.match(r'^show\s+iox\b', c):
+        return ('IOx service (CAF)             : '
+                + ('Running' if app_hosting_engine.iox_enabled(device_id)
+                   else 'Not Running')
+                + '\nIOx service (HA)              : Not Supported'
+                + '\nIOx service (IOxman)          : '
+                + ('Running' if app_hosting_engine.iox_enabled(device_id)
+                   else 'Not Running')
+                + '\nIOx service (Sec storage)     : Not Supported'
+                + '\nLibvirtd 1.3.4                : Running')
+
+    # ══════ OpenFlow ══════
+    m = re.match(r'^boot\s+mode\s+(openflow|normal)\s*$', c)
+    if m:
+        openflow_engine.set_boot_mode(device_id, m.group(1))
+        if m.group(1) == 'openflow':
+            return ('Changes to the boot mode preferences have been stored\n'
+                    '%% Reload the switch to apply the new boot mode')
+        return 'Changes to the boot mode preferences have been stored'
+
+    if re.match(r'^(no\s+)?feature\s+openflow\s*$', c):
+        neg = c.startswith('no')
+        if not openflow_engine.enable_feature(device_id, not neg):
+            return ('% OpenFlow requires the switch to be in OpenFlow boot '
+                    'mode. Configure "boot mode openflow" and reload.')
+        return ''
+
+    if re.match(r'^openflow\s*$', c) and state.mode == 'config':
+        if not openflow_engine.feature_enabled(device_id):
+            return '% Enable "feature openflow" first'
+        state.mode = 'config-openflow'
+        return ''
+
+    if state.mode in ('config-openflow', 'config-openflow-switch'):
+        m = re.match(r'^switch\s+(\d+)\s+pipeline\s+(\d+)\s*$', c)
+        if m:
+            openflow_engine.add_switch(device_id, int(m.group(1)),
+                                       int(m.group(2)))
+            state.mode = 'config-openflow-switch'
+            state._of_switch = int(m.group(1))
+            return ''
+    if state.mode == 'config-openflow-switch':
+        sid = getattr(state, '_of_switch', 1)
+        m = re.match(r'^(no\s+)?controller\s+ipv4\s+([\d.]+)\s+port\s+(\d+)'
+                     r'(?:\s+vrf\s+(\S+))?(?:\s+security\s+(none|tls))?\s*$',
+                     orig, re.I)
+        if m:
+            if m.group(1):
+                openflow_engine.remove_controller(device_id, sid, m.group(2),
+                                                  int(m.group(3)))
+            else:
+                openflow_engine.add_controller(
+                    device_id, sid, m.group(2), int(m.group(3)),
+                    m.group(4) or '', (m.group(5) or 'none').lower())
+            return ''
+        m = re.match(r'^datapath-id\s+(0x[0-9a-f]+)\s*$', c)
+        if m:
+            openflow_engine._node(device_id)['switches'][sid]['dpid'] = \
+                m.group(1)
+            return ''
+        m = re.match(r'^probe-interval\s+(\d+)\s*$', c)
+        if m:
+            openflow_engine._node(device_id)['switches'][sid][
+                'probe_interval'] = int(m.group(1))
+            return ''
+        if re.match(r'^logging\s+flow-mod\s*$', c):
+            openflow_engine._node(device_id)['switches'][sid][
+                'logging_flow_mod'] = True
+            return ''
+
+    m = re.match(r'^show\s+openflow\s+switch\s+(\d+)'
+                 r'(\s+controllers?|\s+flows?(?:\s+list)?|\s+ports)?\s*$', c)
+    if m:
+        sid = int(m.group(1))
+        what = (m.group(2) or '').strip()
+        if what.startswith('controller'):
+            return openflow_engine.format_controllers(device_id, sid)
+        if what.startswith('flow'):
+            return openflow_engine.format_flows(device_id, sid)
+        if what == 'ports':
+            return openflow_engine.format_ports(
+                device_id, sid, getattr(state, 'interfaces', {}))
+        return openflow_engine.format_switch(device_id, sid)
+
+    return None
 
 
 def _mdt_valid(sub: dict) -> bool:
