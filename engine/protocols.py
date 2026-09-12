@@ -165,6 +165,28 @@ class VirtualNetwork:
         if loop_path:
             self._notify_loop_events(a, b, iface_a or a, iface_b or b, loop_path)
 
+    def ifaces_between(self, a: str, b: str) -> set:
+        """a から b へ向かう **すべての** ローカルIF名を返す。
+
+        interface_links は {peer -> iface} と1本しか覚えられないため、
+        同一ペア間に並列リンクを張ると後勝ちで上書きされる。
+        並列リンクを全部持っているのは link_ifaces のほうなので、
+        「そのピアへ向かうIF」を扱う処理は必ずこちらを使うこと。
+        （主回線と予備回線を張ったラボで、主回線をshutdownしても
+          予備回線側のIF名しか見えず判定を誤る、という事故が起きた）
+        """
+        out = set(getattr(self, 'link_ifaces', {}).get(a, {}).get(b, set()))
+        single = self.interface_links.get(a, {}).get(b)
+        if single:
+            out.add(single)
+        return out
+
+    def up_ifaces_between(self, a: str, b: str) -> set:
+        """a から b へ向かうIFのうち、a側でshutdownされていないもの"""
+        down = {self._norm_iface(x) for x in self.down_interfaces.get(a, set())}
+        return {i for i in self.ifaces_between(a, b)
+                if self._norm_iface(i) not in down}
+
     def _edge_up(self, a: str, b: str) -> bool:
         """a-b間の物理リンクが1本でも生きていれば True。
         並列リンクは全down時のみ断とする。iface情報が無ければ従来通りup扱い。"""
@@ -241,8 +263,11 @@ class VirtualNetwork:
         """指定インターフェース経由で接続されているpeer device_idのセット。
         インターフェース名は短縮形/正式形の差を吸収して照合する。"""
         target = self._norm_iface(iface)
-        return {peer for peer, if_name in self.interface_links.get(device_id, {}).items()
-                if if_name == iface or self._norm_iface(if_name) == target}
+        # 並列リンクがあると interface_links には1本しか載らないため、
+        # そのIF経由のピアを取りこぼす。link_ifaces を含めて照合する。
+        return {peer for peer in self.links.get(device_id, set())
+                if any(self._norm_iface(x) == target
+                       for x in self.ifaces_between(device_id, peer))}
 
     def remove_link(self, a: str, b: str):
         self.links[a].discard(b)
@@ -448,8 +473,12 @@ class VirtualNetwork:
             if not self._edge_up(src_id, peer_id):
                 continue
             if down:
-                connecting_iface = self.interface_links.get(src_id, {}).get(peer_id)
-                if connecting_iface and connecting_iface in down:
+                # そのピアへ向かうIFが1本でも生きていれば届く。
+                # 以前は interface_links の1本だけを見ていたため、
+                # 並列リンク構成で主回線を落としても予備回線側のIF名が
+                # 見えていて「まだ生きている」と誤判定していた。
+                ifs = self.ifaces_between(src_id, peer_id)
+                if ifs and not self.up_ifaces_between(src_id, peer_id):
                     continue
             # L2マルチキャスト系プロトコル（RIP/OSPF/STP/VRRP/LACP）は
             # 同一セグメントのみ届く
@@ -485,11 +514,10 @@ class VirtualNetwork:
 
     def _live_neighbors(self, node: str) -> list:
         """物理リンクが生きている(=downでない)直結隣接を返す"""
-        down = self.down_interfaces.get(node, set())
         out = []
         for peer in self.links.get(node, set()):
-            cif = self.interface_links.get(node, {}).get(peer)
-            if cif and cif in down:
+            ifs = self.ifaces_between(node, peer)
+            if ifs and not self.up_ifaces_between(node, peer):
                 continue
             if not self._edge_up(node, peer):
                 continue
@@ -1281,13 +1309,9 @@ class OspfEngine:
         if enabled is None:
             return set()
         norm = {vnet._norm_iface(x) for x in enabled}
-        lifaces = getattr(vnet, 'link_ifaces', {})
         out = set()
         for peer in vnet.links.get(device_id, set()):
-            ifs = set(lifaces.get(device_id, {}).get(peer, set()))
-            single = vnet.interface_links.get(device_id, {}).get(peer)
-            if single:
-                ifs.add(single)
+            ifs = vnet.ifaces_between(device_id, peer)
             if not ifs:
                 continue          # iface情報が無ければ従来どおり許可
             ospf_ifs = [x for x in ifs if vnet._norm_iface(x) in norm]

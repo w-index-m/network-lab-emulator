@@ -735,6 +735,28 @@ async def cli_command(body: dict):
     if snmp_out is not None:
         return {"output": snmp_out, "mode": state.mode, "hostname": state.hostname}
 
+    # ══════════════════════════════════════════════════════
+    # CLIディスパッチの順序（重要）
+    # ══════════════════════════════════════════════════════
+    # このエミュレータは CLI を2層で処理する。上から順に見て、
+    # **最初に非Noneを返した層が勝つ**。
+    #
+    #   1. app.py の handle_protocol_show(...)    … show系
+    #   2. app.py の handle_protocol_config(...)  … 設定系
+    #   3. engine/rules.py の RuleEngine.process(...) … 上記で拾われな
+    #      かったものの受け皿（ベンダ別の既定応答・補完・ヘルプなど）
+    #
+    # したがって **app.py 側に同じコマンドのハンドラがあると、
+    # rules.py 側の実装には決して到達しない**。rules.py にある
+    # `_show_ip_route` のように「app.py 側が条件付きでフォールスルー
+    # したときだけ動く」コードが存在するので、rules.py を直すときは
+    # 先に app.py 側で拾われていないかを必ず確認すること。
+    # （app.py 側を直さずに rules.py を直して「変わらない」と悩む、
+    #   という事故が繰り返し起きている）
+    #
+    # 新しいコマンドを足すときの原則:
+    #   - プロトコルエンジンの状態を読む/書くもの → app.py 側
+    #   - 装置種別ごとの定型応答・ヘルプ・補完     → rules.py 側
     # ── プロトコル動的show（エンジンが起動していればエンジンの出力を優先）──
     proto_output = await handle_protocol_show(device_id, command, state)
     if proto_output is not None:
