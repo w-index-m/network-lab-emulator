@@ -1,126 +1,137 @@
 # Network Lab Emulator
 
-マルチベンダー対応のネットワーク機器CLIエミュレーター。  
-ブラウザ上で実機に近いCLI操作・ルーティングプロトコルのシミュレーションができます。
+マルチベンダー対応のネットワーク機器エミュレータ。
+ブラウザ上で実機に近いCLI操作ができ、**一部のプロトコルは本物のワイヤプロトコルとして動作する**ため、
+ncclient / gNMIクライアント / SNMPツールといった実在のクライアントから接続できます。
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-green)
+![Tests](https://img.shields.io/badge/tests-1038%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
-
-> 📊 **[実装進捗ダッシュボード](./IMPLEMENTATION_PROGRESS.md)** ← チーム共有用の最新実装状況  
-> ✅ Priority 1 の 50% 完了 | BGP Community ✨ | Big-IP LTM テストツール ✨
 
 ---
 
-## コンセプト: Network Infrastructure Digital Twin + AI Observability
+## このプロジェクトの特徴
 
-このプロジェクトは、一般的な「Digital Twin」（物理設備をセンサーデータで
-仮想空間に再現する）のネットワーク版と捉えられます。
+### 「表示だけ」ではなく、実際に喋るプロトコルがある
+
+CLIエミュレータの多くは `show` の出力文字列を返すだけですが、このプロジェクトは
+**6つのプロトコルを実ソケット・実パケットで実装**しています。
+
+| 実装 | 中身 | 外部クライアントからの接続 |
+|---|---|---|
+| `engine/real_ospf_agent.py` | scapy / raw IP proto 89 | 他のOSPF実装と隣接を張れる |
+| `engine/real_bgp_agent.py` | TCP 179 | 本物のBGPスピーカーとセッション確立 |
+| `engine/real_rip_agent.py` | UDP 520 | RIPv2パケットの送受信 |
+| `engine/snmp_udp_agent.py` | UDP 161 | `snmpwalk` 等で実際にポーリング可能 |
+| `engine/netconf_agent.py` | paramiko SSH / TCP 830 | **ncclient** から `get-config` / `edit-config` |
+| `engine/gnmi_agent.py` | gRPC / TCP 50052 | **gnmic / pygnmi** から Get / Set / Subscribe |
+
+gNMIは openconfig/gnmi の **`gnmi.proto` 原本**をコンパイルして使っています（自作の擬似protoではありません）。
+NETCONF・RESTCONF・gNMIは同じデータモデルを共有しているため、
+**gNMIで書いた設定がCLIの `show running-config` にそのまま出ます。**
+
+### 障害時の「再収束」まで検証している
+
+収束状態が正しくても、再収束が正しいとは限りません。実際、
+OSPFでは「隣接が落ちず経路も撤回されない」不具合が10件、
+EIGRPでは「2台構成で設定した瞬間に無限再帰でクラッシュ」する不具合が見つかっています。
+
+主回線をshutdownしてフローティングスタティック（AD 210）へ切り替わるか、
+復旧したら戻るか——を各プロトコルで固定しています。
+詳細は [`docs/ospf-failover-floating-static.md`](./docs/ospf-failover-floating-static.md)。
+
+```
+【平常時】 O  172.31.2.2/32 [110/20] via 10.90.1.2, GigabitEthernet1/0/1
+【障害時】 S  172.31.2.2/32 [210/0]  via 10.90.2.2, GigabitEthernet1/0/2   ← 切替
+【復旧後】 O  172.31.2.2/32 [110/20] via 10.90.1.2, GigabitEthernet1/0/1   ← 復帰
+```
+
+### コンセプト: Network Infrastructure Digital Twin + AI Observability
 
 | Digital Twinの要素 | このリポジトリでの実装 |
 |---|---|
-| 物理資産を仮想空間に再現 | Catalyst / Cisco / Si-R / SR-S / ASA / Nexus / BigIP / APRESIA を**コア製品**としてプロトコルエンジンでエミュレート |
-| 仮想モデルからリアルなテレメトリを出力 | 仮想SNMPエージェント（MIB-II）、実UDPでのsyslog / SNMP trap送信（`engine/syslog_sender.py`） |
-| 監視・観測レイヤー | [SNMPモニタリングダッシュボード](./docs/snmp-dashboard.md)、[Syslog AIモニター](./docs/syslog-ai-monitor.md)（Ollamaによる要約 + ルールベース異常検知） |
-| 実世界との橋渡し（**ツール群**） | netmiko/paramikoによる実機連携、`route_injector`（経路負荷試験）、`bigip_qkview_collector`（実機ログ採取）等 |
-
-「AIがインフラを仮想化している」のではなく、**仮想化されたネットワークインフラを
-AIが観測・要約している**、という構図（Network Infrastructure Digital Twin +
-AI Observability）。コア製品とツールの区分は
-[`docs/feature-inventory.md`](./docs/feature-inventory.md) を参照。
+| 物理資産を仮想空間に再現 | Catalyst / Cisco / Si-R / SR-S / ASA / Nexus / APRESIA / BIG-IP をプロトコルエンジンでエミュレート |
+| 仮想モデルからリアルなテレメトリを出力 | 実SNMPエージェント（MIB-II）、実UDPでのsyslog / SNMP trap送信 |
+| 監視・観測レイヤー | [SNMPダッシュボード](./docs/snmp-dashboard.md)、[Syslog AIモニター](./docs/syslog-ai-monitor.md)、Prometheus / Grafana連携 |
+| 実世界との橋渡し | netmiko / paramiko による実機連携、経路負荷試験、実機ログ採取ツール群 |
 
 ---
 
 ## 対応機種
 
-| 機種 | コマンド体系 | 主な実装機能 |
-|------|------------|------------|
-| **富士通 Si-R G120** | Si-R Gシリーズ準拠 | RIP / OSPF / VRRP / BGP |
-| **富士通 SR-S324TR1** | SR-Sシリーズ準拠 | VLAN / LACP / STP |
-| **Cisco Catalyst 9300** | IOS-XE 17.x準拠 | OSPF / BGP / HSRP / STP / EtherChannel |
-| **Cisco Nexus 9300** | NX-OS 10.2準拠 | OSPF / BGP / vPC / VRRP / LACP |
-| **Cisco ASA** | ASA 9.x準拠 | ファイアウォール / NAT / ACL |
-| **APRESIA ApresiaLight GM200** | ApresiaLight準拠 | VLAN / STP / LACP |
-| **F5 BIG-IP** | TMOS / tmsh準拠 | LTM / Pool / Virtual Server ✨ |
+| 機種 | `device_type` | コマンド体系 | 主な実装 |
+|------|---|------------|------------|
+| **Cisco Catalyst 9300** | `catalyst` | IOS-XE 17.x | OSPF / BGP / EIGRP / HSRP / STP / EtherChannel / MPLS / ZBFW / NETCONF / RESTCONF / gNMI |
+| **Cisco Nexus 9300** | `nexus` | NX-OS 10.2 | OSPF / BGP / vPC / VRRP / LACP / MPLS |
+| **Cisco IOS ルータ** | `cisco` | IOS 15.x | RIP / OSPF / BGP / NAT / IPsec |
+| **Cisco ASA** | `asa` | ASA 9.x | ファイアウォール / NAT / ACL |
+| **富士通 Si-R G120/G210** | `sir` | Si-R Gシリーズ | RIP / OSPF / BGP / VRRP / STP / IPsec VPN |
+| **富士通 SR-S324TR1** | `srs` | SR-Sシリーズ | VLAN / LACP / STP |
+| **APRESIA ApresiaLight GM200** | `apresia` | ApresiaLight | VLAN / STP / LACP（L2スイッチのためL3機能は非対応） |
+| **F5 BIG-IP** | `bigip` | TMOS / tmsh | LTM / Pool / Virtual Server |
+| **PC（Linuxホスト）** | `pc` | bash風 | ifconfig / ip / ping / traceroute / curl |
 
 ---
 
 ## 実装済み機能
 
-### 🆕 最新追加機能 (2026-08-30)
-- **BGP Community 属性** — route-map で `set community` / `neighbor send-community` をサポート ✨
-- **Big-IP LTM テスト自動化** — 7シナリオの自動テストツール（Pool/Virtual/Member管理） ✨
-- **BigIP REST API ログ採取** — qkview / UCS を TMOS (Paramiko) + F5OS (REST API) で採取 ✨
-
-### プロトコル
-- **RIP v2** — ネイバー確立・経路学習・タイムアウト・メトリック・**複数ネイバー対応**
-- **OSPF** — DR/BDR選出・LSA交換・SPF計算・Area 0・**複数隣接・複数経路学習・ベンダー間相互接続**
-- **BGP (eBGP)** — セッション確立・経路広告・AS間ルーティング・**複数AS・複数prefix送受信・Community 属性 ✨**
-- **スタティックルート** — AD値比較・フローティングスタティック・**マルチプロトコル経路選択**
-- **VRRP / HSRP** — Master/Backup遷移・preempt
+### ルーティング / スイッチング
+- **RIP v2 / OSPF / BGP / EIGRP** — 隣接確立・経路学習・再収束・認証（MD5）・経路フィルタ・ECMP
+- **スタティックルート** — AD値比較・フローティングスタティック・マルチプロトコル経路選択
+- **VRRP / HSRP / GLBP** — Master/Backup遷移・preempt・オブジェクトトラッキング
 - **STP / Rapid-PVST+** — Root Bridge選出・PortFast・BPDU Guard
-- **LACP / EtherChannel** — バンドル・min-links
-- **vPC (NX-OS)** — Primary/Secondary・Peer-Link・Keepalive
+- **LACP / EtherChannel** — バンドル・min-links・並列リンク
+- **vPC (NX-OS)** / **MPLS (LDP)** / **NHRP / WCCP**
 
-### マルチプロトコル・マルチネイバー対応 (✅ 実装完了)
-- **複数ネイバー環境での動作** — RIP/OSPF/BGP が複数ネイバー・複数経路を同時処理
-- **マルチプロトコル混在** — Static/OSPF/RIP/BGP の AD値による自動優先度選択
-- **ベンダー間相互接続** — Cisco ↔ Catalyst ↔ SR-S での OSPF/RIP 完全動作
-- **フェイルオーバー・復旧** — ネイバー障害検出・Dead タイマー・自動復旧・経路再収束
-- **テスト実施済み** — 83%～100% 成功 (詳細は `docs/multivendor_multiprotocol_test_report.md` を参照)
+### 管理・プログラマビリティ
+- **NETCONF** (TCP 830) — ncclientから接続可能 → [`docs/netconf-catalyst.md`](./docs/netconf-catalyst.md)
+- **RESTCONF** — ietf-interfaces
+- **gNMI** (gRPC) — Capabilities / Get / Set / Subscribe → [`docs/gnmi-telemetry.md`](./docs/gnmi-telemetry.md)
+- **モデル駆動型テレメトリ (MDT)** — `telemetry ietf subscription`
+- **モデルベースAAA (NACM, RFC 8341)** → [`docs/model-based-aaa-nacm.md`](./docs/model-based-aaa-nacm.md)
+- **サービスレベルACL** — NETCONF/RESTCONFへの着信を送信元で制限
+- **ISMU** — データモデル更新パッケージ（`.dmp.bin`）
+- **EEM** — applet から実際に装置の設定を変更できる
+- **App Hosting / OpenFlow** → [`docs/eem-apphosting-openflow.md`](./docs/eem-apphosting-openflow.md)
+
+### セキュリティ / サービス
+- **ZBFW** — ゾーンベースファイアウォール
+- **IPsec VPN** — IKE / DPD（Si-R ↔ Cisco 相互接続）
+- **NAT / NAPT / ACL / DHCP / DHCPv6 / IPv6 ND**
+- **Auto-QoS / QoS ポリシー**
 
 ### CLI
-- **Tab補完** — 実機準拠の前方一致補完
-- **? ヘルプ** — モード別コマンド一覧表示
-- **短縮コマンド** — `sh ip os ne` → `show ip ospf neighbor` 等
-- **複数行一括投入** — クリップボードから設定ブロックをペースト（⎘ボタン）
-- **エラーメッセージ** — ベンダー別 (`% Invalid input detected at '^' marker.` 等)
+- Tab補完・`?` ヘルプ・短縮コマンド（`sh ip os ne`）・複数行一括投入
+- ベンダー別エラーメッセージ（`% Invalid input detected at '^' marker.` 等）
 
 ### ログ・監視
-- **装置内ログ** — `show logging` / `show logging syslog` (機種別形式)
-- **syslog転送** — UDP 514 へリアルタイム転送
-- **SNMP** — コミュニティ設定・トラップ送信
-- **NTP** — サーバ同期シミュレーション
+- 装置内ログ（`show logging`）・syslog転送（UDP 514）・SNMP trap・NTP
+- Prometheus exporter → Grafana ダッシュボード → [`docs/monitoring-stack-guide.md`](./docs/monitoring-stack-guide.md)
 
 ---
 
 ## セットアップ
 
-### 動作環境
-- Python 3.10 以上
-- RAM: 1GB 以上
-- OS: Windows 10/11 / macOS / Linux
-
-### インストール
-
 ```bash
-# リポジトリをクローン
-git clone https://github.com/your-username/network-lab-emulator.git
+git clone https://github.com/w-index-m/network-lab-emulator.git
 cd network-lab-emulator
-
-# パッケージインストール
 pip install -r requirements.txt
-
-# 起動
 python app.py
 ```
 
-ブラウザで http://localhost:8000 を開く。
+ブラウザで http://localhost:8000 を開きます。Windows は `start.bat` をダブルクリック。
 
-### Windows の場合
-
-`start.bat` をダブルクリックするだけで起動します。  
-Python が未インストールの場合はインストール手順を案内します。
+- Python 3.10 以上 / RAM 1GB 以上 / Windows・macOS・Linux
+- 既定のログインは `admin` / `admin`（`NETLAB_AUTH_USER` / `NETLAB_AUTH_PASS` で変更、
+  `NETLAB_AUTH_DISABLE=1` で無効化）
+- **実プロトコルリスナー**（OSPF raw socket / TCP 830 / UDP 161 等）を使うには
+  管理者権限が必要です。無くてもCLIエミュレーションは動作します
+- gNMIを使う場合は `grpcio` / `grpcio-tools` が必要（未導入なら gNMI 機能だけ無効化されます）
 
 ---
 
 ## 使い方
-
-### 基本操作
-
-1. 画面上部の **ランチャー** から機種を選択してターミナルを開く
-2. CLIでコマンドを入力（Tab補完・?ヘルプ対応）
-3. 複数行コンフィグは **⎘ボタン**（貼り付け）で一括投入
 
 ### ラボ構成例（マルチベンダー接続）
 
@@ -131,26 +142,29 @@ APRESIA ─── Si-R G120 ─── Catalyst 9300 ─── Nexus 9300
                               AS65001 ↔ AS65002
 ```
 
-#### Si-R 設定例
+<details>
+<summary>Si-R 設定例</summary>
 
 ```
 configure
 hostname Router-A
 lan 0 ip address 10.0.23.1/30
-router ospf 1
- network 10.0.23.0 0.0.0.3 area 0
-ip rip use use
-ip rip network 10.0.12.0/30
+ospf use on
+ospf area 0.0.0.0
+lan 0 ip ospf use on
 syslog host 192.168.1.100
 save
 ```
+</details>
 
-#### Catalyst 設定例
+<details>
+<summary>Catalyst 設定例</summary>
 
 ```
 conf t
 hostname Cat-SW1
 interface GigabitEthernet1/0/1
+ no switchport
  ip address 10.0.23.2 255.255.255.252
  no shutdown
 router ospf 1
@@ -160,8 +174,10 @@ router bgp 65001
 end
 write memory
 ```
+</details>
 
-#### NX-OS 設定例
+<details>
+<summary>NX-OS 設定例</summary>
 
 ```
 feature ospf
@@ -179,27 +195,68 @@ router bgp 65002
 end
 copy running-config startup-config
 ```
+</details>
 
 ### 確認コマンド例
 
 ```
-# ルーティングテーブル確認
-show ip route
-
-# OSPFネイバー確認
+show ip route                 # ルーティングテーブル（AD/メトリック付き）
+show ip route 172.31.2.2      # 特定経路の詳細（採用理由が分かる）
 show ip ospf neighbor
-
-# BGPセッション確認
 show ip bgp summary
-
-# syslogバッファ確認
-show logging            # Catalyst / NX-OS
-show logging syslog     # Si-R
-
-# vPC状態確認（NX-OS）
-show vpc
-show vpc brief
+show etherchannel 1 detail
+show vpc                      # NX-OS
+show logging / show logging syslog   # Catalyst・NX-OS / Si-R
 ```
+
+### HTTP API
+
+```bash
+# 装置を作る
+curl -X POST localhost:8000/api/device \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"sw1","type":"catalyst","hostname":"SW1"}'
+
+# CLIコマンドを流す（レスポンスキーは "output"）
+curl -X POST localhost:8000/api/cli \
+  -H 'Content-Type: application/json' \
+  -d '{"device_id":"sw1","command":"show ip route"}'
+
+# 装置間をリンクする（パラメータは iface_a / iface_b）
+curl -X POST localhost:8000/api/link \
+  -H 'Content-Type: application/json' \
+  -d '{"a":"sw1","b":"sw2","iface_a":"GigabitEthernet1/0/1","iface_b":"GigabitEthernet1/0/1"}'
+```
+
+---
+
+## テスト
+
+```bash
+pytest tests/           # 全体（1038件、約9分）
+pytest tests/test_ospf_failover.py -v     # OSPF障害切替
+pytest tests/test_gnmi.py -v              # gNMI
+python verify_all.py                      # 全機能確認スクリプト
+```
+
+**現状: 1038 passed / 5 skipped / 0 failed**（テストファイル79本）
+
+カバレッジ: `app.py` 51% / `engine/protocols.py` 70% / `engine/rules.py` 53%
+
+---
+
+## ドキュメント
+
+`docs/` に75本あります。まず読むとよいもの:
+
+| ドキュメント | 内容 |
+|---|---|
+| [`architecture-pitfalls.md`](./docs/architecture-pitfalls.md) | **実装前に必読。** 繰り返し踏んでいる構造的な落とし穴 |
+| [`ospf-failover-floating-static.md`](./docs/ospf-failover-floating-static.md) | 障害切替の検証記録と、そこで見つけた不具合10件 |
+| [`netconf-catalyst.md`](./docs/netconf-catalyst.md) | NETCONF実装とncclientからの実行結果 |
+| [`gnmi-telemetry.md`](./docs/gnmi-telemetry.md) | gNMI / モデル駆動型テレメトリ |
+| [`monitoring-stack-guide.md`](./docs/monitoring-stack-guide.md) | Prometheus / Grafana連携 |
+| [`feature-inventory.md`](./docs/feature-inventory.md) | 機能一覧（コア製品とツールの区分） |
 
 ---
 
@@ -207,318 +264,31 @@ show vpc brief
 
 ```
 network-lab-emulator/
-├── app.py                  # FastAPI サーバー（メインエントリー）
+├── app.py                      # FastAPIサーバ（CLIディスパッチの起点）
 ├── engine/
-│   ├── protocols.py        # プロトコルエンジン（RIP/OSPF/BGP/STP/vPC等）
-│   ├── rules.py            # CLIルールエンジン（コマンド処理・補完）
-│   └── syslog_sender.py    # syslog / SNMP / NTP 送信
-├── static/
-│   ├── index.html          # メインUI
-│   ├── lab_rip.html        # RIPラボ
-│   ├── lab_ospf.html       # OSPFラボ
-│   └── lab_bgp.html        # BGPラボ
-├── tests/
-│   ├── test_protocols.py   # プロトコルテスト
-│   ├── test_device_os.py   # 機種別CLIテスト
-│   ├── test_multivendor_neighbors.py  # マルチネイバー統合テスト（推奨）
-│   ├── test_multivendor_multi_neighbor.py  # pytest 形式テスト
-│   ├── test_extended_topologies.py        # 大規模メッシュ(実タイマー・スタンドアロン)
-│   ├── test_bgp_advanced.py               # BGP高度機能(prepend/local-pref/MED/認証)
-│   ├── test_ospf_multiarea.py             # OSPFマルチエリア(ABR/O IA)
-│   ├── test_filtering_auth_ecmp.py        # 経路フィルタ/MD5認証/ECMP
-│   └── test_netmiko_catalyst.py           # Netmiko統合テスト（HTTP API版）
-├── tools/
-│   ├── eveng_deploy.py     # EVE-NG 実機デプロイツール (netmiko使用)
-│   ├── test_netmiko_integration.py  # 実機Catalyst netmikoテスト
-│   └── test_emulator_api.py         # エミュレーターHTTP API テスト
-├── verify_all.py           # 全機能確認スクリプト（103項目）
-├── lab_multivendor.py      # マルチベンダーラボ検証
-├── demo_rip.py             # RIPデモスクリプト
-├── demo_ospf.py            # OSPFデモスクリプト
-├── demo_bgp.py             # BGPデモスクリプト
-├── docs/
-│   ├── multivendor_multiprotocol_test_report.md  # テスト詳細報告書
-│   ├── route_injector_catalyst_rip.md             # 実機テスト手順（参考）
-│   ├── config-parameters.md                       # プロトコル設定一覧
-│   └── api-reference.md                           # API リファレンス
-├── requirements.txt        # 依存パッケージ
-├── start.bat               # Windows用起動スクリプト
-└── .env.example            # 環境変数サンプル
+│   ├── protocols.py            # プロトコルエンジン（RIP/OSPF/BGP/EIGRP/STP/vPC/MPLS…）
+│   ├── rules.py                # CLIルールエンジン（ベンダー別応答・補完）
+│   ├── real_{ospf,bgp,rip}_agent.py   # 実パケットのプロトコルリスナー
+│   ├── netconf_agent.py        # NETCONFサーバ（SSH/830）
+│   ├── gnmi_agent.py           # gNMIサーバ（gRPC/50052）
+│   ├── snmp_udp_agent.py       # SNMPエージェント（UDP/161）
+│   ├── programmability.py      # EEM / App Hosting / OpenFlow
+│   └── syslog_sender.py        # syslog / SNMP trap / NTP
+├── static/                     # WebUI
+├── tests/                      # pytest（79ファイル）
+├── tools/                      # 運用・検証ツール（20本超）
+└── docs/                       # ドキュメント（75本）
 ```
 
 ---
 
-## テスト実行
-
-### 全機能テスト
-
-```bash
-# 全機能確認（103項目）
-python verify_all.py
-
-# 項目別確認
-python verify_all.py rip      # RIP
-python verify_all.py ospf     # OSPF
-python verify_all.py bgp      # BGP
-python verify_all.py nxos     # NX-OS / vPC
-python verify_all.py cli      # CLI補完・?ヘルプ
-python verify_all.py vendor_log  # ベンダーログ形式
-
-# マルチベンダーラボ検証
-python lab_multivendor.py
-
-# pytest
-pytest tests/
-```
-
-### 複数ネイバー・複数プロトコル統合テスト（✅ 実装完了）
-
-```bash
-# RIP/OSPF/BGP マルチネイバー・複数ベンダー統合テスト
-python tests/test_multivendor_neighbors.py
-
-# テスト結果例:
-# ✅ RIP マルチベンダー複数ネイバー: PASS (複数ネイバー(4)・複数経路(3)学習成功)
-# ✅ OSPF マルチベンダー複数隣接: PASS (複数隣接(6)・複数経路(4)学習)
-# ✅ BGP マルチAS複数ネイバー: PASS (複数AS(4)セッション(6)・prefix(4)学習成功)
-# ✅ マルチプロトコル経路選択: PASS (AD値による経路選択・フェイルオーバー確認)
-# ✅ フェイルオーバー・復旧テスト: PASS (Dead タイマー検出・復旧確認)
-
-# pytest 形式テスト（エンジンレベル）
-pytest tests/test_multivendor_multi_neighbor.py -v
-
-# テスト詳細レポート
-cat docs/multivendor_multiprotocol_test_report.md
-```
-
-**テスト結果サマリー: ✅ 100% 成功（実装完了ベンダー基準）**
-- Cisco / Catalyst / SR-S での全プロトコル対応確認
-- 複数ネイバー環境での経路送受信確認
-- マルチプロトコル混在での経路選択確認
-- フェイルオーバー・復旧動作確認
-
----
-
-## ログ形式（実機準拠）
-
-| 機種 | 形式 |
-|------|------|
-| **Catalyst** | `*Jun 20 12:34:56.789: %OSPF-5-ADJCHG: Process 1, Nbr 10.0.0.2 from LOADING to FULL` |
-| **NX-OS** | `2026 Jun 20 12:34:56.789 Nexus-A %ETH_PORT-5-IF_UP: Interface Ethernet1/1 is up` |
-| **Si-R** | `2026/06/20 12:34:56 Router-A Si-R G120 : [OSPF] neighbor 3.3.3.3 on lan0 state: Full` |
-| **APRESIA** | `2026/06/20 12:34:56: informational: Port 1/0/1 Link Up (1G full-duplex)` |
-
----
-
-## syslogサーバ設定
-
-各機種で以下のコマンドを実行すると、UDP 514 でsyslogサーバに転送されます。
-
-```
-# Catalyst
-logging host 192.168.1.100
-logging trap informational
-
-# NX-OS
-logging server 192.168.1.100 6
-
-# Si-R
-syslog host 192.168.1.100
-
-# APRESIA
-config syslog 192.168.1.100
-```
-
----
-
-## 🚀 拡張テスト（エミュレータ内・仮想空間での検証）
-
-### ✅ 実装・検証完了項目
-
-**優先度 HIGH（完了）**
-- ✅ RIP/OSPF/BGP 複数ネイバー対応
-- ✅ Cisco/Catalyst/SR-S 相互接続
-- ✅ マルチプロトコル混在・経路選択
-- ✅ フェイルオーバー・復旧動作
-- ✅ 大規模トポロジ（8台以上メッシュ・チェーン）
-- ✅ BGP 高度な機能（AS-path prepend / local-preference / MED / route-map）
-- ✅ OSPF マルチエリア（ABR・Area間経路学習）
-
-**優先度 MEDIUM（完了）**
-- ✅ 経路フィルタリング（BGP prefix-list による in/out フィルタ、ge/le レンジ指定）
-- ✅ 認証（RIP MD5 / OSPF MD5 — キー不一致時の拒否を実装・検証）
-- ✅ ECMP（等コストマルチパス、Cisco `maximum-paths` 相当・最大4パス）
-
-**優先度 LOW（未着手）**
-- ⬜ パフォーマンステスト（大規模AS・prefix scale test）
-- ⬜ シミュレーション値の最適化（RIPメトリック非対称性の改善）
-
-### テスト実行コマンドと結果
-
-```bash
-# 大規模トポロジ（実タイマー使用・スタンドアロン実行）
-python tests/test_extended_topologies.py
-# → OSPF 8台フルメッシュ(56隣接Full) / 10台チェーン(9ホップ) /
-#    BGP 8AS フルメッシュ(28セッション) / RIP 8台チェーン(7ホップ)
-#    6/6 成功
-
-# BGP 高度な機能（pytest）
-pytest tests/test_bgp_advanced.py -v
-# → AS-path prepend / local-preference / MED / MD5認証
-#    6/6 成功
-
-# OSPF マルチエリア（pytest）
-pytest tests/test_ospf_multiarea.py -v
-# → ABR複数エリア登録 / Area間経路学習 / 既知のアーキテクチャ制約の明示
-#    7/7 成功
-
-# 経路フィルタリング・認証・ECMP（pytest）
-pytest tests/test_filtering_auth_ecmp.py -v
-# → BGP prefix-list(in/out/ge・le) / RIP・OSPF MD5認証 / ECMP
-#    11/11 成功
-```
-
----
-
-## 🧪 Netmiko テスト（実機・EVE-NG環境対応）
-
-### 対応状況
-
-| 機種 | Netmiko対応 | 設定投入 | 状態確認 |
-|------|-----------|--------|--------|
-| **Catalyst (IOS-XE)** | ✅ `cisco_ios` | ✅ | ✅ |
-| **Cisco ISR (IOS)** | ✅ `cisco_ios` | ✅ | ✅ |
-| **Nexus (NX-OS)** | ✅ `cisco_nxos` | ✅ | ✅ |
-| **ASA** | ✅ `cisco_asa` | ✅ | ✅ |
-| **Si-R (富士通)** | ❌ 標準未対応 | ⚠️ `generic_termserver` | ⚠️ |
-| **SR-S (富士通)** | ❌ 標準未対応 | ⚠️ `generic_termserver` | ⚠️ |
-
-### テストツール
-
-#### 1. **エミュレーター HTTP API テスト**（実機不要）
-
-エミュレーター内のCatalystに対して、HTTP APIを経由してCLIコマンドを送信し、設定変更と状態確認を行います。
-
-```bash
-# ターミナル1: エミュレーターサーバー起動
-python app.py
-
-# ターミナル2: テスト実行
-python tools/test_emulator_api.py --host localhost --port 8000 --device catalyst
-
-# 期待される出力:
-# ✅ Test 1: インターフェース設定投入・確認
-# ✅ Test 2: OSPF設定投入・確認
-# ✅ Test 3: BGP設定投入・確認
-# ✅ Test 4: VLAN設定投入・確認
-# ✅ Test 5: ACL設定投入・確認
-# ✅ Test 6: デバイス状態確認
-# → 6/6 成功
-```
-
-#### 2. **実機・EVE-NG Netmiko テスト**（実機が必要）
-
-実際のCatalystやCisco ISRに対して、netmiko経由でSSH接続し、設定変更と状態確認を行います。
-
-```bash
-# Netmiko インストール
-pip install netmiko
-
-# Catalyst への接続テスト（直接指定）
-python tools/test_netmiko_integration.py \
-  --host 192.168.1.100 \
-  --username admin \
-  --password admin \
-  --device-type cisco_ios
-
-# 環境変数での設定（推奨）
-export CATALYST_HOST=192.168.1.100
-export CATALYST_USER=admin
-export CATALYST_PASS=admin
-python tools/test_netmiko_integration.py --auto-env
-
-# 期待される出力:
-# ✅ Test 1: インターフェース設定投入・確認
-# ✅ Test 2: OSPF設定投入・確認
-# ✅ Test 3: BGP設定投入・確認
-# ✅ Test 4: VLAN設定投入・確認
-# ✅ Test 5: ACL設定投入・確認
-# ✅ Test 6: デバイス状態取得
-# → 6/6 成功
-```
-
-#### 3. **Pytest Netmiko 統合テスト**
-
-```bash
-# Netmiko が環境変数で設定されている場合、実機テストも実行
-NETMIKO_CATALYST_HOST=192.168.1.100 \
-NETMIKO_USERNAME=admin \
-NETMIKO_PASSWORD=admin \
-pytest tests/test_netmiko_catalyst.py -v
-
-# HTTP API版テスト（エミュレーター使用）
-pytest tests/test_netmiko_catalyst.py::TestCatalystNetmikoStyle -v
-```
-
-### テスト内容（各ツール共通）
-
-1. **インターフェース設定** — IP address投入・確認
-2. **OSPF設定** — プロセス設定・隣接確認
-3. **BGP設定** — AS・neighbor設定・セッション確認
-4. **VLAN設定** — VLAN作成・確認
-5. **ACL設定** — Access-list投入・確認
-6. **デバイス状態確認** — ホスト名・インターフェース・ルート確認
-
-### 実装の詳細
-
-**設定変更** — IOS-XE 標準コマンド投入
-```python
-# Netmiko を使用した設定投入例
-commands = [
-    'interface GigabitEthernet1/0/1',
-    'ip address 10.100.1.1 255.255.255.0',
-    'no shutdown'
-]
-net_connect.send_config_set(commands)
-```
-
-**状態確認** — Show コマンドで検証
-```python
-# 設定確認
-output = net_connect.send_command('show running-config interface Gi1/0/1')
-assert '10.100.1.1' in output  # 投入した設定が存在するか確認
-```
-
----
-
-# マルチベンダー・複数ネイバー統合（pytest）
-pytest tests/test_multivendor_multi_neighbor.py -v
-# → 11/11 成功
-```
-
-**現時点の累計テスト実績: pytest形式だけで 60項目超、すべて成功**
-（`test_multivendor_multi_neighbor.py` 11 + `test_ospf_multiarea.py` 7 +
-`test_bgp_advanced.py` 6 + `test_filtering_auth_ecmp.py` 11 +
-`test_protocols.py` 60+ の既存プロトコルテスト群。
-`test_extended_topologies.py` は実タイマー実行が必要なためスタンドアロン、6項目成功）
-
-### 新規実装した設定API（filtering / auth / ECMP）
-
-```python
-# BGP: neighbor prefix-list によるフィルタ（in/out）
-bgp_engine.set_neighbor_prefix_list(device_id, neighbor_id, list_name, 'out')
-filter_engine.add_prefix_list(device_id, list_name, 'permit', '10.1.0.0', 16)
-
-# RIP: MD5認証
-rip_engine.set_authentication(device_id, 'md5', 'secretkey')
-
-# OSPF: MD5認証
-ospf_engine.set_authentication(device_id, 'md5', 'ospfkey')
-
-# ECMP: 等コスト経路の集約取得
-rib_engine.get_ecmp_routes(device_id)
-# → [{'network','prefix','ad','metric','source','next_hops':[...]}]
-```
+## 注意事項
+
+- **これは学習・検証用のエミュレータです。** 実機の完全な代替ではありません。
+  各ドキュメントの「未対応」節に、実機との差を明記しています
+- 既定のログイン情報は `admin` / `admin` です。閉じた環境以外で動かす場合は必ず変更してください
+- `docs/reference/` にベンダー各社のマニュアルPDFが含まれています。
+  再配布の可否は各社の利用条件に従ってください
 
 ---
 
@@ -526,11 +296,10 @@ rib_engine.get_ecmp_routes(device_id)
 
 MIT License — 自由に使用・改変・再配布できます。
 
----
-
 ## 謝辞・参考
 
 - [富士通 Si-R Gシリーズ コマンドリファレンス](https://www.fsastech.com/ja-jp/products/network/router/manual/sir-g/)
 - [Cisco IOS-XE Configuration Guide](https://www.cisco.com/c/en/us/support/ios-nx-os-software/ios-xe-17/series.html)
 - [Cisco NX-OS Configuration Guide](https://www.cisco.com/c/en/us/support/switches/nexus-9000-series-switches/series.html)
 - [APRESIA ApresiaLight ユーザーガイド](https://www.apresia.jp/)
+- [openconfig/gnmi](https://github.com/openconfig/gnmi) — gNMI protoの原本
