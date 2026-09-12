@@ -11,7 +11,7 @@ from typing import Dict, Optional
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +34,7 @@ from engine.protocols import (
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine, mpls_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
+from engine.nexpose import nexpose_engine, page_of as nexpose_page
 from engine.programmability import (
     app_hosting_engine, eem_engine, openflow_engine,
 )
@@ -522,9 +523,10 @@ async def session_auth_middleware(request, call_next):
         if _AUTH_DISABLED or _valid_token(token):
             return await call_next(request)
         return _Response(status_code=403, content="認証が必要です")
-    # RESTCONF: 実機同様、セッショントークンではなくHTTP Basic認証
-    # （リクエスト毎にユーザー名/パスワードを渡す方式）を使う
-    if path.startswith("/restconf/"):
+    # RESTCONF と Nexpose(InsightVM) API は、実機同様セッショントークン
+    # ではなく HTTP Basic 認証（リクエスト毎にユーザー名/パスワード）を使う。
+    # Nexpose API v3 の securityDefinitions も type: basic になっている。
+    if path.startswith("/restconf/") or path.startswith("/api/3/"):
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Basic "):
             import base64 as _b64
@@ -534,9 +536,10 @@ async def session_auth_middleware(request, call_next):
                 user, pw = "", ""
             if _secrets.compare_digest(user, _AUTH_USER) and _secrets.compare_digest(pw, _AUTH_PASS):
                 return await call_next(request)
+        _realm = 'Nexpose' if path.startswith("/api/3/") else 'RESTCONF'
         return _Response(
             status_code=401, content="Unauthorized",
-            headers={"WWW-Authenticate": 'Basic realm="RESTCONF"'})
+            headers={"WWW-Authenticate": f'Basic realm="{_realm}"'})
     # 通常APIはヘッダーまたはクエリパラメータでトークン検証
     token = request.headers.get("X-Session-Token", "") or request.query_params.get("token", "")
     if _valid_token(token):
@@ -6982,6 +6985,224 @@ async def root():
     if index.exists():
         return HTMLResponse(index.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>index.html が見つかりません</h1>")
+
+# ══════════════════════════════════════════════════════════
+# Nexpose / InsightVM Console API v3
+# ══════════════════════════════════════════════════════════
+# Rapid7公式のSwagger 2.0仕様(206エンドポイント)のうち、脆弱性スキャナ
+# として筋が通る最小限だけを実装している:
+#     Site作成 -> スキャン -> Asset検出 -> Vulnerability -> Report
+# スキャン対象はこのエミュレータ上の装置。装置で実際に有効化した管理
+# サービス(SNMP/NETCONF/gNMI)が、そのまま検出結果に効く。
+# 詳細と未対応範囲は docs/nexpose-api.md を参照。
+
+def _np_err(status: int, message: str):
+    """実機のエラー書式に合わせる"""
+    return JSONResponse(status_code=status, content={
+        'status': str(status), 'message': message})
+
+
+@app.get("/api/3")
+async def nexpose_root():
+    return {'links': [{'rel': 'self', 'href': '/api/3'}],
+            'resources': ['sites', 'scans', 'assets', 'vulnerabilities',
+                          'reports']}
+
+
+@app.get("/api/3/administration/info")
+async def nexpose_info():
+    return {'productName': 'Nexpose (emulated)', 'version': '6.6.х',
+            'hostName': 'netlab-console'}
+
+
+# ── Sites ─────────────────────────────────
+@app.get("/api/3/sites")
+async def nexpose_sites(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_engine.sites.values()), page, size)
+
+
+@app.post("/api/3/sites")
+async def nexpose_create_site(body: dict):
+    sid, err = nexpose_engine.create_site(body)
+    if err:
+        return _np_err(400, err)
+    return JSONResponse(status_code=201, content={
+        'id': sid, 'links': [{'rel': 'self', 'href': f'/api/3/sites/{sid}'}]})
+
+
+@app.get("/api/3/sites/{sid}")
+async def nexpose_site(sid: int):
+    site = nexpose_engine.sites.get(sid)
+    if site is None:
+        return _np_err(404, f'site {sid} not found')
+    return site
+
+
+@app.delete("/api/3/sites/{sid}")
+async def nexpose_delete_site(sid: int):
+    if not nexpose_engine.delete_site(sid):
+        return _np_err(404, f'site {sid} not found')
+    return {'links': [{'rel': 'self', 'href': f'/api/3/sites/{sid}'}]}
+
+
+@app.put("/api/3/sites/{sid}/included_targets")
+async def nexpose_site_targets(sid: int, body: list = Body(...)):
+    if not nexpose_engine.set_targets(sid, body):
+        return _np_err(404, f'site {sid} not found')
+    return {'addresses': body}
+
+
+@app.get("/api/3/sites/{sid}/assets")
+async def nexpose_site_assets(sid: int, page: int = 0, size: int = 10):
+    if sid not in nexpose_engine.sites:
+        return _np_err(404, f'site {sid} not found')
+    rows = [a for a in nexpose_engine.assets.values() if a.get('_site') == sid]
+    return nexpose_page(rows, page, size)
+
+
+@app.post("/api/3/sites/{sid}/scans")
+async def nexpose_start_scan(sid: int, body: dict = None):
+    scan_id, err = nexpose_engine.start_scan(sid, device_sessions, body)
+    if err:
+        return _np_err(404, err)
+    return JSONResponse(status_code=201, content={
+        'id': scan_id,
+        'links': [{'rel': 'self', 'href': f'/api/3/scans/{scan_id}'}]})
+
+
+@app.get("/api/3/sites/{sid}/scans")
+async def nexpose_site_scans(sid: int, page: int = 0, size: int = 10):
+    if sid not in nexpose_engine.sites:
+        return _np_err(404, f'site {sid} not found')
+    rows = [s for s in nexpose_engine.scans.values() if s.get('_site') == sid]
+    return nexpose_page(rows, page, size)
+
+
+# ── Scans ─────────────────────────────────
+@app.get("/api/3/scans")
+async def nexpose_scans(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_engine.scans.values()), page, size)
+
+
+@app.get("/api/3/scans/{scan_id}")
+async def nexpose_scan(scan_id: int):
+    scan = nexpose_engine.scans.get(scan_id)
+    if scan is None:
+        return _np_err(404, f'scan {scan_id} not found')
+    return scan
+
+
+@app.post("/api/3/scans/{scan_id}/{status}")
+async def nexpose_scan_status(scan_id: int, status: str):
+    ok, err = nexpose_engine.set_scan_status(scan_id, status)
+    if not ok:
+        return _np_err(404 if 'not found' in (err or '') else 400, err)
+    return {'links': [{'rel': 'self', 'href': f'/api/3/scans/{scan_id}'}]}
+
+
+# ── Assets ────────────────────────────────
+@app.get("/api/3/assets")
+async def nexpose_assets(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_engine.assets.values()), page, size)
+
+
+@app.get("/api/3/assets/{aid}")
+async def nexpose_asset(aid: int):
+    a = nexpose_engine.assets.get(aid)
+    if a is None:
+        return _np_err(404, f'asset {aid} not found')
+    return a
+
+
+@app.get("/api/3/assets/{aid}/services")
+async def nexpose_asset_services(aid: int, page: int = 0, size: int = 10):
+    a = nexpose_engine.assets.get(aid)
+    if a is None:
+        return _np_err(404, f'asset {aid} not found')
+    return nexpose_page(a['services'], page, size)
+
+
+@app.get("/api/3/assets/{aid}/vulnerabilities")
+async def nexpose_asset_vulns(aid: int, page: int = 0, size: int = 10):
+    rows = nexpose_engine.asset_vulnerabilities(aid)
+    if rows is None:
+        return _np_err(404, f'asset {aid} not found')
+    return nexpose_page(rows, page, size)
+
+
+# ── Vulnerabilities ───────────────────────
+@app.get("/api/3/vulnerabilities")
+async def nexpose_vulns(page: int = 0, size: int = 10):
+    return nexpose_page(nexpose_engine.list_vulnerabilities(), page, size)
+
+
+@app.get("/api/3/vulnerabilities/{vid}")
+async def nexpose_vuln(vid: str):
+    v = nexpose_engine.get_vulnerability(vid)
+    if v is None:
+        return _np_err(404, f'vulnerability {vid} not found')
+    return v
+
+
+@app.get("/api/3/vulnerabilities/{vid}/assets")
+async def nexpose_vuln_assets(vid: str):
+    if nexpose_engine.get_vulnerability(vid) is None:
+        return _np_err(404, f'vulnerability {vid} not found')
+    return {'resources': nexpose_engine.vulnerability_assets(vid)}
+
+
+@app.get("/api/3/vulnerabilities/{vid}/solutions")
+async def nexpose_vuln_solutions(vid: str):
+    rows = nexpose_engine.vulnerability_solutions(vid)
+    if rows is None:
+        return _np_err(404, f'vulnerability {vid} not found')
+    return {'resources': rows}
+
+
+# ── Reports ───────────────────────────────
+@app.get("/api/3/reports")
+async def nexpose_reports(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_engine.reports.values()), page, size)
+
+
+@app.post("/api/3/reports")
+async def nexpose_create_report(body: dict):
+    rid, err = nexpose_engine.create_report(body)
+    if err:
+        return _np_err(400, err)
+    return JSONResponse(status_code=201, content={
+        'id': rid, 'links': [{'rel': 'self', 'href': f'/api/3/reports/{rid}'}]})
+
+
+@app.post("/api/3/reports/{rid}/generate")
+async def nexpose_generate_report(rid: int):
+    inst, err = nexpose_engine.generate_report(rid)
+    if err:
+        return _np_err(404, err)
+    return JSONResponse(status_code=201, content={
+        'id': inst,
+        'links': [{'rel': 'self',
+                   'href': f'/api/3/reports/{rid}/history/{inst}'}]})
+
+
+@app.get("/api/3/reports/{rid}/history")
+async def nexpose_report_history(rid: int):
+    rows = nexpose_engine.report_history(rid)
+    if rows is None:
+        return _np_err(404, f'report {rid} not found')
+    return {'resources': rows}
+
+
+@app.get("/api/3/reports/{rid}/content")
+async def nexpose_report_content(rid: int):
+    """実機はPDF/HTML等のバイナリを返すが、検証しやすいテキストで返す
+    （エミュレータ独自。実機APIには無いパス）"""
+    body = nexpose_engine.report_content(rid)
+    if body is None:
+        return _np_err(404, f'report {rid} not found')
+    return _Response(status_code=200, content=body,
+                     media_type='text/plain; charset=utf-8')
+
 
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 

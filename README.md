@@ -257,6 +257,7 @@ python verify_all.py                      # 全機能確認スクリプト
 | [`ospf-failover-floating-static.md`](./docs/ospf-failover-floating-static.md) | 障害切替の検証記録と、そこで見つけた不具合10件 |
 | [`netconf-catalyst.md`](./docs/netconf-catalyst.md) | NETCONF実装とncclientからの実行結果 |
 | [`gnmi-telemetry.md`](./docs/gnmi-telemetry.md) | gNMI / モデル駆動型テレメトリ |
+| [`nexpose-api.md`](./docs/nexpose-api.md) | Nexpose / InsightVM Console API v3 エミュレーション（脆弱性データは架空） |
 | [`monitoring-stack-guide.md`](./docs/monitoring-stack-guide.md) | Prometheus / Grafana連携 |
 | [`feature-inventory.md`](./docs/feature-inventory.md) | 機能一覧（コア製品とツールの区分） |
 

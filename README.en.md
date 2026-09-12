@@ -239,6 +239,7 @@ There are 75 documents under `docs/`, **mostly in Japanese**. Start here:
 | [`ospf-failover-floating-static.md`](./docs/ospf-failover-floating-static.md) | Failover verification and the ten defects it uncovered |
 | [`netconf-catalyst.md`](./docs/netconf-catalyst.md) | NETCONF implementation and real ncclient transcripts |
 | [`gnmi-telemetry.md`](./docs/gnmi-telemetry.md) | gNMI and model-driven telemetry |
+| [`nexpose-api.md`](./docs/nexpose-api.md) | Nexpose / InsightVM Console API v3 emulation (vulnerability data is fictional) |
 | [`monitoring-stack-guide.md`](./docs/monitoring-stack-guide.md) | Prometheus / Grafana integration |
 | [`feature-inventory.md`](./docs/feature-inventory.md) | Feature inventory (core emulation vs. tooling) |
 
