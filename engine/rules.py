@@ -1223,12 +1223,18 @@ class RuleEngine:
             return self._show_arp(state)
 
         # ── show etherchannel (Catalyst/SR-S) ──
-        if re.match(r'^show\s+etherchannel\s+summary', c):
-            return self._show_etherchannel_summary(state)
-        if re.match(r'^show\s+etherchannel\s+detail', c):
-            return self._show_etherchannel_detail(state)
-        if re.match(r'^show\s+etherchannel', c):
-            return self._show_etherchannel_summary(state)
+        # 実機は "show etherchannel [<group>] {summary|detail|...}" のように
+        # グループ番号を挟める。以前は番号付きの形にマッチせず、
+        # "show etherchannel 1 detail" が summary にフォールスルーしていた。
+        m_ec = re.match(r'^show\s+etherchannel(?:\s+(\d+))?'
+                        r'(?:\s+(summary|detail|port-channel|port|protocol))?'
+                        r'\s*$', c)
+        if m_ec:
+            grp = int(m_ec.group(1)) if m_ec.group(1) else None
+            what = m_ec.group(2) or 'summary'
+            if what == 'detail':
+                return self._show_etherchannel_detail(state, grp)
+            return self._show_etherchannel_summary(state, grp)
 
         # ── show lacp (Catalyst/SR-S/Nexus) ──
         if re.match(r'^show\s+lacp\s+neighbor', c):
@@ -2492,8 +2498,12 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
   internal_temp        : {temp} C"""
 
     # ─── show etherchannel summary ────────────────────────────
-    def _show_etherchannel_summary(self, state):
+    def _show_etherchannel_summary(self, state, group=None):
         cgs = getattr(state, 'channel_groups', {})
+        if group is not None:
+            if group not in cgs:
+                return f"Channel-group {group} does not exist."
+            cgs = {group: cgs[group]}
         lines = [
             "Flags:  D - down        P - bundled in port-channel",
             "        I - stand-alone s - suspended",
@@ -2528,8 +2538,12 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             lines.append(f"{grp_id:<7}{po_field:<14}{proto:<12}" + " ".join(member_strs))
         return "\n".join(lines)
 
-    def _show_etherchannel_detail(self, state):
+    def _show_etherchannel_detail(self, state, group=None):
         cgs = getattr(state, 'channel_groups', {})
+        if group is not None:
+            if group not in cgs:
+                return f"Channel-group {group} does not exist."
+            cgs = {group: cgs[group]}
         if not cgs:
             return "No EtherChannels configured."
         lines = []
