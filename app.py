@@ -34,7 +34,8 @@ from engine.protocols import (
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine, mpls_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
-from engine.nexpose import nexpose_engine, page_of as nexpose_page
+from engine.nexpose import (nexpose_engine, page_of as nexpose_page,
+                            SCAN_TEMPLATES as nexpose_scan_templates_catalog)
 from engine.programmability import (
     app_hosting_engine, eem_engine, openflow_engine,
 )
@@ -2018,7 +2019,13 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         _og = orig_groups(snmp_comm, orig)
         name, perm = _og.group(1), snmp_comm.group(2)
         perm = 'ro' if perm in ('ro', 'read-only') else 'rw'
-        if not any(c_['name'] == name for c_ in state.snmp_community):
+        # 既存の名前を再指定したら権限を更新する（実機の挙動）。
+        # 以前は既存名を丸ごと無視していたため、ro→rw の変更が効かなかった。
+        for c_ in state.snmp_community:
+            if c_['name'] == name:
+                c_['perm'] = perm
+                break
+        else:
             state.snmp_community.append({'name': name, 'perm': perm})
         return
     # Cisco: "snmp-server host 192.168.1.200 traps public"
@@ -2143,6 +2150,18 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         views.append({'subtree_number': subtree_number,
                       'type': sir_snmp_view.group(3), 'name': sir_snmp_view.group(4)})
         views.sort(key=lambda v: v['subtree_number'])
+        return
+    # no snmp-server community [<name>] — 名前を省くと全削除
+    # （未実装だったため、一度設定したコミュニティを消せなかった）
+    no_comm = re.match(r'^no\s+snmp-server\s+community(?:\s+(\S+))?'
+                       r'(?:\s+(?:ro|rw|read-only|read-write))?\s*$', c)
+    if no_comm:
+        name = orig_groups(no_comm, orig).group(1)
+        if name:
+            state.snmp_community = [c_ for c_ in state.snmp_community
+                                    if c_['name'] != name]
+        else:
+            state.snmp_community = []
         return
     # no snmp-server host
     no_snmp = re.match(r'^no\s+snmp-server\s+host\s+([\d.]+)', c)
@@ -7064,7 +7083,8 @@ async def nexpose_site_assets(sid: int, page: int = 0, size: int = 10):
 async def nexpose_start_scan(sid: int, body: dict = None):
     scan_id, err = nexpose_engine.start_scan(sid, device_sessions, body)
     if err:
-        return _np_err(404, err)
+        # 存在しないサイトは404、テンプレート指定ミスはリクエスト側の誤りで400
+        return _np_err(404 if 'not found' in err else 400, err)
     return JSONResponse(status_code=201, content={
         'id': scan_id,
         'links': [{'rel': 'self', 'href': f'/api/3/scans/{scan_id}'}]})
@@ -7202,6 +7222,88 @@ async def nexpose_report_content(rid: int):
         return _np_err(404, f'report {rid} not found')
     return _Response(status_code=200, content=body,
                      media_type='text/plain; charset=utf-8')
+
+
+@app.get("/api/3/scan_templates")
+async def nexpose_scan_templates(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_scan_templates_catalog.values()), page, size)
+
+
+@app.get("/api/3/scan_templates/{tid}")
+async def nexpose_scan_template(tid: str):
+    t = nexpose_scan_templates_catalog.get(tid)
+    if t is None:
+        return _np_err(404, f'scan template {tid} not found')
+    return t
+
+
+# ── 認証スキャン用の資格情報 ──
+@app.get("/api/3/sites/{sid}/site_credentials")
+async def nexpose_site_credentials(sid: int, page: int = 0, size: int = 10):
+    rows = nexpose_engine.list_site_credentials(sid)
+    if rows is None:
+        return _np_err(404, f'site {sid} not found')
+    return nexpose_page(rows, page, size)
+
+
+@app.post("/api/3/sites/{sid}/site_credentials")
+async def nexpose_add_site_credential(sid: int, body: dict):
+    cid, err = nexpose_engine.add_site_credential(sid, body)
+    if err:
+        return _np_err(404 if 'not found' in err else 400, err)
+    return JSONResponse(status_code=201, content={
+        'id': cid,
+        'links': [{'rel': 'self',
+                   'href': f'/api/3/sites/{sid}/site_credentials/{cid}'}]})
+
+
+@app.delete("/api/3/sites/{sid}/site_credentials/{cid}")
+async def nexpose_delete_site_credential(sid: int, cid: int):
+    ok, err = nexpose_engine.delete_site_credential(sid, cid)
+    if not ok:
+        return _np_err(404, err)
+    return {'links': [{'rel': 'self', 'href': f'/api/3/sites/{sid}'}]}
+
+
+# ── 脆弱性例外（承認されると次のスキャンから計上されない）──
+@app.get("/api/3/vulnerability_exceptions")
+async def nexpose_exceptions(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_engine.exceptions.values()), page, size)
+
+
+@app.post("/api/3/vulnerability_exceptions")
+async def nexpose_create_exception(body: dict):
+    eid, err = nexpose_engine.create_exception(body)
+    if err:
+        return _np_err(400, err)
+    return JSONResponse(status_code=201, content={
+        'id': eid,
+        'links': [{'rel': 'self',
+                   'href': f'/api/3/vulnerability_exceptions/{eid}'}]})
+
+
+@app.get("/api/3/vulnerability_exceptions/{eid}")
+async def nexpose_exception(eid: int):
+    exc = nexpose_engine.exceptions.get(eid)
+    if exc is None:
+        return _np_err(404, f'vulnerability exception {eid} not found')
+    return exc
+
+
+@app.post("/api/3/vulnerability_exceptions/{eid}/{action}")
+async def nexpose_review_exception(eid: int, action: str, body: dict = None):
+    ok, err = nexpose_engine.review_exception(
+        eid, action, (body or {}).get('comment', ''))
+    if not ok:
+        return _np_err(404 if 'not found' in err else 400, err)
+    return nexpose_engine.exceptions[eid]
+
+
+@app.delete("/api/3/vulnerability_exceptions/{eid}")
+async def nexpose_delete_exception(eid: int):
+    if not nexpose_engine.delete_exception(eid):
+        return _np_err(404, f'vulnerability exception {eid} not found')
+    return {'links': [{'rel': 'self', 'href': '/api/3/vulnerability_exceptions'}]}
 
 
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

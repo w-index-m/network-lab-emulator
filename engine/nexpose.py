@@ -25,12 +25,82 @@ from collections import OrderedDict
 
 
 # ══════════════════════════════════════════
+# スキャンテンプレート
+# ══════════════════════════════════════════
+# 実機の /api/3/scan_templates 相当。テンプレートによって
+# 「ポートを見つけるだけ」か「脆弱性まで評価するか」が変わる。
+SCAN_TEMPLATES = OrderedDict([
+    ('discovery', {
+        'id': 'discovery',
+        'name': 'Discovery Scan',
+        'description': 'Discovers live assets and open services. '
+                       'Does not assess vulnerabilities.',
+        'assessVulnerabilities': False,
+    }),
+    ('full-audit-without-web-spider', {
+        'id': 'full-audit-without-web-spider',
+        'name': 'Full audit without Web Spider',
+        'description': 'Full vulnerability assessment of discovered services.',
+        'assessVulnerabilities': True,
+    }),
+    ('exhaustive', {
+        'id': 'exhaustive',
+        'name': 'Exhaustive',
+        'description': 'Full assessment including checks that only apply '
+                       'when credentials are supplied.',
+        'assessVulnerabilities': True,
+    }),
+])
+
+DEFAULT_TEMPLATE = 'full-audit-without-web-spider'
+
+# 認証情報で使えるサービス（実機の SiteCredential.service より抜粋）
+CREDENTIAL_SERVICES = ('ssh', 'snmp', 'telnet', 'https')
+
+
+# ── 検出条件（authenticated check）────────
+# 認証スキャンでしか判定できないもの。装置の config を読んで初めて
+# 分かる内容を、そのまま関数にしている。
+def _chk_no_aaa(state, ports):
+    return not getattr(state, 'aaa_new_model', False)
+
+
+def _chk_weak_local_password(state, ports):
+    for u in (getattr(state, 'users', None) or []):
+        if int(u.get('privilege', 1)) >= 15 and 0 < len(u.get('password') or '') < 8:
+            return True
+    return False
+
+
+def _chk_snmp_rw_community(state, ports):
+    return any((c.get('perm') or '').lower() == 'rw'
+               for c in (getattr(state, 'snmp_community', None) or []))
+
+
+def _chk_snmp_default_community(state, ports):
+    """既定のコミュニティ名がそのまま使われているか。
+
+    以前はポート161が開いているだけで上げていたため、コミュニティ名を
+    変えても所見が消えなかった（タイトルは "(public)" なのに）。
+    """
+    if 161 not in ports:
+        return False
+    return any((c.get('name') or '').lower() in ('public', 'private')
+               for c in (getattr(state, 'snmp_community', None) or []))
+
+
+# ══════════════════════════════════════════
 # 脆弱性カタログ（このエミュレータ用のダミーデータ）
 # ══════════════════════════════════════════
 # severity は実機同様 'Critical' / 'Severe' / 'Moderate' の3段階。
 # severityScore は 0-10、riskScore は Rapid7 の Real Risk Score を模して
 # 0-1000 のスケールで持たせている（CVSS単体ではなく悪用可能性を加味する、
 # という考え方だけを再現したもの。数値そのものは作り物）。
+#
+# 検出条件は次の2種類:
+#   match_port      … そのポートが開いていれば検出（非認証で分かる）
+#   check           … state を読む関数。requires_auth=True なら
+#                     認証情報が設定されたサイトのスキャンでのみ評価する
 VULN_CATALOG = [
     {
         'id': 'netlab-ssh-weak-kex',
@@ -56,7 +126,7 @@ VULN_CATALOG = [
                        '(Emulated finding — not a real advisory.)',
         'solution': 'Change the community string and restrict access with an ACL.',
         'exploits': 2, 'malwareKits': 1,
-        'match_port': 161,
+        'check': _chk_snmp_default_community, 'port': 161,
     },
     {
         'id': 'netlab-telnet-cleartext',
@@ -92,7 +162,51 @@ VULN_CATALOG = [
                        'account. (Emulated finding — not a real advisory.)',
         'solution': 'Change the default credentials.',
         'exploits': 3, 'malwareKits': 2,
-        'match_default_creds': True,
+        'check': lambda state, ports: _uses_default_creds(state),
+    },
+
+    # ── 認証スキャンでのみ判定できるもの ──
+    {
+        'id': 'netlab-no-aaa-authentication',
+        'title': 'AAA Authentication Not Configured',
+        'severity': 'Severe', 'severityScore': 7, 'riskScore': 631,
+        'cves': ['CVE-0000-0006'],
+        'categories': ['Authentication', 'Configuration'],
+        'description': 'The device does not use AAA, so login attempts are not '
+                       'centrally authenticated or accounted for. '
+                       '(Emulated finding — not a real advisory.)',
+        'solution': 'Enable "aaa new-model" and point authentication at a '
+                    'TACACS+/RADIUS group with local fallback.',
+        'exploits': 0, 'malwareKits': 0,
+        'check': _chk_no_aaa, 'requires_auth': True,
+    },
+    {
+        'id': 'netlab-weak-local-password',
+        'title': 'Privileged Local Account With Short Password',
+        'severity': 'Severe', 'severityScore': 8, 'riskScore': 702,
+        'cves': ['CVE-0000-0007'],
+        'categories': ['Authentication'],
+        'description': 'A local account with privilege level 15 has a password '
+                       'shorter than 8 characters. '
+                       '(Emulated finding — not a real advisory.)',
+        'solution': 'Enforce a minimum password length and re-issue the account '
+                    'secret.',
+        'exploits': 1, 'malwareKits': 0,
+        'check': _chk_weak_local_password, 'requires_auth': True,
+    },
+    {
+        'id': 'netlab-snmp-rw-community',
+        'title': 'SNMP Community With Read-Write Access',
+        'severity': 'Critical', 'severityScore': 9, 'riskScore': 845,
+        'cves': ['CVE-0000-0008'],
+        'categories': ['SNMP', 'Configuration'],
+        'description': 'An SNMP community is configured with read-write access, '
+                       'allowing configuration changes over SNMP. '
+                       '(Emulated finding — not a real advisory.)',
+        'solution': 'Remove the read-write community, or restrict it with an ACL '
+                    'and move to SNMPv3.',
+        'exploits': 2, 'malwareKits': 0,
+        'check': _chk_snmp_rw_community, 'requires_auth': True, 'port': 161,
     },
 ]
 
@@ -123,7 +237,9 @@ class NexposeEngine:
         self.scans = OrderedDict()      # id -> scan
         self.assets = OrderedDict()     # id -> asset
         self.reports = OrderedDict()    # id -> report
-        self._next = {'site': 1, 'scan': 1, 'asset': 1, 'report': 1}
+        self.exceptions = OrderedDict()  # id -> vulnerability exception
+        self._next = {'site': 1, 'scan': 1, 'asset': 1, 'report': 1,
+                      'credential': 1, 'exception': 1}
 
     def _id(self, kind):
         v = self._next[kind]
@@ -135,14 +251,19 @@ class NexposeEngine:
         name = (body or {}).get('name')
         if not name:
             return None, 'name is required'
+        tmpl = (body or {}).get('scanTemplate', DEFAULT_TEMPLATE)
+        if tmpl not in SCAN_TEMPLATES:
+            return None, (f'unknown scan template: {tmpl} '
+                          f'(known: {", ".join(SCAN_TEMPLATES)})')
         sid = self._id('site')
         self.sites[sid] = {
             'id': sid,
             'name': name,
             'description': (body or {}).get('description', ''),
             'importance': (body or {}).get('importance', 'normal'),
-            'scanTemplate': (body or {}).get('scanTemplate', 'full-audit-without-web-spider'),
+            'scanTemplate': tmpl,
             'scanEngine': (body or {}).get('engineId', 1),
+            'credentials': [],
             'type': 'static',
             'assets': 0,
             'riskScore': 0.0,
@@ -168,6 +289,127 @@ class NexposeEngine:
         site['targets'] = list(addresses or [])
         return True
 
+    # ── Site credentials ─────────────────
+    # 認証スキャン用の資格情報。実機同様パスワードは書き込み専用扱いで、
+    # GET しても返さない。
+    def add_site_credential(self, sid, body):
+        site = self.sites.get(sid)
+        if site is None:
+            return None, f'site {sid} not found'
+        body = body or {}
+        name = body.get('name')
+        account = body.get('account') or {}
+        service = (account.get('service') or '').lower()
+        if not name:
+            return None, 'name is required'
+        if service not in CREDENTIAL_SERVICES:
+            return None, (f'unsupported credential service: '
+                          f'{account.get("service")!r} '
+                          f'(supported: {", ".join(CREDENTIAL_SERVICES)})')
+        if service != 'snmp' and not account.get('username'):
+            return None, f'username is required for service "{service}"'
+        if service == 'snmp' and not account.get('community'):
+            return None, 'community is required for service "snmp"'
+        cid = self._id('credential')
+        site['credentials'].append({
+            'id': cid,
+            'name': name,
+            'description': body.get('description', ''),
+            'enabled': bool(body.get('enabled', True)),
+            'service': service,
+            'username': account.get('username', ''),
+            '_secret': account.get('password') or account.get('community') or '',
+        })
+        return cid, None
+
+    def list_site_credentials(self, sid):
+        site = self.sites.get(sid)
+        if site is None:
+            return None
+        return [_credential_public(c) for c in site['credentials']]
+
+    def delete_site_credential(self, sid, cid):
+        site = self.sites.get(sid)
+        if site is None:
+            return False, f'site {sid} not found'
+        before = len(site['credentials'])
+        site['credentials'] = [c for c in site['credentials'] if c['id'] != cid]
+        if len(site['credentials']) == before:
+            return False, f'credential {cid} not found on site {sid}'
+        return True, None
+
+    # ── Vulnerability exception ──────────
+    # 「この所見はうちでは許容する」を登録する運用。承認されたものは
+    # 次のスキャンから件数・リスクスコアの計算に入らない。
+    def create_exception(self, body):
+        body = body or {}
+        vid = body.get('vulnerability')
+        if not vid:
+            return None, 'vulnerability is required'
+        if not any(v['id'] == vid for v in VULN_CATALOG):
+            return None, f'unknown vulnerability: {vid}'
+        reason = body.get('reason')
+        if reason not in ('False Positive', 'Compensating Control',
+                          'Acceptable Use', 'Acceptable Risk', 'Other'):
+            return None, ('reason must be one of: False Positive, '
+                          'Compensating Control, Acceptable Use, '
+                          'Acceptable Risk, Other')
+        scope = body.get('scope') or {}
+        stype = (scope.get('type') or 'global').lower()
+        if stype not in ('global', 'site', 'asset'):
+            return None, f'unsupported scope type: {stype}'
+        if stype != 'global' and scope.get('id') is None:
+            return None, f'scope.id is required for scope type "{stype}"'
+        eid = self._id('exception')
+        self.exceptions[eid] = {
+            'id': eid,
+            'vulnerability': vid,
+            'scope': {'type': stype, 'id': scope.get('id')},
+            'reason': reason,
+            'comment': body.get('comment', ''),
+            'state': 'under-review',
+            'submittedBy': 'admin',
+            'submit': {'date': _iso(time.time()), 'name': 'admin'},
+            'review': None,
+        }
+        return eid, None
+
+    def review_exception(self, eid, action, comment=''):
+        exc = self.exceptions.get(eid)
+        if exc is None:
+            return False, f'exception {eid} not found'
+        if action not in ('approve', 'reject'):
+            return False, f'unsupported review action: {action}'
+        if exc['state'] != 'under-review':
+            return False, (f'exception {eid} is already "{exc["state"]}" '
+                           f'and cannot be reviewed again')
+        exc['state'] = 'approved' if action == 'approve' else 'rejected'
+        exc['review'] = {'date': _iso(time.time()), 'name': 'admin',
+                         'comment': comment}
+        return True, None
+
+    def delete_exception(self, eid):
+        return self.exceptions.pop(eid, None) is not None
+
+    def _is_excepted(self, vid, sid, asset_keys):
+        """承認済みの例外がこの所見に掛かっているか
+
+        asset スコープは Asset ID でも IP でも指定できるようにしている
+        （例外はスキャン前に登録されることがあり、その時点ではまだ
+        Asset ID が採番されていないため）。
+        """
+        for exc in self.exceptions.values():
+            if exc['state'] != 'approved' or exc['vulnerability'] != vid:
+                continue
+            sc = exc['scope']
+            if sc['type'] == 'global':
+                return True
+            if sc['type'] == 'site' and sc['id'] == sid:
+                return True
+            if sc['type'] == 'asset' and sc['id'] in asset_keys:
+                return True
+        return False
+
     # ── Scan ─────────────────────────────
     def start_scan(self, sid, device_sessions, body=None):
         """サイトのスキャンを実行し、対象装置からAssetと脆弱性を作る。
@@ -177,13 +419,21 @@ class NexposeEngine:
         site = self.sites.get(sid)
         if site is None:
             return None, f'site {sid} not found'
+        tmpl_id = (body or {}).get('templateId') or site['scanTemplate']
+        tmpl = SCAN_TEMPLATES.get(tmpl_id)
+        if tmpl is None:
+            return None, (f'unknown scan template: {tmpl_id} '
+                          f'(known: {", ".join(SCAN_TEMPLATES)})')
         targets = self._resolve_targets(site, device_sessions)
         scan_id = self._id('scan')
         now = time.time()
 
+        authenticated = any(c['enabled'] for c in site['credentials'])
         found = []
         for dev_id, state, ip in targets:
-            found.append(self._assess(dev_id, state, ip, sid))
+            found.append(self._assess(dev_id, state, ip, sid,
+                                      assess=tmpl['assessVulnerabilities'],
+                                      authenticated=authenticated))
 
         vsum = {'critical': 0, 'severe': 0, 'moderate': 0, 'total': 0}
         for a in found:
@@ -195,6 +445,8 @@ class NexposeEngine:
             'scanName': (body or {}).get('name') or f'Scan {scan_id}',
             'scanType': 'manual',
             'status': 'finished',
+            'scanTemplate': tmpl_id,
+            'credentialed': authenticated,
             'engineId': site['scanEngine'],
             'engineName': 'Local scan engine',
             'startTime': _iso(now),
@@ -247,27 +499,38 @@ class NexposeEngine:
             out.append((dev_id, state, ip))
         return out
 
-    def _assess(self, dev_id, state, ip, sid):
-        """1台ぶんの診断結果（Asset）を作る"""
+    def _assess(self, dev_id, state, ip, sid, assess=True, authenticated=False):
+        """1台ぶんの診断結果（Asset）を作る
+
+        assess=False（discovery テンプレート）ならサービスの検出までで止め、
+        脆弱性は評価しない。authenticated=False なら requires_auth の
+        チェックは飛ばす（資格情報が無いと config を読めないため）。
+        """
         services = _services_of(state)
         open_ports = {s['port'] for s in services}
-        vulns = []
-        for v in VULN_CATALOG:
-            hit = False
-            if v.get('match_port') and v['match_port'] in open_ports:
-                hit = True
-            if v.get('match_default_creds') and _uses_default_creds(state):
-                hit = True
-            if hit:
-                vulns.append(v)
-
-        counts = {'critical': 0, 'severe': 0, 'moderate': 0}
-        for v in vulns:
-            counts[v['severity'].lower()] += 1
 
         existing = next((a for a in self.assets.values()
                          if a['ip'] == ip and a.get('_site') == sid), None)
         aid = existing['id'] if existing else self._id('asset')
+
+        hits = []
+        if assess:
+            for v in VULN_CATALOG:
+                if v.get('requires_auth') and not authenticated:
+                    continue
+                if v.get('match_port') and v['match_port'] in open_ports:
+                    hits.append(v)
+                elif v.get('check') and v['check'](state, open_ports):
+                    hits.append(v)
+
+        # 承認済みの例外が掛かっているものは件数にもリスクにも入れない
+        keys = {aid, ip}
+        vulns = [v for v in hits if not self._is_excepted(v['id'], sid, keys)]
+        excluded = [v['id'] for v in hits if v not in vulns]
+
+        counts = {'critical': 0, 'severe': 0, 'moderate': 0}
+        for v in vulns:
+            counts[v['severity'].lower()] += 1
         asset = {
             'id': aid,
             'ip': ip,
@@ -275,8 +538,10 @@ class NexposeEngine:
             'os': _OS_BY_TYPE.get(getattr(state, 'device_type', ''), 'Unknown'),
             'type': 'device',
             'mac': _mac_for(dev_id),
-            'assessedForVulnerabilities': True,
+            'assessedForVulnerabilities': bool(assess),
             'assessedForPolicies': False,
+            'credentialStatus': ('credential-status-success' if authenticated
+                                 else 'no-credentials-supplied'),
             'addresses': [{'ip': ip, 'mac': _mac_for(dev_id)}],
             'services': services,
             'rawRiskScore': float(sum(v['riskScore'] for v in vulns)),
@@ -290,6 +555,7 @@ class NexposeEngine:
             '_site': sid,
             '_device_id': dev_id,
             '_vuln_ids': [v['id'] for v in vulns],
+            '_excluded_ids': excluded,
         }
         self.assets[aid] = asset
         return asset
@@ -313,7 +579,8 @@ class NexposeEngine:
             v = next(x for x in VULN_CATALOG if x['id'] == vid)
             out.append({
                 'id': f'{aid}-{vid}',
-                'results': [{'port': v.get('match_port'), 'status': 'vulnerable-version',
+                'results': [{'port': v.get('match_port') or v.get('port'),
+                             'status': 'vulnerable-version',
                              'proof': f'<p>{v["title"]}</p>'}],
                 'since': _iso(time.time()),
                 'status': 'vulnerable',
@@ -388,9 +655,14 @@ class NexposeEngine:
                     continue
                 lines.append(f'    {a["ip"]:<16} {a["hostName"]:<16} '
                              f'{a["os"]}')
+                if not a.get('assessedForVulnerabilities'):
+                    lines.append('      (not assessed — discovery scan)')
                 for vid in a['_vuln_ids']:
                     vv = next(x for x in VULN_CATALOG if x['id'] == vid)
                     lines.append(f'      [{vv["severity"]:<8}] {vv["title"]}')
+                for vid in a.get('_excluded_ids') or []:
+                    vv = next(x for x in VULN_CATALOG if x['id'] == vid)
+                    lines.append(f'      [excepted] {vv["title"]}')
             lines.append('')
         return '\n'.join(lines)
 
@@ -442,16 +714,29 @@ def _services_of(state):
     return out
 
 
+DEFAULT_ACCOUNT_NAMES = ('admin', 'cisco', 'root')
+
+
 def _uses_default_creds(state):
     """既定の管理者アカウントがそのまま残っているか。
 
-    username コマンドで privilege 15 のユーザが作られていれば、
-    その名前と既定名が一致するかで判断する。
+    注意: 以前は存在しない属性 `state.local_users` を読んでいたため
+    常に True（＝常に検出）になっており、ユーザを作り直しても所見が
+    消えなかった。実際のローカルユーザは `state.users` に
+    [{'name':..., 'privilege':..., 'password':...}] の形で入っている。
     """
-    users = getattr(state, 'local_users', None) or {}
+    users = getattr(state, 'users', None) or []
     if not users:
         return True          # 何も設定されていない = 既定のまま
-    return any(u in ('admin', 'cisco') for u in users)
+    return any((u.get('name') or '').lower() in DEFAULT_ACCOUNT_NAMES
+               for u in users)
+
+
+def _credential_public(c):
+    """API公開用。パスワード/コミュニティ文字列は返さない（実機同様）"""
+    return {'id': c['id'], 'name': c['name'], 'description': c['description'],
+            'enabled': c['enabled'],
+            'account': {'service': c['service'], 'username': c['username']}}
 
 
 def _vuln_public(v):
