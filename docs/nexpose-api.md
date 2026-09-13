@@ -163,11 +163,13 @@ Asset のスコアは所見の合計。
 | service | 確かめ方 |
 |---|---|
 | `ssh` | 本物のSSH認証（paramiko クライアント → 22 のCLIサーバ / 830 のNETCONF） |
+| `telnet` | 本物のTelnetログイン（23 のCLIサーバ）→ [`telnet-cli-server.md`](./telnet-cli-server.md) |
 | `snmp` | 本物のSNMP v2c GET を、そのコミュニティで投げる |
-| `telnet` / `https` | 認証できる実体が無いので未検証（`verified: false`） |
+| `https` | **試しようがないので未検証**（`verified: false`）。RESTCONF は装置ごとの `:443` ではなく、アプリ自身のポートで `/restconf/{device_id}/` として提供しており、認証もアプリ全体のユーザだから |
 
-**22 でログインできた場合は、続けて `show running-config` を実際に
-実行して設定を持ち帰る**（`engine/ssh_cli_agent.py` の実SSH CLIサーバ）。
+**22（SSH）や 23（Telnet）でログインできた場合は、続けて
+`show running-config` を実際に実行して設定を持ち帰る**
+（`engine/ssh_cli_agent.py` / `engine/telnet_cli_agent.py` の実CLIサーバ）。
 `requires_auth` の所見は、その**取得した本文**を解析して判定する。
 `DeviceState` を直接覗くのは、config を取れなかったときの代替経路。
 
@@ -413,6 +415,27 @@ SNMP GET で確かめるようにした瞬間に出てきたもの。
     ```
 
 ### 認証後の読み取りを本物のSSHにして分かったこと
+
+### 認証スキャンを telnet まで広げて分かったこと（2件）
+
+14. **`netlab-telnet-cleartext` は一度も成立しない死んだ判定だった** —
+    検出条件が `state.telnet_enabled` を見ていたのに、
+    **この属性を立てるコードがどこにも無かった**。
+    さらに `transport input ssh telnet` は running-config に
+    **ハードコード**されていてコマンド自体が未実装だったので、
+    平文管理を有効にすることも止めることもできなかった。
+    実Telnetサーバと `transport input` を実装した
+    → [`telnet-cli-server.md`](./telnet-cli-server.md)
+
+15. **`https` の候補サービス（装置の :443）は嘘だった** —
+    `candidate_services` が `restconf_enabled` で 443 を挙げていたが、
+    RESTCONF は装置ごとの :443 ではなく**アプリ自身のポート**で
+    `/restconf/{device_id}/` として提供している。そのアドレスでは
+    誰も待ち受けておらず、実プローブでは絶対に確認できない候補
+    だったので外した。`https` 資格情報は未検証のままとし、
+    その理由を note に出すようにした。
+
+---
 
 13. **そもそもCLIをSSHで叩く手段が無かった** —
     CLIは `/api/cli` からしか呼べず、NETCONFサーバ(830)は

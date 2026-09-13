@@ -3061,6 +3061,37 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             state.restconf_service_acl = acls
             return ''
 
+    # ── line vty / transport input ──
+    # 以前は running-config に "transport input ssh telnet" が固定で
+    # 書かれているだけで、コマンドが未実装だった。つまり telnet を
+    # 止める手段が無く、平文管理の所見を直せなかった。
+    if state.device_type in ('cisco', 'catalyst'):
+        m_line = re.match(r'^line\s+(vty)\s+(\d+)(?:\s+(\d+))?\s*$', c)
+        if m_line and state.mode in ('config', 'config-line'):
+            state.mode = 'config-line'
+            state._vty_range = (int(m_line.group(2)),
+                                int(m_line.group(3) or m_line.group(2)))
+            return ''
+        m_ti = re.match(r'^transport\s+input\s+(.+)$', c)
+        if m_ti and state.mode == 'config-line':
+            words = m_ti.group(1).split()
+            allowed = set()
+            for w in words:
+                if w == 'all':
+                    allowed |= {'ssh', 'telnet'}
+                elif w == 'none':
+                    allowed = set()
+                    break
+                elif w in ('ssh', 'telnet'):
+                    allowed.add(w)
+                else:
+                    return f'% Invalid input detected at \'^\' marker.\n  {w}'
+            state.vty_transport_input = allowed
+            # telnet の許可/不許可をそのまま実リスナーに反映する
+            from engine.telnet_cli_agent import ensure_telnet_cli_agent
+            ensure_telnet_cli_agent(device_id, device_sessions, _run_cli_sync)
+            return ''
+
     # ── crypto key generate rsa ── 実機はRSA鍵を作って初めてSSHが
     # 起動する。ここで TCP/22 の実CLIリスナーを立ち上げるので、
     # 本物のSSHクライアントでログインして show コマンドを打てる。
@@ -4537,12 +4568,17 @@ def _build_running_config(device_id: str, state) -> str:
         lines.append(' exec-timeout 0 0')
         lines.append(' logging synchronous')
         lines.append(' transport preferred none')
+        # transport input は以前ここに固定文字列で書かれていたため、
+        # 設定を変えても running-config が変わらず、telnet を止める
+        # 手段も無かった。実際の設定値を出す。
+        _ti = getattr(state, 'vty_transport_input', None)
+        _ti_line = ' transport input ' + _format_transport_input(_ti)
         lines.append('line vty 0 4')
         lines.append(' login local')
-        lines.append(' transport input ssh telnet')
+        lines.append(_ti_line)
         lines.append('line vty 5 15')
         lines.append(' login local')
-        lines.append(' transport input ssh telnet')
+        lines.append(_ti_line)
         # syslog
         syslog = getattr(state, 'syslog_servers', [])
         if syslog:
@@ -5612,10 +5648,13 @@ def _register_icmp(device_id: str):
         asyncio.ensure_future(ensure_snmp_agent(device_id, device_sessions, snmp_agent))
     except RuntimeError:
         pass  # イベントループが無い呼び出し元（起動シーケンス等）からは無視
-    # SSH CLIリスナーも管理IPの変更に追従させる（鍵が無ければ何もしない）
+    # SSH/Telnet の実CLIリスナーも管理IPの変更に追従させる
+    # （鍵が無い / telnet が許可されていなければ何もしない）
     try:
         from engine.ssh_cli_agent import ensure_ssh_cli_agent
+        from engine.telnet_cli_agent import ensure_telnet_cli_agent
         ensure_ssh_cli_agent(device_id, device_sessions, _run_cli_sync)
+        ensure_telnet_cli_agent(device_id, device_sessions, _run_cli_sync)
     except Exception:
         pass
 
@@ -5727,6 +5766,22 @@ async def api_load():
     _load_config()
     return {"ok": True, "devices": list(device_sessions.keys())}
 
+def _format_transport_input(value) -> str:
+    """vty の transport input を実機の表記に直す
+
+    既定（未設定）は ssh のみ。実機の既定は telnet も許可だが、
+    装置を作っただけで平文ポートが開くのは事故のもとなので、
+    このエミュレータでは明示設定を要求する
+    （docs/telnet-cli-server.md に明記）。
+    """
+    allowed = set(value) if value else {'ssh'}
+    if not allowed:
+        return 'none'
+    if allowed >= {'ssh', 'telnet'}:
+        return 'all'
+    return ' '.join(sorted(allowed))
+
+
 def _run_cli_sync(device_id: str, command: str) -> str:
     """SSHサーバのスレッドからCLIを実行する橋渡し
 
@@ -5753,6 +5808,7 @@ def _stop_real_listeners(dev_id: str):
                     ('engine.gnmi_agent', 'stop_gnmi_agent'),
                     ('engine.snmp_udp_agent', 'stop_snmp_agent'),
                     ('engine.ssh_cli_agent', 'stop_ssh_cli_agent'),
+                    ('engine.telnet_cli_agent', 'stop_telnet_cli_agent'),
                     ('engine.real_ospf_agent', 'stop_ospf_agent')):
         try:
             m = __import__(mod, fromlist=[fn])

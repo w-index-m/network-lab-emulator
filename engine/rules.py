@@ -451,6 +451,7 @@ def _expand_port_list(raw: str):
 CONFIG_SUBMODES = {
     # モード名                  親モード              exit時に消す属性
     "config-if":               ("config",            ()),
+    "config-line":             ("config",            ('_vty_range',)),
     "config-router":           ("config",            ()),
     "config-vlan":             ("config",            ()),
     "config-crypto":           ("config",            ('_ike_policy_num',)),

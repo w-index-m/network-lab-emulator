@@ -414,6 +414,93 @@ def test_ssh_port_22_is_discovered_by_the_scan(ssh_device):
 
 
 # ══════════════════════════════════════════
+# Telnet（平文管理）
+# ══════════════════════════════════════════
+def _telnet_on():
+    for c in ('configure terminal', 'line vty 0 4', 'transport input all',
+              'end'):
+        _cli(c)
+    time.sleep(1.2)
+
+
+def _telnet_off():
+    for c in ('configure terminal', 'line vty 0 4', 'transport input ssh',
+              'end'):
+        _cli(c)
+    time.sleep(1.2)
+
+
+def test_cleartext_finding_only_fires_when_telnet_is_really_open(site):
+    """回帰テスト: この所見は一度も成立しない死んだ判定だった
+
+    検出条件が `state.telnet_enabled` を見ていたのに、その属性を
+    立てるコードがどこにも無かった。
+    """
+    assert 'netlab-telnet-cleartext' not in _scan(site)['_vuln_ids']
+
+    _telnet_on()
+    a = _scan(site)
+    assert ('tcp', 23) in _ports(a)
+    assert 'netlab-telnet-cleartext' in a['_vuln_ids']
+
+    _telnet_off()
+    a = _scan(site)
+    assert ('tcp', 23) not in _ports(a)
+    assert 'netlab-telnet-cleartext' not in a['_vuln_ids']
+
+
+def test_telnet_credentials_are_really_tried(site):
+    _telnet_on()
+    _cred(site, 'bad-tn', {'service': 'telnet', 'username': 'admin',
+                           'password': 'definitely-wrong'})
+    a = _scan(site)
+    assert _detail(a, 'bad-tn')['verified'] is False
+    assert a['credentialStatus'] == 'credential-status-login-failed'
+
+    _cred(site, 'good-tn', {'service': 'telnet', 'username': 'admin',
+                            'password': 'admin'})
+    a = _scan(site)
+    d = _detail(a, 'good-tn')
+    assert d['verified'] is True
+    assert 'cleartext' in d['note']
+    assert a['credentialStatus'] == 'credential-status-success'
+
+
+def test_telnet_credential_reads_the_config_and_drives_findings(site):
+    """Telnetでも `show running-config` を実際に読むこと"""
+    _telnet_on()
+    _cred(site, 'tn', {'service': 'telnet', 'username': 'admin',
+                       'password': 'admin'})
+    a = _scan(site)
+    assert 'read running-config' in _detail(a, 'tn')['note']
+    assert 'netlab-no-aaa-authentication' in a['_vuln_ids']
+
+
+def test_telnet_credential_when_the_service_is_closed(site):
+    _telnet_off()
+    _cred(site, 'tn', {'service': 'telnet', 'username': 'admin',
+                       'password': 'admin'})
+    a = _scan(site)
+    assert _detail(a, 'tn')['note'] == 'no Telnet service found'
+    assert a['credentialStatus'] == 'credential-status-service-not-found'
+
+
+def test_https_credentials_are_reported_as_unverified(site):
+    """RESTCONFは装置ごとの:443では提供していないので試しようがない
+
+    以前は candidate_services が 443 を挙げていたが、そのアドレスでは
+    誰も待ち受けておらず、実プローブでは絶対に確認できない候補だった。
+    """
+    _cred(site, 'web', {'service': 'https', 'username': 'admin',
+                        'password': 'admin'})
+    a = _scan(site)
+    d = _detail(a, 'web')
+    assert d['verified'] is False
+    assert 'not implemented' in d['note']
+    assert ('tcp', 443) not in _ports(a)
+
+
+# ══════════════════════════════════════════
 # SNMPコミュニティの照合（実機と同じ「黙って捨てる」）
 # ══════════════════════════════════════════
 def _snmp_get(ip, community, oid='1.3.6.1.2.1.1.5.0', timeout=1.5):

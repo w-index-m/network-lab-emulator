@@ -896,8 +896,27 @@ def verify_credentials(credentials, ip, services):
                 any_service = True
                 ok = probe_snmp(ip, 161, c['_secret'])
                 note = 'community accepted' if ok else 'community rejected'
+        elif svc == 'telnet':
+            if 23 not in open_tcp:
+                note = 'no Telnet service found'
+            else:
+                any_service = True
+                ok, cfg = probe_telnet_login(ip, 23, c['username'],
+                                             c['_secret'],
+                                             fetch_config=(config is None))
+                if ok and cfg:
+                    config = cfg
+                    note = (f'authenticated on tcp/23 (cleartext), '
+                            f'read running-config ({len(cfg)} bytes)')
+                elif ok:
+                    note = 'authenticated on tcp/23 (cleartext)'
+                else:
+                    note = 'login failed'
         else:
-            # telnet/https はこのエミュレータに認証できる実体が無い
+            # https は装置ごとの待ち受けが無い。RESTCONF はアプリ自身の
+            # ポートで /restconf/{device_id}/ として提供していて、
+            # 認証もアプリ全体のユーザなので、装置の資格情報としては
+            # 試しようがない（docs/nexpose-api.md の未対応範囲を参照）
             note = f'{svc} verification not implemented'
         any_ok = any_ok or ok
         details.append({'id': c['id'], 'name': c['name'], 'service': svc,
@@ -910,6 +929,124 @@ def verify_credentials(credentials, ip, services):
     else:
         status = CRED_FAILED
     return any_ok, status, details, config
+
+
+def _telnet_allowed(state):
+    """vty の transport input に telnet が含まれているか
+
+    以前は `state.telnet_enabled` を見ていたが、**この属性を立てる
+    コードがどこにも無かった**ので、平文管理の所見は一度も成立しない
+    死んだ判定だった。実際の設定値を見る。
+    """
+    try:
+        from engine.telnet_cli_agent import telnet_allowed
+    except Exception:                                   # pragma: no cover
+        return False
+    return telnet_allowed(state)
+
+
+def probe_telnet_login(ip, port, username, password, timeout=6.0,
+                       fetch_config=False):
+    """本物のTelnetログインを試す。
+
+    平文なので Username:/Password: のプロンプトに素で流し込むだけ。
+    「平文だから資格情報がそのまま流れる」というのが、この所見の
+    そもそもの中身でもある。
+
+    戻り値は (通ったか, config文字列 or None)。
+
+    注意: Python 3.13 で telnetlib が標準ライブラリから外れたので、
+    素のソケットで実装している（依存を増やさないため）。
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((ip, int(port)))
+    except OSError:
+        s.close()
+        return False, None
+    try:
+        hit, _ = _telnet_expect(s, [b'Username:'], timeout)
+        if hit is None:
+            return False, None
+        s.sendall(username.encode() + b'\r\n')
+        hit, _ = _telnet_expect(s, [b'Password:'], timeout)
+        if hit is None:
+            return False, None
+        s.sendall(password.encode() + b'\r\n')
+        # プロンプト(#)が出れば成功、"Login invalid" なら失敗
+        hit, buf = _telnet_expect(s, [b'#', b'Login invalid'], timeout)
+        if hit != b'#':
+            return False, None
+        if not fetch_config:
+            return True, None
+        s.sendall(b'show running-config\r\n')
+        # 出力が終わってプロンプトが戻るまで読む
+        import time as _t
+        end, out = _t.time() + timeout, b''
+        s.settimeout(0.5)
+        while _t.time() < end:
+            try:
+                chunk = s.recv(8192)
+            except socket.timeout:
+                if b'\nend' in out or out.rstrip().endswith(b'#'):
+                    break
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += _strip_iac(chunk)
+        return True, out.decode(errors='replace')
+    except OSError:
+        return False, None
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def _telnet_expect(sock, needles, timeout=5.0):
+    """needles のどれかが現れるまで読む。現れた needle を返す（無ければ None）"""
+    import time as _t
+    buf = b''
+    end = _t.time() + timeout
+    sock.settimeout(0.5)
+    while _t.time() < end:
+        try:
+            chunk = sock.recv(4096)
+        except socket.timeout:
+            continue
+        except OSError:
+            return None, buf
+        if not chunk:
+            return None, buf
+        buf += _strip_iac(chunk)
+        for n in needles:
+            if n in buf:
+                return n, buf
+    return None, buf
+
+
+def _strip_iac(data):
+    """Telnetのオプション交渉バイト列を落とす"""
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        if data[i] == 255:                      # IAC
+            if i + 1 < len(data) and data[i + 1] in (251, 252, 253, 254):
+                i += 3
+                continue
+            if i + 1 < len(data) and data[i + 1] == 250:    # SB ... SE
+                j = data.find(bytes([255, 240]), i)
+                i = len(data) if j < 0 else j + 2
+                continue
+            i += 2
+            continue
+        out.append(data[i])
+        i += 1
+    return bytes(out)
 
 
 def candidate_services(state):
@@ -936,9 +1073,11 @@ def candidate_services(state):
     if getattr(state, 'gnxi_secure_server', False):
         add(int(getattr(state, 'gnxi_secure_port', 9339) or 9339), 'gNMI',
             'tcp', 'gRPC', 'TLS')
-    if getattr(state, 'restconf_enabled', False):
-        add(443, 'HTTPS', 'tcp', 'nginx', '')
-    if getattr(state, 'telnet_enabled', False):
+    # RESTCONF は装置ごとの :443 ではなく、アプリ自身のポートで
+    # /restconf/{device_id}/... として提供している。以前はここで
+    # 443 を候補に挙げていたが、そのアドレスでは誰も待ち受けておらず
+    # 実プローブでは絶対に確認できない（＝嘘の候補だった）ので外した。
+    if _telnet_allowed(state):
         add(23, 'Telnet', 'tcp', '', '')
     return out
 
