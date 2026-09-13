@@ -513,7 +513,11 @@ SSH/Telnet CLIサーバに user EXEC / privileged EXEC の区別
 - Nexposeの site_credentials が公開鍵を扱えない（username/passwordのみ）。
   SSH CLIサーバ自体は `ip ssh pubkey-chain` の公開鍵認証に対応済み
   → [`ssh-cli-server.md`](./ssh-cli-server.md)
-- 権限昇格（enable）
+- **enable権限昇格そのものは別セッションで実装済み**
+  （[`ssh-cli-server.md`](./ssh-cli-server.md)）。ただし Nexpose 側は
+  それを使って `enable` を試すところまではしていない — privilege 1
+  の資格情報は認証止まりで、config を読めないぶんは
+  `DeviceState` 直読みにフォールバックするだけ（§3.5 の続き参照）
 - Scan Engine / Engine Pool、スケジュールスキャン、非同期実行
   （`POST .../scans` はその場で完了して `finished` を返す）
 - Scan Template のチューニング（3種類の固定テンプレートのみ）
