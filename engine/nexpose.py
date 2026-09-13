@@ -58,6 +58,16 @@ DEFAULT_TEMPLATE = 'full-audit-without-web-spider'
 # 認証情報で使えるサービス（実機の SiteCredential.service より抜粋）
 CREDENTIAL_SERVICES = ('ssh', 'snmp', 'telnet', 'https')
 
+# 実機の SiteCredential.account.permissionElevation の許容値
+# （Rapid7公式Swaggerに実在する列挙。"privileged-exec" が
+# Cisco の `enable` に相当する）。
+PERMISSION_ELEVATION_TYPES = ('none', 'sudo', 'sudosu', 'su', 'pbrun',
+                             'privileged-exec')
+# 機能として実際にシミュレートしているのはこれだけ。su/sudo/pbrun等は
+# UNIX系装置向けで、このエミュレータにその実体が無いため、
+# 受理はするが素通しする（何も昇格しない）。
+IMPLEMENTED_ELEVATION_TYPES = ('privileged-exec',)
+
 
 # ── 検出条件（authenticated check）────────
 # 認証スキャンでしか判定できないもの。装置の config を読んで初めて
@@ -333,6 +343,23 @@ class NexposeEngine:
             return None, f'username is required for service "{service}"'
         if service == 'snmp' and not account.get('community'):
             return None, 'community is required for service "snmp"'
+
+        elevation = (account.get('permissionElevation') or 'none').lower()
+        if elevation not in PERMISSION_ELEVATION_TYPES:
+            return None, (f'unsupported permissionElevation: '
+                          f'{account.get("permissionElevation")!r} '
+                          f'(supported: {", ".join(PERMISSION_ELEVATION_TYPES)})')
+        elevation_user = account.get('permissionElevationUsername', '')
+        elevation_pw = account.get('permissionElevationPassword', '')
+        # 実機の規則: none/pbrun 以外はユーザ名・パスワードとも必須
+        if elevation not in ('none', 'pbrun'):
+            if not elevation_user:
+                return None, ('permissionElevationUsername is required '
+                              f'when permissionElevation is "{elevation}"')
+            if not elevation_pw:
+                return None, ('permissionElevationPassword is required '
+                              f'when permissionElevation is "{elevation}"')
+
         cid = self._id('credential')
         site['credentials'].append({
             'id': cid,
@@ -342,6 +369,9 @@ class NexposeEngine:
             'service': service,
             'username': account.get('username', ''),
             '_secret': account.get('password') or account.get('community') or '',
+            'elevation': elevation,
+            'elevation_username': elevation_user,
+            '_elevation_secret': elevation_pw,
         })
         return cid, None
 
@@ -795,8 +825,33 @@ def probe_snmp(ip, port=161, community='public', timeout=PROBE_TIMEOUT):
             pass
 
 
+def _ssh_expect(chan, needles, timeout=6.0):
+    """paramikoの対話チャンネルから、needlesのどれかが出るまで読む。
+
+    `engine/telnet_cli_agent.py` で使っている素ソケット版
+    `_telnet_expect` の paramiko Channel 版。IACの読み飛ばしが
+    要らない分だけ単純。
+    """
+    import time as _t
+    buf = b''
+    end = _t.time() + timeout
+    chan.settimeout(0.5)
+    while _t.time() < end:
+        try:
+            chunk = chan.recv(4096)
+        except Exception:
+            continue
+        if not chunk:
+            return None, buf
+        buf += chunk
+        for n in needles:
+            if n in buf:
+                return n, buf
+    return None, buf
+
+
 def probe_ssh_login(ip, port, username, password, timeout=4.0,
-                    fetch_config=False):
+                    fetch_config=False, enable_password=None):
     """本物のSSHログインを試す。
 
     このエミュレータのNETCONFサーバ(830)とCLIサーバ(22)は、どちらも
@@ -806,12 +861,20 @@ def probe_ssh_login(ip, port, username, password, timeout=4.0,
 
     fetch_config=True かつ CLI が喋れるポート(22)なら、続けて
     `show running-config` を**実際に実行して**中身を持ち帰る。
-    戻り値は (通ったか, config文字列 or None)。
+
+    enable_password を渡すと、`show running-config` の前に対話シェルで
+    `enable` を実行し、そのパスワードで昇格を試みてから読む
+    （実機の InsightVM が site credential に持たせる
+    `permissionElevation: "privileged-exec"` に相当。
+    docs/nexpose-api.md 参照）。
+
+    戻り値は (通ったか, config文字列 or None, elevated)。
+    elevated は昇格を試みていなければ None、試みた結果は True/False。
     """
     try:
         import paramiko
     except Exception:                                   # pragma: no cover
-        return False, None
+        return False, None, None
     cli = paramiko.SSHClient()
     cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
@@ -824,14 +887,19 @@ def probe_ssh_login(ip, port, username, password, timeout=4.0,
             cli.close()
         except Exception:
             pass
-        return False, None
+        return False, None, None
 
     config = None
+    elevated = None
     if fetch_config:
         try:
-            _in, out, _err = cli.exec_command('show running-config',
-                                              timeout=timeout)
-            fetched = out.read().decode(errors='replace')
+            if enable_password:
+                elevated, fetched = _elevate_and_read_config(
+                    cli, enable_password, timeout)
+            else:
+                _in, out, _err = cli.exec_command('show running-config',
+                                                  timeout=timeout)
+                fetched = out.read().decode(errors='replace')
             # privilege 1 のアカウントで認証はできたが `show
             # running-config` はprivileged EXEC専用コマンドなので
             # 拒否される、というケースがある（engine/ssh_cli_agent.py
@@ -846,7 +914,35 @@ def probe_ssh_login(ip, port, username, password, timeout=4.0,
         cli.close()
     except Exception:
         pass
-    return True, config
+    return True, config, elevated
+
+
+def _elevate_and_read_config(cli, enable_password, timeout):
+    """対話シェルで `enable` してから `show running-config` を読む。
+
+    execチャンネル（`exec_command`）は1コマンド1回きりで対話できない
+    ので、`enable` のパスワード入力には対話シェル（`invoke_shell`）
+    が要る。戻り値は (昇格できたか, 読めた本文)。
+    """
+    chan = cli.invoke_shell()
+    try:
+        _ssh_expect(chan, [b'#', b'>'], timeout)      # 最初のプロンプト
+        chan.send('enable\n')
+        hit, _buf = _ssh_expect(chan, [b'Password:'], timeout)
+        elevated = False
+        if hit is not None:
+            chan.send(enable_password + '\n')
+            hit2, buf2 = _ssh_expect(chan, [b'#'], timeout)
+            elevated = (hit2 == b'#' and b'Access denied' not in buf2
+                       and b'No password set' not in buf2)
+        chan.send('show running-config\n')
+        _hit, out = _ssh_expect(chan, [b'\r\nend', b'#'], timeout)
+        return elevated, out.decode(errors='replace')
+    finally:
+        try:
+            chan.close()
+        except Exception:
+            pass
 
 
 # credentialStatus の値。Swagger仕様には列挙が無い（レポート側の
@@ -880,20 +976,31 @@ def verify_credentials(credentials, ip, services):
             # 実行して設定を持ち帰れるため（830 は netconf サブシステム
             # しか受け付けないので、認証の可否しか分からない）。
             ports = [p for p in (22, 830) if p in open_tcp]
+            # permissionElevation: "privileged-exec" が実機の
+            # Cisco enable 相当。su/sudo/pbrun等は受理だけしていて
+            # 機能的には何もしない（UNIX系向けでこのエミュレータに
+            # 実体が無いため）。
+            elevate_pw = (c.get('_elevation_secret')
+                         if c.get('elevation') in IMPLEMENTED_ELEVATION_TYPES
+                         else None)
             if not ports:
                 note = 'no SSH service found'
             else:
                 any_service = True
                 for p in ports:
-                    ok, cfg = probe_ssh_login(ip, p, c['username'], c['_secret'],
-                                              fetch_config=(p == 22))
+                    ok, cfg, elevated = probe_ssh_login(
+                        ip, p, c['username'], c['_secret'],
+                        fetch_config=(p == 22),
+                        enable_password=elevate_pw if p == 22 else None)
                     if ok:
+                        note = f'authenticated on tcp/{p}'
+                        if elevated is True:
+                            note += ' (elevated via enable)'
+                        elif elevated is False:
+                            note += ', enable failed'
                         if cfg:
                             config = cfg
-                            note = (f'authenticated on tcp/{p}, '
-                                    f'read running-config ({len(cfg)} bytes)')
-                        else:
-                            note = f'authenticated on tcp/{p}'
+                            note += f', read running-config ({len(cfg)} bytes)'
                         break
                 else:
                     note = 'login failed'
@@ -1168,10 +1275,18 @@ def _uses_default_creds(state):
 
 
 def _credential_public(c):
-    """API公開用。パスワード/コミュニティ文字列は返さない（実機同様）"""
+    """API公開用。パスワード/コミュニティ文字列は返さない（実機同様）。
+
+    permissionElevation と そのusernameは秘密ではないので返す
+    （permissionElevationPasswordは秘密なので返さない）。
+    """
+    account = {'service': c['service'], 'username': c['username']}
+    elevation = c.get('elevation', 'none')
+    if elevation != 'none':
+        account['permissionElevation'] = elevation
+        account['permissionElevationUsername'] = c.get('elevation_username', '')
     return {'id': c['id'], 'name': c['name'], 'description': c['description'],
-            'enabled': c['enabled'],
-            'account': {'service': c['service'], 'username': c['username']}}
+            'enabled': c['enabled'], 'account': account}
 
 
 def _vuln_public(v):

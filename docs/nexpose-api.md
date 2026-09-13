@@ -182,6 +182,64 @@ Asset のスコアは所見の合計。
 830 は netconf サブシステムしか受け付けないので、そちらでログインした
 場合は**認証の可否しか分からない**（`note` に取得有無が出る）。
 
+### 権限昇格（`permissionElevation`）— privilege 1 でも config を読む
+
+privilege 1 のアカウントでは `show running-config` が user EXEC で
+拒否される（[`ssh-cli-server.md`](./ssh-cli-server.md) の enable
+昇格）。実機の InsightVM はこれに対応するため、SSH の site
+credential に `permissionElevation` を持たせられる。これは
+**Rapid7公式Swaggerに実在するフィールド**（`SharedCredentialAccount`）で、
+値は `none` / `sudo` / `sudosu` / `su` / `pbrun` / `privileged-exec`
+の6種類。`privileged-exec` が Cisco の `enable` に相当する。
+
+```json
+{
+  "name": "elevated",
+  "account": {
+    "service": "ssh",
+    "username": "lowpriv", "password": "LowP@ss",
+    "permissionElevation": "privileged-exec",
+    "permissionElevationUsername": "enable",
+    "permissionElevationPassword": "En@bleSecret1"
+  }
+}
+```
+
+`permissionElevation` が `none`/`pbrun` 以外なら、実機の規則どおり
+`permissionElevationUsername`/`permissionElevationPassword` の両方を
+必須にしている（`privileged-exec` に実際のユーザ名は要らないが、
+このフィールド自体は汎用モデルの一部で、値は使わず必須チェックだけ
+実機に合わせている）。
+
+**このエミュレータで実際に昇格を試みるのは `privileged-exec` だけ**。
+`sudo`/`sudosu`/`su`/`pbrun` はUNIX系装置向けで、このエミュレータに
+その実体が無いため、受理はするが何もしない（素通し）。
+
+`privileged-exec` を指定すると、SSHログイン後に対話シェルで
+`enable` → パスワードを実際に送り、昇格できたかどうかで
+`show running-config` を読むかどうかが変わる。
+
+```
+=== 昇格無し（比較用）===
+   plain  ssh  verified=True  authenticated on tcp/22
+
+=== permissionElevation: privileged-exec + 正しいパスワード ===
+   elevated  ssh  verified=True
+             authenticated on tcp/22 (elevated via enable), read running-config (...)
+   findings に netlab-no-aaa-authentication が乗る（aaa new-model 未設定のため）
+
+=== permissionElevation: privileged-exec + 間違ったパスワード ===
+   bad-elev  ssh  verified=True   authenticated on tcp/22, enable failed
+```
+
+`verified` はSSHログイン自体が通ったかどうかで、昇格の成否とは
+別。昇格に失敗しても資格情報自体は無効にならない（実機も同様、
+権限不足で一部データが取れないだけで認証情報としては有効）。
+
+`permissionElevationPassword` は他の秘密フィールドと同じく
+GETしても返らない。`permissionElevation` と
+`permissionElevationUsername` は秘密ではないので返る。
+
 `credentialStatus` に結果が出る。Swagger仕様にこの列挙は無い
 （レポート側のデータモデルにあり、API定義には現れない）ので、
 実機の表記に寄せた独自の値。
@@ -513,11 +571,9 @@ SSH/Telnet CLIサーバに user EXEC / privileged EXEC の区別
 - Nexposeの site_credentials が公開鍵を扱えない（username/passwordのみ）。
   SSH CLIサーバ自体は `ip ssh pubkey-chain` の公開鍵認証に対応済み
   → [`ssh-cli-server.md`](./ssh-cli-server.md)
-- **enable権限昇格そのものは別セッションで実装済み**
-  （[`ssh-cli-server.md`](./ssh-cli-server.md)）。ただし Nexpose 側は
-  それを使って `enable` を試すところまではしていない — privilege 1
-  の資格情報は認証止まりで、config を読めないぶんは
-  `DeviceState` 直読みにフォールバックするだけ（§3.5 の続き参照）
+- `permissionElevation` は `privileged-exec`（Cisco enable）のみ実装。
+  `sudo`/`sudosu`/`su`/`pbrun` は受理するが機能的には素通し
+  （UNIX系向けでこのエミュレータに実体が無いため）
 - Scan Engine / Engine Pool、スケジュールスキャン、非同期実行
   （`POST .../scans` はその場で完了して `finished` を返す）
 - Scan Template のチューニング（3種類の固定テンプレートのみ）
@@ -533,7 +589,7 @@ SSH/Telnet CLIサーバに user EXEC / privileged EXEC の区別
 ## 6. テスト
 
 `tests/test_nexpose_api.py`（55 件、TestClient）、
-`tests/test_nexpose_real_scan.py`（28 件、**本物の uvicorn サーバ**）、
+`tests/test_nexpose_real_scan.py`（36 件、**本物の uvicorn サーバ**）、
 `tests/test_ssh_cli_server.py`（10 件、実SSHクライアント →
 [`ssh-cli-server.md`](./ssh-cli-server.md)）、
 `tests/test_snmp_community_config.py`（10 件）。
@@ -560,6 +616,13 @@ SSH/Telnet CLIサーバに user EXEC / privileged EXEC の区別
 認証スキャンにならないこと、装置側のパスワードを変えたら同じ
 資格情報が通らなくなること、`snmpwalk` がコミュニティ照合を
 素通りしないこと、複数コミュニティのどれでも読めること。
+さらに `permissionElevation`: `privileged-exec` で正しいパスワード
+なら privilege 1 でも config が読めること、間違っていれば読めない
+まま（DeviceState直読みへフォールバック）になること、
+`sudo`/`su`/`pbrun` 等は受理だけして何もしないこと、
+`permissionElevationPassword` がGETで返らないこと、
+必須チェック（`none`/`pbrun` 以外はユーザ名・パスワード必須）が
+実機の規則どおりに効くこと。
 
 ```bash
 python3 -m pytest tests/test_nexpose_api.py tests/test_nexpose_real_scan.py \

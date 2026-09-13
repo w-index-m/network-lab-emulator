@@ -248,6 +248,24 @@ def _cred(sid, name, account):
                 {'name': name, 'account': account})['id']
 
 
+def client_post_credential(sid, body):
+    """`_req` と違い、4xx でも例外にせず {status_code, message, ...} で返す
+
+    バリデーションエラーの中身（メッセージ文言）自体を確認したい
+    テスト用。
+    """
+    req = urllib.request.Request(
+        BASE + f'/api/3/sites/{sid}/site_credentials', method='POST',
+        data=json.dumps(body).encode(),
+        headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return {'status_code': r.status, **json.loads(r.read())}
+    except urllib.error.HTTPError as e:
+        payload = json.loads(e.read())
+        return {'status_code': e.code, **payload}
+
+
 def _detail(asset, name):
     return next(d for d in asset['credentials'] if d['name'] == name)
 
@@ -478,6 +496,157 @@ def test_config_fetch_denial_falls_back_to_reading_the_device_state(
     assert 'netlab-snmp-rw-community' in ids
     # aaa new-model は設定済みなので、この所見は立たないはず
     assert 'netlab-no-aaa-authentication' not in ids
+
+
+# ══════════════════════════════════════════
+# permissionElevation: "privileged-exec"（Cisco enable相当）
+# ══════════════════════════════════════════
+ENABLE_SECRET = 'En@bleSecret1'
+
+
+@pytest.fixture
+def low_priv_no_aaa_device(server):
+    """privilege 1 のユーザ + enable secret。aaa new-modelは未設定
+    （enable昇格が効いているかを "netlab-no-aaa-authentication" の
+    有無で見分けるため、わざと未設定にしている）"""
+    _req('DELETE', f'/api/device/{DEV}')
+    _req('POST', '/api/device',
+         {'id': DEV, 'type': 'catalyst', 'hostname': 'ELEV-TARGET'})
+    for c in ('configure terminal', 'interface GigabitEthernet1/0/1',
+              'no switchport', f'ip address {DEV_IP} 255.255.255.0',
+              'no shutdown', 'exit',
+              'username lowpriv privilege 1 secret LowP@ss',
+              f'enable secret {ENABLE_SECRET}',
+              'crypto key generate rsa modulus 2048', 'end'):
+        _cli(c)
+    time.sleep(3)
+    sid = _req('POST', '/api/3/sites', {
+        'name': 'Elevation scan',
+        'scan': {'assets': {'includedTargets': {'addresses': [DEV_IP]}}}})['id']
+    yield sid
+    _req('DELETE', f'/api/device/{DEV}')
+
+
+def _elevated_cred(sid, name, password, elevation_password,
+                   username='lowpriv', service='ssh'):
+    return _cred(sid, name, {
+        'service': service, 'username': username, 'password': password,
+        'permissionElevation': 'privileged-exec',
+        'permissionElevationUsername': 'enable',
+        'permissionElevationPassword': elevation_password})
+
+
+def test_without_elevation_config_cannot_be_read(low_priv_no_aaa_device):
+    """比較用: 昇格無しだと従来通り config は読めない"""
+    sid = low_priv_no_aaa_device
+    _cred(sid, 'plain', {'service': 'ssh', 'username': 'lowpriv',
+                         'password': 'LowP@ss'})
+    a = _scan(sid)
+    d = _detail(a, 'plain')
+    assert d['verified'] is True
+    assert 'read running-config' not in d['note']
+
+
+def test_elevation_with_the_correct_password_reads_the_real_config(
+        low_priv_no_aaa_device):
+    """正しい enable パスワードを持たせれば、privilege 1 でも
+    running-config を実際に読めること"""
+    sid = low_priv_no_aaa_device
+    _elevated_cred(sid, 'elevated', 'LowP@ss', ENABLE_SECRET)
+    a = _scan(sid)
+    d = _detail(a, 'elevated')
+    assert d['verified'] is True
+    assert 'elevated via enable' in d['note']
+    assert 'read running-config' in d['note']
+    # aaa new-model が本当に未設定なので、昇格後に読んだconfigから
+    # この所見が立つはず（DeviceState直読みのフォールバックでも
+    # 同じ結論になるが、ここでは実際に読めていることを確かめたい）
+    assert 'netlab-no-aaa-authentication' in a['_vuln_ids']
+
+
+def test_elevation_with_the_wrong_password_does_not_read_config(
+        low_priv_no_aaa_device):
+    sid = low_priv_no_aaa_device
+    _elevated_cred(sid, 'bad-elev', 'LowP@ss', 'WrongEnablePassword')
+    a = _scan(sid)
+    d = _detail(a, 'bad-elev')
+    assert d['verified'] is True           # SSHログイン自体は通っている
+    assert 'enable failed' in d['note']
+    assert 'read running-config' not in d['note']
+
+
+def test_elevation_password_is_never_returned_by_the_api(
+        low_priv_no_aaa_device):
+    sid = low_priv_no_aaa_device
+    _elevated_cred(sid, 'elevated', 'LowP@ss', ENABLE_SECRET)
+    rows = _req('GET', f'/api/3/sites/{sid}/site_credentials')['resources']
+    row = next(r for r in rows if r['name'] == 'elevated')
+    assert row['account']['permissionElevation'] == 'privileged-exec'
+    assert row['account']['permissionElevationUsername'] == 'enable'
+    assert 'permissionElevationPassword' not in row['account']
+    assert 'password' not in row['account']
+
+
+def test_unsupported_permission_elevation_is_rejected(low_priv_no_aaa_device):
+    sid = low_priv_no_aaa_device
+    r = client_post_credential(sid, {
+        'name': 'bad', 'account': {'service': 'ssh', 'username': 'x',
+                                   'password': 'y',
+                                   'permissionElevation': 'made-up-value'}})
+    assert r['status_code'] == 400
+    assert 'unsupported permissionElevation' in r['message']
+
+
+def test_permission_elevation_requires_username_and_password(
+        low_priv_no_aaa_device):
+    sid = low_priv_no_aaa_device
+    r = client_post_credential(sid, {
+        'name': 'bad', 'account': {
+            'service': 'ssh', 'username': 'x', 'password': 'y',
+            'permissionElevation': 'privileged-exec',
+            'permissionElevationUsername': 'enable'}})
+    assert r['status_code'] == 400
+    assert 'permissionElevationPassword is required' in r['message']
+
+    r2 = client_post_credential(sid, {
+        'name': 'bad2', 'account': {
+            'service': 'ssh', 'username': 'x', 'password': 'y',
+            'permissionElevation': 'privileged-exec',
+            'permissionElevationPassword': 'secret'}})
+    assert r2['status_code'] == 400
+    assert 'permissionElevationUsername is required' in r2['message']
+
+
+def test_none_and_pbrun_do_not_require_elevation_credentials(
+        low_priv_no_aaa_device):
+    """none/pbrun は例外的にユーザ名・パスワードが無くても通ること
+    （実機の規則）"""
+    sid = low_priv_no_aaa_device
+    assert client_post_credential(sid, {
+        'name': 'ok-none', 'account': {
+            'service': 'ssh', 'username': 'x', 'password': 'y',
+            'permissionElevation': 'none'}})['status_code'] == 201
+    assert client_post_credential(sid, {
+        'name': 'ok-pbrun', 'account': {
+            'service': 'ssh', 'username': 'x', 'password': 'y',
+            'permissionElevation': 'pbrun'}})['status_code'] == 201
+
+
+def test_unimplemented_elevation_types_are_accepted_but_do_nothing(
+        low_priv_no_aaa_device):
+    """su/sudo/sudosu はUNIX系向けでこのエミュレータに実体が無いので、
+    受理はするが機能的には素通しになること（昇格を試みない）"""
+    sid = low_priv_no_aaa_device
+    _cred(sid, 'sudo-cred', {
+        'service': 'ssh', 'username': 'lowpriv', 'password': 'LowP@ss',
+        'permissionElevation': 'sudo',
+        'permissionElevationUsername': 'root',
+        'permissionElevationPassword': 'whatever'})
+    a = _scan(sid)
+    d = _detail(a, 'sudo-cred')
+    assert d['verified'] is True
+    assert 'elevated' not in d['note']
+    assert 'read running-config' not in d['note']
 
 
 # ══════════════════════════════════════════
