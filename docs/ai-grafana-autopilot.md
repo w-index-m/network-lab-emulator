@@ -73,6 +73,56 @@ Grafana Service Account トークンは Grafana UI の
    ```
    が記録されることを確認した。**人が「異常発生→記録」の間を一切操作していない**。
 
+### 再現ログ（2026-09-13）
+
+ユーザー要望でデモを再実行し、上記2の手順を新規デバイスで再確認した。
+
+```bash
+# モックGrafana（標準ライブラリのみ）を起動
+python3 mock_grafana.py 3999
+
+# エミュレーターを実際に起動
+NETLAB_AUTH_DISABLE=1 python3 -m uvicorn app:app --host 127.0.0.1 --port 8010
+
+# デバイスを作成し、Gi1/0/1をno shutdownでUpにする
+curl -u admin:admin -X POST localhost:8010/api/device \
+  -d '{"device_id":"demo-sw","type":"cisco","hostname":"Demo-SW"}'
+curl -u admin:admin -X POST localhost:8010/api/cli \
+  -d '{"device_id":"demo-sw","command":"enable"}'
+# configure terminal → interface GigabitEthernet1/0/1 →
+# ip address 10.250.0.1 255.255.255.0 → no shutdown
+
+# autopilotを実際に3秒間隔で起動（バックグラウンド）
+python3 tools/ai_grafana_autopilot.py \
+  --emulator-url http://127.0.0.1:8010 \
+  --grafana-url http://127.0.0.1:3999 \
+  --grafana-token demo-token-xyz --interval 3
+```
+
+健全な状態では何も検知しないことをまず確認した上で、実際にCLIで
+インターフェースを落とした：
+
+```bash
+curl -u admin:admin -X POST localhost:8010/api/cli \
+  -d '{"device_id":"demo-sw","command":"shutdown"}'
+```
+
+3秒以内（次のポーリング）に自律的に検知し、モックGrafanaへ実際にPOSTされた：
+
+```
+[16:50:33] 🔎 1件の異常を検知
+  ✅ demo-sw: GigabitEthernet1/0/1 がダウン
+
+RECEIVED: {"time": 1789318233935, "tags": ["netlab", "interface-down", "cisco"],
+           "text": "[CRITICAL] demo-sw: GigabitEthernet1/0/1 がダウン\nifOperStatus=down（管理状態: down）"}
+AUTH: Bearer demo-token-xyz
+```
+
+指定した`--grafana-token`がそのまま`Authorization: Bearer`ヘッダに
+使われていること、`severity=critical`に対応するタグ・本文が付くことも
+実通信で確認できた。デモ用に起動したuvicorn/モックサーバーは終了後に
+停止している（このデモはリポジトリに恒久的な状態を残さない）。
+
 ## 実際のGrafanaに繋ぐ場合
 
 `--grafana-url`を実際のGrafanaのURLに、`--grafana-token`を発行した
