@@ -21,6 +21,7 @@ Rapid7 公式の Swagger 2.0 仕様（InsightVM API v3, 206エンドポイント
 
 import re
 import socket
+import threading
 import time
 from collections import OrderedDict
 
@@ -273,6 +274,11 @@ class NexposeEngine:
         self.exceptions = OrderedDict()  # id -> vulnerability exception
         self._next = {'site': 1, 'scan': 1, 'asset': 1, 'report': 1,
                       'credential': 1, 'exception': 1}
+        self._scan_control = {}         # scan_id -> {'pause':..., 'stop':...}
+        # reset() をまたいで生き残っているスキャンのバックグラウンド
+        # スレッドが、reset後の新しい self.assets/self.scans に書き込んで
+        # テスト間で結果が混ざるのを防ぐための世代カウンタ。
+        self._generation = getattr(self, '_generation', 0) + 1
 
     def _id(self, kind):
         v = self._next[kind]
@@ -465,9 +471,26 @@ class NexposeEngine:
 
     # ── Scan ─────────────────────────────
     def start_scan(self, sid, device_sessions, body=None):
-        """サイトのスキャンを実行し、対象装置からAssetと脆弱性を作る。
+        """サイトのスキャンを開始する。
 
-        実機は非同期だが、ここでは即座に完了させる（状態遷移だけ再現）。
+        実機は非同期で、スキャンは装置を1台ずつ順に評価しながら
+        進む。以前はここで全装置を評価し終えてから即座に "finished"
+        を返しており、pause/resume/stop は状態遷移の型だけあって
+        実際には**テストが `scans[id]['status']` を手で書き換えないと
+        到達できない**死んだコードだった。
+
+        装置ごとの評価は常にバックグラウンドスレッド（`_run_scan`）で
+        行う。既定（`body['async']` を指定しない）ではこのメソッド
+        自身がスレッドの完了を `join()` して待つため、**呼び出し側
+        から見た挙動は以前と同じ**（戻ってきた時点で "finished"）。
+        既存のテスト・呼び出し側を一切変えずに済ませるための選択。
+
+        `body['async'] = True` を指定すると `join()` せずにすぐ
+        "running" のスキャンIDを返す。これで初めて pause/resume/stop
+        が実際に意味を持つ（次の装置に進む前のチェックポイントで
+        効く。装置単位の粒度で、1台の評価そのものは中断できない）。
+        実機のAPI仕様には無い、テスト容易性のためのこのエミュレータ
+        独自の拡張 — 詳細は docs/nexpose-api.md 参照。
         """
         site = self.sites.get(sid)
         if site is None:
@@ -480,48 +503,101 @@ class NexposeEngine:
         targets = self._resolve_targets(site, device_sessions)
         scan_id = self._id('scan')
         now = time.time()
-
         probe = bool((body or {}).get('probe', True))
-        found = []
-        for dev_id, state, ip in targets:
-            found.append(self._assess(dev_id, state, ip, sid,
-                                      assess=tmpl['assessVulnerabilities'],
-                                      credentials=site['credentials'],
-                                      probe=probe))
-        authenticated = any(a['credentialStatus'] == CRED_OK for a in found)
-
-        vsum = {'critical': 0, 'severe': 0, 'moderate': 0, 'total': 0}
-        for a in found:
-            for k in vsum:
-                vsum[k] += a['vulnerabilities'][k]
 
         self.scans[scan_id] = {
             'id': scan_id,
             'scanName': (body or {}).get('name') or f'Scan {scan_id}',
             'scanType': 'manual',
-            'status': 'finished',
+            'status': 'running',
             'scanTemplate': tmpl_id,
-            'credentialed': authenticated,
+            'credentialed': False,
             'probed': probe,
             'engineId': site['scanEngine'],
             'engineName': 'Local scan engine',
             'startTime': _iso(now),
-            'endTime': _iso(now + 12),
-            'duration': 'PT12S',
+            'endTime': None,
+            'duration': None,
             'startedBy': 'admin',
-            'assets': len(found),
+            'assets': 0,
             'message': '',
-            'vulnerabilities': vsum,
+            'vulnerabilities': {'critical': 0, 'severe': 0, 'moderate': 0,
+                               'total': 0},
             '_site': sid,
         }
-        site['assets'] = len(found)
-        site['lastScanTime'] = _iso(now + 12)
-        site['vulnerabilities'] = dict(vsum)
-        site['riskScore'] = round(sum(a['riskScore'] for a in found), 2)
+        ctl = {'pause': threading.Event(), 'stop': threading.Event()}
+        self._scan_control[scan_id] = ctl
+        worker = threading.Thread(
+            target=self._run_scan, daemon=True,
+            args=(scan_id, sid, targets, tmpl, list(site['credentials']),
+                 probe, ctl, self._generation, now))
+        worker.start()
+        if not (body or {}).get('async'):
+            worker.join()
         return scan_id, None
 
+    def _run_scan(self, scan_id, sid, targets, tmpl, credentials, probe,
+                 ctl, generation, start_ts):
+        """バックグラウンドスレッド本体。装置を1台ずつ評価する。"""
+        found = []
+        stopped = False
+        for dev_id, state, ip in targets:
+            if generation != self._generation:
+                return          # reset()された。この結果はもう要らない
+            if ctl['stop'].is_set():
+                stopped = True
+                break
+            while ctl['pause'].is_set():
+                if ctl['stop'].is_set():
+                    stopped = True
+                    break
+                time.sleep(0.05)
+            if stopped or ctl['stop'].is_set():
+                stopped = True
+                break
+            found.append(self._assess(dev_id, state, ip, sid,
+                                      assess=tmpl['assessVulnerabilities'],
+                                      credentials=credentials, probe=probe))
+            scan = self.scans.get(scan_id)
+            if scan is None or generation != self._generation:
+                return
+            # 見つかった台数を随時反映する。paused中にGETしても
+            # 「そこまでは終わっている」台数が見えるのが実機と同じ。
+            scan['assets'] = len(found)
+
+        if generation != self._generation:
+            return
+        scan = self.scans.get(scan_id)
+        site = self.sites.get(sid)
+        if scan is None:
+            return
+        vsum = {'critical': 0, 'severe': 0, 'moderate': 0, 'total': 0}
+        for a in found:
+            for k in vsum:
+                vsum[k] += a['vulnerabilities'][k]
+        authenticated = any(a['credentialStatus'] == CRED_OK for a in found)
+        end_ts = time.time()
+        scan['status'] = 'stopped' if stopped else 'finished'
+        scan['credentialed'] = authenticated
+        scan['assets'] = len(found)
+        scan['vulnerabilities'] = vsum
+        scan['endTime'] = _iso(end_ts)
+        scan['duration'] = f'PT{max(1, int(end_ts - start_ts))}S'
+        if site is not None:
+            site['assets'] = len(found)
+            site['lastScanTime'] = scan['endTime']
+            site['vulnerabilities'] = dict(vsum)
+            site['riskScore'] = round(sum(a['riskScore'] for a in found), 2)
+        self._scan_control.pop(scan_id, None)
+
     def set_scan_status(self, scan_id, status):
-        """pause / stop / resume（実機と同じ遷移だけ許す）"""
+        """pause / stop / resume（実機と同じ遷移だけ許す）
+
+        バックグラウンドスレッドの `_run_scan` が次の装置へ進む前の
+        チェックポイントでこれを見るので、実際にスキャンの進行を
+        止めたり再開したりする（テストが手で status を書き換えて
+        「見た目だけ」通していた状態ではない）。
+        """
         scan = self.scans.get(scan_id)
         if scan is None:
             return False, f'scan {scan_id} not found'
@@ -537,6 +613,18 @@ class NexposeEngine:
         if cur not in ok_from:
             return False, (f'cannot {status} a scan in state "{cur}" '
                            f'(expected one of: {", ".join(sorted(ok_from))})')
+        ctl = self._scan_control.get(scan_id)
+        # 呼び出し側にはここで即座に新しい状態を見せる。実際に
+        # バックグラウンドスレッドが「次の装置へ進むのをやめる」のは
+        # 今評価中の装置が終わった直後（装置単位の粒度なので、
+        # 中断は多少遅れて効く。実機のスキャンエンジンも同様）。
+        if status == 'pause' and ctl is not None:
+            ctl['pause'].set()
+        elif status == 'resume' and ctl is not None:
+            ctl['pause'].clear()
+        elif status == 'stop' and ctl is not None:
+            ctl['stop'].set()
+            ctl['pause'].clear()          # 一時停止中でもすぐ抜けられるように
         scan['status'] = new
         return True, None
 

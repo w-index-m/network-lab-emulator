@@ -529,6 +529,47 @@ SSH/Telnet CLIサーバに user EXEC / privileged EXEC の区別
 
 ---
 
+### 非同期スキャン（`async`）— pause/resume/stop を本当に効かせる
+
+実機の `pause`/`resume`/`stop` は Swagger 上に定義があるが、
+このエミュレータの `start_scan` は元々**同期I/O**で、
+`POST .../scans` がその場でスキャンを完了させて返していた
+（§5 に書いたとおり）。そのため `pause`/`resume`/`stop` の状態遷移
+バリデーションは実装されていても、**呼び出す頃には対象のスキャンが
+既に `finished` になっている**という到達不能なコードだった。
+
+これを実機の非同期実行に寄せるのではなく、**エミュレータ独自の
+オプトイン拡張**として `POST .../scans` のボディに `"async": true` を
+渡したときだけ、バックグラウンドスレッドでスキャンを進行させ、
+`pause`/`resume`/`stop` が装置1台ずつの評価の合間で本当に効くように
+した。`async` を渡さない場合（デフォルト）は今まで通り、
+返ってきた時点でスキャンは完了している。
+
+```bash
+curl -u admin:admin -X POST localhost:8000/api/3/sites/1/scans \
+  -H 'Content-Type: application/json' -d '{"async": true}'
+# → {"id": 7, ...}  この時点ではまだ running のことがある
+
+curl -u admin:admin -X POST localhost:8000/api/3/scans/7/pause
+curl -u admin:admin localhost:8000/api/3/scans/7   # status: paused, assets が途中で止まっている
+curl -u admin:admin -X POST localhost:8000/api/3/scans/7/resume
+curl -u admin:admin -X POST localhost:8000/api/3/scans/7/stop    # 途中終了。status: stopped
+```
+
+`"async": true` は Rapid7 の実 API には存在しないフィールドで、
+このエミュレータでのみ意味を持つ。実機の非同期実行そのもの
+（Scan Engine 経由のジョブキュー等）を再現したものではない。
+
+回帰テストは `tests/test_nexpose_real_scan.py` の
+`test_async_scan_starts_running_and_reaches_finished`、
+`test_async_scan_can_really_be_paused_and_resumed`、
+`test_async_scan_can_really_be_stopped`、
+`test_pause_and_stop_are_rejected_once_a_scan_has_finished`、
+`test_default_sync_scan_behaviour_is_unchanged`（`async` を渡さない
+既定動作が変わっていないことの固定）。
+
+---
+
 修正後は実機同様、コミュニティが合わない要求は**黙って捨てる**
 （応答を返すとコミュニティ名の総当たりに手掛かりを与えるため）。
 
@@ -574,8 +615,10 @@ SSH/Telnet CLIサーバに user EXEC / privileged EXEC の区別
 - `permissionElevation` は `privileged-exec`（Cisco enable）のみ実装。
   `sudo`/`sudosu`/`su`/`pbrun` は受理するが機能的には素通し
   （UNIX系向けでこのエミュレータに実体が無いため）
-- Scan Engine / Engine Pool、スケジュールスキャン、非同期実行
-  （`POST .../scans` はその場で完了して `finished` を返す）
+- Scan Engine / Engine Pool、スケジュールスキャン。
+  `POST .../scans` は既定ではその場で完了して `finished` を返すが、
+  `"async": true`（エミュレータ独自拡張）を渡すとバックグラウンドで
+  進行し `pause`/`resume`/`stop` が本当に効く（詳細は §3.5 の後）
 - Scan Template のチューニング（3種類の固定テンプレートのみ）
 - Policy / SCAP・CIS ベンチマーク
 - レポートの実ファイル出力（PDF/CSV）。`/content` はプレーンテキスト
@@ -589,7 +632,7 @@ SSH/Telnet CLIサーバに user EXEC / privileged EXEC の区別
 ## 6. テスト
 
 `tests/test_nexpose_api.py`（55 件、TestClient）、
-`tests/test_nexpose_real_scan.py`（36 件、**本物の uvicorn サーバ**）、
+`tests/test_nexpose_real_scan.py`（41 件、**本物の uvicorn サーバ**）、
 `tests/test_ssh_cli_server.py`（10 件、実SSHクライアント →
 [`ssh-cli-server.md`](./ssh-cli-server.md)）、
 `tests/test_snmp_community_config.py`（10 件）。

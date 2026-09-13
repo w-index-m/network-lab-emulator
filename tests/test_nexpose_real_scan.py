@@ -54,8 +54,8 @@ def _req(method, path, body=None):
     return json.loads(raw) if raw else None
 
 
-def _cli(cmd):
-    return _req('POST', '/api/cli', {'device_id': DEV, 'command': cmd})['output']
+def _cli(cmd, dev=DEV):
+    return _req('POST', '/api/cli', {'device_id': dev, 'command': cmd})['output']
 
 
 def _tcp_open(ip, port, timeout=1.0):
@@ -817,3 +817,135 @@ def test_multiple_communities_all_work(device):
     assert _snmp_get(DEV_IP, 'alpha') is True
     assert _snmp_get(DEV_IP, 'bravo') is True       # RWでも読み取りはできる
     assert _snmp_get(DEV_IP, 'charlie') is False
+
+
+# ══════════════════════════════════════════
+# 非同期スキャン（body: {"async": true}）
+# ══════════════════════════════════════════
+# 既定のスキャンは（既存の呼び出し側・テストを一切変えずに済むよう）
+# 今も同期的に完了する。`async: true` を指定した場合だけ、実際に
+# バックグラウンドで進み、pause/resume/stopがその場で意味を持つ
+# ようになる。実機のAPI仕様には無いエミュレータ独自の拡張
+# （docs/nexpose-api.md 参照）。
+DEV2 = 'rs-b'
+DEV2_IP = '10.217.9.1'
+
+
+@pytest.fixture
+def two_device_site(server):
+    """2台の装置を持つサイト。pause/resumeを「装置と装置の間」で
+    観測できるだけの実時間が要る。"""
+    for d, ip, host in ((DEV, DEV_IP, 'SCAN-TARGET-1'),
+                        (DEV2, DEV2_IP, 'SCAN-TARGET-2')):
+        _req('DELETE', f'/api/device/{d}')
+        _req('POST', '/api/device', {'id': d, 'type': 'catalyst',
+                                     'hostname': host})
+        for c in ('configure terminal', 'interface GigabitEthernet1/0/1',
+                  'no switchport', f'ip address {ip} 255.255.255.0',
+                  'no shutdown', 'end'):
+            _cli(c, dev=d)
+    time.sleep(2)
+    sid = _req('POST', '/api/3/sites', {
+        'name': 'Async scan',
+        'scan': {'assets': {'includedTargets': {'addresses': [DEV_IP, DEV2_IP]}}}
+    })['id']
+    yield sid
+    for d in (DEV, DEV2):
+        _req('DELETE', f'/api/device/{d}')
+
+
+def _wait_for_scan_status(scan_id, statuses, timeout=20, interval=0.2):
+    """scanが指定した状態のどれかになるまで待つ。最後に見た値を返す。"""
+    end = time.time() + timeout
+    scan = _req('GET', f'/api/3/scans/{scan_id}')
+    while time.time() < end and scan['status'] not in statuses:
+        time.sleep(interval)
+        scan = _req('GET', f'/api/3/scans/{scan_id}')
+    return scan
+
+
+def test_async_scan_starts_running_and_reaches_finished(two_device_site):
+    sid = two_device_site
+    scan_id = _req('POST', f'/api/3/sites/{sid}/scans',
+                   {'async': True})['id']
+    scan = _req('GET', f'/api/3/scans/{scan_id}')
+    # 呼び出し元にすぐ返る。まだ終わっていない可能性が高い
+    assert scan['status'] in ('running', 'finished')
+
+    final = _wait_for_scan_status(scan_id, {'finished'})
+    assert final['status'] == 'finished'
+    assert final['assets'] == 2
+    assert final['endTime'] is not None
+
+
+def test_async_scan_can_really_be_paused_and_resumed(two_device_site):
+    """本当にバックグラウンドで進んでいるスキャンを、実際に
+    pause/resumeできること（テストが状態を手で書き換えるのではなく、
+    バックグラウンドスレッドが実際にその状態で止まる/動き出す）"""
+    sid = two_device_site
+    scan_id = _req('POST', f'/api/3/sites/{sid}/scans',
+                   {'async': True})['id']
+
+    # すぐpauseする。装置1台の評価には現実の秒数がかかるので、
+    # まだ running のうちにpauseが間に合う可能性が高い
+    _req('POST', f'/api/3/scans/{scan_id}/pause')
+    scan = _req('GET', f'/api/3/scans/{scan_id}')
+    if scan['status'] == 'finished':
+        pytest.skip('スキャンがpauseより先に終わってしまった（環境依存）')
+    assert scan['status'] == 'paused'
+
+    # paused のまま、しばらく待っても2台目までは進んでいないこと
+    time.sleep(2)
+    scan = _req('GET', f'/api/3/scans/{scan_id}')
+    assert scan['status'] == 'paused'
+    assert scan['assets'] < 2
+
+    # resumeすれば最後まで進む
+    _req('POST', f'/api/3/scans/{scan_id}/resume')
+    final = _wait_for_scan_status(scan_id, {'finished'})
+    assert final['status'] == 'finished', 'resumeしても終わらなかった'
+    assert final['assets'] == 2
+
+
+def test_async_scan_can_really_be_stopped(two_device_site):
+    """止めたスキャンは、それ以降の装置を評価しないこと"""
+    sid = two_device_site
+    scan_id = _req('POST', f'/api/3/sites/{sid}/scans',
+                   {'async': True})['id']
+
+    _req('POST', f'/api/3/scans/{scan_id}/stop')
+    scan = _req('GET', f'/api/3/scans/{scan_id}')
+    if scan['status'] == 'finished':
+        pytest.skip('スキャンがstopより先に終わってしまった（環境依存）')
+
+    final = _wait_for_scan_status(scan_id, {'stopped'}, timeout=10)
+    assert final['status'] == 'stopped', 'stopしても止まらなかった'
+    assert final['assets'] < 2                  # 2台目はもう評価していない
+    assert final['endTime'] is not None
+
+
+def test_pause_and_stop_are_rejected_once_a_scan_has_finished(
+        two_device_site):
+    """終わったスキャンをpause/stopしようとしたら、実機同様400"""
+    sid = two_device_site
+    scan_id = _req('POST', f'/api/3/sites/{sid}/scans', {})['id']  # 同期実行
+    assert _req('GET', f'/api/3/scans/{scan_id}')['status'] == 'finished'
+
+    for action in ('pause', 'resume', 'stop'):
+        try:
+            _req('POST', f'/api/3/scans/{scan_id}/{action}')
+            pytest.fail(f'{action} が finished のスキャンに対して通ってしまった')
+        except AssertionError as e:
+            assert 'finished' in str(e) or 'expected one of' in str(e)
+
+
+def test_default_sync_scan_behaviour_is_unchanged(two_device_site):
+    """async を指定しない既定の呼び出しは、これまでどおり
+    戻ってきた時点で完全に終わっていること（既存の呼び出し側を
+    壊さないための後方互換性の確認）"""
+    sid = two_device_site
+    scan_id = _req('POST', f'/api/3/sites/{sid}/scans', {})['id']
+    scan = _req('GET', f'/api/3/scans/{scan_id}')
+    assert scan['status'] == 'finished'
+    assert scan['assets'] == 2
+    assert scan['endTime'] is not None

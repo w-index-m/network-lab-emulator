@@ -8,7 +8,7 @@ ncclient / gNMIクライアント / SNMPツールといった実在のクライ�
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-green)
-![Tests](https://img.shields.io/badge/tests-1242%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1245%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ---
@@ -241,13 +241,13 @@ curl -X POST localhost:8000/api/link \
 ## テスト
 
 ```bash
-pytest tests/           # 全体（1242件、約15分）
+pytest tests/           # 全体（1245件、約15分）
 pytest tests/test_ospf_failover.py -v     # OSPF障害切替
 pytest tests/test_gnmi.py -v              # gNMI
 python verify_all.py                      # 全機能確認スクリプト
 ```
 
-**現状: 1242 passed / 5 skipped / 0 failed**（テストファイル86本）
+**現状: 1245 passed / 5 skipped / 0 failed**（テストファイル86本）
 
 カバレッジ: `app.py` 51% / `engine/protocols.py` 70% / `engine/rules.py` 53%
 

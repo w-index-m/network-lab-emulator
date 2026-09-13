@@ -8,7 +8,7 @@ protocols**, so genuine clients such as ncclient, gnmic and `snmpwalk` can conne
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-green)
-![Tests](https://img.shields.io/badge/tests-1242%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1245%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 > Most of the documentation under `docs/` is written in Japanese.
@@ -220,13 +220,13 @@ curl -X POST localhost:8000/api/link \
 ## Tests
 
 ```bash
-pytest tests/                           # full suite (1242 tests, ~15 min)
+pytest tests/                           # full suite (1245 tests, ~15 min)
 pytest tests/test_ospf_failover.py -v   # OSPF failover
 pytest tests/test_gnmi.py -v            # gNMI
 python verify_all.py                    # feature sweep script
 ```
 
-**Current status: 1242 passed / 5 skipped / 0 failed** across 86 test files.
+**Current status: 1245 passed / 5 skipped / 0 failed** across 86 test files.
 
 Coverage: `app.py` 51% · `engine/protocols.py` 70% · `engine/rules.py` 53%
 

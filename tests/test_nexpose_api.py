@@ -155,7 +155,17 @@ def test_scan_of_unknown_site_is_404():
 
 
 def test_scan_status_transitions_follow_the_spec():
-    """pause/resume/stop は実機と同じ遷移だけ許す"""
+    """pause/resume/stop は実機と同じ遷移だけ許す
+
+    ここでは状態機械そのもの（許される遷移だけ）を確認するために
+    scan['status'] を手で書き換えている。**実際にバックグラウンドで
+    走っているスキャンを本当にpause/resume/stopできること**は
+    `tests/test_nexpose_real_scan.py` の
+    `test_async_scan_can_really_be_paused_and_resumed` 等で、
+    `body['async']=True` を使って確認している
+    （このテストファイルはTestClientベースで、非同期スキャンの
+    タイミングを確認するには実サーバの方が向くため）。
+    """
     sid = _lab()
     scan_id = client.post(f'/api/3/sites/{sid}/scans', json={}).json()['id']
     # finished のスキャンは pause できない
