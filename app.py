@@ -5670,11 +5670,28 @@ async def api_load():
     _load_config()
     return {"ok": True, "devices": list(device_sessions.keys())}
 
+def _stop_real_listeners(dev_id: str):
+    """装置が持っている実リスナーをすべて止める（個別の失敗は無視）"""
+    for mod, fn in (('engine.netconf_agent', 'stop_netconf_agent'),
+                    ('engine.gnmi_agent', 'stop_gnmi_agent'),
+                    ('engine.snmp_udp_agent', 'stop_snmp_agent'),
+                    ('engine.real_ospf_agent', 'stop_ospf_agent')):
+        try:
+            m = __import__(mod, fromlist=[fn])
+            getattr(m, fn)(dev_id)
+        except Exception:
+            pass
+
+
 @app.delete("/api/device/{dev_id}")
 async def remove_device(dev_id: str):
     """装置を削除。関連する各エンジンの登録も掃除する。"""
     if dev_id in device_sessions:
         del device_sessions[dev_id]
+    # 実リスナー（NETCONF/gNMI/SNMP/OSPF）を止めてポートを解放する。
+    # これが無いと装置を消しても TCP/830 や UDP/161 が開いたまま残り、
+    # 同じIPで装置を作り直すと "Address already in use" になる。
+    _stop_real_listeners(dev_id)
     # ICMP/到達性・トポロジー登録を除去（残すとメンバー疎通判定等で誤検出する）
     icmp_engine.device_ips.pop(dev_id, None)
     for peer in list(vnet.get_neighbors(dev_id)):
@@ -7081,7 +7098,11 @@ async def nexpose_site_assets(sid: int, page: int = 0, size: int = 10):
 
 @app.post("/api/3/sites/{sid}/scans")
 async def nexpose_start_scan(sid: int, body: dict = None):
-    scan_id, err = nexpose_engine.start_scan(sid, device_sessions, body)
+    # スキャンは実際にソケットを開いて待つ（同期I/O）。そのままawaitせずに
+    # 呼ぶとイベントループを止めてしまい、同じループ上で動いている
+    # SNMP UDPエージェントが応答できずに「閉じている」と誤検出する。
+    scan_id, err = await asyncio.to_thread(
+        nexpose_engine.start_scan, sid, device_sessions, body)
     if err:
         # 存在しないサイトは404、テンプレート指定ミスはリクエスト側の誤りで400
         return _np_err(404 if 'not found' in err else 400, err)

@@ -20,6 +20,7 @@ Rapid7 公式の Swagger 2.0 仕様（InsightVM API v3, 206エンドポイント
 """
 
 import re
+import socket
 import time
 from collections import OrderedDict
 
@@ -429,11 +430,13 @@ class NexposeEngine:
         now = time.time()
 
         authenticated = any(c['enabled'] for c in site['credentials'])
+        probe = bool((body or {}).get('probe', True))
         found = []
         for dev_id, state, ip in targets:
             found.append(self._assess(dev_id, state, ip, sid,
                                       assess=tmpl['assessVulnerabilities'],
-                                      authenticated=authenticated))
+                                      authenticated=authenticated,
+                                      probe=probe))
 
         vsum = {'critical': 0, 'severe': 0, 'moderate': 0, 'total': 0}
         for a in found:
@@ -447,6 +450,7 @@ class NexposeEngine:
             'status': 'finished',
             'scanTemplate': tmpl_id,
             'credentialed': authenticated,
+            'probed': probe,
             'engineId': site['scanEngine'],
             'engineName': 'Local scan engine',
             'startTime': _iso(now),
@@ -499,14 +503,16 @@ class NexposeEngine:
             out.append((dev_id, state, ip))
         return out
 
-    def _assess(self, dev_id, state, ip, sid, assess=True, authenticated=False):
+    def _assess(self, dev_id, state, ip, sid, assess=True, authenticated=False,
+                probe=True):
         """1台ぶんの診断結果（Asset）を作る
 
         assess=False（discovery テンプレート）ならサービスの検出までで止め、
         脆弱性は評価しない。authenticated=False なら requires_auth の
         チェックは飛ばす（資格情報が無いと config を読めないため）。
+        probe=True なら候補ポートに本当に接続して開閉を確かめる。
         """
-        services = _services_of(state)
+        services = _services_of(state, ip, probe=probe)
         open_ports = {s['port'] for s in services}
 
         existing = next((a for a in self.assets.values()
@@ -687,11 +693,72 @@ def _mac_for(dev_id):
     return 'aa:bb:cc:%02x:%02x:%02x' % ((h >> 16) & 0xff, (h >> 8) & 0xff, h & 0xff)
 
 
-def _services_of(state):
-    """装置で実際に有効化されている管理サービスをポート一覧にする。
+# ══════════════════════════════════════════
+# ポートスキャン
+# ══════════════════════════════════════════
+# このエミュレータは NETCONF(830) / gNMI(50052) / SNMP(161) を本物の
+# ソケットで待ち受けている。so スキャナ側も本当に繋いで確かめる。
+#
+# 以前は state を読んで「設定されているから開いている」としていたが、
+# それだと待ち受けに失敗していても開いていることになってしまう
+# （実際 NETCONF/gNMI は装置IPに bind できず落ちていた）。
+PROBE_TIMEOUT = 0.4
 
-    エミュレータ側で本当にリスナーが上がるもの（SNMP/NETCONF/gNMI）に
-    対応させているので、「設定した結果として検出される」という筋が通る。
+
+def probe_tcp(ip, port, timeout=PROBE_TIMEOUT):
+    """本物のTCP接続を試す。開いていれば True"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((ip, int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def probe_snmp(ip, port=161, community='public', timeout=PROBE_TIMEOUT):
+    """本物のSNMP v2c GET（sysDescr）を投げて応答があるか見る。
+
+    UDPなので「繋がるか」では判定できない。実際にリクエストを投げて
+    返事が来るかどうかで判断する。
+    """
+    try:
+        from engine.snmp_udp_agent import encode_response  # noqa: F401
+        from engine.snmp_udp_agent import (_encode_int, _encode_oid, _tlv,
+                                           PDU_GET, TAG_OCTET_STRING,
+                                           TAG_SEQUENCE)
+    except Exception:                                   # pragma: no cover
+        return False
+    vb = _tlv(TAG_SEQUENCE, _encode_oid('1.3.6.1.2.1.1.1.0') + _tlv(0x05, b''))
+    pdu = _tlv(PDU_GET, _encode_int(1) + _encode_int(0) + _encode_int(0) +
+               _tlv(TAG_SEQUENCE, vb))
+    msg = _tlv(TAG_SEQUENCE,
+               _encode_int(1) +                       # version 1 = v2c
+               _tlv(TAG_OCTET_STRING, community.encode()) + pdu)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    try:
+        s.sendto(msg, (ip, int(port)))
+        data, _ = s.recvfrom(4096)
+        return bool(data)
+    except OSError:
+        return False
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def candidate_services(state):
+    """装置の設定から「開いているはずの」管理サービスを挙げる。
+
+    これはあくまで候補。実際に開いているかは probe で確かめる。
     """
     out = []
 
@@ -707,10 +774,72 @@ def _services_of(state):
     if getattr(state, 'gnxi_server', False):
         add(int(getattr(state, 'gnxi_port', 50052) or 50052), 'gNMI',
             'tcp', 'gRPC', '')
+    if getattr(state, 'gnxi_secure_server', False):
+        add(int(getattr(state, 'gnxi_secure_port', 9339) or 9339), 'gNMI',
+            'tcp', 'gRPC', 'TLS')
     if getattr(state, 'restconf_enabled', False):
         add(443, 'HTTPS', 'tcp', 'nginx', '')
     if getattr(state, 'telnet_enabled', False):
         add(23, 'Telnet', 'tcp', '', '')
+    return out
+
+
+# 設定に出ていなくても必ず叩いてみるポート。
+# 候補だけを確かめる作りにすると「設定を消したのにリスナーが残っている」
+# という状態を見逃す（実際 `no netconf-yang` でポートが開いたままだった）。
+# スキャナなのだから、設定ではなく現物を見るのが筋。
+WELL_KNOWN_PORTS = [
+    (22,    'SSH',     'tcp'),
+    (23,    'Telnet',  'tcp'),
+    (80,    'HTTP',    'tcp'),
+    (443,   'HTTPS',   'tcp'),
+    (830,   'SSH',     'tcp'),
+    (9339,  'gNMI',    'tcp'),
+    (50051, 'gNMI',    'tcp'),
+    (50052, 'gNMI',    'tcp'),
+]
+
+
+def _services_of(state, ip=None, probe=True):
+    """検出されたサービス一覧。
+
+    probe=True なら実際にソケットを開いて確かめる。対象は
+    「設定から予想される候補」＋「よく使われるポート」で、
+    応答したものだけを返す。各エントリの 'detectedBy' に、
+    どう確かめたかを残す。
+    """
+    cands = candidate_services(state)
+    if not probe or not ip:
+        for s in cands:
+            s['detectedBy'] = 'configuration'
+        return cands
+
+    comm = ''
+    for c_ in (getattr(state, 'snmp_community', None) or []):
+        comm = c_.get('name') or ''
+        break
+
+    by_port = {(s['port'], s['protocol']): s for s in cands}
+    for port, name, proto in WELL_KNOWN_PORTS:
+        by_port.setdefault((port, proto), {
+            'port': port, 'protocol': proto, 'name': name,
+            'product': '', 'version': '', 'family': ''})
+    # SNMPは設定が無くてもエージェントが動いていることがあるので必ず叩く
+    by_port.setdefault((161, 'udp'), {
+        'port': 161, 'protocol': 'udp', 'name': 'SNMP',
+        'product': '', 'version': '', 'family': ''})
+
+    out = []
+    for (port, proto), s in sorted(by_port.items()):
+        if proto == 'udp':
+            ok = probe_snmp(ip, port, comm or 'public')
+            how = 'snmp-get'
+        else:
+            ok = probe_tcp(ip, port)
+            how = 'tcp-connect'
+        if ok:
+            s['detectedBy'] = how
+            out.append(s)
     return out
 
 

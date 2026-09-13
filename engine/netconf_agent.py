@@ -26,10 +26,13 @@ NETCONFで edit-config した結果は show ip interface brief や RESTCONF
 """
 
 import asyncio
+import logging
 import socket
 import threading
 import xml.etree.ElementTree as ET
 from typing import Optional
+
+from engine.loopback_alias import ensure_loopback_alias
 
 try:
     import paramiko
@@ -593,6 +596,41 @@ def _device_users(state) -> dict:
     return users
 
 
+def _peer_hung_up(sock, timeout=0.3) -> bool:
+    """接続してすぐ切られた（＝SSHクライアントではない）か
+
+    peek して EOF が返れば相手はもう閉じている。タイムアウトした場合は
+    「まだ何も送ってきていないだけ」なので、SSHクライアントとして扱う
+    （判断を誤って正規の接続を切らないよう、迷ったら通す側に倒す）。
+    """
+    try:
+        sock.settimeout(timeout)
+        return sock.recv(1, socket.MSG_PEEK) == b''
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.settimeout(None)
+        except OSError:
+            pass
+
+
+class _QuietBannerFilter(logging.Filter):
+    """ポートスキャンのノイズを落とす
+
+    スキャナ（Nexposeエミュレーション含む）はTCPを開けてすぐ閉じるので、
+    paramiko が毎回 "Error reading SSH protocol banner" をトレースバック
+    付きでERROR出力する。実機は当然そんなログを吐かないし、本物の
+    SSHエラーが埋もれるので、この1件だけ落とす。
+    """
+
+    def filter(self, record):
+        return 'Error reading SSH protocol banner' not in record.getMessage()
+
+
+logging.getLogger('paramiko.transport').addFilter(_QuietBannerFilter())
+
+
 def serve_connection(sock, state, host_key, session_id: int, on_change=None):
     """1本のTCP接続をNETCONFセッションとして処理する（ブロッキング）"""
     transport = paramiko.Transport(sock)
@@ -678,6 +716,11 @@ class NetconfServer:
         self.host_key = paramiko.RSAKey.generate(2048)
 
     def start(self):
+        # 装置が名乗っているIPはホストに存在しないことがあるので、
+        # bind する前にループバックへ足しておく（SNMPと同じ回避）。
+        # これが無いと "Cannot assign requested address" で起動に失敗し、
+        # SNMPだけ上がってNETCONFは落ちる、という非対称な状態になっていた。
+        ensure_loopback_alias(self.ip)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind((self.ip, self.port))
@@ -702,6 +745,16 @@ class NetconfServer:
                 except Exception:
                     pass
                 continue
+            # ポートスキャナは開けてすぐ閉じる。RFC 4253 では双方が接続直後に
+            # 識別文字列を送るので、相手が何も送らずに切ったなら SSH では
+            # ない。paramiko に渡すと毎回トレースバックを吐くので、
+            # ここで静かに落とす（実機もスキャンでログを埋めたりしない）。
+            if _peer_hung_up(client):
+                try:
+                    client.close()
+                except OSError:
+                    pass
+                continue
             self._session_id += 1
             threading.Thread(
                 target=serve_connection,
@@ -722,11 +775,26 @@ class NetconfServer:
             return True
 
     def stop(self):
+        """待ち受けを止めてポートを解放する。
+
+        close() だけでは accept() でブロックしているスレッドが起きず、
+        fd が解放されないため TCP/830 が LISTEN のまま残っていた。
+        その結果 `no netconf-yang` を打ってもポートは開いたままで、
+        再度 `netconf-yang` を打つと "Address already in use" で
+        起動に失敗していた（実ポートスキャンを入れて気付いた）。
+        shutdown() で accept() を起こしてから閉じる。
+        """
         self._stop.set()
         try:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass                    # 未接続のリスニングソケットでは起こりうる
+        try:
             self._sock.close()
-        except Exception:
+        except OSError:
             pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2)
 
 
 _servers = {}

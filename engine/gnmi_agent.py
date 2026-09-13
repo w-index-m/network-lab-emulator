@@ -29,6 +29,8 @@ _PROTO_DIR = os.path.join(os.path.dirname(__file__), 'gnmi_proto')
 if _PROTO_DIR not in sys.path:
     sys.path.insert(0, _PROTO_DIR)
 
+from engine.loopback_alias import ensure_loopback_alias
+
 try:
     import grpc                                  # noqa: E402
     import gnmi_pb2                              # noqa: E402
@@ -392,6 +394,9 @@ class GnmiServer:
         self._server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
         gnmi_pb2_grpc.add_gNMIServicer_to_server(
             GnmiServicer(device_id, state, on_change), self._server)
+        # 装置IPはホストに存在しないことがあるので、bind する前に
+        # ループバックへ足す（SNMP/NETCONFと同じ回避）
+        ensure_loopback_alias(ip)
         self._server.add_insecure_port(f'{ip}:{port}')
 
     def start(self):

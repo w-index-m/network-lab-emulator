@@ -65,10 +65,59 @@ Site 作成 → スキャン実行 → Asset 検出 → Vulnerability 検出 →
 
 ---
 
-## 3. 検出のしくみ
+## 3. 検出のしくみ — 本物のソケットで確かめる
 
-`engine/nexpose.py` の `_services_of(state)` が、装置の `DeviceState` から
-**実際に有効化されている管理サービス**をポート一覧に落とす。
+このエミュレータは NETCONF(830) / gNMI(50052) / SNMP(161) を
+**本物のソケットで待ち受けている**ので、スキャナ側も本当に接続して
+確かめる。`detectedBy` に、どう確かめたかが残る。
+
+| detectedBy | 確認方法 |
+|---|---|
+| `tcp-connect` | 実際に TCP 接続できた |
+| `snmp-get` | 実際に SNMP v2c GET (sysDescr) を投げて応答があった |
+| `configuration` | 設定を読んだだけ（`probe: false` 指定時） |
+
+走査するのは「設定から予想される候補ポート」＋`WELL_KNOWN_PORTS`
+（22/23/80/443/830/9339/50051/50052/161）。候補だけを確かめる作りだと
+**設定が消えたのにリスナーが残っている状態を見逃す**ので、
+設定に出ていないポートも叩く。
+
+```
+実スキャン (probe=true)
+   udp/161    SNMP    snmp-get
+   tcp/830    SSH     tcp-connect
+   tcp/50052  gNMI    tcp-connect
+
+no gnxi server の後
+   udp/161    SNMP    snmp-get
+   tcp/830    SSH     tcp-connect        ← 50052 は消える
+```
+
+`probe: false` を渡すと、以前の「設定を読むだけ」の挙動に戻せる。
+
+### 制約 — TestClient では SNMP を実プローブできない
+
+FastAPI の `TestClient` は**リクエストを処理している間しか
+イベントループを回さない**。SNMP UDP エージェントは同じループ上の
+asyncio DatagramProtocol なので、リクエスト外に届いたパケットが
+処理されず、実プローブだと 161 が常に閉じて見える
+（ソケットは bind 済みで `Recv-Q` にパケットが溜まったままになる）。
+
+そのため実プローブの確認は `tests/test_nexpose_real_scan.py` が
+**本物の uvicorn サーバをサブプロセスで立てて**行っている。
+`tests/test_nexpose_api.py` 側の API 挙動テストは `probe: false` を使う。
+
+なお、スキャンは同期I/Oなので `POST .../scans` は
+`asyncio.to_thread` 経由で呼んでいる。直接 await せずに呼ぶと
+イベントループを止めてしまい、同じループ上の SNMP エージェントが
+応答できず自分で自分を「閉じている」と誤検出する。
+
+---
+
+## 3.1 候補の出しかた
+
+`engine/nexpose.py` の `candidate_services(state)` が、装置の
+`DeviceState` から**有効化されている管理サービス**をポート一覧に落とす。
 
 | 装置側の設定 | 開くポート |
 |---|---|
@@ -212,6 +261,44 @@ Site 1: Lab Segment
 「スキャナ側を作ると装置側の穴が見える」という意味では、
 この組み合わせ自体が検査になっている。
 
+### 実ポートスキャンを入れて見つかった不具合（5件）
+
+モデルを読むのをやめて本当にソケットを叩いた瞬間に出てきたもの。
+**どれも、それまでのテストは全部通っていた。**
+
+5. **NETCONF と gNMI が装置IPで待ち受けられていなかった** —
+   SNMPエージェントだけが `ip addr add <ip>/32 dev lo` でIPを
+   足しており、NETCONF/gNMI はやっていなかった。そのため
+   `Cannot assign requested address` で毎回起動に失敗していたのに、
+   スキャナが設定を読むだけだったので「開いている」と report していた。
+   共通化して `engine/loopback_alias.py` に置いた。
+
+6. **SNMPエージェントが管理IPの変更に追従しなかった** —
+   装置作成時のIPに張り付いたままで、あとから `ip address` を
+   振っても古いIPで待ち受け続けていた。関数のdocstringに
+   「追従しない（今のところ十分）」と書いてあったが、十分ではなかった。
+
+7. **`no netconf-yang` がポートを解放していなかった** —
+   `stop()` が `close()` しかしておらず、`accept()` でブロックしている
+   スレッドが起きないため fd が残り、TCP/830 が LISTEN のままだった。
+   その状態で再度 `netconf-yang` を打つと
+   `Address already in use` で起動に失敗する。
+   `shutdown()` してから閉じるよう修正。
+
+8. **装置を削除してもリスナーが止まらなかった** —
+   `DELETE /api/device/{id}` は各エンジンの登録を掃除するだけで、
+   NETCONF/gNMI/SNMP/OSPF の実リスナーを止めていなかった。
+   消したはずの装置のポートが開いたまま残る。
+
+9. **ポートスキャンのたびに paramiko がトレースバックを吐いていた** —
+   スキャナはTCPを開けてすぐ閉じるので、毎回
+   `Error reading SSH protocol banner` が ERROR で出る。
+   RFC 4253 では双方が接続直後に識別文字列を送るので、
+   何も送らずに切った相手は SSH ではない。accept 後に peek して
+   EOF なら静かに落とすようにした。
+
+5〜8 の回帰テストは `tests/test_nexpose_real_scan.py`。
+
 ---
 
 ## 4. 重要な注意 — 脆弱性データは作り物
@@ -230,9 +317,13 @@ Site 1: Lab Segment
 意図的に実装していないもの：
 
 - 認証・権限（`/api/3/users`, `/api/3/roles`, Asset Group の権限境界）
-- 実際のポートスキャン／バナー取得。到達性は
-  `device_sessions` のモデルを読むだけで、パケットは出していない。
-  資格情報も**照合していない**（登録されていれば認証成功とみなす）
+- バナー取得・サービス識別。ポートの開閉は本物のソケットで確かめるが、
+  製品名やバージョンは `DeviceState` から埋めているだけ
+- ポートスイープ。叩くのは候補＋`WELL_KNOWN_PORTS` だけで、
+  1-65535 の全走査はしない
+- 資格情報の**照合**。登録されていれば認証成功とみなす
+  （実際に SSH ログインを試してはいない）
+- 認証スキャンの中身も、SSH越しではなく `DeviceState` を直接読んでいる
 - Scan Engine / Engine Pool、スケジュールスキャン、非同期実行
   （`POST .../scans` はその場で完了して `finished` を返す）
 - Scan Template のチューニング（3種類の固定テンプレートのみ）
@@ -247,7 +338,8 @@ Site 1: Lab Segment
 
 ## 6. テスト
 
-`tests/test_nexpose_api.py`（55 件）と
+`tests/test_nexpose_api.py`（55 件、TestClient）、
+`tests/test_nexpose_real_scan.py`（7 件、**本物の uvicorn サーバ**）、
 `tests/test_snmp_community_config.py`（10 件）。
 
 固定しているのは主にこの 5 点：
@@ -263,8 +355,15 @@ Site 1: Lab Segment
 5. **再スキャンで Asset が重複しない**、`included_targets` で
    スキャン対象が絞られる、例外のスコープが他サイトに漏れない
 
+実プローブ側（`test_nexpose_real_scan.py`）が固定しているのは、
+§3.5 の 5〜8 そのもの: 装置IPで本当に待ち受けていること、
+リスナーを止めれば検出からも消えること、`no netconf-yang` が
+ポートを解放すること、装置を消せばポートが閉じること、
+そして**設定に無いポートでも開いていれば見つけること**。
+
 ```bash
-python3 -m pytest tests/test_nexpose_api.py tests/test_snmp_community_config.py -q
+python3 -m pytest tests/test_nexpose_api.py tests/test_nexpose_real_scan.py \
+                 tests/test_snmp_community_config.py -q
 ```
 
 ---

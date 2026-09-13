@@ -36,7 +36,9 @@ def _cli(dev, cmd):
 
 
 def _device(dev, hostname, ip, extra=()):
-    app_module.device_sessions.pop(dev, None)
+    # DELETE で消す（pop だけだと実リスナーが残り、次のテストの
+    # スキャンがその開きっぱなしのポートを拾ってしまう）
+    client.delete(f'/api/device/{dev}')
     client.post('/api/device',
                 json={'id': dev, 'type': 'catalyst', 'hostname': hostname})
     cmds = ['configure terminal', 'interface GigabitEthernet1/0/1',
@@ -51,8 +53,10 @@ def _device(dev, hostname, ip, extra=()):
 def _clean():
     nexpose_engine.reset()
     for d in ('t-np-a', 't-np-b'):
-        app_module.device_sessions.pop(d, None)
+        client.delete(f'/api/device/{d}')
     yield
+    for d in ('t-np-a', 't-np-b'):
+        client.delete(f'/api/device/{d}')
 
 
 def _lab():
@@ -126,9 +130,16 @@ def test_open_management_services_drive_the_findings():
 
     「装置の設定が、そのままスキャン結果に効く」というのがこの実装の
     肝なので、ここが崩れたら意味が無くなる。
+
+    ここは probe=False（設定から候補を出すだけ）で確認している。
+    TestClient は**リクエストの間しかイベントループを回さない**ため、
+    同じループ上で動く SNMP UDP エージェントが応答できず、
+    実プローブだと 161 が閉じていると判定されてしまうため。
+    実プローブ側は tests/test_nexpose_real_scan.py が
+    本物の uvicorn サーバを立てて確認している。
     """
     sid = _lab()
-    client.post(f'/api/3/sites/{sid}/scans', json={})
+    client.post(f'/api/3/sites/{sid}/scans', json={'probe': False})
     assets = {a['ip']: a for a in
               client.get(f'/api/3/sites/{sid}/assets').json()['resources']}
     open_dev = assets['10.200.0.1']

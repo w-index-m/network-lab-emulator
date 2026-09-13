@@ -12,8 +12,9 @@ engine/protocols.py の SnmpAgent（内部シミュレーション、get/getnext
 """
 
 import asyncio
-import subprocess
 from typing import Optional
+
+from engine.loopback_alias import ensure_loopback_alias as _shared_ensure_loopback_alias
 
 # ── BER (Basic Encoding Rules) ──────────────────────────────
 TAG_INTEGER = 0x02
@@ -271,16 +272,11 @@ class SnmpDeviceProtocol(asyncio.DatagramProtocol):
 
 def _ensure_loopback_alias(ip: str):
     """SNMPをそのIPで待ち受けられるよう、ループバックにエイリアスIPを追加する。
-    既に存在する場合は何もしない（失敗は無視）。"""
-    if ip in ('', '127.0.0.1'):
-        return
-    try:
-        subprocess.run(
-            ['ip', 'addr', 'add', f'{ip}/32', 'dev', 'lo', 'scope', 'host'],
-            capture_output=True, timeout=5,
-        )
-    except Exception:
-        pass
+
+    実体は engine/loopback_alias.py に移した（NETCONF/gNMI も同じ回避が
+    必要だったため）。ここは既存の呼び出し元向けの薄い別名。
+    """
+    _shared_ensure_loopback_alias(ip)
 
 
 def _pick_management_ip(state) -> Optional[str]:
@@ -325,21 +321,52 @@ async def start_all_snmp_agents(device_sessions: dict, snmp_agent, port: int = 1
 _running_agents: dict = {}  # device_id -> (transport, ip)
 
 
+def stop_snmp_agent(device_id: str):
+    """装置のSNMP待ち受けを閉じてポートを解放する。
+
+    装置を削除しても待ち受けが残り続けていたため追加した
+    （実ポートスキャンで、消したはずの装置のポートが開いたままなのが
+    見えて気付いた）。
+    """
+    running = _running_agents.pop(device_id, None)
+    if not running:
+        return False
+    try:
+        running[0].close()
+    except Exception:
+        pass
+    return True
+
+
 async def ensure_snmp_agent(device_id: str, device_sessions: dict, snmp_agent,
                              port: int = 161):
     """アプリ起動後に動的追加された装置に対し、実UDP SNMPエージェントを
     起動する（start_all_snmp_agentsは起動時に存在した装置しか対象にしない
     ため、これが無いと後から追加した装置はsnmpget/snmpwalkに応答しない）。
-    既に起動済み、またはIP未設定なら何もしない。IPが変わった場合は
-    device_id単位でしか管理していないため追従しない（今のところ十分）。"""
-    if device_id in _running_agents:
-        return
+    既に起動済み、またはIP未設定なら何もしない。
+
+    管理IPが変わった場合は、古いソケットを閉じて新しいIPで張り直す。
+    以前は追従せず起動時のIPに張り付いたままだったため、装置作成後に
+    `ip address` を振ると SNMP だけ別IPで待ち受ける、という状態に
+    なっていた（Nexposeの実ポートスキャンを入れて初めて表面化した）。
+    """
     state = device_sessions.get(device_id)
     if not state:
         return
     ip = _pick_management_ip(state)
     if not ip:
         return
+    running = _running_agents.get(device_id)
+    if running:
+        if running[1] == ip:
+            return
+        try:
+            running[0].close()
+        except Exception:
+            pass
+        _running_agents.pop(device_id, None)
+        print(f'[SNMP] {device_id} 管理IPが {running[1]} → {ip} に変わったため '
+              f'待ち受けを張り直します')
     _ensure_loopback_alias(ip)
     loop = asyncio.get_event_loop()
     try:
