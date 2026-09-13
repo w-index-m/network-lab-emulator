@@ -18,11 +18,14 @@ Nexposeエミュレーションの認証スキャンが「ログインは本物�
 
 対応している範囲:
   - password認証（装置のローカルユーザ。無ければ admin/admin）
+  - **公開鍵認証**（`ip ssh pubkey-chain` で登録した鍵。RSA/Ed25519/
+    ECDSA。DSSはクラス自体はあるがparamiko 4.0でサポートが落ちている）。
+    装置側の CLI で登録した鍵しか通らない
   - shell チャンネル（対話）と exec チャンネル（`ssh host "show ..."`）
   - プロンプト、モード遷移、Ctrl-C / Ctrl-D、`exit` での切断
 
 対応していない範囲（実機との差）:
-  - 公開鍵認証、`enable` による権限昇格、AAA連携
+  - `enable` による権限昇格、AAA連携
   - 端末制御（カーソル移動・履歴・TAB補完）。行単位で読むだけ
   - ホスト鍵は**プロセス内で1本を共有**する（装置ごとに2048bitの鍵を
     生成すると装置作成が目に見えて遅くなるため。実機は装置ごとに別鍵）
@@ -68,8 +71,11 @@ def prompt_for(state) -> str:
 
 
 class _CliSshServer(paramiko.ServerInterface if _HAS_PARAMIKO else object):
-    def __init__(self, valid_users):
+    def __init__(self, valid_users, authorized_keys=None):
         self.valid_users = valid_users
+        # {username: ["ssh-rsa AAAA...", ...]}。`ip ssh pubkey-chain` で
+        # 登録された鍵のみ（`engine/ssh_cli_agent._device_authorized_keys`）。
+        self.authorized_keys = authorized_keys or {}
         self.authenticated_user = None
         # チャンネルごとの要求を覚える。1本のSSH接続で exec と shell が
         # 続けて開かれる（paramikoのSSHClientがまさにそうする）ので、
@@ -83,10 +89,26 @@ class _CliSshServer(paramiko.ServerInterface if _HAS_PARAMIKO else object):
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
+    def check_auth_publickey(self, username, key):
+        """`ip ssh pubkey-chain` で登録された鍵とだけ照合する。
+
+        paramikoの2段階公開鍵認証（まず「この鍵で通るか」を問い合わせ、
+        通ればクライアントが署名して再送する）どちらの段階でもここが
+        呼ばれる。署名の正当性自体はTransport側が検証するので、ここは
+        「そのユーザ名にその鍵が登録されているか」だけを見ればよい。
+        """
+        wanted = f'{key.get_name()} {key.get_base64()}'
+        if wanted in self.authorized_keys.get(username, []):
+            self.authenticated_user = username
+            return paramiko.AUTH_SUCCESSFUL
+        return paramiko.AUTH_FAILED
+
     def check_auth_none(self, username):
         return paramiko.AUTH_FAILED
 
     def get_allowed_auths(self, username):
+        if self.authorized_keys.get(username):
+            return 'publickey,password'
         return 'password'
 
     def check_channel_request(self, kind, chanid):
@@ -176,7 +198,8 @@ class SshCliServer:
     def _serve(self, sock):
         transport = paramiko.Transport(sock)
         transport.add_server_key(_shared_host_key())
-        server = _CliSshServer(_device_users(self.state))
+        server = _CliSshServer(_device_users(self.state),
+                               _device_authorized_keys(self.state))
         try:
             transport.start_server(server=server)
             # 1本の接続で複数チャンネルが開かれる。1本目を処理して
@@ -290,6 +313,15 @@ def _device_users(state) -> dict:
     """
     from engine.netconf_agent import _device_users as nc_users
     return nc_users(state)
+
+
+def _device_authorized_keys(state) -> dict:
+    """`ip ssh pubkey-chain` で登録された公開鍵（無ければ空）
+
+    形は {username: ["ssh-rsa AAAA...", ...]}。app.py の
+    `_finalize_ssh_pubkey` がこの形で state.ssh_pubkeys に積む。
+    """
+    return getattr(state, 'ssh_pubkeys', None) or {}
 
 
 # ── ライフサイクル ──────────────────────

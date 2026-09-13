@@ -67,6 +67,38 @@ The name for the keys will be: SSH-SW.netlab
 NETCONFサーバとまったく同じ規則を**同じ関数で**参照しているので、
 「SSHは通るがNETCONFは通らない」のような食い違いは起きない。
 
+### 公開鍵認証
+
+実機同様 `ip ssh pubkey-chain` で登録した鍵でもログインできる。
+RSA / Ed25519 / ECDSA に対応（`ssh-dss` はクラス自体は用意しているが、
+paramiko 4.0 でDSA/DSSサポートが落ちたため実質使えない）。
+
+```
+Switch(config)# ip ssh pubkey-chain
+Switch(conf-ssh-pubkey)# username netadmin
+Switch(conf-ssh-pubkey-user)# key-string
+Switch(conf-ssh-pubkey-user-key)# AAAAB3NzaC1yc2EAAAADAQABAAABgQDBGV...
+Switch(conf-ssh-pubkey-user-key)# exit
+Switch(conf-ssh-pubkey-user)# exit
+Switch(conf-ssh-pubkey)# exit
+```
+
+`key-string` の配下は「行をそのまま貼り付ける」特殊な入力モードで、
+`exit`/`end` を打つまではコマンドとして解釈されない（実機と同じ）。
+base64本体は複数行に分けて貼ってよい（1行の折り返し幅は問わない）。
+
+実機は base64 本体だけを貼らせる方式だが、`~/.ssh/id_rsa.pub` の中身を
+そのまま貼りたくなるのが自然なので、`ssh-rsa AAAA... comment` という
+OpenSSH形式の1行を貼っても受け付ける（意図的な緩和）。
+
+鍵の種類（RSA/Ed25519/ECDSA）は明示的に書かせるのではなく、
+**base64を復号したバイト列自身から読み取る**。SSHの鍵のワイヤ形式は
+自己記述的（先頭にアルゴリズム名の文字列が入っている）なので、それを見る。
+最初は無条件に `ssh-rsa` を仮定していたため、Ed25519/ECDSA鍵が
+常に「RSAとして解釈できない」で弾かれる不具合があった。
+
+`no username <name>` でその名前に登録された鍵を丸ごと失効できる。
+
 ---
 
 ## 3. 作り
@@ -97,6 +129,7 @@ CLI処理はイベントループ上の非同期関数なので、SSHのワー�
 ## 4. 対応している範囲
 
 - password認証（ローカルユーザ、無ければ admin/admin）
+- **公開鍵認証**（`ip ssh pubkey-chain`。RSA/Ed25519/ECDSA）
 - shell チャンネル（対話）と exec チャンネル（`ssh host "..."`）
 - プロンプト（`host#` / `host(config)#` / `host(config-if)#`）とモード遷移
 - Backspace / Ctrl-C / Ctrl-D / `exit` での切断
@@ -106,7 +139,6 @@ CLI処理はイベントループ上の非同期関数なので、SSHのワー�
 
 ## 5. 対応していない範囲（実機との差）
 
-- **公開鍵認証**。password のみ
 - **`enable` による権限昇格**、AAA連携（TACACS+/RADIUS でのログイン認証）
 - 端末制御。カーソル移動・履歴・TAB補完は無く、行単位で読むだけ
 - **ホスト鍵はプロセス内で1本を共有**する。装置ごとに2048bitの鍵を
@@ -115,6 +147,8 @@ CLI処理はイベントループ上の非同期関数なので、SSHのワー�
 - `line vty` の `transport input` / `access-class` は見ていない
   （SSHの可否はRSA鍵の有無だけで決まる）
 - SCP / SFTP、ポートフォワード
+- `key-hash`（すでにSCPで転送済みの鍵をハッシュ値で参照する方式）。
+  `key-string` で本体を貼る方式のみ
 
 ### 検証できていないこと
 
@@ -129,10 +163,10 @@ CLI処理はイベントループ上の非同期関数なので、SSHのワー�
 
 ## 6. テスト
 
-`tests/test_ssh_cli_server.py`（10件）。本物の uvicorn サーバを
+`tests/test_ssh_cli_server.py`（21件）。本物の uvicorn サーバを
 サブプロセスで立て、paramiko のクライアントで実際にログインする。
 
-固定しているのは主にこの5点:
+固定しているのは主にこの7点:
 
 1. **RSA鍵を作るまで22番が開かないこと**、`zeroize` で閉じること
 2. 正しいパスワードで通り、**間違ったパスワードは弾かれること**
@@ -141,6 +175,12 @@ CLI処理はイベントループ上の非同期関数なので、SSHのワー�
    `SSH session not active` で失敗していた）
 4. プロンプトがモードに追従すること
 5. **SSHで変えた設定が `/api/cli` 側からも見えること**
+6. **登録した公開鍵でログインでき、登録していない鍵・別ユーザ名に
+   登録した鍵は拒否されること**。RSA / Ed25519 の両方で確認
+   （Ed25519は生成直後、算出したアルゴリズムを 'ssh-rsa' 決め打ちで
+   誤判定していた回帰）
+7. `no username` で鍵が失効すること、公開鍵を登録してもパスワード
+   認証が塞がれないこと
 
 ```bash
 python3 -m pytest tests/test_ssh_cli_server.py -q

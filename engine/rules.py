@@ -481,6 +481,13 @@ CONFIG_SUBMODES = {
                                                       '_app_vnic_gi')),
     "config-openflow":         ("config",            ()),
     "config-openflow-switch":  ("config-openflow",   ('_of_switch',)),
+    # ip ssh pubkey-chain（SSH公開鍵認証）。key-stringサブモードは
+    # 「行をそのまま貼り付ける」特殊な入力モードで、exit/endの確定処理
+    # (_finalize_ssh_pubkey) はapp.py側が先に横取りするため、ここでの
+    # 遷移先は「取りこぼした場合に備えた保険」の意味合いが強い。
+    "config-ssh-pubkey":       ("config",            ()),
+    "config-ssh-pubkey-user":  ("config-ssh-pubkey", ('_ssh_pubkey_user',)),
+    "config-ssh-pubkey-key":   ("config-ssh-pubkey-user", ('_ssh_pubkey_buf',)),
 }
 
 # 設定コマンドを _cmd_config に通すモード一覧（config本体＋全サブモード）

@@ -3213,6 +3213,65 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             stop_ssh_cli_agent(device_id)
             return '% All RSA keys will be removed.'
 
+    # ── ip ssh pubkey-chain（SSH公開鍵認証）──
+    # ここまでSSHはパスワード認証のみだった。実機同様、あらかじめ
+    # 登録した公開鍵でも認証できるようにする。
+    #
+    #   ip ssh pubkey-chain
+    #    username netadmin
+    #     key-string
+    #      <base64本体。複数行に分けて貼ってよい>
+    #     exit
+    #    exit
+    #   exit
+    #
+    # key-string配下は「値をそのまま貼り付ける」特殊モードなので、
+    # 通常のコマンド解釈をせず、行をそのまま蓄積して exit/end で確定する。
+    if state.device_type in ('cisco', 'catalyst'):
+        if state.mode == 'config-ssh-pubkey-key':
+            if c in ('exit', 'end'):
+                blob = ''.join(getattr(state, '_ssh_pubkey_buf', []))
+                err = _finalize_ssh_pubkey(state, blob.strip())
+                if hasattr(state, '_ssh_pubkey_buf'):
+                    del state._ssh_pubkey_buf
+                if c == 'end':
+                    for _attr in ('_ssh_pubkey_user', '_ssh_pubkey_buf'):
+                        if hasattr(state, _attr):
+                            delattr(state, _attr)
+                    state.mode = 'exec'
+                else:
+                    state.mode = 'config-ssh-pubkey-user'
+                return err or ''
+            # データ行（大小文字を保ったまま蓄積。base64は大小文字を区別する）
+            if orig.strip():
+                state._ssh_pubkey_buf.append(orig.strip())
+            return ''
+
+        if c == 'ip ssh pubkey-chain' and state.mode == 'config':
+            state.mode = 'config-ssh-pubkey'
+            return ''
+        if c == 'no ip ssh pubkey-chain' and state.mode == 'config':
+            state.ssh_pubkeys = {}
+            return ''
+
+        if state.mode == 'config-ssh-pubkey':
+            m_puser = re.match(r'^username\s+(\S+)\s*$', orig, re.I)
+            if m_puser:
+                state.mode = 'config-ssh-pubkey-user'
+                state._ssh_pubkey_user = m_puser.group(1)
+                return ''
+            m_nopuser = re.match(r'^no\s+username\s+(\S+)\s*$', orig, re.I)
+            if m_nopuser:
+                keys = getattr(state, 'ssh_pubkeys', None) or {}
+                keys.pop(m_nopuser.group(1), None)
+                state.ssh_pubkeys = keys
+                return ''
+
+        if state.mode == 'config-ssh-pubkey-user' and c == 'key-string':
+            state._ssh_pubkey_buf = []
+            state.mode = 'config-ssh-pubkey-key'
+            return ''
+
     # ── NETCONF-YANG ── netconf-yang を入れると実機同様
     # SSHの netconf サブシステム(TCP 830)が待ち受けを始める。
     # ncclient等の実物のNETCONFクライアントから接続できる。
@@ -4275,6 +4334,22 @@ def _build_running_config(device_id: str, state) -> str:
                 _p = f' privilege {_u["privilege"]}' if _u.get('privilege', 1) != 1 else ''
                 _pw = f' secret {_u["password"]}' if _u.get('password') else ''
                 lines.append(f'username {_u["name"]}{_p}{_pw}')
+            lines.append('!')
+        # SSH公開鍵（ip ssh pubkey-chain）
+        _pubkeys = getattr(state, 'ssh_pubkeys', None) or {}
+        if _pubkeys:
+            lines.append('ip ssh pubkey-chain')
+            for _uname, _keylist in _pubkeys.items():
+                lines.append(f' username {_uname}')
+                for _entry in _keylist:
+                    _algo, _b64 = _entry.split(' ', 1)
+                    lines.append('  key-string')
+                    # 実機同様、base64本体だけを折り返して出す
+                    for _i in range(0, len(_b64), 64):
+                        lines.append(f'   {_b64[_i:_i + 64]}')
+                    lines.append('  exit')
+                lines.append(' exit')
+            lines.append('exit')
             lines.append('!')
         # AAA（モデルベースAAAの前提。NETCONF/RESTCONFを使うには必要）
         if getattr(state, 'aaa_new_model', False):
@@ -5875,6 +5950,82 @@ def _format_transport_input(value) -> str:
     if allowed >= {'ssh', 'telnet'}:
         return 'all'
     return ' '.join(sorted(allowed))
+
+
+def _finalize_ssh_pubkey(state, blob: str):
+    """`ip ssh pubkey-chain` の key-string で貼り付けられた値を確定する。
+
+    実機は base64 本体だけを貼らせる（`ssh-rsa` 等のアルゴリズム名は
+    付けない）が、`~/.ssh/id_rsa.pub` をそのまま貼りたくなるのが自然
+    なので、OpenSSH形式（`ssh-rsa AAAA... comment`）で始まる場合も
+    受け付ける。戻り値はエラーメッセージ（成功時は空文字列）。
+    """
+    if not blob:
+        return '% Incomplete command.'
+    user = getattr(state, '_ssh_pubkey_user', None)
+    if not user:
+        return '% No username specified.'
+    parts = blob.split()
+    _known_algos = ('ssh-rsa', 'ssh-ed25519', 'ssh-dss',
+                    'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384',
+                    'ecdsa-sha2-nistp521')
+    algo_hint = parts[0] if parts and parts[0] in _known_algos else None
+    if algo_hint:
+        b64 = parts[1] if len(parts) > 1 else ''
+    else:
+        b64 = ''.join(blob.split())
+    if not b64:
+        return '% Invalid key data.'
+    try:
+        import base64 as _b64mod
+        raw = _b64mod.b64decode(b64, validate=True)
+    except Exception:
+        return '% Invalid base64 key data.'
+    if not raw:
+        return '% Invalid key data.'
+    # 鍵の種類は blob 自身の先頭フィールドに書かれている（SSHワイヤ形式は
+    # 自己記述的）。実機にアルゴリズム名を別途書かせる方式は無いので、
+    # 素のbase64本体だけが貼られる（＝行頭のヒントが無い）のが通常。
+    # 以前はここで無条件に 'ssh-rsa' を仮定していたため、ed25519/ecdsa
+    # 鍵は常に「RSAとして解釈できない」で弾かれていた。
+    try:
+        import paramiko
+        actual_algo = paramiko.Message(raw).get_text()
+    except Exception:
+        return '% Invalid key data.'
+    if algo_hint and algo_hint != actual_algo:
+        return (f'% Key type mismatch: declared "{algo_hint}" but the key '
+                f'data is "{actual_algo}"')
+    algo = actual_algo
+    # 実際に鍵として構築できるか確認する（形だけ整えたゴミを弾く）。
+    # 型名だけ読めても、その後ろのmpint/バイト列が壊れていれば
+    # 鍵としては無効なので、該当クラスで実際にパースさせる。
+    try:
+        # paramiko のバージョンによっては DSSKey が無い（4.0でDSA/DSS
+        # サポートが落ちた）。dict内包表記の時点でAttributeErrorになり、
+        # 「鍵の種類に関わらず必ず Invalid key data になる」という
+        # 分かりにくい壊れ方をしていたので、無い属性は素通りする。
+        _key_class_names = {
+            'ssh-rsa': 'RSAKey', 'ssh-dss': 'DSSKey',
+            'ssh-ed25519': 'Ed25519Key',
+            'ecdsa-sha2-nistp256': 'ECDSAKey',
+            'ecdsa-sha2-nistp384': 'ECDSAKey',
+            'ecdsa-sha2-nistp521': 'ECDSAKey',
+        }
+        cls_name = _key_class_names.get(algo)
+        cls = getattr(paramiko, cls_name, None) if cls_name else None
+        if cls is None:
+            return f'% Unsupported key type: {algo}'
+        cls(data=raw)
+    except Exception:
+        return '% Invalid key data.'
+    keys = getattr(state, 'ssh_pubkeys', None) or {}
+    entry_list = keys.setdefault(user, [])
+    entry = f'{algo} {b64}'
+    if entry not in entry_list:
+        entry_list.append(entry)
+    state.ssh_pubkeys = keys
+    return ''
 
 
 def _run_cli_sync(device_id: str, command: str) -> str:

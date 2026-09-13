@@ -283,3 +283,202 @@ def test_invalid_modulus_is_rejected(device):
     out = _cli('crypto key generate rsa modulus 99')
     assert 'Invalid modulus' in out
     _cli('end')
+
+
+# ══════════════════════════════════════════
+# 公開鍵認証（ip ssh pubkey-chain）
+# ══════════════════════════════════════════
+def _register_pubkey(username, key, wrap=64):
+    """`ip ssh pubkey-chain` で公開鍵を登録する（実機と同じ手順）"""
+    b64 = key.get_base64()
+    cmds = ['configure terminal', 'ip ssh pubkey-chain',
+           f'username {username}', 'key-string']
+    for i in range(0, len(b64), wrap):
+        cmds.append(b64[i:i + wrap])
+    cmds += ['exit', 'exit', 'exit', 'end']
+    out = ''
+    for c in cmds:
+        out = _cli(c) or out
+    return out
+
+
+def test_login_with_a_registered_public_key(device):
+    key = paramiko.RSAKey.generate(2048)
+    _register_pubkey(USER, key)
+
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        c.connect(DEV_IP, 22, username=USER, pkey=key, timeout=10,
+                  allow_agent=False, look_for_keys=False)
+        assert c.get_transport().is_authenticated()
+    finally:
+        c.close()
+
+
+def test_an_unregistered_key_is_rejected(device):
+    registered = paramiko.RSAKey.generate(2048)
+    _register_pubkey(USER, registered)
+    other = paramiko.RSAKey.generate(2048)
+
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        with pytest.raises(paramiko.AuthenticationException):
+            c.connect(DEV_IP, 22, username=USER, pkey=other, timeout=10,
+                      allow_agent=False, look_for_keys=False)
+    finally:
+        c.close()
+
+
+def test_password_auth_still_works_after_registering_a_key(device):
+    """公開鍵を登録しても、パスワード認証が塞がれないこと"""
+    key = paramiko.RSAKey.generate(2048)
+    _register_pubkey(USER, key)
+    c = _connect()          # パスワードで接続
+    try:
+        assert c.get_transport().is_authenticated()
+    finally:
+        c.close()
+
+
+def test_public_key_appears_in_running_config(device):
+    key = paramiko.RSAKey.generate(2048)
+    _register_pubkey(USER, key)
+    cfg = _cli('show running-config')
+    assert 'ip ssh pubkey-chain' in cfg
+    assert f' username {USER}' in cfg
+    # base64本体が折り返されて出ること（連結すれば元の鍵と一致する）
+    assert key.get_base64() in cfg.replace('\n', '').replace(' ', '')
+
+
+def test_running_config_survives_a_key_added_over_ssh_password_login(device):
+    """SSH経由で鍵を登録しても /api/cli 側の running-config に出ること
+
+    公開鍵チェーンの設定自体は /api/cli 経由で行っているが、念のため
+    別実装になっていないか running-config 側からも確かめる。
+    """
+    key = paramiko.RSAKey.generate(2048)
+    _register_pubkey(USER, key)
+    # 別セッションでSSHログインして running-config を取得する
+    c = _connect()
+    try:
+        _in, out, _err = c.exec_command('show running-config')
+        cfg = out.read().decode()
+    finally:
+        c.close()
+    assert 'ip ssh pubkey-chain' in cfg
+
+
+def test_key_for_a_different_username_does_not_authenticate(device):
+    """別ユーザ名に登録した鍵では、そのユーザ名でログインできないこと"""
+    key = paramiko.RSAKey.generate(2048)
+    _register_pubkey('otheruser', key)
+
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        with pytest.raises(paramiko.AuthenticationException):
+            c.connect(DEV_IP, 22, username=USER, pkey=key, timeout=10,
+                      allow_agent=False, look_for_keys=False)
+    finally:
+        c.close()
+
+
+def test_removing_the_username_revokes_its_keys(device):
+    key = paramiko.RSAKey.generate(2048)
+    _register_pubkey(USER, key)
+
+    for c in ('configure terminal', 'ip ssh pubkey-chain',
+              f'no username {USER}', 'exit', 'end'):
+        _cli(c)
+
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        with pytest.raises(paramiko.AuthenticationException):
+            c.connect(DEV_IP, 22, username=USER, pkey=key, timeout=10,
+                      allow_agent=False, look_for_keys=False)
+    finally:
+        c.close()
+
+
+def _generate_ed25519_key():
+    """paramiko.Ed25519Key に generate() が無いので cryptography 側で作る"""
+    import io
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey)
+    from cryptography.hazmat.primitives import serialization
+    priv = Ed25519PrivateKey.generate()
+    pem = priv.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.OpenSSH,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    return paramiko.Ed25519Key.from_private_key(io.StringIO(pem))
+
+
+def test_ed25519_keys_are_also_supported(device):
+    key = _generate_ed25519_key()
+    _register_pubkey(USER, key)
+
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        c.connect(DEV_IP, 22, username=USER, pkey=key, timeout=10,
+                  allow_agent=False, look_for_keys=False)
+        assert c.get_transport().is_authenticated()
+    finally:
+        c.close()
+
+
+def test_pasting_the_full_openssh_format_line_also_works(device):
+    """`~/.ssh/id_rsa.pub` をそのまま貼っても通ること
+
+    実機は base64本体だけを貼らせる方式だが、フルの
+    "ssh-rsa AAAA... comment" 形式で貼っても受け付ける
+    （utility寄りの意図的な緩和）。
+    """
+    key = paramiko.RSAKey.generate(2048)
+    line = f'{key.get_name()} {key.get_base64()} test@laptop'
+    for c in ('configure terminal', 'ip ssh pubkey-chain',
+              f'username {USER}', 'key-string', line,
+              'exit', 'exit', 'exit', 'end'):
+        _cli(c)
+
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        c.connect(DEV_IP, 22, username=USER, pkey=key, timeout=10,
+                  allow_agent=False, look_for_keys=False)
+        assert c.get_transport().is_authenticated()
+    finally:
+        c.close()
+
+
+def test_no_ip_ssh_pubkey_chain_revokes_every_key(device):
+    key = paramiko.RSAKey.generate(2048)
+    _register_pubkey(USER, key)
+
+    _cli('configure terminal')
+    _cli('no ip ssh pubkey-chain')
+    _cli('end')
+
+    assert 'ip ssh pubkey-chain' not in _cli('show running-config')
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        with pytest.raises(paramiko.AuthenticationException):
+            c.connect(DEV_IP, 22, username=USER, pkey=key, timeout=10,
+                      allow_agent=False, look_for_keys=False)
+    finally:
+        c.close()
+
+
+def test_garbage_key_data_is_rejected_with_an_error(device):
+    for c in ('configure terminal', 'ip ssh pubkey-chain',
+              f'username {USER}', 'key-string', 'not-a-valid-key!!'):
+        _cli(c)
+    out = _cli('exit')
+    assert 'Invalid' in out
+    _cli('exit'); _cli('exit'); _cli('end')

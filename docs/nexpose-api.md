@@ -482,12 +482,13 @@ SNMP GET で確かめるようにした瞬間に出てきたもの。
   製品名やバージョンは `DeviceState` から埋めているだけ
 - ポートスイープ。叩くのは候補＋`WELL_KNOWN_PORTS` だけで、
   1-65535 の全走査はしない
-- telnet / https の資格情報の照合（認証できる実体が無い）。
-  ssh と snmp は本当に試す
-- 認証スキャンで読む**中身**。認証自体は本物のSSHログインだが、
-  ログインが通った後は SSH 越しに `show running-config` を叩くのではなく
-  `DeviceState` を直接読んでいる
-- 公開鍵認証、権限昇格（enable）
+- https の資格情報の照合（認証できる実体が無い）。
+  ssh・telnet・snmp は本当に試す（22/23でログインできれば
+  `show running-config` を実際に実行して読む。詳細は §3.5 の 13）
+- Nexposeの site_credentials が公開鍵を扱えない（username/passwordのみ）。
+  SSH CLIサーバ自体は `ip ssh pubkey-chain` の公開鍵認証に対応済み
+  → [`ssh-cli-server.md`](./ssh-cli-server.md)
+- 権限昇格（enable）
 - Scan Engine / Engine Pool、スケジュールスキャン、非同期実行
   （`POST .../scans` はその場で完了して `finished` を返す）
 - Scan Template のチューニング（3種類の固定テンプレートのみ）
