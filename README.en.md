@@ -279,8 +279,10 @@ network-lab-emulator/
   it diverges from the real device
 - The default credentials are `admin` / `admin`. Change them before running anywhere
   that is not a closed environment
-- `docs/reference/` contains vendor manual PDFs. Redistribution is subject to each
-  vendor's terms — please check before relying on them
+- Vendor manual PDFs that used to live under `docs/reference/` have been
+  removed since their redistribution terms were unclear. The implementation
+  notes derived from them remain in the docs as written-up summaries citing
+  the model/edition
 
 ---
 

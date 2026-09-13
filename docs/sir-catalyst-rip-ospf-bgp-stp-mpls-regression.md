@@ -1,6 +1,7 @@
 # Si-R/Catalyst: RIP/OSPF/BGP/STP/MPLS リグレッション記録（2026-09-09〜10）
 
-Si-R実機マニュアル(`docs/reference/Si-R.G120G121G210G211cmd_reference-g12x_g21x_202606.pdf`)
+Si-R実機マニュアル（Si-R G120/G121/G210/G211 コマンドリファレンス、
+2026年6月版。再配布可否が不明なため`docs/reference/`からは削除済み）
 との突き合わせ、および3台Catalyst OSPF構成でのライブ検証を通じて見つけた
 不具合の修正記録と、再現用のコマンドサンプルをまとめる。
 
