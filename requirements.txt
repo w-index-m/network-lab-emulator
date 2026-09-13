@@ -8,3 +8,9 @@ rank_bm25>=0.2.2
 # _HAS_GRPC=False で無効化されるだけでアプリは起動する。
 grpcio>=1.60
 grpcio-tools>=1.60
+# 実NETCONFサーバ(830)・実SSH CLIサーバ(22)が使う実SSH実装。
+# 未導入でも各エージェントは _HAS_PARAMIKO=False で無効化されるだけで
+# アプリは起動するが、ここに書かないとその機能が有効にならない
+# （このリポジトリで実際に使っているのに requirements.txt に
+# 無いことに気付かず放置されていた）。
+paramiko>=3.4

@@ -24,10 +24,11 @@ SSH CLIサーバ（`ssh_cli_agent.py`）のTelnet版。存在理由は2つ:
   - IAC（Telnetオプション交渉）は WILL/WONT/DO/DONT を読み飛ばす。
     ECHO と SGA だけこちらから WILL を送る
   - パスワード入力中のエコー抑制
+  - **`enable` による権限昇格**（SSH CLIサーバと同じ規則・同じ実装を
+    `engine/ssh_cli_agent` から参照する）
 
 対応していない範囲（実機との差）:
   - `line vty` 単位の同時接続数制限、`exec-timeout`、`access-class`
-  - `enable` による権限昇格
   - 端末制御（カーソル移動・履歴・TAB補完）
 """
 
@@ -93,9 +94,11 @@ class TelnetCliServer:
             sock.settimeout(120)
             # ECHO と SGA はこちら（サーバ）が持つ、と宣言する
             sock.sendall(bytes([IAC, WILL, OPT_ECHO, IAC, WILL, OPT_SGA]))
-            if not self._login(sock):
+            user = self._login(sock)
+            if user is None:
                 return
-            self._shell(sock)
+            from engine.ssh_cli_agent import initial_privilege
+            self._shell(sock, initial_privilege(self.state, user))
         except OSError:
             pass
         finally:
@@ -105,38 +108,70 @@ class TelnetCliServer:
                 pass
 
     def _login(self, sock):
+        """ログインに成功したユーザ名を返す。失敗/切断なら None。"""
         from engine.netconf_agent import _device_users
         users = _device_users(self.state)
         sock.sendall(b'\r\n\r\nUser Access Verification\r\n\r\n')
         for _attempt in range(3):
             user = self._readline(sock, b'Username: ')
             if user is None:
-                return False
+                return None
             pw = self._readline(sock, b'Password: ', echo=False)
             if pw is None:
-                return False
+                return None
             if users.get(user) == pw:
-                return True
+                return user
             sock.sendall(b'\r\n% Login invalid\r\n\r\n')
         sock.sendall(b'% Bad passwords\r\n')
-        return False
+        return None
 
-    def _shell(self, sock):
-        sock.sendall(b'\r\n' + _prompt(self.state) + b' ')
+    def _shell(self, sock, privilege):
+        priv = [privilege]                  # enable/disableで書き換える
+        sock.sendall(b'\r\n' + _prompt(self.state, priv[0] >= 15) + b' ')
         while not self._stop.is_set():
             line = self._readline(sock, b'')
             if line is None:
                 return
             if not line:
-                sock.sendall(_prompt(self.state) + b' ')
+                sock.sendall(_prompt(self.state, priv[0] >= 15) + b' ')
                 continue
             if line.lower() in ('exit', 'quit', 'logout') and \
                     getattr(self.state, 'mode', 'exec') == 'exec':
                 return
-            out = self.run_command(self.device_id, line)
+            out = self._dispatch(sock, line, priv)
             if out:
                 sock.sendall(_crlf(out) + b'\r\n')
-            sock.sendall(_prompt(self.state) + b' ')
+            sock.sendall(_prompt(self.state, priv[0] >= 15) + b' ')
+
+    def _dispatch(self, sock, line, priv):
+        """1行ぶんのコマンドを、権限昇格まわりだけ横取りして実行する
+
+        SSH CLIサーバ（`ssh_cli_agent.SshCliServer._dispatch`）と
+        同じ規則・同じヘルパー関数を使う（実装を2箇所に持たない）。
+        """
+        from engine.ssh_cli_agent import is_privileged_only, check_enable_password
+        low = line.lower()
+        if low in ('enable', 'en'):
+            if priv[0] >= 15:
+                return self.run_command(self.device_id, line)
+            pw = self._readline(sock, b'Password: ', echo=False)
+            if pw is None:
+                return ''
+            ok = check_enable_password(self.state, pw)
+            if ok is None:
+                return '% No password set.'
+            if ok:
+                priv[0] = 15
+                return ''
+            return '% Access denied.'
+        if low == 'disable':
+            if getattr(self.state, 'mode', 'exec') == 'exec':
+                priv[0] = 1
+            return ''
+        if priv[0] < 15 and is_privileged_only(line):
+            return (f"% Invalid input detected at '^' marker.\n"
+                   f'  {line}\n  ^')
+        return self.run_command(self.device_id, line)
 
     def _readline(self, sock, prompt, echo=True):
         """1行読む。Telnetのオプション交渉は読み飛ばす。
@@ -206,9 +241,9 @@ class TelnetCliServer:
             return False
 
 
-def _prompt(state):
+def _prompt(state, privileged: bool = True):
     from engine.ssh_cli_agent import prompt_for
-    return prompt_for(state).encode()
+    return prompt_for(state, privileged).encode()
 
 
 def _crlf(text):

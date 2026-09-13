@@ -482,3 +482,217 @@ def test_garbage_key_data_is_rejected_with_an_error(device):
     out = _cli('exit')
     assert 'Invalid' in out
     _cli('exit'); _cli('exit'); _cli('end')
+
+
+# ══════════════════════════════════════════
+# enable（権限昇格）
+# ══════════════════════════════════════════
+LOWUSER, LOWPASS = 'lowpriv', 'LowP@ss'
+ENABLE_SECRET = 'En@bleSecret1'
+
+
+@pytest.fixture
+def low_priv_device(device):
+    """privilege 1 のユーザ + enable secret を足した装置
+
+    `device` フィクスチャの USER(=netadmin) は privilege 15 のまま
+    残す。既存のSSHテスト群がそれを前提にしているため。
+    """
+    for c in ('configure terminal', f'username {LOWUSER} privilege 1 '
+             f'secret {LOWPASS}', f'enable secret {ENABLE_SECRET}', 'end'):
+        _cli(c)
+    yield
+
+
+def _connect_shell(user, password, timeout=10):
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.connect(DEV_IP, 22, username=user, password=password, timeout=timeout,
+              allow_agent=False, look_for_keys=False)
+    sh = c.invoke_shell()
+    time.sleep(1)
+    sh.recv(65535)                      # バナー/最初のプロンプトを捨てる
+    return c, sh
+
+
+def test_privileged_user_starts_at_hash_prompt(low_priv_device):
+    """privilege 15 のユーザは最初から特権EXEC（#）"""
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.connect(DEV_IP, 22, username=USER, password=PASSWORD, timeout=10,
+              allow_agent=False, look_for_keys=False)
+    sh = c.invoke_shell()
+    time.sleep(1)
+    banner = sh.recv(65535).decode(errors='replace')
+    try:
+        assert banner.rstrip().endswith('#')
+    finally:
+        c.close()
+
+
+def test_low_privilege_user_starts_at_angle_bracket_prompt(low_priv_device):
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.connect(DEV_IP, 22, username=LOWUSER, password=LOWPASS, timeout=10,
+              allow_agent=False, look_for_keys=False)
+    sh = c.invoke_shell()
+    time.sleep(1)
+    banner = sh.recv(65535).decode(errors='replace')
+    try:
+        assert banner.rstrip().endswith('>')
+    finally:
+        c.close()
+
+
+def test_user_exec_blocks_configure_terminal(low_priv_device):
+    c, sh = _connect_shell(LOWUSER, LOWPASS)
+    try:
+        out = _shell_send(sh, 'configure terminal')
+        assert 'Invalid input' in out
+        assert out.rstrip().endswith('>')          # モードは変わっていない
+    finally:
+        c.close()
+
+
+def test_user_exec_blocks_show_running_config(low_priv_device):
+    c, sh = _connect_shell(LOWUSER, LOWPASS)
+    try:
+        out = _shell_send(sh, 'show running-config')
+        assert 'Invalid input' in out
+    finally:
+        c.close()
+
+
+def test_user_exec_still_allows_ordinary_show_commands(low_priv_device):
+    c, sh = _connect_shell(LOWUSER, LOWPASS)
+    try:
+        out = _shell_send(sh, 'show ip interface brief')
+        assert DEV_IP in out
+    finally:
+        c.close()
+
+
+def test_enable_with_correct_password_elevates(low_priv_device):
+    c, sh = _connect_shell(LOWUSER, LOWPASS)
+    try:
+        out = _shell_send(sh, 'enable')
+        assert 'Password:' in out
+        out = _shell_send(sh, ENABLE_SECRET)
+        assert out.rstrip().endswith('#')
+        # 昇格後はconfigureが通る
+        out = _shell_send(sh, 'configure terminal')
+        assert 'Invalid input' not in out
+        assert '(config)#' in out
+        _shell_send(sh, 'end')
+    finally:
+        c.close()
+
+
+def test_enable_with_wrong_password_stays_unprivileged(low_priv_device):
+    c, sh = _connect_shell(LOWUSER, LOWPASS)
+    try:
+        _shell_send(sh, 'enable')
+        out = _shell_send(sh, 'wrong-password')
+        assert 'Access denied' in out
+        assert out.rstrip().endswith('>')
+        # まだ昇格していないので configure は依然として弾かれる
+        out = _shell_send(sh, 'configure terminal')
+        assert 'Invalid input' in out
+    finally:
+        c.close()
+
+
+def test_disable_returns_to_user_exec(low_priv_device):
+    c, sh = _connect_shell(LOWUSER, LOWPASS)
+    try:
+        _shell_send(sh, 'enable')
+        _shell_send(sh, ENABLE_SECRET)
+        out = _shell_send(sh, 'disable')
+        assert out.rstrip().endswith('>')
+        out = _shell_send(sh, 'configure terminal')
+        assert 'Invalid input' in out
+    finally:
+        c.close()
+
+
+def test_enable_without_a_password_configured_is_refused(device):
+    """enable secret/password のどちらも未設定なら実機同様拒否する"""
+    for c in ('configure terminal', f'username {LOWUSER} privilege 1 '
+             f'secret {LOWPASS}', 'end'):
+        _cli(c)
+    c, sh = _connect_shell(LOWUSER, LOWPASS)
+    try:
+        _shell_send(sh, 'enable')
+        out = _shell_send(sh, 'anything')
+        assert 'No password set' in out
+        assert out.rstrip().endswith('>')
+    finally:
+        c.close()
+
+
+def test_exec_channel_rejects_privileged_commands_for_low_privilege_user(
+        low_priv_device):
+    """execチャンネルは対話プロンプトが無いので、その場で拒否される
+    （実機のvty exec-channelと同じ制約。enableで昇格する余地が無い）"""
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.connect(DEV_IP, 22, username=LOWUSER, password=LOWPASS, timeout=10,
+              allow_agent=False, look_for_keys=False)
+    try:
+        _in, out, _err = c.exec_command('show running-config')
+        text = out.read().decode()
+        assert 'Invalid input' in text
+    finally:
+        c.close()
+
+
+def test_exec_channel_still_allows_ordinary_commands(low_priv_device):
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    c.connect(DEV_IP, 22, username=LOWUSER, password=LOWPASS, timeout=10,
+              allow_agent=False, look_for_keys=False)
+    try:
+        _in, out, _err = c.exec_command('show ip interface brief')
+        assert DEV_IP in out.read().decode()
+    finally:
+        c.close()
+
+
+def test_no_local_users_falls_back_to_privileged_admin(server):
+    """ローカルユーザが1つも無い装置は admin/admin で特権EXECに入る"""
+    try:
+        import urllib.request
+        urllib.request.urlopen(urllib.request.Request(
+            BASE + '/api/device/priv-admin-fallback', method='DELETE'),
+            timeout=30).read()
+    except Exception:
+        pass
+    import urllib.request, json                          # noqa: E401
+    urllib.request.urlopen(urllib.request.Request(
+        BASE + '/api/device', method='POST',
+        data=json.dumps({'id': 'priv-admin-fallback', 'type': 'catalyst',
+                         'hostname': 'FALLBACK'}).encode(),
+        headers={'Content-Type': 'application/json'}), timeout=30).read()
+    ip = '10.224.8.8'
+    for c in ('configure terminal', 'interface GigabitEthernet1/0/1',
+              'no switchport', f'ip address {ip} 255.255.255.0',
+              'no shutdown', 'exit',
+              'crypto key generate rsa modulus 2048', 'end'):
+        _cli(c, dev='priv-admin-fallback')
+    time.sleep(2)
+    c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        c.connect(ip, 22, username='admin', password='admin', timeout=10,
+                  allow_agent=False, look_for_keys=False)
+        sh = c.invoke_shell()
+        time.sleep(1)
+        assert sh.recv(65535).decode(errors='replace').rstrip().endswith('#')
+    finally:
+        c.close()
+        try:
+            urllib.request.urlopen(urllib.request.Request(
+                BASE + '/api/device/priv-admin-fallback', method='DELETE'),
+                timeout=30).read()
+        except Exception:
+            pass

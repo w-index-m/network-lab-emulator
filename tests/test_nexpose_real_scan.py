@@ -414,6 +414,73 @@ def test_ssh_port_22_is_discovered_by_the_scan(ssh_device):
 
 
 # ══════════════════════════════════════════
+# 権限昇格（enable）を認識した資格情報照合
+# ══════════════════════════════════════════
+# ssh_cli_agent.py に user EXEC / privileged EXEC の区別を入れた結果、
+# privilege 15 未満のローカルユーザは `show running-config` を
+# 実行できなくなった。ログイン(認証)は通るが設定は読めない、という
+# 状態が実際に起こるようになったので、その扱いを固定する。
+@pytest.fixture
+def low_priv_ssh_device(server):
+    _req('DELETE', f'/api/device/{DEV}')
+    _req('POST', '/api/device',
+         {'id': DEV, 'type': 'catalyst', 'hostname': 'LOWPRIV-TARGET'})
+    for c in ('configure terminal', 'interface GigabitEthernet1/0/1',
+              'no switchport', f'ip address {DEV_IP} 255.255.255.0',
+              'no shutdown', 'exit',
+              'snmp-server community secret-rw rw',   # state直読みで拾えるはず
+              'aaa new-model',                        # ← 設定済み
+              'username lowpriv privilege 1 secret LowP@ss',
+              'crypto key generate rsa modulus 2048', 'end'):
+        _cli(c)
+    time.sleep(3)
+    sid = _req('POST', '/api/3/sites', {
+        'name': 'Low priv scan',
+        'scan': {'assets': {'includedTargets': {'addresses': [DEV_IP]}}}})['id']
+    yield sid
+    _req('DELETE', f'/api/device/{DEV}')
+
+
+def test_low_privilege_credential_authenticates_but_cannot_read_config(
+        low_priv_ssh_device):
+    """認証は通るが running-config は読めない、という状態になること
+
+    privilege 1 のアカウントでは `show running-config` がuser EXECで
+    ブロックされる（privileged EXEC専用コマンド）ので、ログインは
+    verified=True でも config は取得できない。
+    """
+    sid = low_priv_ssh_device
+    _cred(sid, 'lowpriv', {'service': 'ssh', 'username': 'lowpriv',
+                           'password': 'LowP@ss'})
+    a = _scan(sid)
+    d = _detail(a, 'lowpriv')
+    assert d['verified'] is True
+    assert 'read running-config' not in d['note']
+    assert d['note'] == 'authenticated on tcp/22'
+
+
+def test_config_fetch_denial_falls_back_to_reading_the_device_state(
+        low_priv_ssh_device):
+    """config が読めなくても、判定自体はできる限り続けること
+
+    以前は「拒否されたときの応答文字列」をそのまま config として
+    扱っていたため、`aaa new-model` や `RW` を正規表現で探しても
+    見つからず、実際には脆弱な状態でも所見が消えてしまっていた
+    （configが読めているように見えて中身が空振り、という壊れ方）。
+    ここでは config が読めない場合、DeviceState を直接見る従来の
+    経路にきちんとフォールバックすることを確認する。
+    """
+    sid = low_priv_ssh_device
+    _cred(sid, 'lowpriv', {'service': 'ssh', 'username': 'lowpriv',
+                           'password': 'LowP@ss'})
+    ids = set(_scan(sid)['_vuln_ids'])
+    # RWコミュニティは実際に設定されているので検出されるべき
+    assert 'netlab-snmp-rw-community' in ids
+    # aaa new-model は設定済みなので、この所見は立たないはず
+    assert 'netlab-no-aaa-authentication' not in ids
+
+
+# ══════════════════════════════════════════
 # Telnet（平文管理）
 # ══════════════════════════════════════════
 def _telnet_on():

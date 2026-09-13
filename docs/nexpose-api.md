@@ -444,6 +444,31 @@ SNMP GET で確かめるようにした瞬間に出てきたもの。
     先へ進めなかった。実SSH CLIサーバ（TCP/22）を実装した
     → [`ssh-cli-server.md`](./ssh-cli-server.md)
 
+### `enable` 権限昇格を入れて分かったこと
+
+SSH/Telnet CLIサーバに user EXEC / privileged EXEC の区別
+（[`ssh-cli-server.md`](./ssh-cli-server.md) の「enableによる権限昇格」）
+を入れた結果、**privilege 15 未満のローカルユーザは
+`show running-config` を実行できなくなった**。認証（ログイン）は
+通るが、設定は読めない、という状態が実際に起こるようになった。
+
+これに対して `probe_ssh_login` は、権限不足の応答
+（`% Invalid input detected...`）をそのまま config として
+扱わないようにしている。もしそのまま扱うと、`aaa new-model` や
+`RW` を正規表現で探しても見つからず「読めているのに中身が
+空振り」という壊れ方をする。config が読めない場合は、
+これまで通り `DeviceState` を直接見る経路にフォールバックする。
+
+```
+資格情報: lowpriv (privilege 1, aaa new-model設定済み, snmp RWあり)
+  verified=True note='authenticated on tcp/22'   ← config は読めていない
+  findings: ['netlab-snmp-rw-community']          ← DeviceState直読みで検出
+  （'netlab-no-aaa-authentication' は出ない。aaa new-modelは設定済みなので）
+```
+
+回帰テストは `tests/test_nexpose_real_scan.py` の
+`test_config_fetch_denial_falls_back_to_reading_the_device_state`。
+
 ---
 
 修正後は実機同様、コミュニティが合わない要求は**黙って捨てる**
@@ -504,7 +529,7 @@ SNMP GET で確かめるようにした瞬間に出てきたもの。
 ## 6. テスト
 
 `tests/test_nexpose_api.py`（55 件、TestClient）、
-`tests/test_nexpose_real_scan.py`（20 件、**本物の uvicorn サーバ**）、
+`tests/test_nexpose_real_scan.py`（28 件、**本物の uvicorn サーバ**）、
 `tests/test_ssh_cli_server.py`（10 件、実SSHクライアント →
 [`ssh-cli-server.md`](./ssh-cli-server.md)）、
 `tests/test_snmp_community_config.py`（10 件）。

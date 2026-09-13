@@ -21,16 +21,25 @@ Nexposeエミュレーションの認証スキャンが「ログインは本物�
   - **公開鍵認証**（`ip ssh pubkey-chain` で登録した鍵。RSA/Ed25519/
     ECDSA。DSSはクラス自体はあるがparamiko 4.0でサポートが落ちている）。
     装置側の CLI で登録した鍵しか通らない
+  - **`enable` による権限昇格**。ログインしたローカルユーザの
+    `privilege` が15未満なら user EXEC(`>`) で始まり、`enable secret`/
+    `enable password` と一致すれば privileged EXEC(`#`) に上がる
   - shell チャンネル（対話）と exec チャンネル（`ssh host "show ..."`）
   - プロンプト、モード遷移、Ctrl-C / Ctrl-D、`exit` での切断
 
 対応していない範囲（実機との差）:
-  - `enable` による権限昇格、AAA連携
+  - AAA連携（TACACS+/RADIUSでの `enable` 認証）
+  - user EXEC で塞ぐコマンドは代表的なもの（`configure terminal`・
+    `show running/startup-config`・`write`/`copy`/`reload`/`debug`・
+    `crypto`・`ip ssh pubkey-chain`）だけで、実機のコマンド単位の
+    privilege-level割り当て表（多くのshowはlevel 0/1で見られる等）を
+    忠実には再現していない
   - 端末制御（カーソル移動・履歴・TAB補完）。行単位で読むだけ
   - ホスト鍵は**プロセス内で1本を共有**する（装置ごとに2048bitの鍵を
     生成すると装置作成が目に見えて遅くなるため。実機は装置ごとに別鍵）
 """
 
+import re
 import socket
 import threading
 
@@ -57,17 +66,79 @@ def _shared_host_key():
         return _host_key
 
 
-def prompt_for(state) -> str:
-    """実機と同じ形のプロンプトを組み立てる"""
+def prompt_for(state, privileged: bool = True) -> str:
+    """実機と同じ形のプロンプトを組み立てる。
+
+    privileged=False（user EXEC）なら `>`。config系のモードは
+    privilege 15 でなければ入れない（`_is_privileged_only` が
+    `configure terminal` 自体を塞ぐ）ので、config-* の間は常に `#`。
+    """
     host = getattr(state, 'hostname', 'Router')
     mode = getattr(state, 'mode', 'exec')
     if mode == 'exec':
-        return f'{host}#'
+        return f'{host}#' if privileged else f'{host}>'
     if mode == 'config':
         return f'{host}(config)#'
     if mode.startswith('config-'):
         return f'{host}({mode})#'
-    return f'{host}#'
+    return f'{host}#' if privileged else f'{host}>'
+
+
+# ── enable（権限昇格）─────────────────────
+# 実機はVTY経由のログインだと既定で user EXEC(>) から始まり、
+# privilege 15 未満のローカルユーザはそのまま。ローカルユーザの
+# privilege が15（ローカルユーザ未設定時の admin/admin フォールバック
+# 含む）なら最初から privileged EXEC(#) に入る。
+#
+# 「昇格すると何ができるようになるか」を実機の個々のコマンドの
+# privilege-level割り当てに忠実に合わせるのは大掛かりなので、
+# 代表的な「これが素通りしたらラボとして意味が無い」もの
+# （設定投入・running-configの閲覧・reload等）だけを
+# user EXEC でブロックする、という割り切り。
+_PRIVILEGED_ONLY_PATTERNS = [re.compile(p, re.I) for p in (
+    r'^conf(ig(ure)?)?(\s+t(erm(inal)?)?)?\s*$',
+    r'^sh(ow)?\s+run(ning-config)?\b',
+    r'^sh(ow)?\s+start(up-config)?\b',
+    r'^write\b', r'^copy\b', r'^reload\b', r'^debug\b',
+    r'^crypto\b', r'^ip\s+ssh\s+pubkey-chain\b',
+)]
+
+
+def is_privileged_only(command: str) -> bool:
+    c = (command or '').strip()
+    return any(p.match(c) for p in _PRIVILEGED_ONLY_PATTERNS)
+
+
+def initial_privilege(state, username: str) -> int:
+    """ログイン直後の権限レベル。
+
+    ローカルユーザの `privilege` を見る。ローカルユーザが1つも
+    無い装置は admin/admin にフォールバックする仕様
+    （`_device_users` 参照）なので、その場合は特権15として扱う。
+    """
+    users = getattr(state, 'users', None) or []
+    for u in users:
+        if u.get('name') == username:
+            return int(u.get('privilege', 1) or 1)
+    if not users:
+        return 15
+    return 1
+
+
+def check_enable_password(state, password: str):
+    """enable secret/password と照合する。
+
+    戻り値: True=一致 / False=不一致 / None=どちらも未設定
+    （実機の "% No password set." に相当。呼び出し側で判定する）。
+    secret が設定されていれば実機同様 secret を優先する。
+    """
+    secret = getattr(state, 'enable_secret', None)
+    if secret:
+        return password == secret
+    plain = getattr(state, 'enable_password', None)
+    if plain:
+        return password == plain
+    return None
 
 
 class _CliSshServer(paramiko.ServerInterface if _HAS_PARAMIKO else object):
@@ -226,65 +297,147 @@ class SshCliServer:
                 chan.close()
                 return
             kind, payload = req
+            privilege = initial_privilege(self.state, server.authenticated_user)
             if kind == 'exec':
-                self._run_exec(chan, payload)
+                self._run_exec(chan, payload, privilege)
             else:
-                self._run_shell(chan)
+                self._run_shell(chan, privilege)
         except Exception:
             try:
                 chan.close()
             except Exception:
                 pass
 
-    def _run_exec(self, chan, command):
-        """ssh host "show version" — 1コマンド実行して切る"""
+    def _run_exec(self, chan, command, privilege):
+        """ssh host "show version" — 1コマンド実行して切る
+
+        execチャンネルは1発勝負で対話プロンプトを出せないので、
+        privilege 15 未満なら特権専用コマンドをその場で拒否する
+        （`enable` で昇格する余地が無いのは実機のvty exec-channelと
+        同じ制約）。
+        """
         try:
-            out = self.run_command(self.device_id, command)
+            if privilege < 15 and is_privileged_only(command):
+                out = (f"% Invalid input detected at '^' marker.\n"
+                       f'  {command}\n  ^')
+            else:
+                out = self.run_command(self.device_id, command)
             chan.sendall(_crlf(out) + b'\r\n')
             chan.send_exit_status(0)
         finally:
             chan.close()
 
-    def _run_shell(self, chan):
+    def _run_shell(self, chan, privilege):
+        """対話シェル。1バイトずつ読む（下の注意点を参照）。
+
+        `enable` はパスワードを訊くために、この関数の中から
+        `_read_password()` でチャンネルをもう一度読む。以前は
+        ここを `chan.recv(1024)` のチャンク読みにしていたところ、
+        `ssh host` にヒアドキュメントで複数行を一気に流し込むような
+        接続（実際 OpenSSH クライアントで再現した）だと、
+        「enable」の行と次のパスワードの行が**同じチャンクに乗って
+        届く**ことがあり、外側のループがチャンクごと読み切って
+        しまうため、`_read_password` 側の recv() には何も残っておらず
+        パスワード入力が空振り→次のプロンプトへ、という壊れ方をした。
+        1バイトずつ読めば「今読むべき分だけ読む」が保証されるので、
+        ネストした recv() 呼び出しがあっても取りこぼさない
+        （`telnet_cli_agent.py` の `_readline` も同じ理由で1バイト読み）。
+        """
+        priv = [privilege]                  # enable/disableで書き換える
         chan.sendall(b'\r\n')
-        chan.sendall(prompt_for(self.state).encode() + b' ')
+        chan.sendall(prompt_for(self.state, priv[0] >= 15).encode() + b' ')
         buf = b''
         while not self._stop.is_set():
-            try:
-                data = chan.recv(1024)
-            except Exception:
+            ch = self._recv_byte(chan)
+            if ch is None:
                 return
-            if not data:
-                return
-            for b in data:
-                ch = bytes([b])
-                if ch in (b'\r', b'\n'):
-                    chan.sendall(b'\r\n')
-                    line = buf.decode(errors='replace').strip()
-                    buf = b''
-                    if line.lower() in ('exit', 'quit', 'logout') and \
-                            getattr(self.state, 'mode', 'exec') == 'exec':
-                        chan.close()
-                        return
-                    if line:
-                        out = self.run_command(self.device_id, line)
-                        if out:
-                            chan.sendall(_crlf(out) + b'\r\n')
-                    chan.sendall(prompt_for(self.state).encode() + b' ')
-                elif ch == b'\x7f':                     # Backspace
-                    if buf:
-                        buf = buf[:-1]
-                        chan.sendall(b'\b \b')
-                elif ch == b'\x03':                     # Ctrl-C
-                    buf = b''
-                    chan.sendall(b'^C\r\n')
-                    chan.sendall(prompt_for(self.state).encode() + b' ')
-                elif ch == b'\x04':                     # Ctrl-D
+            if ch in (b'\r', b'\n'):
+                chan.sendall(b'\r\n')
+                line = buf.decode(errors='replace').strip()
+                buf = b''
+                if line.lower() in ('exit', 'quit', 'logout') and \
+                        getattr(self.state, 'mode', 'exec') == 'exec':
                     chan.close()
                     return
-                else:
-                    buf += ch
-                    chan.sendall(ch)                    # エコー
+                if line:
+                    out = self._dispatch(chan, line, priv)
+                    if out:
+                        chan.sendall(_crlf(out) + b'\r\n')
+                chan.sendall(
+                    prompt_for(self.state, priv[0] >= 15).encode() + b' ')
+            elif ch == b'\x7f':                     # Backspace
+                if buf:
+                    buf = buf[:-1]
+                    chan.sendall(b'\b \b')
+            elif ch == b'\x03':                     # Ctrl-C
+                buf = b''
+                chan.sendall(b'^C\r\n')
+                chan.sendall(
+                    prompt_for(self.state, priv[0] >= 15).encode() + b' ')
+            elif ch == b'\x04':                     # Ctrl-D
+                chan.close()
+                return
+            else:
+                buf += ch
+                chan.sendall(ch)                    # エコー
+
+    @staticmethod
+    def _recv_byte(chan):
+        """1バイト読む。切断されたら None。"""
+        try:
+            data = chan.recv(1)
+        except Exception:
+            return None
+        return data or None
+
+    def _dispatch(self, chan, line, priv):
+        """1行ぶんのコマンドを、権限昇格まわりだけ横取りして実行する"""
+        low = line.lower()
+        if low in ('enable', 'en'):
+            if priv[0] >= 15:
+                return self.run_command(self.device_id, line)   # 実機同様素通し
+            pw = self._read_password(chan, 'Password: ')
+            if pw is None:                  # 接続が切れた
+                return ''
+            ok = check_enable_password(self.state, pw)
+            if ok is None:
+                return '% No password set.'
+            if ok:
+                priv[0] = 15
+                return ''
+            return '% Access denied.'
+        if low == 'disable':
+            if getattr(self.state, 'mode', 'exec') == 'exec':
+                priv[0] = 1
+            return ''
+        if priv[0] < 15 and is_privileged_only(line):
+            return (f"% Invalid input detected at '^' marker.\n"
+                   f'  {line}\n  ^')
+        return self.run_command(self.device_id, line)
+
+    def _read_password(self, chan, prompt):
+        """`Password: ` プロンプトを出し、エコーせずに1行読む。
+
+        1バイトずつ読む理由は `_run_shell` のdocstringを参照
+        （チャンク読みだと同じTCPセグメントに乗った次の行を
+        呼び出し元の recv() ごと横取りされ、パスワードが空振りする）。
+        """
+        chan.sendall(prompt.encode())
+        buf = b''
+        while not self._stop.is_set():
+            ch = self._recv_byte(chan)
+            if ch is None:
+                return None
+            if ch in (b'\r', b'\n'):
+                chan.sendall(b'\r\n')
+                return buf.decode(errors='replace')
+            if ch == b'\x7f':
+                buf = buf[:-1]
+            elif ch == b'\x03':
+                chan.sendall(b'^C\r\n')
+                return ''
+            else:
+                buf += ch          # パスワードなのでエコーしない
 
 
 def _crlf(text: str) -> bytes:

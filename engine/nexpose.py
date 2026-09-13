@@ -831,7 +831,15 @@ def probe_ssh_login(ip, port, username, password, timeout=4.0,
         try:
             _in, out, _err = cli.exec_command('show running-config',
                                               timeout=timeout)
-            config = out.read().decode(errors='replace')
+            fetched = out.read().decode(errors='replace')
+            # privilege 1 のアカウントで認証はできたが `show
+            # running-config` はprivileged EXEC専用コマンドなので
+            # 拒否される、というケースがある（engine/ssh_cli_agent.py
+            # の enable 権限昇格を参照）。エラー文言をそのまま config
+            # として扱うと、"aaa new-model" 等の文字列検索がすべて
+            # 空振りし、正しい所見判定ができなくなる。
+            if 'Invalid input detected' not in fetched:
+                config = fetched
         except Exception:
             config = None       # NETCONFサブシステムしか無いポート等
     try:

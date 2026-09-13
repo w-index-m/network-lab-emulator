@@ -2,8 +2,10 @@
 
 本物のSSHクライアントで装置にログインして、CLIを叩ける。
 
-> 動作確認は paramiko のクライアントで行っている。
-> OpenSSH の `ssh` コマンドとの相互接続は未検証（§5参照）。
+> paramiko のクライアントに加え、**OpenSSHの `ssh` コマンドとの
+> 相互接続も確認済み**（§5参照）。パスワード認証・公開鍵認証・
+> 対話シェル・execチャンネル・`enable` 権限昇格、いずれも
+> 実際の `ssh` バイナリで通ることを確認している。
 
 ```
 $ ssh netadmin@10.222.0.1
@@ -99,6 +101,35 @@ OpenSSH形式の1行を貼っても受け付ける（意図的な緩和）。
 
 `no username <name>` でその名前に登録された鍵を丸ごと失効できる。
 
+### `enable` による権限昇格
+
+実機同様、ログインしたローカルユーザの `privilege` が15未満なら
+**user EXEC**（プロンプトが `>`）から始まる。`enable` で
+`enable secret`/`enable password` と突き合わせ、通れば
+**privileged EXEC**（`#`）に上がる。
+
+```
+Switch> enable
+Password:
+Switch#
+```
+
+```
+Switch(config)# enable secret En@bleSecret1
+```
+
+- ローカルユーザが1つも無い装置は admin/admin にフォールバックする
+  仕様（`_device_users`）なので、その場合は特権15として扱う
+- `enable secret`/`enable password` のどちらも未設定なら、実機同様
+  `% No password set.` で拒否する（未設定＝誰でも通せる、にはしない）
+- `disable` で user EXEC に戻る（`exec` モードのときだけ有効）
+- **user EXEC で塞ぐのは代表的なコマンドだけ**（下記4.参照）。
+  実機の「show系の多くは privilege 0/1 でも見られる」という
+  コマンド単位の割り当て表までは再現していない
+- `ssh host "command"` の**execチャンネルには昇格の余地が無い**。
+  対話プロンプトを出せないので、privilege 15 未満なら特権専用
+  コマンドはその場で拒否する（実機のvty exec-channelも同じ制約）
+
 ---
 
 ## 3. 作り
@@ -130,8 +161,10 @@ CLI処理はイベントループ上の非同期関数なので、SSHのワー�
 
 - password認証（ローカルユーザ、無ければ admin/admin）
 - **公開鍵認証**（`ip ssh pubkey-chain`。RSA/Ed25519/ECDSA）
+- **`enable` による権限昇格**（user EXEC ⇔ privileged EXEC）
 - shell チャンネル（対話）と exec チャンネル（`ssh host "..."`）
-- プロンプト（`host#` / `host(config)#` / `host(config-if)#`）とモード遷移
+- プロンプト（`host>` / `host#` / `host(config)#` / `host(config-if)#`）
+  とモード遷移
 - Backspace / Ctrl-C / Ctrl-D / `exit` での切断
 - ポートスキャン対策: 接続してすぐ切る相手は静かに落とす
   （RFC 4253 では双方が接続直後に識別文字列を送るので、
@@ -139,7 +172,12 @@ CLI処理はイベントループ上の非同期関数なので、SSHのワー�
 
 ## 5. 対応していない範囲（実機との差）
 
-- **`enable` による権限昇格**、AAA連携（TACACS+/RADIUS でのログイン認証）
+- AAA連携（TACACS+/RADIUSでの `enable` 認証）
+- user EXEC で塞ぐコマンドは代表的なもの（`configure terminal`・
+  `show running/startup-config`・`write`/`copy`/`reload`/`debug`・
+  `crypto`・`ip ssh pubkey-chain`）だけで、実機のコマンド単位の
+  privilege-level割り当て表（多くのshowはlevel 0/1で見られる等）を
+  忠実には再現していない
 - 端末制御。カーソル移動・履歴・TAB補完は無く、行単位で読むだけ
 - **ホスト鍵はプロセス内で1本を共有**する。装置ごとに2048bitの鍵を
   生成すると装置作成が目に見えて遅くなるため。実機は装置ごとに別鍵なので、
@@ -150,23 +188,49 @@ CLI処理はイベントループ上の非同期関数なので、SSHのワー�
 - `key-hash`（すでにSCPで転送済みの鍵をハッシュ値で参照する方式）。
   `key-string` で本体を貼る方式のみ
 
-### 検証できていないこと
+### OpenSSHクライアントとの相互接続 — 実際に確認した
 
-動作確認は **paramiko のクライアント**で行っている（モックではなく
-実装の異なる本物のSSHクライアントだが、サーバ側と同じライブラリ）。
-**OpenSSH の `ssh` コマンドとの相互接続は未検証** — 開発環境に
-`ssh` クライアントが入っておらず試せていない。OpenSSH は鍵交換・
-暗号方式の選択が paramiko より厳しいので、実際に繋ぐと
-アルゴリズムの調整が要る可能性がある。
+以前は「開発環境に `ssh` が入っておらず未検証」としていたが、
+`apt-get install openssh-client sshpass` で導入して実際に確認した。
+パスワード認証・execチャンネル・対話シェル・公開鍵認証（RSA）・
+`enable` 権限昇格のいずれも本物の `ssh` バイナリで通る。
+
+その過程で実際に見つけた不具合が1件ある。
+
+**`chan.recv(1024)` のチャンク読みだと、ヒアドキュメントで複数行を
+一気に流し込む接続でパスワード入力が空振りする。**
+
+```bash
+ssh -tt lowpriv@10.0.0.1 <<'EOF'
+enable
+En@bleSecret1
+configure terminal
+EOF
+```
+
+OpenSSHクライアントはヒアドキュメントの内容を1回のwrite()で送ることが
+あり、"enable" の行と次のパスワードの行が**同じTCPセグメントに乗って
+届く**。`_run_shell` の外側ループが `chan.recv(1024)` でそのチャンクを
+丸ごと読み切ってしまうと、`enable` の処理から呼ばれる
+`_read_password()` 側の recv() には次に読むべきバイトが何も残っておらず、
+パスワード入力が空振りしてすぐ次のプロンプトに戻ってしまい、
+本来パスワードのはずだった行が**次のコマンドとして誤実行**された。
+
+paramikoのクライアントでは1行ずつ `send()` していたため、この
+壊れ方には気付けなかった。1バイトずつ読むよう修正した
+（`telnet_cli_agent.py` の `_readline` は元から同じ理由で
+1バイト読みになっていたので、Telnet側にこの不具合は無かった）。
+
+回帰テストは `tests/test_openssh_interop.py`。
 
 ---
 
 ## 6. テスト
 
-`tests/test_ssh_cli_server.py`（21件）。本物の uvicorn サーバを
+`tests/test_ssh_cli_server.py`（34件）。本物の uvicorn サーバを
 サブプロセスで立て、paramiko のクライアントで実際にログインする。
 
-固定しているのは主にこの7点:
+固定しているのは主にこの8点:
 
 1. **RSA鍵を作るまで22番が開かないこと**、`zeroize` で閉じること
 2. 正しいパスワードで通り、**間違ったパスワードは弾かれること**
@@ -181,7 +245,22 @@ CLI処理はイベントループ上の非同期関数なので、SSHのワー�
    誤判定していた回帰）
 7. `no username` で鍵が失効すること、公開鍵を登録してもパスワード
    認証が塞がれないこと
+8. **privilege 15 未満のユーザは user EXEC(`>`) で始まり、
+   `configure terminal`・`show running-config` を拒否されること**。
+   正しい `enable secret` で privileged EXEC(`#`) に昇格でき、
+   間違ったパスワードでは昇格しないこと。`disable` で戻ること。
+   `enable secret`/`enable password` のどちらも未設定なら
+   `% No password set.` で拒否すること。execチャンネル（`ssh host
+   "..."`）には昇格の余地が無く、その場で拒否されること
+
+`tests/test_openssh_interop.py`（8件、`ssh`/`sshpass` が無い環境では
+スキップ）。paramikoではなく**本物のOpenSSHバイナリ**で同じ観点を
+再確認する。パスワード認証・execチャンネル・対話シェル・公開鍵認証・
+`enable` 権限昇格に加え、**ヒアドキュメントで複数行を一気に流し込む
+接続でも `enable` のパスワード入力が空振りしないこと**
+（実際に見つけた不具合の回帰。上記「OpenSSHクライアントとの
+相互接続」参照）。
 
 ```bash
-python3 -m pytest tests/test_ssh_cli_server.py -q
+python3 -m pytest tests/test_ssh_cli_server.py tests/test_openssh_interop.py -q
 ```

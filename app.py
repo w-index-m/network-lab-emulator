@@ -2964,6 +2964,27 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                            if u.get('name') != m_no_user.group(1)]
             return ''
 
+        # enable secret/password（`enable`によるprivileged EXECへの
+        # 昇格に使う。SSH/Telnet CLIサーバがこれと突き合わせる。
+        # secret があれば実機同様 secret を優先する）
+        m_enable = re.match(r'^enable\s+(secret|password)(?:\s+[057])?'
+                            r'\s+(\S+)\s*$', orig, re.I)
+        if m_enable and state.mode == 'config':
+            kind, pw = m_enable.group(1).lower(), m_enable.group(2)
+            if kind == 'secret':
+                state.enable_secret = pw
+            else:
+                state.enable_password = pw
+            return ''
+        m_no_enable = re.match(r'^no\s+enable\s+(secret|password)\s*$',
+                               orig, re.I)
+        if m_no_enable and state.mode == 'config':
+            attr = ('enable_secret' if m_no_enable.group(1).lower() == 'secret'
+                   else 'enable_password')
+            if hasattr(state, attr):
+                delattr(state, attr)
+            return ''
+
     # ── EEM / アプリケーションホスティング / OpenFlow ──
     if state.device_type in ('cisco', 'catalyst'):
         _p = _handle_programmability(device_id, command, orig, c, state)
@@ -4327,6 +4348,15 @@ def _build_running_config(device_id: str, state) -> str:
         lines.append('!')
         lines.append(f'hostname {state.hostname}')
         lines.append('!')
+        # enable secret/password（`enable`での昇格に使う。SSH/Telnet
+        # CLIサーバが privilege 15 未満のローカルユーザに対してこれと
+        # 突き合わせる）
+        if getattr(state, 'enable_secret', None):
+            lines.append(f'enable secret {state.enable_secret}')
+        elif getattr(state, 'enable_password', None):
+            lines.append(f'enable password {state.enable_password}')
+        if getattr(state, 'enable_secret', None) or getattr(state, 'enable_password', None):
+            lines.append('!')
         # ローカルユーザ（NETCONFの認証とNACMのグループ判定に使う）
         _users = getattr(state, 'users', None) or []
         if _users:

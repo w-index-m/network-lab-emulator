@@ -75,13 +75,15 @@ Switch(config-line)# transport input none     ← どちらも不可
   ECHO と SGA だけこちらから WILL を送る
 - パスワード入力中のエコー抑制
 - `/api/cli` と同じ経路を通す。Telnetで変えた設定がWeb UI側にも出る
+- **`enable` による権限昇格**（SSH CLIサーバと同じ実装・同じ規則を
+  `engine/ssh_cli_agent` から参照する → [`ssh-cli-server.md`](./ssh-cli-server.md)）
 
 ## 4. 対応していない範囲（実機との差）
 
 - **暗号化しない**。これは欠落ではなく仕様（平文であることが
   そもそもこの所見の中身）
 - `line vty` 単位の同時接続数制限、`exec-timeout`、`access-class`
-- `enable` による権限昇格
+- AAA連携（TACACS+/RADIUSでの `enable` 認証）
 - 端末制御（カーソル移動・履歴・TAB補完）。行単位で読むだけ
 - `line con` / `line aux`。`line vty` のみ
 
@@ -120,10 +122,10 @@ Nexposeエミュレーションは、telnet資格情報を**実際に試す**。
 
 ## 6. テスト
 
-`tests/test_telnet_cli_server.py`（11件）。
+`tests/test_telnet_cli_server.py`（18件）。
 本物の uvicorn サーバを立て、素のソケットでTelnetを喋る。
 
-固定しているのは主にこの5点:
+固定しているのは主にこの6点:
 
 1. **既定では23番が開かないこと**
 2. `transport input all` で開き、`ssh` / `none` で閉じること
@@ -131,6 +133,11 @@ Nexposeエミュレーションは、telnet資格情報を**実際に試す**。
    （以前は固定文字列で、変えても出力が変わらなかった）
 4. 正しいパスワードで通り、**間違ったパスワードは弾かれること**
 5. **Telnetで変えた設定が `/api/cli` 側からも見えること**
+6. **`enable` による権限昇格がSSH CLIサーバと同じ規則で動くこと**
+   （user EXEC(`>`) で `configure terminal`/`show running-config` が
+   拒否される、正しい `enable secret` で `#` に上がる、`disable` で
+   戻る）。ヘルパー関数を共有しているので、片方だけ動く/動かないという
+   食い違いは起きない
 
 ```bash
 python3 -m pytest tests/test_telnet_cli_server.py -q

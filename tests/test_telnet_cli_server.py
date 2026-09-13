@@ -265,3 +265,120 @@ def test_credentials_travel_in_cleartext(device):
         assert b'User Access Verification' in buf
     finally:
         s.close()
+
+
+# ══════════════════════════════════════════
+# enable（権限昇格）— SSH CLIサーバと同じ規則をTelnet越しに確認する
+# ══════════════════════════════════════════
+LOWUSER, LOWPASS = 'lowpriv', 'LowP@ss'
+ENABLE_SECRET = 'En@bleSecret1'
+
+
+@pytest.fixture
+def low_priv_device(device):
+    _set_transport('all')
+    for c in ('configure terminal', f'username {LOWUSER} privilege 1 '
+             f'secret {LOWPASS}', f'enable secret {ENABLE_SECRET}', 'end'):
+        _cli(c)
+    yield
+
+
+def test_privileged_user_lands_at_hash_prompt(low_priv_device):
+    hit, _buf, s = _telnet_login(USER, PASSWORD)
+    try:
+        assert hit == b'#'
+    finally:
+        s.close()
+
+
+def test_low_privilege_user_lands_at_angle_bracket_prompt(low_priv_device):
+    from engine.nexpose import _telnet_expect
+    s = socket.socket(); s.settimeout(6); s.connect((DEV_IP, 23))
+    try:
+        hit, _ = _telnet_expect(s, [b'Username:'], 6)
+        s.sendall(LOWUSER.encode() + b'\r\n')
+        hit, _ = _telnet_expect(s, [b'Password:'], 6)
+        s.sendall(LOWPASS.encode() + b'\r\n')
+        hit, _buf = _telnet_expect(s, [b'>', b'#'], 6)
+        assert hit == b'>'
+    finally:
+        s.close()
+
+
+def _login_low_priv():
+    from engine.nexpose import _telnet_expect
+    s = socket.socket(); s.settimeout(6); s.connect((DEV_IP, 23))
+    _telnet_expect(s, [b'Username:'], 6)
+    s.sendall(LOWUSER.encode() + b'\r\n')
+    _telnet_expect(s, [b'Password:'], 6)
+    s.sendall(LOWPASS.encode() + b'\r\n')
+    _telnet_expect(s, [b'>'], 6)
+    return s
+
+
+def test_user_exec_blocks_configure_terminal(low_priv_device):
+    from engine.nexpose import _telnet_expect
+    s = _login_low_priv()
+    try:
+        s.sendall(b'configure terminal\r\n')
+        _hit, buf = _telnet_expect(s, [b'>'], 6)
+        assert b'Invalid input' in buf
+    finally:
+        s.close()
+
+
+def test_user_exec_allows_ordinary_show_commands(low_priv_device):
+    from engine.nexpose import _telnet_expect
+    s = _login_low_priv()
+    try:
+        s.sendall(b'show ip interface brief\r\n')
+        _hit, buf = _telnet_expect(s, [b'>'], 6)
+        assert DEV_IP.encode() in buf
+    finally:
+        s.close()
+
+
+def test_enable_with_correct_password_elevates(low_priv_device):
+    from engine.nexpose import _telnet_expect
+    s = _login_low_priv()
+    try:
+        s.sendall(b'enable\r\n')
+        hit, _ = _telnet_expect(s, [b'Password:'], 6)
+        assert hit is not None
+        s.sendall(ENABLE_SECRET.encode() + b'\r\n')
+        hit, _ = _telnet_expect(s, [b'#'], 6)
+        assert hit == b'#'
+        s.sendall(b'configure terminal\r\n')
+        _hit, buf = _telnet_expect(s, [b'#'], 6)
+        assert b'Invalid input' not in buf
+        assert b'(config)#' in buf
+    finally:
+        s.close()
+
+
+def test_enable_with_wrong_password_stays_unprivileged(low_priv_device):
+    from engine.nexpose import _telnet_expect
+    s = _login_low_priv()
+    try:
+        s.sendall(b'enable\r\n')
+        _telnet_expect(s, [b'Password:'], 6)
+        s.sendall(b'wrong\r\n')
+        _hit, buf = _telnet_expect(s, [b'>'], 6)
+        assert b'Access denied' in buf
+    finally:
+        s.close()
+
+
+def test_disable_returns_to_user_exec(low_priv_device):
+    from engine.nexpose import _telnet_expect
+    s = _login_low_priv()
+    try:
+        s.sendall(b'enable\r\n')
+        _telnet_expect(s, [b'Password:'], 6)
+        s.sendall(ENABLE_SECRET.encode() + b'\r\n')
+        _telnet_expect(s, [b'#'], 6)
+        s.sendall(b'disable\r\n')
+        hit, _ = _telnet_expect(s, [b'>'], 6)
+        assert hit == b'>'
+    finally:
+        s.close()
