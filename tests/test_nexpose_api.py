@@ -405,18 +405,26 @@ def test_unknown_template_on_scan_is_400_not_404():
 # ══════════════════════════════════════════
 # 認証スキャン（site credentials）
 # ══════════════════════════════════════════
-def _ssh_cred(sid, name='lab-ssh'):
+def _ssh_cred(sid, name='lab-ssh', username='admin', password='admin'):
+    """サイトにSSH資格情報を足す
+
+    既定が admin/admin なのは、ローカルユーザを定義していない装置では
+    NETCONFのSSHサーバが admin/admin にフォールバックするため
+    （engine/netconf_agent.py の `_device_users`）。スキャナは
+    **実際にSSHログインして**認証スキャンにするかを決めるので、
+    通らない資格情報を渡すとここは認証スキャンにならない。
+    """
     return client.post(f'/api/3/sites/{sid}/site_credentials', json={
         'name': name,
-        'account': {'service': 'ssh', 'username': 'netadmin',
-                    'password': 'Str0ngP@ss'}})
+        'account': {'service': 'ssh', 'username': username,
+                    'password': password}})
 
 
 def test_credential_secret_is_never_returned():
     sid = _lab()
     assert _ssh_cred(sid).status_code == 201
     rows = client.get(f'/api/3/sites/{sid}/site_credentials').json()['resources']
-    assert rows[0]['account'] == {'service': 'ssh', 'username': 'netadmin'}
+    assert rows[0]['account'] == {'service': 'ssh', 'username': 'admin'}
     assert 'password' not in rows[0]['account']
     assert '_secret' not in rows[0]
 
@@ -491,7 +499,7 @@ def test_rw_community_is_only_visible_with_credentials():
     _device('t-np-a', 'VULN-A', '10.200.0.1',
             ['snmp-server community secret-rw rw',
              'username netadmin privilege 15 secret Str0ngP@ss',
-             'aaa new-model'])
+             'aaa new-model', 'netconf-yang'])   # 認証を試せるSSHが要る
     sid = client.post('/api/3/sites', json={
         'name': 'S', 'scan': {'assets': {'includedTargets': {
             'addresses': ['10.200.0.1']}}}}).json()['id']
@@ -502,19 +510,22 @@ def test_rw_community_is_only_visible_with_credentials():
         return {r['vulnerabilityId'] for r in
                 client.get(f'/api/3/assets/{aid}/vulnerabilities').json()['resources']}
 
-    assert ids() == set()          # 非認証では何も見えない
-    _ssh_cred(sid)
+    # 非認証では 830 の ssh-weak-kex しか見えない（rw コミュニティは
+    # config を読まないと分からない）
+    assert 'netlab-snmp-rw-community' not in ids()
+    _ssh_cred(sid, username='netadmin', password='Str0ngP@ss')
     client.post(f'/api/3/sites/{sid}/scans', json={})
     assert 'netlab-snmp-rw-community' in ids()
 
 
 def test_short_privileged_password_is_flagged():
     _device('t-np-b', 'VULN-B', '10.200.0.2',
-            ['username netadmin privilege 15 secret short', 'aaa new-model'])
+            ['username netadmin privilege 15 secret short', 'aaa new-model',
+             'netconf-yang'])
     sid = client.post('/api/3/sites', json={
         'name': 'S', 'scan': {'assets': {'includedTargets': {
             'addresses': ['10.200.0.2']}}}}).json()['id']
-    _ssh_cred(sid)
+    _ssh_cred(sid, username='netadmin', password='short')
     client.post(f'/api/3/sites/{sid}/scans', json={})
     aid = client.get(f'/api/3/sites/{sid}/assets').json()['resources'][0]['id']
     assert 'netlab-weak-local-password' in {
@@ -726,6 +737,11 @@ def test_remediation_loop_drives_the_risk_score_down():
               'snmp-server community n0t-guessable ro', 'aaa new-model',
               'username netadmin privilege 15 secret Str0ngP@ssw0rd', 'end'):
         _cli('t-np-a', c)
+    # ローカルユーザを作ると admin/admin のフォールバックが消えるので、
+    # 実際にログインできる資格情報へ入れ替える（スキャナは本当に
+    # SSHログインして認証スキャンにするか決めるため）
+    _ssh_cred(sid, name='post-fix', username='netadmin',
+              password='Str0ngP@ssw0rd')
     fixed, risk_fixed = run()
     assert risk_fixed < risk_auth
     for gone in ('netlab-snmp-default-community', 'netlab-snmp-rw-community',

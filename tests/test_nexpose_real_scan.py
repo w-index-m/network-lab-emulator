@@ -238,3 +238,157 @@ def test_scanner_finds_a_port_the_configuration_says_nothing_about(site):
 def test_probe_false_falls_back_to_reading_the_configuration(site):
     a = _scan(site, probe=False)
     assert all(s['detectedBy'] == 'configuration' for s in a['services'])
+
+
+# ══════════════════════════════════════════
+# 資格情報を本当に試す
+# ══════════════════════════════════════════
+def _cred(sid, name, account):
+    return _req('POST', f'/api/3/sites/{sid}/site_credentials',
+                {'name': name, 'account': account})['id']
+
+
+def _detail(asset, name):
+    return next(d for d in asset['credentials'] if d['name'] == name)
+
+
+def test_no_credentials(site):
+    a = _scan(site)
+    assert a['credentialStatus'] == 'no-credentials-supplied'
+    assert a['credentials'] == []
+
+
+def test_wrong_ssh_password_does_not_authenticate_the_scan(site):
+    """でたらめなパスワードで認証スキャンにならないこと
+
+    以前は「登録されていれば認証成功」とみなしていたので、
+    どんなパスワードでも requires_auth の所見まで出ていた。
+    """
+    _cred(site, 'bad-ssh', {'service': 'ssh', 'username': 'admin',
+                            'password': 'definitely-wrong'})
+    a = _scan(site)
+    assert a['credentialStatus'] == 'credential-status-login-failed'
+    assert _detail(a, 'bad-ssh')['verified'] is False
+    assert 'netlab-no-aaa-authentication' not in a['_vuln_ids']
+
+
+def test_correct_ssh_password_really_logs_in(site):
+    """本物のSSH認証が通ったときだけ認証スキャンになること
+
+    この装置はローカルユーザを定義していないので、NETCONFのSSHサーバは
+    admin/admin にフォールバックする（engine/netconf_agent.py）。
+    """
+    _cred(site, 'good-ssh', {'service': 'ssh', 'username': 'admin',
+                             'password': 'admin'})
+    a = _scan(site)
+    assert a['credentialStatus'] == 'credential-status-success'
+    d = _detail(a, 'good-ssh')
+    assert d['verified'] is True
+    assert d['note'] == 'authenticated on tcp/830'
+    assert 'netlab-no-aaa-authentication' in a['_vuln_ids']
+
+
+def test_credential_follows_the_device_password(site):
+    """装置側のパスワードを変えたら、同じ資格情報が通らなくなること"""
+    _cred(site, 'ssh', {'service': 'ssh', 'username': 'admin',
+                        'password': 'admin'})
+    assert _scan(site)['credentialStatus'] == 'credential-status-success'
+
+    # ローカルユーザを作ると admin/admin のフォールバックは無くなる
+    for c in ('configure terminal',
+              'username netadmin privilege 15 secret An0therP@ss', 'end'):
+        _cli(c)
+    time.sleep(1)
+    assert _scan(site)['credentialStatus'] == 'credential-status-login-failed'
+
+    _cred(site, 'ssh2', {'service': 'ssh', 'username': 'netadmin',
+                         'password': 'An0therP@ss'})
+    a = _scan(site)
+    assert a['credentialStatus'] == 'credential-status-success'
+    assert _detail(a, 'ssh2')['verified'] is True
+    assert _detail(a, 'ssh')['verified'] is False
+
+
+def test_snmp_credential_is_checked_against_the_real_agent(site):
+    """SNMPコミュニティも本物のGETで確かめること"""
+    _cred(site, 'bad-snmp', {'service': 'snmp', 'community': 'not-configured'})
+    a = _scan(site)
+    assert _detail(a, 'bad-snmp')['verified'] is False
+    assert a['credentialStatus'] == 'credential-status-login-failed'
+
+    _cred(site, 'good-snmp', {'service': 'snmp', 'community': 'public'})
+    a = _scan(site)
+    assert _detail(a, 'good-snmp')['verified'] is True
+    assert a['credentialStatus'] == 'credential-status-success'
+
+
+def test_credential_for_a_service_that_is_not_running(site):
+    for c in ('configure terminal', 'no netconf-yang', 'end'):
+        _cli(c)
+    time.sleep(1.5)
+    _cred(site, 'ssh', {'service': 'ssh', 'username': 'admin',
+                        'password': 'admin'})
+    a = _scan(site)
+    assert a['credentialStatus'] == 'credential-status-service-not-found'
+    assert _detail(a, 'ssh')['note'] == 'no SSH service found'
+
+
+# ══════════════════════════════════════════
+# SNMPコミュニティの照合（実機と同じ「黙って捨てる」）
+# ══════════════════════════════════════════
+def _snmp_get(ip, community, oid='1.3.6.1.2.1.1.5.0', timeout=1.5):
+    from engine.nexpose import probe_snmp
+    return probe_snmp(ip, 161, community, timeout=timeout)
+
+
+def test_configured_community_is_required(device):
+    """設定したコミュニティだけが通ること
+
+    以前は `_auth` が設定に関わらず 'public' を常に許していたため、
+    コミュニティを変えても public で読めてしまっていた。
+    """
+    for c in ('configure terminal', 'no snmp-server community public',
+              'snmp-server community s3cret-only ro', 'end'):
+        _cli(c)
+    time.sleep(1)
+    assert _snmp_get(DEV_IP, 's3cret-only') is True
+    assert _snmp_get(DEV_IP, 'public') is False
+    assert _snmp_get(DEV_IP, 'wrong') is False
+
+
+def test_walk_does_not_bypass_the_community_check(device):
+    """GETNEXT/WALK がコミュニティ照合を素通りしないこと
+
+    以前 `getnext()` はコミュニティ引数すら受け取っておらず、
+    でたらめなコミュニティで snmpwalk するとMIBが丸ごと読めた。
+    """
+    import subprocess
+    for c in ('configure terminal', 'no snmp-server community public',
+              'snmp-server community s3cret-only ro', 'end'):
+        _cli(c)
+    time.sleep(1)
+
+    def walk(community):
+        r = subprocess.run(
+            ['snmpwalk', '-v2c', '-c', community, '-t', '2', '-r', '0',
+             DEV_IP, '1.3.6.1.2.1.1'],
+            capture_output=True, text=True, timeout=30)
+        return r.stdout
+
+    assert 'SCAN-TARGET' in walk('s3cret-only')
+    assert 'SCAN-TARGET' not in walk('wrong-community')
+    assert 'SCAN-TARGET' not in walk('public')
+
+
+def test_multiple_communities_all_work(device):
+    """コミュニティを複数設定したらどれでも読めること
+
+    エージェント側が1つしか保持できず、2つ目以降で読めなかった。
+    """
+    for c in ('configure terminal', 'snmp-server community alpha ro',
+              'snmp-server community bravo rw', 'end'):
+        _cli(c)
+    time.sleep(1)
+    assert _snmp_get(DEV_IP, 'alpha') is True
+    assert _snmp_get(DEV_IP, 'bravo') is True       # RWでも読み取りはできる
+    assert _snmp_get(DEV_IP, 'charlie') is False

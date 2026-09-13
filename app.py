@@ -2027,6 +2027,10 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                 break
         else:
             state.snmp_community.append({'name': name, 'perm': perm})
+        # 設定したコミュニティをSNMPエージェント側へ反映する。これが無いと
+        # 装置作成時の既定(public)のまま残り、設定したコミュニティでは
+        # 読めず public では読めてしまう、という逆の状態になる。
+        _register_icmp(device_id)
         return
     # Cisco: "snmp-server host 192.168.1.200 traps public"
     snmp_host = re.match(r'^snmp-server\s+host\s+([\d.]+)'
@@ -2162,6 +2166,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                     if c_['name'] != name]
         else:
             state.snmp_community = []
+        _register_icmp(device_id)
         return
     # no snmp-server host
     no_snmp = re.match(r'^no\s+snmp-server\s+host\s+([\d.]+)', c)
@@ -5547,10 +5552,20 @@ def _register_icmp(device_id: str):
     if isinstance(_sc, list) and _sc:
         _first = _sc[0]
         _comm = _first.get('name', 'public') if isinstance(_first, dict) else str(_first)
+    # 設定されているコミュニティを**すべて**渡す。1つしか渡していなかった
+    # ため、2つ目以降のコミュニティでは読めず、しかも _auth が public を
+    # 常に許していたので「設定を変えても public で読める」状態だった。
+    _ro, _rw = [], []
+    for _c in (_sc if isinstance(_sc, list) else []):
+        if not isinstance(_c, dict) or not _c.get('name'):
+            continue
+        (_rw if (_c.get('perm') or 'ro').lower() == 'rw' else _ro).append(_c['name'])
     snmp_agent.register(device_id, state.device_type, state.hostname,
                         contact=getattr(state, 'snmp_contact', ''),
                         location=getattr(state, 'snmp_location', ''),
-                        community=_comm)
+                        community=_comm,
+                        communities=_ro + _rw,   # RWでも読み取りはできる
+                        rw_communities=_rw)
     # 実UDP SNMPエージェント（snmpget/snmpwalkに応答する側）を動的起動する。
     # start_all_snmp_agents はアプリ起動時に存在した装置しか対象にしないため、
     # これが無いとアプリ起動後に追加した装置はWalk/Getに応答しなかった。

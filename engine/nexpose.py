@@ -429,14 +429,14 @@ class NexposeEngine:
         scan_id = self._id('scan')
         now = time.time()
 
-        authenticated = any(c['enabled'] for c in site['credentials'])
         probe = bool((body or {}).get('probe', True))
         found = []
         for dev_id, state, ip in targets:
             found.append(self._assess(dev_id, state, ip, sid,
                                       assess=tmpl['assessVulnerabilities'],
-                                      authenticated=authenticated,
+                                      credentials=site['credentials'],
                                       probe=probe))
+        authenticated = any(a['credentialStatus'] == CRED_OK for a in found)
 
         vsum = {'critical': 0, 'severe': 0, 'moderate': 0, 'total': 0}
         for a in found:
@@ -503,16 +503,28 @@ class NexposeEngine:
             out.append((dev_id, state, ip))
         return out
 
-    def _assess(self, dev_id, state, ip, sid, assess=True, authenticated=False,
+    def _assess(self, dev_id, state, ip, sid, assess=True, credentials=(),
                 probe=True):
         """1台ぶんの診断結果（Asset）を作る
 
         assess=False（discovery テンプレート）ならサービスの検出までで止め、
-        脆弱性は評価しない。authenticated=False なら requires_auth の
-        チェックは飛ばす（資格情報が無いと config を読めないため）。
-        probe=True なら候補ポートに本当に接続して開閉を確かめる。
+        脆弱性は評価しない。probe=True なら候補ポートに本当に接続して
+        開閉を確かめる。
+
+        資格情報は**装置ごとに実際に試す**。認証が通った装置だけが
+        requires_auth の所見まで評価される（通らない装置では、
+        本物のスキャナ同様、外から見える範囲しか分からない）。
         """
         services = _services_of(state, ip, probe=probe)
+        if probe:
+            authenticated, cred_status, cred_detail = verify_credentials(
+                credentials, ip, services)
+        else:
+            # モデル読みモードでは実際に試せないので、有効な資格情報が
+            # あれば通ったものとして扱う（以前の挙動）
+            authenticated = any(c.get('enabled') for c in credentials)
+            cred_status = CRED_OK if authenticated else CRED_NONE
+            cred_detail = []
         open_ports = {s['port'] for s in services}
 
         existing = next((a for a in self.assets.values()
@@ -546,8 +558,8 @@ class NexposeEngine:
             'mac': _mac_for(dev_id),
             'assessedForVulnerabilities': bool(assess),
             'assessedForPolicies': False,
-            'credentialStatus': ('credential-status-success' if authenticated
-                                 else 'no-credentials-supplied'),
+            'credentialStatus': cred_status,
+            'credentials': cred_detail,
             'addresses': [{'ip': ip, 'mac': _mac_for(dev_id)}],
             'services': services,
             'rawRiskScore': float(sum(v['riskScore'] for v in vulns)),
@@ -753,6 +765,95 @@ def probe_snmp(ip, port=161, community='public', timeout=PROBE_TIMEOUT):
             s.close()
         except OSError:
             pass
+
+
+def probe_ssh_login(ip, port, username, password, timeout=4.0):
+    """本物のSSHログインを試す。
+
+    このエミュレータのNETCONFサーバは paramiko の実SSHサーバなので、
+    資格情報が本当に通るかどうかを実際に認証して確かめられる。
+    以前は「登録されていれば認証成功」とみなしていたので、
+    でたらめなパスワードでも認証スキャンになっていた。
+    """
+    try:
+        import paramiko
+    except Exception:                                   # pragma: no cover
+        return False
+    cli = paramiko.SSHClient()
+    cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        cli.connect(ip, port=int(port), username=username, password=password,
+                    timeout=timeout, auth_timeout=timeout, banner_timeout=timeout,
+                    allow_agent=False, look_for_keys=False)
+        return True
+    except Exception:
+        # 認証失敗・接続不可・SSHで無い、いずれも「通らなかった」
+        return False
+    finally:
+        try:
+            cli.close()
+        except Exception:
+            pass
+
+
+# credentialStatus の値。Swagger仕様には列挙が無い（レポート側の
+# データモデルにあり、API定義には現れない）ため、実機の表記に
+# 寄せた独自の値。
+CRED_NONE = 'no-credentials-supplied'
+CRED_OK = 'credential-status-success'
+CRED_FAILED = 'credential-status-login-failed'
+CRED_NO_SERVICE = 'credential-status-service-not-found'
+
+
+def verify_credentials(credentials, ip, services):
+    """サイトの資格情報を本当に試して、認証スキャンにできるか判定する。
+
+    戻り値は (認証できたか, credentialStatus, 明細)。
+    """
+    enabled = [c for c in credentials if c.get('enabled')]
+    if not enabled:
+        return False, CRED_NONE, []
+
+    open_tcp = {s['port'] for s in services if s['protocol'] == 'tcp'}
+    open_udp = {s['port'] for s in services if s['protocol'] == 'udp'}
+    details, any_ok, any_service = [], False, False
+
+    for c in enabled:
+        svc, ok, note = c['service'], False, ''
+        if svc == 'ssh':
+            # SSHを喋るポート（22 / NETCONFの830）を順に試す
+            ports = [p for p in (22, 830) if p in open_tcp]
+            if not ports:
+                note = 'no SSH service found'
+            else:
+                any_service = True
+                for p in ports:
+                    if probe_ssh_login(ip, p, c['username'], c['_secret']):
+                        ok, note = True, f'authenticated on tcp/{p}'
+                        break
+                else:
+                    note = 'login failed'
+        elif svc == 'snmp':
+            if 161 not in open_udp:
+                note = 'no SNMP service found'
+            else:
+                any_service = True
+                ok = probe_snmp(ip, 161, c['_secret'])
+                note = 'community accepted' if ok else 'community rejected'
+        else:
+            # telnet/https はこのエミュレータに認証できる実体が無い
+            note = f'{svc} verification not implemented'
+        any_ok = any_ok or ok
+        details.append({'id': c['id'], 'name': c['name'], 'service': svc,
+                        'verified': ok, 'note': note})
+
+    if any_ok:
+        status = CRED_OK
+    elif not any_service:
+        status = CRED_NO_SERVICE
+    else:
+        status = CRED_FAILED
+    return any_ok, status, details
 
 
 def candidate_services(state):

@@ -152,12 +152,55 @@ Asset のスコアは所見の合計。
 `discovery` ではポートは見つかるが `assessedForVulnerabilities: false` に
 なり、所見は 0 件。
 
-### 認証スキャン
+### 認証スキャン — 資格情報は本当に試す
 
-サイトに資格情報（`site_credentials`）を登録すると、そのサイトのスキャンは
-**認証スキャン**になり、`requires_auth` の所見まで評価される。
+サイトに資格情報（`site_credentials`）を登録すると、スキャン時に
+**実際にログインを試す**。通った装置だけが認証スキャン扱いになり、
+`requires_auth` の所見まで評価される。
 「外から見えるポート」と「config を読んで初めて分かること」を
 分けるための仕組み。
+
+| service | 確かめ方 |
+|---|---|
+| `ssh` | 本物のSSH認証（paramiko クライアント → 22/830 のNETCONF SSHサーバ） |
+| `snmp` | 本物のSNMP v2c GET を、そのコミュニティで投げる |
+| `telnet` / `https` | 認証できる実体が無いので未検証（`verified: false`） |
+
+`credentialStatus` に結果が出る。Swagger仕様にこの列挙は無い
+（レポート側のデータモデルにあり、API定義には現れない）ので、
+実機の表記に寄せた独自の値。
+
+| 値 | 意味 |
+|---|---|
+| `no-credentials-supplied` | 有効な資格情報が登録されていない |
+| `credential-status-success` | 1つ以上が本当に通った |
+| `credential-status-login-failed` | サービスはあったが、どれも通らなかった |
+| `credential-status-service-not-found` | 試せるサービスが開いていなかった |
+
+`asset['credentials']` に1件ずつの結果（`verified` と理由）が入る。
+
+```
+=== 1. 資格情報なし ===
+   credentialStatus=no-credentials-supplied  total=1
+=== 2. 間違ったパスワードのSSH資格情報 ===
+   credentialStatus=credential-status-login-failed  total=1
+     bad-ssh      ssh    verified=False login failed
+     authenticated-only findings: []
+=== 3. 正しいSSH資格情報を追加 ===
+   credentialStatus=credential-status-success  total=2
+     bad-ssh      ssh    verified=False login failed
+     good-ssh     ssh    verified=True  authenticated on tcp/830
+     authenticated-only findings: ['netlab-no-aaa-authentication']
+=== 4. 間違ったSNMPコミュニティだけ ===
+   credentialStatus=credential-status-login-failed  total=1
+     bad-snmp     snmp   verified=False community rejected
+=== 5. 正しいSNMPコミュニティ ===
+   credentialStatus=credential-status-success  total=2
+     good-snmp    snmp   verified=True  community accepted
+```
+
+`probe: false` のときは実際に試せないので、以前どおり
+「有効な資格情報があれば通ったものとして扱う」に戻る。
 
 認証スキャンでしか上がらない所見:
 
@@ -299,6 +342,55 @@ Site 1: Lab Segment
 
 5〜8 の回帰テストは `tests/test_nexpose_real_scan.py`。
 
+### 資格情報を本当に試すようにして見つかった不具合（3件）
+
+「登録されていれば認証成功」をやめて、本物のSSHログインと
+SNMP GET で確かめるようにした瞬間に出てきたもの。
+**3件ともSNMPのコミュニティ照合が壊れていた。**
+
+10. **でたらめなコミュニティで `snmpwalk` するとMIBが丸ごと読めた** —
+    `get()` はコミュニティを照合していたが、`getnext()` は
+    **引数としてコミュニティを受け取ってすらいなかった**。
+    GET だけ守って GETNEXT/GETBULK が素通り、という逆の状態。
+
+    ```
+    --- 誤ったコミュニティで WALK（修正前）---
+    iso.3.6.1.2.1.1.1.0 = STRING: "Cisco IOS XE Software, ..."
+    iso.3.6.1.2.1.1.5.0 = STRING: "SNMP-T"
+    ```
+
+11. **`_auth()` が設定に関わらず `public` を常に許していた** —
+    `return community in ('public', cfg)`。
+    `snmp-server community s3cret-only ro` と設定しても
+    public で読めてしまう。これでは
+    `netlab-snmp-default-community` の所見を直しても意味が無い。
+
+12. **設定したコミュニティがエージェントに届いていなかった** —
+    `snmp_agent.register()` は装置作成時にしか呼ばれず、
+    `snmp-server community` を打っても既定の `public` のままだった。
+    しかも1つしか保持できず、2つ目以降のコミュニティでは読めなかった。
+    結果として**正しいコミュニティでは読めず、public では読める**という
+    完全に逆の状態になっていた。
+
+    ```
+    --- 正しいコミュニティで GET（修正前）---
+    iso.3.6.1.2.1.1.5.0 = No Such Object available on this agent at this OID
+    ```
+
+修正後は実機同様、コミュニティが合わない要求は**黙って捨てる**
+（応答を返すとコミュニティ名の総当たりに手掛かりを与えるため）。
+
+```
+--- 正しいコミュニティで GET ---   iso.3.6.1.2.1.1.5.0 = STRING: "SNMP-T2"
+--- 正しいコミュニティで WALK ---  iso.3.6.1.2.1.1.5.0 = STRING: "SNMP-T2"
+--- public で GET (設定していない) ---  Timeout: No Response
+--- 誤ったコミュニティで WALK ---       Timeout: No Response
+```
+
+なお、コミュニティを1つも設定していない装置はこれまで通り
+既定の `public` で読める（このエミュレータは装置作成時に
+暗黙の public で登録しているため）。
+
 ---
 
 ## 4. 重要な注意 — 脆弱性データは作り物
@@ -321,9 +413,12 @@ Site 1: Lab Segment
   製品名やバージョンは `DeviceState` から埋めているだけ
 - ポートスイープ。叩くのは候補＋`WELL_KNOWN_PORTS` だけで、
   1-65535 の全走査はしない
-- 資格情報の**照合**。登録されていれば認証成功とみなす
-  （実際に SSH ログインを試してはいない）
-- 認証スキャンの中身も、SSH越しではなく `DeviceState` を直接読んでいる
+- telnet / https の資格情報の照合（認証できる実体が無い）。
+  ssh と snmp は本当に試す
+- 認証スキャンで読む**中身**。認証自体は本物のSSHログインだが、
+  ログインが通った後は SSH 越しに `show running-config` を叩くのではなく
+  `DeviceState` を直接読んでいる
+- 公開鍵認証、権限昇格（enable）
 - Scan Engine / Engine Pool、スケジュールスキャン、非同期実行
   （`POST .../scans` はその場で完了して `finished` を返す）
 - Scan Template のチューニング（3種類の固定テンプレートのみ）
@@ -339,7 +434,7 @@ Site 1: Lab Segment
 ## 6. テスト
 
 `tests/test_nexpose_api.py`（55 件、TestClient）、
-`tests/test_nexpose_real_scan.py`（7 件、**本物の uvicorn サーバ**）、
+`tests/test_nexpose_real_scan.py`（16 件、**本物の uvicorn サーバ**）、
 `tests/test_snmp_community_config.py`（10 件）。
 
 固定しているのは主にこの 5 点：
@@ -360,6 +455,10 @@ Site 1: Lab Segment
 リスナーを止めれば検出からも消えること、`no netconf-yang` が
 ポートを解放すること、装置を消せばポートが閉じること、
 そして**設定に無いポートでも開いていれば見つけること**。
+加えて §3.5 の 10〜12: 間違ったパスワード／コミュニティでは
+認証スキャンにならないこと、装置側のパスワードを変えたら同じ
+資格情報が通らなくなること、`snmpwalk` がコミュニティ照合を
+素通りしないこと、複数コミュニティのどれでも読めること。
 
 ```bash
 python3 -m pytest tests/test_nexpose_api.py tests/test_nexpose_real_scan.py \

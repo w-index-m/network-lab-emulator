@@ -5920,7 +5920,15 @@ class SnmpAgent:
 
     def register(self, device_id: str, device_type: str, hostname: str,
                  contact: str = '', location: str = '',
-                 community: str = 'public'):
+                 community: str = 'public', communities=None,
+                 rw_communities=None):
+        """装置をSNMPエージェントに登録する。
+
+        communities には装置に設定されている読み取り可能な
+        コミュニティ名をすべて渡す（`snmp-server community` の
+        RO/RW 両方）。1つしか持てないと、2つ目以降のコミュニティで
+        読めなくなる。
+        """
         # 既存の書込済み値（snmpset）があれば保持
         prev = self.devices.get(device_id, {})
         self.devices[device_id] = {
@@ -5928,6 +5936,8 @@ class SnmpAgent:
             'contact': prev.get('contact') or contact,
             'location': prev.get('location') or location,
             'community': community,
+            'communities': list(communities) if communities else [],
+            'rw_communities': list(rw_communities) if rw_communities else [],
             'rw_community': prev.get('rw_community', 'private'),
             'overrides': prev.get('overrides', {}),  # snmpsetで書込んだOID値
             'if_admin': prev.get('if_admin', {}),    # ifAdminStatus上書き
@@ -6033,7 +6043,17 @@ class SnmpAgent:
                 return (o, t, v)
         return None
 
-    def getnext(self, device_id: str, oid: str):
+    def getnext(self, device_id: str, oid: str, community: str = None):
+        """SNMP GETNEXT
+
+        community を渡すと照合する。以前は照合が一切無く、GETは
+        コミュニティを見るのに GETNEXT/WALK は素通りしていたため、
+        でたらめなコミュニティで snmpwalk するとMIBが丸ごと読めた。
+        既定の None は「呼び出し元が内部利用（照合済み/不要）」を意味し、
+        ダッシュボード等の既存の内部呼び出しと互換を保つ。
+        """
+        if community is not None and not self._auth(device_id, community):
+            return 'AUTH_FAIL'
         oid = oid.lstrip('.')
         mib = self._build_mib(device_id)
         for o, t, v in mib:
@@ -6056,9 +6076,22 @@ class SnmpAgent:
         return result
 
     def _auth(self, device_id: str, community: str) -> bool:
-        # コミュニティ名チェック（デフォルトpublicは常に許可）
-        cfg = self.devices.get(device_id, {}).get('community', 'public')
-        return community in ('public', cfg) or community == cfg
+        """読み取りコミュニティの照合
+
+        以前は設定に関わらず 'public' を常に許可していたため、
+        `snmp-server community s3cret-only ro` と設定しても public で
+        中身が読めてしまっていた。装置にコミュニティが設定されていれば
+        そのどれかに一致することを要求する。
+
+        何も設定されていない装置は、これまで通り既定の 'public' で
+        読める（このエミュレータは装置作成時に暗黙の public で
+        登録しているため）。
+        """
+        d = self.devices.get(device_id, {})
+        configured = d.get('communities') or []
+        if configured:
+            return community in configured
+        return community == d.get('community', 'public')
 
     @staticmethod
     def _oid_gt(a: str, b: str) -> bool:

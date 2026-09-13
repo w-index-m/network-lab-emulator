@@ -233,6 +233,14 @@ class SnmpDeviceProtocol(asyncio.DatagramProtocol):
         except Exception:
             return
 
+        # コミュニティの照合はPDUの種類に関わらず先に1回だけ行う。
+        # 実機はコミュニティが合わない要求を**黙って捨てる**（応答を
+        # 返すと、コミュニティ名の総当たりに手掛かりを与えてしまう）。
+        # 以前は GET だけが照合し、GETNEXT/GETBULK は素通りだったので、
+        # でたらめなコミュニティで snmpwalk するとMIBが丸ごと読めた。
+        if not self.snmp_agent._auth(self.device_id, community):
+            return
+
         varbinds = []
         if pdu_tag == PDU_GET:
             for oid in oids:
@@ -244,8 +252,8 @@ class SnmpDeviceProtocol(asyncio.DatagramProtocol):
                     varbinds.append((o, t, v))
         elif pdu_tag == PDU_GETNEXT:
             for oid in oids:
-                result = self.snmp_agent.getnext(self.device_id, oid)
-                if result is None:
+                result = self.snmp_agent.getnext(self.device_id, oid, community)
+                if result in (None, 'AUTH_FAIL'):
                     varbinds.append((oid, 'ENDOFMIBVIEW', None))
                 else:
                     o, t, v = result
@@ -255,8 +263,9 @@ class SnmpDeviceProtocol(asyncio.DatagramProtocol):
             for oid in oids:
                 cur = oid
                 for _ in range(max_reps):
-                    result = self.snmp_agent.getnext(self.device_id, cur)
-                    if result is None:
+                    result = self.snmp_agent.getnext(self.device_id, cur,
+                                                     community)
+                    if result in (None, 'AUTH_FAIL'):
                         varbinds.append((cur, 'ENDOFMIBVIEW', None))
                         break
                     o, t, v = result
