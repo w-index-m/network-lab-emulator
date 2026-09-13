@@ -8,7 +8,7 @@ protocols**, so genuine clients such as ncclient, gnmic and `snmpwalk` can conne
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-green)
-![Tests](https://img.shields.io/badge/tests-1038%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1135%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 > Most of the documentation under `docs/` is written in Japanese.
@@ -20,7 +20,7 @@ protocols**, so genuine clients such as ncclient, gnmic and `snmpwalk` can conne
 ### It doesn't just print `show` output — some protocols actually speak on the wire
 
 Many CLI emulators only return canned strings. This project implements
-**six protocols over real sockets and real packets**.
+**seven protocols over real sockets and real packets**.
 
 | Implementation | Transport | What you can connect with |
 |---|---|---|
@@ -29,6 +29,7 @@ Many CLI emulators only return canned strings. This project implements
 | `engine/real_rip_agent.py` | UDP 520 | Sends and receives RIPv2 packets |
 | `engine/snmp_udp_agent.py` | UDP 161 | Poll it with `snmpwalk` and friends |
 | `engine/netconf_agent.py` | paramiko SSH / TCP 830 | **ncclient** — `get-config`, `edit-config` |
+| `engine/ssh_cli_agent.py` | paramiko SSH / TCP 22 | **A real `ssh` client** — log in and drive the CLI |
 | `engine/gnmi_agent.py` | gRPC / TCP 50052 | **gnmic / pygnmi** — Get, Set, Subscribe |
 
 gNMI uses the **original `gnmi.proto` from openconfig/gnmi**, compiled with `protoc` —
@@ -217,13 +218,13 @@ curl -X POST localhost:8000/api/link \
 ## Tests
 
 ```bash
-pytest tests/                           # full suite (1038 tests, ~9 min)
+pytest tests/                           # full suite (1135 tests, ~11 min)
 pytest tests/test_ospf_failover.py -v   # OSPF failover
 pytest tests/test_gnmi.py -v            # gNMI
 python verify_all.py                    # feature sweep script
 ```
 
-**Current status: 1038 passed / 5 skipped / 0 failed** across 79 test files.
+**Current status: 1135 passed / 5 skipped / 0 failed** across 83 test files.
 
 Coverage: `app.py` 51% · `engine/protocols.py` 70% · `engine/rules.py` 53%
 
@@ -240,6 +241,7 @@ There are 75 documents under `docs/`, **mostly in Japanese**. Start here:
 | [`netconf-catalyst.md`](./docs/netconf-catalyst.md) | NETCONF implementation and real ncclient transcripts |
 | [`gnmi-telemetry.md`](./docs/gnmi-telemetry.md) | gNMI and model-driven telemetry |
 | [`nexpose-api.md`](./docs/nexpose-api.md) | Nexpose / InsightVM Console API v3 emulation (vulnerability data is fictional) |
+| [`ssh-cli-server.md`](./docs/ssh-cli-server.md) | Real SSH server (TCP/22) — drive the CLI from a real SSH client |
 | [`monitoring-stack-guide.md`](./docs/monitoring-stack-guide.md) | Prometheus / Grafana integration |
 | [`feature-inventory.md`](./docs/feature-inventory.md) | Feature inventory (core emulation vs. tooling) |
 

@@ -162,9 +162,23 @@ Asset のスコアは所見の合計。
 
 | service | 確かめ方 |
 |---|---|
-| `ssh` | 本物のSSH認証（paramiko クライアント → 22/830 のNETCONF SSHサーバ） |
+| `ssh` | 本物のSSH認証（paramiko クライアント → 22 のCLIサーバ / 830 のNETCONF） |
 | `snmp` | 本物のSNMP v2c GET を、そのコミュニティで投げる |
 | `telnet` / `https` | 認証できる実体が無いので未検証（`verified: false`） |
+
+**22 でログインできた場合は、続けて `show running-config` を実際に
+実行して設定を持ち帰る**（`engine/ssh_cli_agent.py` の実SSH CLIサーバ）。
+`requires_auth` の所見は、その**取得した本文**を解析して判定する。
+`DeviceState` を直接覗くのは、config を取れなかったときの代替経路。
+
+| 所見 | config 上の判定 |
+|---|---|
+| `netlab-no-aaa-authentication` | `aaa new-model` の行が無い |
+| `netlab-weak-local-password` | `username X privilege 15 secret Y` の Y が8文字未満 |
+| `netlab-snmp-rw-community` | `snmp-server community X RW` の行がある |
+
+830 は netconf サブシステムしか受け付けないので、そちらでログインした
+場合は**認証の可否しか分からない**（`note` に取得有無が出る）。
 
 `credentialStatus` に結果が出る。Swagger仕様にこの列挙は無い
 （レポート側のデータモデルにあり、API定義には現れない）ので、
@@ -178,6 +192,27 @@ Asset のスコアは所見の合計。
 | `credential-status-service-not-found` | 試せるサービスが開いていなかった |
 
 `asset['credentials']` に1件ずつの結果（`verified` と理由）が入る。
+
+```
+=== 資格情報なし ===
+   services: [('tcp', 22), ('udp', 161)]
+   findings: ['netlab-snmp-default-community']
+
+=== 正しいSSH資格情報（22でログイン → show running-config 取得）===
+   credentialStatus=credential-status-success
+     ssh  ssh  verified=True
+          authenticated on tcp/22, read running-config (3445 bytes)
+   findings: ['netlab-snmp-default-community', 'netlab-no-aaa-authentication',
+              'netlab-weak-local-password', 'netlab-snmp-rw-community']
+
+=== 装置を是正（aaa new-model / rwコミュニティ削除 / 強いパスワード）===
+   credentialStatus=credential-status-success
+     ssh   ssh  verified=False login failed        ← パスワードを変えたので通らない
+     ssh2  ssh  verified=True  authenticated on tcp/22, read running-config
+   findings: ['netlab-snmp-default-community']
+```
+
+認証の成否だけを見る場合（830 しか開いていない装置など）:
 
 ```
 === 1. 資格情報なし ===
@@ -377,6 +412,17 @@ SNMP GET で確かめるようにした瞬間に出てきたもの。
     iso.3.6.1.2.1.1.5.0 = No Such Object available on this agent at this OID
     ```
 
+### 認証後の読み取りを本物のSSHにして分かったこと
+
+13. **そもそもCLIをSSHで叩く手段が無かった** —
+    CLIは `/api/cli` からしか呼べず、NETCONFサーバ(830)は
+    `netconf` サブシステムしか受け付けない。つまり
+    「認証は本物、読み取りは `DeviceState` を直接覗く」から
+    先へ進めなかった。実SSH CLIサーバ（TCP/22）を実装した
+    → [`ssh-cli-server.md`](./ssh-cli-server.md)
+
+---
+
 修正後は実機同様、コミュニティが合わない要求は**黙って捨てる**
 （応答を返すとコミュニティ名の総当たりに手掛かりを与えるため）。
 
@@ -434,7 +480,9 @@ SNMP GET で確かめるようにした瞬間に出てきたもの。
 ## 6. テスト
 
 `tests/test_nexpose_api.py`（55 件、TestClient）、
-`tests/test_nexpose_real_scan.py`（16 件、**本物の uvicorn サーバ**）、
+`tests/test_nexpose_real_scan.py`（20 件、**本物の uvicorn サーバ**）、
+`tests/test_ssh_cli_server.py`（10 件、実SSHクライアント →
+[`ssh-cli-server.md`](./ssh-cli-server.md)）、
 `tests/test_snmp_community_config.py`（10 件）。
 
 固定しているのは主にこの 5 点：

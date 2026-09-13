@@ -334,6 +334,86 @@ def test_credential_for_a_service_that_is_not_running(site):
 
 
 # ══════════════════════════════════════════
+# 認証後は本物のSSHで show running-config を読む
+# ══════════════════════════════════════════
+@pytest.fixture
+def ssh_device(server):
+    """SSH CLI(22) が上がっていて、直すべき設定が入っている装置"""
+    _req('DELETE', f'/api/device/{DEV}')
+    _req('POST', '/api/device',
+         {'id': DEV, 'type': 'catalyst', 'hostname': 'SCAN-TARGET'})
+    for c in ('configure terminal', 'interface GigabitEthernet1/0/1',
+              'no switchport', f'ip address {DEV_IP} 255.255.255.0',
+              'no shutdown', 'exit',
+              'snmp-server community public ro',
+              'snmp-server community wr1te rw',
+              'username netadmin privilege 15 secret pw',   # 8文字未満
+              'crypto key generate rsa modulus 2048', 'end'):
+        _cli(c)
+    time.sleep(3)
+    sid = _req('POST', '/api/3/sites', {
+        'name': 'SSH scan',
+        'scan': {'assets': {'includedTargets': {'addresses': [DEV_IP]}}}})['id']
+    yield sid
+    _req('DELETE', f'/api/device/{DEV}')
+
+
+def test_scanner_really_reads_the_running_config_over_ssh(ssh_device):
+    """認証後に `show running-config` を実際に実行していること
+
+    以前は認証だけ本物で、読み取りは DeviceState を直接覗いていた。
+    """
+    sid = ssh_device
+    _cred(sid, 'ssh', {'service': 'ssh', 'username': 'netadmin',
+                       'password': 'pw'})
+    a = _scan(sid)
+    d = _detail(a, 'ssh')
+    assert d['verified'] is True
+    assert 'tcp/22' in d['note']
+    assert 'read running-config' in d['note']       # 本当に取得した
+
+
+def test_findings_come_from_the_config_that_was_read(ssh_device):
+    sid = ssh_device
+    _cred(sid, 'ssh', {'service': 'ssh', 'username': 'netadmin',
+                       'password': 'pw'})
+    ids = set(_scan(sid)['_vuln_ids'])
+    assert {'netlab-no-aaa-authentication',
+            'netlab-weak-local-password',
+            'netlab-snmp-rw-community'} <= ids
+
+
+def test_fixing_the_device_clears_the_config_based_findings(ssh_device):
+    """設定を直すと、読み取った config が変わり所見も消えること"""
+    sid = ssh_device
+    _cred(sid, 'ssh', {'service': 'ssh', 'username': 'netadmin',
+                       'password': 'pw'})
+    assert 'netlab-snmp-rw-community' in _scan(sid)['_vuln_ids']
+
+    for c in ('configure terminal', 'aaa new-model',
+              'no snmp-server community wr1te',
+              'username netadmin privilege 15 secret Str0ngP@ssw0rd', 'end'):
+        _cli(c)
+    time.sleep(1)
+    # パスワードを変えたので古い資格情報はもう通らない
+    _cred(sid, 'ssh2', {'service': 'ssh', 'username': 'netadmin',
+                        'password': 'Str0ngP@ssw0rd'})
+    a = _scan(sid)
+    assert _detail(a, 'ssh')['verified'] is False
+    assert _detail(a, 'ssh2')['verified'] is True
+    for gone in ('netlab-no-aaa-authentication', 'netlab-weak-local-password',
+                 'netlab-snmp-rw-community'):
+        assert gone not in a['_vuln_ids']
+
+
+def test_ssh_port_22_is_discovered_by_the_scan(ssh_device):
+    a = _scan(ssh_device)
+    assert ('tcp', 22) in _ports(a)
+    svc = next(s for s in a['services'] if s['port'] == 22)
+    assert svc['detectedBy'] == 'tcp-connect'
+
+
+# ══════════════════════════════════════════
 # SNMPコミュニティの照合（実機と同じ「黙って捨てる」）
 # ══════════════════════════════════════════
 def _snmp_get(ip, community, oid='1.3.6.1.2.1.1.5.0', timeout=1.5):
@@ -378,6 +458,28 @@ def test_walk_does_not_bypass_the_community_check(device):
     assert 'SCAN-TARGET' in walk('s3cret-only')
     assert 'SCAN-TARGET' not in walk('wrong-community')
     assert 'SCAN-TARGET' not in walk('public')
+
+
+def test_renaming_the_community_clears_the_finding_under_a_real_scan(site):
+    """コミュニティ名を変えると所見が消えること（実プローブ版）
+
+    同名のテストが test_nexpose_api.py にもあるが、あちらは
+    probe=False。こちらは本物のSNMP GETでポートを確認したうえで
+    判定している。
+    """
+    a = _scan(site)
+    assert ('udp', 161) in _ports(a)
+    assert 'netlab-snmp-default-community' in a['_vuln_ids']
+
+    for c in ('configure terminal', 'no snmp-server community public',
+              'snmp-server community n0t-public ro', 'end'):
+        _cli(c)
+    time.sleep(1)
+
+    a = _scan(site)
+    assert 'netlab-snmp-default-community' not in a['_vuln_ids']
+    # ポート自体は開いたまま（設定を消したわけではない）
+    assert ('udp', 161) in _ports(a)
 
 
 def test_multiple_communities_all_work(device):

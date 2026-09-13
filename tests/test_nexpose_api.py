@@ -345,14 +345,19 @@ def test_default_account_name_still_trips_the_finding():
 
 def test_renaming_the_snmp_community_clears_the_finding():
     """回帰テスト: 以前はポート161が開いているだけで
-    「デフォルトコミュニティ(public)」を上げていた"""
+    「デフォルトコミュニティ(public)」を上げていた
+
+    probe=False なのは、161 が開いていることを前提にした確認だから。
+    TestClient はリクエスト中しかイベントループを回さないので、
+    実プローブだと SNMP は常に閉じて見える（ファイル冒頭の説明を参照）。
+    """
     _device('t-np-a', 'VULN-A', '10.200.0.1',
             ['snmp-server community n0t-public ro',
              'username netadmin privilege 15 secret Str0ngP@ss'])
     sid = client.post('/api/3/sites', json={
         'name': 'S', 'scan': {'assets': {'includedTargets': {
             'addresses': ['10.200.0.1']}}}}).json()['id']
-    client.post(f'/api/3/sites/{sid}/scans', json={})
+    client.post(f'/api/3/sites/{sid}/scans', json={'probe': False})
     aid = client.get(f'/api/3/sites/{sid}/assets').json()['resources'][0]['id']
     ids = {r['vulnerabilityId'] for r in
            client.get(f'/api/3/assets/{aid}/vulnerabilities').json()['resources']}

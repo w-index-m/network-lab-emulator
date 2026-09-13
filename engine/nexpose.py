@@ -78,6 +78,28 @@ def _chk_snmp_rw_community(state, ports):
                for c in (getattr(state, 'snmp_community', None) or []))
 
 
+# ── 実際に読み取った running-config を見る版 ──
+# SSHでログインできた装置では `show running-config` を本当に実行して
+# 持ち帰るので、その本文を解析する。DeviceState を覗くのではなく、
+# 実機のスキャナと同じ「取得した設定を読む」形にするためのもの。
+def _cfg_no_aaa(cfg):
+    return not re.search(r'^\s*aaa new-model\s*$', cfg, re.M | re.I)
+
+
+def _cfg_weak_local_password(cfg):
+    for m in re.finditer(r'^\s*username\s+(\S+)(?:\s+privilege\s+(\d+))?'
+                         r'\s+(?:password|secret)(?:\s+[057])?\s+(\S+)',
+                         cfg, re.M | re.I):
+        if int(m.group(2) or 1) >= 15 and len(m.group(3)) < 8:
+            return True
+    return False
+
+
+def _cfg_snmp_rw_community(cfg):
+    return bool(re.search(r'^\s*snmp-server\s+community\s+\S+\s+RW\s*$',
+                          cfg, re.M | re.I))
+
+
 def _chk_snmp_default_community(state, ports):
     """既定のコミュニティ名がそのまま使われているか。
 
@@ -179,7 +201,7 @@ VULN_CATALOG = [
         'solution': 'Enable "aaa new-model" and point authentication at a '
                     'TACACS+/RADIUS group with local fallback.',
         'exploits': 0, 'malwareKits': 0,
-        'check': _chk_no_aaa, 'requires_auth': True,
+        'check': _chk_no_aaa, 'requires_auth': True, 'check_cfg': _cfg_no_aaa,
     },
     {
         'id': 'netlab-weak-local-password',
@@ -193,7 +215,7 @@ VULN_CATALOG = [
         'solution': 'Enforce a minimum password length and re-issue the account '
                     'secret.',
         'exploits': 1, 'malwareKits': 0,
-        'check': _chk_weak_local_password, 'requires_auth': True,
+        'check': _chk_weak_local_password, 'requires_auth': True, 'check_cfg': _cfg_weak_local_password,
     },
     {
         'id': 'netlab-snmp-rw-community',
@@ -207,7 +229,7 @@ VULN_CATALOG = [
         'solution': 'Remove the read-write community, or restrict it with an ACL '
                     'and move to SNMPv3.',
         'exploits': 2, 'malwareKits': 0,
-        'check': _chk_snmp_rw_community, 'requires_auth': True, 'port': 161,
+        'check': _chk_snmp_rw_community, 'requires_auth': True, 'check_cfg': _cfg_snmp_rw_community, 'port': 161,
     },
 ]
 
@@ -517,14 +539,14 @@ class NexposeEngine:
         """
         services = _services_of(state, ip, probe=probe)
         if probe:
-            authenticated, cred_status, cred_detail = verify_credentials(
+            authenticated, cred_status, cred_detail, config = verify_credentials(
                 credentials, ip, services)
         else:
             # モデル読みモードでは実際に試せないので、有効な資格情報が
             # あれば通ったものとして扱う（以前の挙動）
             authenticated = any(c.get('enabled') for c in credentials)
             cred_status = CRED_OK if authenticated else CRED_NONE
-            cred_detail = []
+            cred_detail, config = [], None
         open_ports = {s['port'] for s in services}
 
         existing = next((a for a in self.assets.values()
@@ -538,6 +560,12 @@ class NexposeEngine:
                     continue
                 if v.get('match_port') and v['match_port'] in open_ports:
                     hits.append(v)
+                elif config is not None and v.get('check_cfg'):
+                    # SSHで実際に取得した running-config を解析する。
+                    # DeviceState を覗くのではなく、実機のスキャナと
+                    # 同じ「読み取った設定を読む」経路になる。
+                    if v['check_cfg'](config):
+                        hits.append(v)
                 elif v.get('check') and v['check'](state, open_ports):
                     hits.append(v)
 
@@ -767,33 +795,50 @@ def probe_snmp(ip, port=161, community='public', timeout=PROBE_TIMEOUT):
             pass
 
 
-def probe_ssh_login(ip, port, username, password, timeout=4.0):
+def probe_ssh_login(ip, port, username, password, timeout=4.0,
+                    fetch_config=False):
     """本物のSSHログインを試す。
 
-    このエミュレータのNETCONFサーバは paramiko の実SSHサーバなので、
-    資格情報が本当に通るかどうかを実際に認証して確かめられる。
-    以前は「登録されていれば認証成功」とみなしていたので、
-    でたらめなパスワードでも認証スキャンになっていた。
+    このエミュレータのNETCONFサーバ(830)とCLIサーバ(22)は、どちらも
+    paramiko の実SSHサーバなので、資格情報が本当に通るかどうかを
+    実際に認証して確かめられる。以前は「登録されていれば認証成功」と
+    みなしていたので、でたらめなパスワードでも認証スキャンになっていた。
+
+    fetch_config=True かつ CLI が喋れるポート(22)なら、続けて
+    `show running-config` を**実際に実行して**中身を持ち帰る。
+    戻り値は (通ったか, config文字列 or None)。
     """
     try:
         import paramiko
     except Exception:                                   # pragma: no cover
-        return False
+        return False, None
     cli = paramiko.SSHClient()
     cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
         cli.connect(ip, port=int(port), username=username, password=password,
                     timeout=timeout, auth_timeout=timeout, banner_timeout=timeout,
                     allow_agent=False, look_for_keys=False)
-        return True
     except Exception:
         # 認証失敗・接続不可・SSHで無い、いずれも「通らなかった」
-        return False
-    finally:
         try:
             cli.close()
         except Exception:
             pass
+        return False, None
+
+    config = None
+    if fetch_config:
+        try:
+            _in, out, _err = cli.exec_command('show running-config',
+                                              timeout=timeout)
+            config = out.read().decode(errors='replace')
+        except Exception:
+            config = None       # NETCONFサブシステムしか無いポート等
+    try:
+        cli.close()
+    except Exception:
+        pass
+    return True, config
 
 
 # credentialStatus の値。Swagger仕様には列挙が無い（レポート側の
@@ -812,24 +857,35 @@ def verify_credentials(credentials, ip, services):
     """
     enabled = [c for c in credentials if c.get('enabled')]
     if not enabled:
-        return False, CRED_NONE, []
+        return False, CRED_NONE, [], None
 
     open_tcp = {s['port'] for s in services if s['protocol'] == 'tcp'}
     open_udp = {s['port'] for s in services if s['protocol'] == 'udp'}
     details, any_ok, any_service = [], False, False
+    config = None
 
     for c in enabled:
         svc, ok, note = c['service'], False, ''
         if svc == 'ssh':
-            # SSHを喋るポート（22 / NETCONFの830）を順に試す
+            # SSHを喋るポートを順に試す。22 のCLIサーバを先に試すのは、
+            # そこでログインできれば `show running-config` を実際に
+            # 実行して設定を持ち帰れるため（830 は netconf サブシステム
+            # しか受け付けないので、認証の可否しか分からない）。
             ports = [p for p in (22, 830) if p in open_tcp]
             if not ports:
                 note = 'no SSH service found'
             else:
                 any_service = True
                 for p in ports:
-                    if probe_ssh_login(ip, p, c['username'], c['_secret']):
-                        ok, note = True, f'authenticated on tcp/{p}'
+                    ok, cfg = probe_ssh_login(ip, p, c['username'], c['_secret'],
+                                              fetch_config=(p == 22))
+                    if ok:
+                        if cfg:
+                            config = cfg
+                            note = (f'authenticated on tcp/{p}, '
+                                    f'read running-config ({len(cfg)} bytes)')
+                        else:
+                            note = f'authenticated on tcp/{p}'
                         break
                 else:
                     note = 'login failed'
@@ -853,7 +909,7 @@ def verify_credentials(credentials, ip, services):
         status = CRED_NO_SERVICE
     else:
         status = CRED_FAILED
-    return any_ok, status, details
+    return any_ok, status, details, config
 
 
 def candidate_services(state):
@@ -867,6 +923,8 @@ def candidate_services(state):
         out.append({'port': port, 'protocol': protocol, 'name': name,
                     'product': product, 'version': version, 'family': ''})
 
+    if getattr(state, 'ssh_rsa_key', False):
+        add(22, 'SSH', 'tcp', 'Cisco SSH', '2.0')
     if getattr(state, 'snmp_community', None):
         add(161, 'SNMP', 'udp', 'net-snmp', 'v2c')
     if getattr(state, 'netconf_enabled', False):

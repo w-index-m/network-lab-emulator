@@ -8,7 +8,7 @@ ncclient / gNMIクライアント / SNMPツールといった実在のクライ�
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-green)
-![Tests](https://img.shields.io/badge/tests-1038%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1135%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ---
@@ -18,7 +18,7 @@ ncclient / gNMIクライアント / SNMPツールといった実在のクライ�
 ### 「表示だけ」ではなく、実際に喋るプロトコルがある
 
 CLIエミュレータの多くは `show` の出力文字列を返すだけですが、このプロジェクトは
-**6つのプロトコルを実ソケット・実パケットで実装**しています。
+**7つのプロトコルを実ソケット・実パケットで実装**しています。
 
 | 実装 | 中身 | 外部クライアントからの接続 |
 |---|---|---|
@@ -27,6 +27,7 @@ CLIエミュレータの多くは `show` の出力文字列を返すだけです
 | `engine/real_rip_agent.py` | UDP 520 | RIPv2パケットの送受信 |
 | `engine/snmp_udp_agent.py` | UDP 161 | `snmpwalk` 等で実際にポーリング可能 |
 | `engine/netconf_agent.py` | paramiko SSH / TCP 830 | **ncclient** から `get-config` / `edit-config` |
+| `engine/ssh_cli_agent.py` | paramiko SSH / TCP 22 | **本物のsshクライアント**でログインしてCLIを操作 |
 | `engine/gnmi_agent.py` | gRPC / TCP 50052 | **gnmic / pygnmi** から Get / Set / Subscribe |
 
 gNMIは openconfig/gnmi の **`gnmi.proto` 原本**をコンパイルして使っています（自作の擬似protoではありません）。
@@ -235,13 +236,13 @@ curl -X POST localhost:8000/api/link \
 ## テスト
 
 ```bash
-pytest tests/           # 全体（1038件、約9分）
+pytest tests/           # 全体（1135件、約11分）
 pytest tests/test_ospf_failover.py -v     # OSPF障害切替
 pytest tests/test_gnmi.py -v              # gNMI
 python verify_all.py                      # 全機能確認スクリプト
 ```
 
-**現状: 1038 passed / 5 skipped / 0 failed**（テストファイル79本）
+**現状: 1135 passed / 5 skipped / 0 failed**（テストファイル83本）
 
 カバレッジ: `app.py` 51% / `engine/protocols.py` 70% / `engine/rules.py` 53%
 
@@ -258,6 +259,7 @@ python verify_all.py                      # 全機能確認スクリプト
 | [`netconf-catalyst.md`](./docs/netconf-catalyst.md) | NETCONF実装とncclientからの実行結果 |
 | [`gnmi-telemetry.md`](./docs/gnmi-telemetry.md) | gNMI / モデル駆動型テレメトリ |
 | [`nexpose-api.md`](./docs/nexpose-api.md) | Nexpose / InsightVM Console API v3 エミュレーション（脆弱性データは架空） |
+| [`ssh-cli-server.md`](./docs/ssh-cli-server.md) | 実SSHサーバ（TCP/22）。本物のSSHクライアントでCLIを叩く |
 | [`monitoring-stack-guide.md`](./docs/monitoring-stack-guide.md) | Prometheus / Grafana連携 |
 | [`feature-inventory.md`](./docs/feature-inventory.md) | 機能一覧（コア製品とツールの区分） |
 

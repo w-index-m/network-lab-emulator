@@ -393,9 +393,19 @@ def _load_config():
           f"{len(data.get('links',[]))} links")
 
 
+# CLIを実行するイベントループ。lifespan で捕まえる（SSHサーバの
+# ワーカースレッドから run_coroutine_threadsafe で投げるため）
+_MAIN_LOOP = [None]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global USE_OLLAMA
+    # SSH CLIサーバのワーカースレッドからCLIを実行するために、
+    # 動いているイベントループを捕まえておく。
+    # （このアプリは lifespan を使っているので @app.on_event("startup")
+    #   は呼ばれない。そちらに書いてもループは None のままになる）
+    _MAIN_LOOP[0] = asyncio.get_running_loop()
     USE_OLLAMA = await detect_ollama()
     mode = f"Ollama ({OLLAMA_MODEL})" if USE_OLLAMA else "ルールベース（オフライン）"
     print(f"""
@@ -3051,6 +3061,32 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             state.restconf_service_acl = acls
             return ''
 
+    # ── crypto key generate rsa ── 実機はRSA鍵を作って初めてSSHが
+    # 起動する。ここで TCP/22 の実CLIリスナーを立ち上げるので、
+    # 本物のSSHクライアントでログインして show コマンドを打てる。
+    if state.device_type in ('cisco', 'catalyst'):
+        m_key = re.match(r'^crypto\s+key\s+generate\s+rsa'
+                         r'(?:\s+(?:general-keys|usage-keys))?'
+                         r'(?:\s+modulus\s+(\d+))?\s*$', c)
+        if m_key and state.mode == 'config':
+            modulus = int(m_key.group(1)) if m_key.group(1) else 1024
+            if not 360 <= modulus <= 4096:
+                return '% Invalid modulus size'
+            state.ssh_rsa_key = True
+            state.ssh_rsa_modulus = modulus
+            from engine.ssh_cli_agent import ensure_ssh_cli_agent
+            ensure_ssh_cli_agent(device_id, device_sessions, _run_cli_sync)
+            return (f'The name for the keys will be: {state.hostname}.netlab\n'
+                    f'% The key modulus size is {modulus} bits\n'
+                    f'% Generating {modulus} bit RSA keys, keys will be '
+                    f'non-exportable...\n[OK]')
+        m_nokey = re.match(r'^crypto\s+key\s+zeroize\s+rsa\s*$', c)
+        if m_nokey and state.mode == 'config':
+            state.ssh_rsa_key = False
+            from engine.ssh_cli_agent import stop_ssh_cli_agent
+            stop_ssh_cli_agent(device_id)
+            return '% All RSA keys will be removed.'
+
     # ── NETCONF-YANG ── netconf-yang を入れると実機同様
     # SSHの netconf サブシステム(TCP 830)が待ち受けを始める。
     # ncclient等の実物のNETCONFクライアントから接続できる。
@@ -5576,6 +5612,12 @@ def _register_icmp(device_id: str):
         asyncio.ensure_future(ensure_snmp_agent(device_id, device_sessions, snmp_agent))
     except RuntimeError:
         pass  # イベントループが無い呼び出し元（起動シーケンス等）からは無視
+    # SSH CLIリスナーも管理IPの変更に追従させる（鍵が無ければ何もしない）
+    try:
+        from engine.ssh_cli_agent import ensure_ssh_cli_agent
+        ensure_ssh_cli_agent(device_id, device_sessions, _run_cli_sync)
+    except Exception:
+        pass
 
     def _net_addr(ip, prefix):
         try:
@@ -5685,11 +5727,32 @@ async def api_load():
     _load_config()
     return {"ok": True, "devices": list(device_sessions.keys())}
 
+def _run_cli_sync(device_id: str, command: str) -> str:
+    """SSHサーバのスレッドからCLIを実行する橋渡し
+
+    `/api/cli` と**同じ経路**を通す。SSH越しの結果とWeb UIの結果が
+    食い違わないよう、ここで別実装を作らないこと。
+
+    CLI処理はイベントループ上の非同期関数なので、ワーカースレッドからは
+    run_coroutine_threadsafe で投げて結果を待つ。
+    """
+    loop = _MAIN_LOOP[0]
+    if loop is None:                                    # pragma: no cover
+        return '% CLI is not available'
+    fut = asyncio.run_coroutine_threadsafe(
+        cli_command({'device_id': device_id, 'command': command}), loop)
+    try:
+        return (fut.result(timeout=30) or {}).get('output', '')
+    except Exception as e:                              # pragma: no cover
+        return f'% {e}'
+
+
 def _stop_real_listeners(dev_id: str):
     """装置が持っている実リスナーをすべて止める（個別の失敗は無視）"""
     for mod, fn in (('engine.netconf_agent', 'stop_netconf_agent'),
                     ('engine.gnmi_agent', 'stop_gnmi_agent'),
                     ('engine.snmp_udp_agent', 'stop_snmp_agent'),
+                    ('engine.ssh_cli_agent', 'stop_ssh_cli_agent'),
                     ('engine.real_ospf_agent', 'stop_ospf_agent')):
         try:
             m = __import__(mod, fromlist=[fn])
