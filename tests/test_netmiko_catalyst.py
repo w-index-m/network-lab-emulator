@@ -129,7 +129,16 @@ class TestCatalystNetmikoStyle:
         _cli(dev_id, 'exit')
 
         # BGP設定確認
+        # `| include bgp` は "bgp" を含む行しか返さないので、neighbor 行
+        # （"bgp" を含まない）は出ない。実機も同じ。ブロックごと見たいので
+        # `| section` を使う。
+        # （以前は出力モディファイア自体が未実装で `|` 以降が無視され、
+        #   全文が返っていたため、include でも neighbor 行が見えていた）
         out = _cli(dev_id, 'show running-config | include bgp')
+        assert 'bgp 65001' in out.lower(), "BGP AS が設定されていない"
+        assert 'neighbor' not in out, "include が絞り込めていない"
+
+        out = _cli(dev_id, 'show running-config | section router bgp')
         assert 'bgp 65001' in out.lower(), "BGP AS が設定されていない"
         assert '65002' in out, "BGP neighbor が設定されていない"
 

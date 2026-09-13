@@ -8,7 +8,7 @@ ncclient / gNMIクライアント / SNMPツールといった実在のクライ�
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-green)
-![Tests](https://img.shields.io/badge/tests-1156%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1179%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ---
@@ -107,6 +107,7 @@ EIGRPでは「2台構成で設定した瞬間に無限再帰でクラッシュ�
 
 ### CLI
 - Tab補完・`?` ヘルプ・短縮コマンド（`sh ip os ne`）・複数行一括投入
+- 出力モディファイア — `| include` / `exclude` / `begin` / `section` / `count`（正規表現）
 - ベンダー別エラーメッセージ（`% Invalid input detected at '^' marker.` 等）
 
 ### ログ・監視
@@ -211,6 +212,9 @@ show ip bgp summary
 show etherchannel 1 detail
 show vpc                      # NX-OS
 show logging / show logging syslog   # Catalyst・NX-OS / Si-R
+show running-config | include ^hostname     # 出力モディファイア
+show running-config | section line vty 0 4
+show ip interface brief | exclude unassigned
 ```
 
 ### HTTP API
@@ -237,13 +241,13 @@ curl -X POST localhost:8000/api/link \
 ## テスト
 
 ```bash
-pytest tests/           # 全体（1156件、約12分）
+pytest tests/           # 全体（1179件、約12分）
 pytest tests/test_ospf_failover.py -v     # OSPF障害切替
 pytest tests/test_gnmi.py -v              # gNMI
 python verify_all.py                      # 全機能確認スクリプト
 ```
 
-**現状: 1156 passed / 5 skipped / 0 failed**（テストファイル84本）
+**現状: 1179 passed / 5 skipped / 0 failed**（テストファイル85本）
 
 カバレッジ: `app.py` 51% / `engine/protocols.py` 70% / `engine/rules.py` 53%
 

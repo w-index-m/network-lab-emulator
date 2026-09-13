@@ -696,6 +696,90 @@ async def snmp_dashboard():
     return {'polled_at': now, 'devices': devices}
 
 
+# 実機の出力モディファイア。`section` は「一致した行＋その配下の
+# インデント行」を出す（running-config を機能単位で見るときに使う）。
+_OUTPUT_MODIFIERS = ('include', 'exclude', 'begin', 'section', 'count')
+
+# `|` を出力モディファイアとして扱ってよいコマンドだけに限定する。
+# 設定コマンドには出力モディファイアが無く、逆に `|` を値として
+# 含むもの（`ip as-path access-list 1 permit ^$|^100$` 等）があるため、
+# 無条件に分割すると壊れる。
+_PIPE_OK_RE = re.compile(r'^\s*(?:sh|sho|show|dir|more)\b', re.I)
+
+
+def _split_output_modifier(command: str):
+    """`show ... | include foo` を (本体, 種別, 引数) に割る。
+
+    モディファイアが無ければ None。短縮形（`inc` / `exc` / `beg` /
+    `sec`）も実機同様に受ける。
+    """
+    if '|' not in command or not _PIPE_OK_RE.match(command):
+        return None
+    base, _sep, rest = command.partition('|')
+    rest = rest.strip()
+    if not rest:
+        return None
+    parts = rest.split(None, 1)
+    word = parts[0].lower()
+    kind = next((m for m in _OUTPUT_MODIFIERS if m.startswith(word)), None)
+    if kind is None:
+        return None
+    arg = parts[1].strip() if len(parts) > 1 else ''
+    if kind != 'count' and not arg:
+        return None
+    return base.strip(), kind, arg
+
+
+def _apply_output_modifier(text: str, kind: str, arg: str) -> str:
+    """出力モディファイアを適用する。
+
+    実機は正規表現を受けるので `re` で照合するが、`(` の付け忘れ等で
+    壊れたパターンを投げられても落ちないよう、その場合は部分一致に
+    フォールバックする。
+    """
+    lines = (text or '').splitlines()
+    if kind == 'count':
+        return str(len(lines))
+
+    try:
+        rx = re.compile(arg)
+
+        def hit(line):
+            return rx.search(line) is not None
+    except re.error:
+        def hit(line):
+            return arg in line
+
+    if kind == 'include':
+        return '\n'.join(l for l in lines if hit(l))
+    if kind == 'exclude':
+        return '\n'.join(l for l in lines if not hit(l))
+    if kind == 'begin':
+        for i, l in enumerate(lines):
+            if hit(l):
+                return '\n'.join(lines[i:])
+        return ''
+    # section: 一致した行と、それに続くインデントされた行
+    out = []
+    i = 0
+    while i < len(lines):
+        if not hit(lines[i]):
+            i += 1
+            continue
+        out.append(lines[i])
+        indent = len(lines[i]) - len(lines[i].lstrip())
+        i += 1
+        while i < len(lines):
+            nxt = lines[i]
+            if not nxt.strip():
+                break
+            if len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+            out.append(nxt)
+            i += 1
+    return '\n'.join(out)
+
+
 @app.post("/api/cli")
 async def cli_command(body: dict):
     """
@@ -724,6 +808,17 @@ async def cli_command(body: dict):
     # クリアコマンドはフロントエンドで処理
     if command.lower() in ("cls", "clear screen"):
         return {"output": "\x0c", "mode": state.mode, "hostname": state.hostname}
+
+    # ── 出力モディファイア（`show ... | include foo`）──
+    # 実装が無く、`|` 以降が無視されて全文が返っていた。
+    # 元のコマンドを実行してから、その出力を絞る。
+    _mod = _split_output_modifier(command)
+    if _mod is not None:
+        _base, _kind, _arg = _mod
+        _inner = await cli_command({**body, "command": _base})
+        _inner["output"] = _apply_output_modifier(
+            _inner.get("output", ""), _kind, _arg)
+        return _inner
 
     # ── terminal length/width/monitor 等（実機と同様、表示設定のみで
     # 状態には影響しない）── unicon等の自動化ツールが接続直後に必ず
