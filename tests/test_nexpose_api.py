@@ -28,6 +28,17 @@ import app as app_module                        # noqa: E402
 from engine.nexpose import nexpose_engine, page_of   # noqa: E402
 
 client = TestClient(app_module.app)
+# `with TestClient(...) as client:` を使わないと、リクエストのたびに
+# 使い捨てのイベントループ(portal)が作られて閉じられる。SNMPエージェント
+# は `asyncio.get_event_loop()` でその時点の実行中ループにDatagram
+# エンドポイントを作るため、ポートの設定を変えたリクエストと実際に
+# スキャンするリクエストが別々のportalで動くと、スキャン側のportalには
+# もう存在しないループ宛てにパケットが届くだけになり、SNMPだけが
+# 「ソケットはbind済みだが応答が絶対に来ない」状態になる
+# （TCPは`connect()`がカーネルレベルで完結するため気付かれなかった）。
+# __enter__ を一度呼んで永続的なportalを張ることで、実機と同じく
+# 別リクエストをまたいでもSNMP UDPエージェントが生きたままにする。
+client.__enter__()
 
 
 def _cli(dev, cmd):

@@ -105,12 +105,49 @@ asyncio DatagramProtocol なので、リクエスト外に届いたパケット�
 
 そのため実プローブの確認は `tests/test_nexpose_real_scan.py` が
 **本物の uvicorn サーバをサブプロセスで立てて**行っている。
-`tests/test_nexpose_api.py` 側の API 挙動テストは `probe: false` を使う。
+`tests/test_nexpose_api.py` 側の API 挙動テストの多くは `probe: false`
+を使うが、SNMPの実検出そのものを固定している一部のテスト
+（`test_remediation_loop_drives_the_risk_score_down` 等）は
+`probe: false` を使わず実プローブに依存している。
 
 なお、スキャンは同期I/Oなので `POST .../scans` は
 `asyncio.to_thread` 経由で呼んでいる。直接 await せずに呼ぶと
 イベントループを止めてしまい、同じループ上の SNMP エージェントが
 応答できず自分で自分を「閉じている」と誤検出する。
+
+#### `TestClient` を `with` なしで使うと SNMPだけ実プローブが失敗する
+
+上の制約には、もう一段落とし穴があった。`TestClient(app)` を
+`with TestClient(app) as client:` を使わずに素朴に呼び出すと、
+**リクエストごとに使い捨てのイベントループ（`anyio`のBlockingPortal）
+が作られては閉じられる**。SNMP UDP エージェントは
+`asyncio.get_event_loop()` でその時点の実行中ループに
+DatagramProtocolを登録するため、「`ip address`/`snmp-server community`
+を設定したリクエスト」と「実際にスキャンするリクエスト」が
+別々の使い捨てポータルで動くと、スキャン側のポータルにはもう
+存在しないループ宛てにパケットが届くだけになる。
+
+TCPベースの検出（SSH/NETCONF/gNMI）はこの影響を受けない。
+`connect()` によるTCPの3ウェイハンドシェイクはカーネルレベルで
+完結し、アプリ側が`accept()`するイベントループの生死とは無関係に
+成立するため。**UDPは応答を返す側のイベントループが生きている
+必要がある**ぶん、この落とし穴が可視化された。
+
+`ss -uapn` で見るとソケット自体は `bind` されたままなので
+「開いてはいるが誰も見ていない」状態になり、`probe_snmp()`は
+タイムアウトして`False`を返す。ログや`ss`だけでは
+「ポートが閉じている」ようにしか見えないので気付きにくい。
+
+対処は `tests/test_nexpose_api.py` の `client = TestClient(app)`
+の直後で `client.__enter__()` を呼び、モジュール内の全テストで
+同じ永続的なポータル（イベントループ）を使い回すようにすること
+（`with`ブロックで囲むのと同じ効果。プロセス終了まで開けっぱなしで
+問題ない）。これにより実行時間も短縮された（実測: 33秒→8秒。
+リクエストのたびにイベントループを作り直すオーバーヘッドが
+無くなるため）。
+
+回帰テストは既存の `tests/test_nexpose_api.py::test_remediation_loop_drives_the_risk_score_down`
+ほか、`probe: false` を使わずSNMP検出に依存する9件。
 
 ---
 
