@@ -4265,6 +4265,8 @@ def _build_running_config(device_id: str, state) -> str:
             if _nve:
                 if _nve.get('source_interface'):
                     body.append(f'  source-interface {_nve["source_interface"]}')
+                if _nve.get('host_reachability_bgp'):
+                    body.append('  host-reachability protocol bgp')
                 for vni, m in sorted(_nve.get('members', {}).items()):
                     suffix = ' associate-vrf' if m.get('associate_vrf') else ''
                     body.append(f'  member vni {vni}{suffix}')
@@ -4514,6 +4516,27 @@ def _build_running_config(device_id: str, state) -> str:
                 getattr(state, 'restconf_enabled', False) or
                 getattr(state, 'netconf_enabled', False)):
             lines.append('!')
+        # EVPN/VXLAN（Catalyst 9000, IOS-XE構文のスタンドアロンVXLAN EVPN。
+        # NX-OSの"feature nv overlay"+"evpn"に相当するが、IOS-XEには
+        # featureコマンドが無く"l2vpn evpn"配下にinstance/vlan-basedで書く）
+        _l2vpn = getattr(state, 'l2vpn_evpn', None)
+        _evpn_vnis_c = getattr(state, 'evpn_vnis', {})
+        if _l2vpn or _evpn_vnis_c:
+            lines.append('l2vpn evpn')
+            if _l2vpn and _l2vpn.get('replication_type'):
+                lines.append(f' replication-type {_l2vpn["replication_type"]}')
+            if _l2vpn and _l2vpn.get('router_id'):
+                lines.append(f' router-id {_l2vpn["router_id"]}')
+            for vni, v in sorted(_evpn_vnis_c.items()):
+                lines.append(f' instance {vni} vlan-based')
+                if v.get('encapsulation'):
+                    lines.append(f'  encapsulation {v["encapsulation"]}')
+            lines.append('!')
+        _vn_seg_c = getattr(state, 'vlan_vn_segment', {})
+        for vid, vni in sorted(_vn_seg_c.items()):
+            lines.append(f'vlan configuration {vid}')
+            lines.append(f' member evpn-instance {vni} vni {vni}')
+            lines.append('!')
         # インタフェース（state.interfacesの全ポートを表示）
         info = icmp_engine.device_ips.get(device_id, {})
         ip_map = {}
@@ -4537,8 +4560,24 @@ def _build_running_config(device_id: str, state) -> str:
                 if _enc:
                     lines.append(f' encapsulation {_enc["type"]} {_enc["vlan"]}'
                                  + (' native' if _enc.get('native') else ''))
+                # nve（VXLAN EVPNのオーバーレイ終端インタフェース、Catalyst 9000
+                # のIOS-XE構文はNX-OSと共通。member vni配下のingress-replication
+                # だけIOS-XEは"protocol bgp"を付けない）
+                _nve_c = getattr(state, 'nve', {}).get(ifname)
                 ip = iinfo.get('ip', '')
-                if ip:
+                if _nve_c:
+                    if _nve_c.get('source_interface'):
+                        lines.append(f' source-interface {_nve_c["source_interface"]}')
+                    if _nve_c.get('host_reachability_bgp'):
+                        lines.append(' host-reachability protocol bgp')
+                    for vni, m in sorted(_nve_c.get('members', {}).items()):
+                        suffix = ' associate-vrf' if m.get('associate_vrf') else ''
+                        lines.append(f' member vni {vni}{suffix}')
+                        if m.get('ingress_replication'):
+                            lines.append('  ingress-replication')
+                        if m.get('mcast_group'):
+                            lines.append(f'  mcast-group {m["mcast_group"]}')
+                elif ip:
                     mask = _prefix_to_mask(iinfo.get('prefix', 24))
                     lines.append(f' ip address {ip} {mask}')
                 elif iinfo.get('vlan') and iinfo.get('vlan') not in ('', 'trunk'):
@@ -4660,6 +4699,16 @@ def _build_running_config(device_id: str, state) -> str:
                     lines.append(f' neighbor {nbr_ip} remote-as {remote_as}')
             for net in bn.get('networks', []):
                 lines.append(f' network {net.split("/")[0]} mask {_prefix_to_mask(int(net.split("/")[1]) if "/" in net else 24)}')
+            # EVPN/VXLAN: address-family l2vpn evpn（Catalyst 9000も
+            # NX-OSと同じくBGPのaddress-family配下でneighbor activateする）
+            _af_c = getattr(state, 'bgp', {}).get('l2vpn_evpn') if isinstance(getattr(state, 'bgp', None), dict) else None
+            if _af_c and _af_c.get('enabled'):
+                lines.append(' address-family l2vpn evpn')
+                for nbr_ip in sorted(_af_c.get('activated_neighbors', [])):
+                    lines.append(f'  neighbor {nbr_ip} activate')
+                if _af_c.get('advertise_all_vni'):
+                    lines.append('  advertise-all-vni')
+                lines.append(' exit-address-family')
         # ACL
         acls = ipfilter_engine.acls.get(device_id, {})
         for name, rules in acls.items():
@@ -7124,9 +7173,14 @@ async def nexus_dashboard():
     Cisco Nexus Dashboard 風のファブリック俯瞰ビュー用データ。
     実際のNexus Dashboard(旧DCNM/Nexus Dashboard Fabric Controller)の
     ような「ファブリック単位でのVXLAN EVPN状態の一覧化」を、
-    このエミュレータ内のNexus装置（device_type == 'nexus'）の
-    状態（feature有効化、VLAN⇔VNIマッピング、nve1のメンバーVNI、
-    BGP EVPNアドレスファミリ）から組み立てて返す。
+    このエミュレータ内でVXLAN EVPNを喋れる装置
+    （device_type == 'nexus' または 'catalyst'）の状態
+    （feature有効化/l2vpn evpn有効化、VLAN⇔VNIマッピング、nve1の
+    メンバーVNI、BGP EVPNアドレスファミリ）から組み立てて返す。
+    NX-OSは"feature nv overlay"+"evpn"、IOS-XE(Catalyst 9000)は
+    "l2vpn evpn"と文法が違うが、どちらも同じstate.nve/evpn_vnis/
+    vlan_vn_segmentに正規化して持っているので、ここでは装置種別を
+    意識せず同じ形で返せる。
     実際のNexus DashboardのAPI/データモデルそのものではなく、
     このエミュレータのCLI実装内容をダッシュボード形式に投影したもの。
     """
@@ -7134,14 +7188,23 @@ async def nexus_dashboard():
     vni_index: Dict[int, dict] = {}
 
     for device_id, state in device_sessions.items():
-        if state.device_type != 'nexus':
+        if state.device_type not in ('nexus', 'catalyst'):
             continue
-        features = sorted(getattr(state, 'nx_features', set()))
         nve_map = getattr(state, 'nve', {})
         evpn_vnis = getattr(state, 'evpn_vnis', {})
         vn_segment = getattr(state, 'vlan_vn_segment', {})
         bgp = getattr(state, 'bgp', None) or {}
         af = bgp.get('l2vpn_evpn') if isinstance(bgp, dict) else None
+
+        if state.device_type == 'nexus':
+            features = sorted(getattr(state, 'nx_features', set()))
+            overlay_enabled = 'nv overlay' in features
+        else:
+            # IOS-XE(Catalyst 9000)には"feature"コマンドが無いので、
+            # "l2vpn evpn"に入った(state.l2vpn_evpnがある)ことを
+            # NX-OSの"feature nv overlay"相当として扱う
+            features = ['l2vpn evpn'] if getattr(state, 'l2vpn_evpn', None) else []
+            overlay_enabled = bool(features)
 
         nve_peers = []
         member_vnis = []
@@ -7161,7 +7224,6 @@ async def nexus_dashboard():
                     "mcast_group": m.get('mcast_group') or None,
                 })
 
-        overlay_enabled = 'nv overlay' in features
         vxlan_ready = overlay_enabled and bool(nve_map) and bool(af and af.get('enabled'))
 
         switch_entry = {

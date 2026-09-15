@@ -467,6 +467,9 @@ CONFIG_SUBMODES = {
     "config-bba":              ("config",            ('_bba_group',)),
     "config-evpn":             ("config",            ()),
     "config-evpn-vni":         ("config-evpn",       ('_evpn_vni',)),
+    "config-l2vpn-evpn":       ("config",            ()),
+    "config-l2vpn-evpn-instance": ("config-l2vpn-evpn", ('_evpn_vni',)),
+    "config-vlan-config":      ("config",            ('_current_vlan',)),
     "config-nve-vni":          ("config-if",         ('_nve_member_vni',)),
     "config-bgp-af":           ("config-router",     ()),
     "config-sec-zone":         ("config",            ('_zbfw_zone',)),
@@ -861,6 +864,21 @@ class RuleEngine:
         # EVPN/VXLAN: evpn グローバルサブモード（Nexus）
         if c == 'evpn' and state.mode == "config" and state.device_type == 'nexus':
             state.mode = 'config-evpn'
+            return ""
+        # EVPN/VXLAN: l2vpn evpn グローバルサブモード（Catalyst 9000のIOS-XE構文。
+        # NX-OSの"evpn"に相当するが、featureコマンドが要らない分だけ
+        # ここがEVPN機能の起点になる）
+        if c == 'l2vpn evpn' and state.mode == "config" and state.device_type == 'catalyst':
+            if not hasattr(state, 'l2vpn_evpn') or not isinstance(state.l2vpn_evpn, dict):
+                state.l2vpn_evpn = {'replication_type': '', 'router_id': ''}
+            state.mode = 'config-l2vpn-evpn'
+            return ""
+        # EVPN/VXLAN: vlan configuration <n>（Catalyst 9000のIOS-XE構文。
+        # NX-OSの"vlan <n>"配下の"vn-segment"に相当する、VLAN⇔VNIの対応付け）
+        m_vc = re.match(r'^vlan\s+configuration\s+(\d+)$', c)
+        if m_vc and state.mode == "config" and state.device_type == 'catalyst':
+            state._current_vlan = int(m_vc.group(1))
+            state.mode = 'config-vlan-config'
             return ""
         # EVPN/VXLAN: router bgp 配下の address-family l2vpn evpn サブモード
         if re.match(r'^address-family\s+l2vpn\s+evpn', c) and state.mode == "config-router":
@@ -5551,15 +5569,65 @@ Configuration Revision            : 5"""
         return '\n'.join(out)
 
     # ════════════════════════════════════════════
-    # EVPN/VXLAN（Nexus: nve1 / evpn / address-family l2vpn evpn）
+    # EVPN/VXLAN（Nexus: nve1 / evpn / address-family l2vpn evpn、
+    # Catalyst 9000: nve1 / l2vpn evpn / vlan configuration。
+    # コマンド文法はNX-OSとIOS-XEで異なるが、装置状態(state.nve /
+    # state.evpn_vnis / state.vlan_vn_segment)は共通で持たせ、
+    # show running-config・/api/nexus/dashboardは両方の装置種別を
+    # 同じデータモデルで扱えるようにしている）
     # ════════════════════════════════════════════
     def _cmd_evpn(self, cmd, state):
-        if state.device_type != 'nexus':
+        if state.device_type not in ('nexus', 'catalyst'):
             return None
         c = cmd.lower().strip()
         if not hasattr(state, 'nve'): state.nve = {}
         if not hasattr(state, 'vlan_vn_segment'): state.vlan_vn_segment = {}
         if not hasattr(state, 'evpn_vnis'): state.evpn_vnis = {}
+
+        # config-l2vpn-evpn サブモード（Catalyst 9000, IOS-XE）:
+        # replication-type / router-id / instance <n> vlan-based
+        if state.mode == 'config-l2vpn-evpn':
+            if not hasattr(state, 'l2vpn_evpn') or not isinstance(state.l2vpn_evpn, dict):
+                state.l2vpn_evpn = {'replication_type': '', 'router_id': ''}
+            m = re.match(r'^replication-type\s+(ingress)$', c)
+            if m:
+                state.l2vpn_evpn['replication_type'] = m.group(1)
+                return ""
+            m = re.match(r'^router-id\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                state.l2vpn_evpn['router_id'] = self._resolve_ifname(m.group(1), state)
+                return ""
+            m = re.match(r'^instance\s+(\d+)\s+vlan-based$', c)
+            if m:
+                vni = int(m.group(1))
+                state.evpn_vnis.setdefault(vni, {
+                    'rd': '', 'rt_import': '', 'rt_export': '', 'encapsulation': ''})
+                state._evpn_vni = vni
+                state.mode = 'config-l2vpn-evpn-instance'
+                return ""
+            return None
+
+        # config-l2vpn-evpn-instance サブモード: encapsulation vxlan
+        if state.mode == 'config-l2vpn-evpn-instance':
+            vni = getattr(state, '_evpn_vni', None)
+            v = state.evpn_vnis.get(vni) if vni is not None else None
+            if v is None:
+                return ""
+            if c == 'encapsulation vxlan':
+                v['encapsulation'] = 'vxlan'
+                return ""
+            return None
+
+        # config-vlan-config サブモード（Catalyst 9000, IOS-XEの
+        # "vlan configuration <n>"）: member evpn-instance <n> vni <n>
+        if state.mode == 'config-vlan-config':
+            m = re.match(r'^member\s+evpn-instance\s+(\d+)\s+vni\s+(\d+)$', c)
+            if m:
+                vid = getattr(state, '_current_vlan', None)
+                if vid is not None:
+                    state.vlan_vn_segment[vid] = int(m.group(2))
+                return ""
+            return None
 
         # config-evpn サブモード: vni <n> l2 → config-evpn-vni へ
         if state.mode == 'config-evpn':
@@ -5594,10 +5662,15 @@ Configuration Revision            : 5"""
         # interface nve<n> 配下: source-interface / member vni
         _cif = getattr(state, 'current_if', '') or ''
         if _cif.lower().startswith('nve'):
-            nve = state.nve.setdefault(_cif, {'source_interface': '', 'members': {}})
+            nve = state.nve.setdefault(_cif, {'source_interface': '',
+                                              'host_reachability_bgp': False,
+                                              'members': {}})
             m = re.match(r'^source-interface\s+(\S+)', cmd.strip(), re.I)
             if m:
                 nve['source_interface'] = self._resolve_ifname(m.group(1), state)
+                return ""
+            if c == 'host-reachability protocol bgp':
+                nve['host_reachability_bgp'] = True
                 return ""
             m = re.match(r'^member\s+vni\s+(\d+)(\s+associate-vrf)?', c)
             if m:
@@ -5617,7 +5690,11 @@ Configuration Revision            : 5"""
             member = nve['members'].get(vni) if nve and vni is not None else None
             if member is None:
                 return ""
-            if re.match(r'^ingress-replication\s+protocol\s+bgp$', c):
+            # NX-OS: "ingress-replication protocol bgp"
+            # IOS-XE(Catalyst 9000): "ingress-replication"だけで
+            # protocol指定が無い（host-reachability protocol bgpの
+            # 方で既にBGPと決まっているため）
+            if re.match(r'^ingress-replication(\s+protocol\s+bgp)?$', c):
                 member['ingress_replication'] = True
                 return ""
             m = re.match(r'^mcast-group\s+([\d.]+)', c)
