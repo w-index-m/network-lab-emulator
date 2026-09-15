@@ -144,6 +144,28 @@ class TestBgpL2vpnEvpnAddressFamily:
         assert 'neighbor 10.0.0.2 activate' in out
         assert 'advertise-all-vni' in out
 
+    def test_bgp_router_id_command_is_reflected(self):
+        """router bgp配下の"router-id X.X.X.X"がshow bgpに反映されること。
+
+        state.bgpの初期値には表示用のもっともらしいダミー値
+        （router_id="10.1.0.1"）が入っており、"router bgp <n>"は
+        asnだけを上書きしてrouter_idを更新していなかったため、
+        実際に"router-id"を打ってもダミー値のまま変わらなかった
+        （EVPN対応でrouter-idを使うようになって顕在化した）。
+        """
+        _dev('nx-evpn-12')
+        _run('nx-evpn-12', ['configure terminal', 'router bgp 65001',
+                            'router-id 10.9.9.9', 'end'])
+        out = _cli('nx-evpn-12', 'show bgp l2vpn evpn summary')
+        # address-family未設定なので本来は"not configured"だが、
+        # router_id自体の反映確認のため直接stateを見る形にはせず
+        # まずaddress-familyありのケースで確認する
+        _run('nx-evpn-12', ['configure terminal', 'router bgp 65001',
+                            'address-family l2vpn evpn', 'end'])
+        out = _cli('nx-evpn-12', 'show bgp l2vpn evpn summary')
+        assert 'BGP router identifier 10.9.9.9' in out
+        assert 'BGP router identifier 10.1.0.1' not in out
+
 
 class TestNotConfigured:
     def test_show_bgp_l2vpn_evpn_without_config(self):

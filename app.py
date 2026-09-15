@@ -2629,6 +2629,19 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             state.ospf['router_id'] = ospf_rid.group(1)
         return
 
+    # "router-id X.X.X.X" (BGP) — router bgp配下。装置初期状態の
+    # state.bgpにはshow bgp用のもっともらしいダミー値
+    # （asn=65001, router_id="10.1.0.1"）が入っており、router bgp <n>
+    # はasnだけを上書きしてrouter_idを更新していなかったため、
+    # EVPN対応でrouter-idを打ってもshow bgp l2vpn evpn summaryに
+    # 反映されずダミー値のままになっていた不具合を修正
+    bgp_rid = re.match(r'^router-id\s+([\d.]+)', c)
+    if (bgp_rid and state.mode == 'config-router'
+            and getattr(state, '_current_router', '') == 'bgp'):
+        if hasattr(state, 'bgp') and isinstance(state.bgp, dict):
+            state.bgp['router_id'] = bgp_rid.group(1)
+        return
+
     # "network 10.0.0.0 0.0.0.255 area 0" (Cisco IOS形式)
     ospf_net = re.match(r'^network\s+([\d.]+)\s+([\d.]+)\s+area\s+(\S+)', c)
     if ospf_net and getattr(state, '_routing_mode', '') == 'ospf':
