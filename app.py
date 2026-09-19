@@ -7295,6 +7295,67 @@ async def get_topology():
         }
     return {"devices": devices}
 
+
+@app.get("/api/topology/neighbors")
+async def get_topology_neighbors():
+    """全装置のCDP/LLDP隣接情報をJSONで返す。
+
+    `show cdp neighbors`/`show lldp neighbors`はテキスト整形されて
+    おり、外部ツールがトポロジー図を描くには`state.cdp_neighbors`/
+    `.lldp_neighbors`を都度パースし直す必要があった。ここでは
+    その構造化データをそのまま返す（`tools/topology_diagram.py`が
+    これを叩いてMermaid/Graphvizの図を組み立てる）。
+
+    実機のCDP/LLDPと同じく、あくまで「隣にどんな装置がいるか」を
+    ネイバー広告から知る仕組みなので、リンクが無い区間や
+    CDP/LLDPが無効な装置は見えない（実機と同じ制約）。
+    """
+    # CDP/LLDPはネイバーをhostnameで記録している（device_idではない）ので、
+    # エッジを組み立てる際にhostname→device_idへ引き直す必要がある
+    hostname_to_id = {st.hostname: dev_id for dev_id, st in device_sessions.items()}
+
+    devices = {}
+    edges = []
+    seen_edges = set()
+    for dev_id, state in device_sessions.items():
+        cdp = list(getattr(state, 'cdp_neighbors', []) or [])
+        lldp = list(getattr(state, 'lldp_neighbors', []) or [])
+        devices[dev_id] = {
+            "hostname": state.hostname,
+            "type": state.device_type,
+            "cdp_neighbors": [
+                {"device": n.get('device'), "local_if": n.get('local_if'),
+                 "remote_if": n.get('port'), "platform": n.get('platform')}
+                for n in cdp
+            ],
+            # LLDPはCDPと違うキー名(system_name/port_id)を使っている
+            "lldp_neighbors": [
+                {"device": n.get('system_name'), "local_if": n.get('local_if'),
+                 "remote_if": n.get('port_id'), "platform": n.get('platform')}
+                for n in lldp
+            ],
+        }
+        # 片方向にしか見えていなくても1本のエッジとして扱う
+        # （実機でも自分だけCDPが無効だと相手側だけに見える、という
+        # ことが起こるが、図としては同じリンクとして描きたいため）
+        merged = {n.get('device'): n for n in cdp}
+        for n in lldp:
+            merged.setdefault(n.get('system_name'), {
+                'local_if': n.get('local_if'), 'port': n.get('port_id')})
+        for remote_hostname, n in merged.items():
+            remote_id = hostname_to_id.get(remote_hostname)
+            if not remote_id:
+                continue
+            key = tuple(sorted((dev_id, remote_id)))
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            edges.append({
+                "a": dev_id, "a_if": n.get('local_if'),
+                "b": remote_id, "b_if": n.get('port'),
+            })
+    return {"devices": devices, "edges": edges}
+
 # ══════════════════════════════════════════
 # WebSocket（プロトコルシミュレーション）
 # ══════════════════════════════════════════
