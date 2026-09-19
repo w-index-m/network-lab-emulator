@@ -7936,6 +7936,39 @@ async def lm_list_alerts(deviceId: int = None):
     return {'total': len(alerts), 'items': alerts}
 
 
+@app.post("/santaba/rest/_emulator/events")
+async def lm_ingest_event(body: dict):
+    """実機のLogicMonitor REST API v3には存在しない、このエミュレータ
+    独自の拡張エンドポイント。実際のLogicMonitor Collectorは監視対象
+    からsyslog/SNMP Trapを受信し、LogicMonitorのクラウド側に独自の
+    内部プロトコルで転送する（公開REST APIではない）。このエミュレータ
+    では`tools/logicmonitor_collector.py`が実際にUDPでsyslog/SNMP Trapを
+    受信し、その代わりにここへLMv1署名付きでPOSTする。
+
+    body: {"type": "syslog", "source_ip": "...", "severity": 3,
+           "facility_tag": "LINK", "message": "..."}
+       または
+          {"type": "trap", "source_ip": "...", "trap_oid": "...",
+           "description": "..."}
+    """
+    etype = body.get('type')
+    source_ip = body.get('source_ip')
+    if not source_ip:
+        return JSONResponse(status_code=422,
+            content={'status': 422, 'errmsg': 'source_ip is required'})
+    if etype == 'syslog':
+        alert = logicmonitor_engine.ingest_syslog(
+            source_ip, body.get('severity', 6),
+            body.get('facility_tag', 'SYSLOG'), body.get('message', ''))
+    elif etype == 'trap':
+        alert = logicmonitor_engine.ingest_trap(
+            source_ip, body.get('trap_oid', ''), body.get('description', ''))
+    else:
+        return JSONResponse(status_code=422,
+            content={'status': 422, 'errmsg': f'unknown event type: {etype!r}'})
+    return {'status': 200, 'alert': alert}
+
+
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 if __name__ == "__main__":

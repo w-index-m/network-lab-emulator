@@ -250,3 +250,107 @@ class TestDeviceAndAlertLifecycle:
         r = client.post('/santaba/rest/device/devices', content=body_str,
                         headers=_lm_headers('POST', '/device/devices', body_str))
         assert r.status_code == 422
+
+
+# ══════════════════════════════════════════════════════════
+# syslog/SNMP Trap受信 (tools/logicmonitor_collector.py が転送する
+# POST /santaba/rest/_emulator/events)
+#
+# 実機のLogicMonitor Collectorはsyslog/SNMP Trapを受信して独自の
+# 内部プロトコルでLogicMonitor側へ転送するが、公開REST API v3には
+# そのためのエンドポイントが無い。/_emulator/events はこのエミュレータ
+# 独自の拡張で、tools/logicmonitor_collector.py が実際にUDPで受信した
+# syslog/Trapをここへ転送する。
+# ══════════════════════════════════════════════════════════
+class TestEventIngestion:
+    def _post_event(self, body):
+        import json as _json
+        body_str = _json.dumps(body)
+        return client.post('/santaba/rest/_emulator/events', content=body_str,
+                           headers=_lm_headers('POST', '/_emulator/events', body_str))
+
+    def test_syslog_event_requires_source_ip(self):
+        r = self._post_event({'type': 'syslog', 'severity': 3, 'message': 'x'})
+        assert r.status_code == 422
+
+    def test_unknown_event_type_is_rejected(self):
+        r = self._post_event({'type': 'bogus', 'source_ip': '10.9.9.9'})
+        assert r.status_code == 422
+
+    def test_syslog_event_below_warning_is_not_an_alert(self):
+        """info(6)/debug(7)は実機同様Alertにならない
+        （ログが埋め尽くされるノイズを避ける設計）。"""
+        r = self._post_event({'type': 'syslog', 'source_ip': '10.9.9.1',
+                              'severity': 6, 'facility_tag': 'SYS',
+                              'message': 'routine info message'})
+        assert r.status_code == 200
+        assert r.json()['alert'] is None
+
+    def test_syslog_event_at_error_becomes_critical_alert(self):
+        r = self._post_event({'type': 'syslog', 'source_ip': '10.9.9.2',
+                              'severity': 3, 'facility_tag': 'LINK',
+                              'message': 'something broke'})
+        assert r.status_code == 200
+        alert = r.json()['alert']
+        assert alert['severityLabel'] == 'critical'
+        assert alert['resourceTemplateName'] == 'Syslog'
+        assert alert['instanceName'] == 'LINK'
+
+    def test_syslog_event_matches_device_by_ip(self):
+        _setup_device()
+        import json as _json
+        body_str = _json.dumps({'name': '10.9.9.3', '_device_id': 'lm-test'})
+        r = client.post('/santaba/rest/device/devices', content=body_str,
+                        headers=_lm_headers('POST', '/device/devices', body_str))
+        lm_id = r.json()['id']
+
+        r = self._post_event({'type': 'syslog', 'source_ip': '10.9.9.3',
+                              'severity': 3, 'facility_tag': 'LINK', 'message': 'x'})
+        alert_id = r.json()['alert']['id']
+        assert r.json()['alert']['deviceId'] == lm_id
+
+        r = client.get(f'/santaba/rest/alert/alerts?deviceId={lm_id}',
+                       headers=_lm_headers('GET', '/alert/alerts'))
+        assert any(a['id'] == alert_id for a in r.json()['items'])
+
+    def test_syslog_event_from_unregistered_ip_has_no_device(self):
+        r = self._post_event({'type': 'syslog', 'source_ip': '10.9.9.99',
+                              'severity': 2, 'facility_tag': 'X', 'message': 'x'})
+        alert = r.json()['alert']
+        assert alert['deviceId'] is None
+        assert alert['deviceDisplayName'] == '10.9.9.99'
+
+    def test_linkdown_trap_becomes_critical_alert(self):
+        r = self._post_event({'type': 'trap', 'source_ip': '10.9.9.4',
+                              'trap_oid': '1.3.6.1.6.3.1.1.5.3',
+                              'description': 'if down'})
+        assert r.status_code == 200
+        alert = r.json()['alert']
+        assert alert['severityLabel'] == 'critical'
+        assert alert['instanceName'] == 'linkDown'
+        assert alert['resourceTemplateName'] == 'SNMP Trap'
+
+    def test_linkup_trap_is_not_a_new_alert(self):
+        """復旧(linkUp)は新規Alertにしない。"""
+        r = self._post_event({'type': 'trap', 'source_ip': '10.9.9.5',
+                              'trap_oid': '1.3.6.1.6.3.1.1.5.4',
+                              'description': 'if up'})
+        assert r.status_code == 200
+        assert r.json()['alert'] is None
+
+    def test_coldstart_trap_becomes_warning_not_critical(self):
+        r = self._post_event({'type': 'trap', 'source_ip': '10.9.9.6',
+                              'trap_oid': '1.3.6.1.6.3.1.1.5.1',
+                              'description': 'reboot'})
+        alert = r.json()['alert']
+        assert alert['severityLabel'] == 'warning'
+        assert alert['instanceName'] == 'coldStart'
+
+    def test_ingested_events_appear_in_alert_list(self):
+        before = client.get('/santaba/rest/alert/alerts',
+                            headers=_lm_headers('GET', '/alert/alerts')).json()['total']
+        self._post_event({'type': 'syslog', 'source_ip': '10.9.9.7',
+                          'severity': 3, 'facility_tag': 'X', 'message': 'x'})
+        after = client.get('/santaba/rest/alert/alerts',
+                           headers=_lm_headers('GET', '/alert/alerts')).json()['total']
+        assert after == before + 1

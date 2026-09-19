@@ -50,6 +50,32 @@ _SEVERITY_CRITICAL = 4
 # ここでは同じ考え方で、「意図した状態」ではない down だけを拾う。
 _UNEXPECTED_DOWN_STATUSES = {'down', 'err-disabled'}
 
+# よく知られたSNMP Trap OID(engine/syslog_sender.py や
+# tools/snmp_trap_receiver.py と同じ定義)。critical/warning/無視の
+# 判定に使う。coldStart/warmStart(再起動)はwarning、linkDownはcritical、
+# linkUp(復旧)はアラートを新規に立てる必要が無いので無視する。
+TRAP_OID_LINKDOWN = '1.3.6.1.6.3.1.1.5.3'
+TRAP_OID_LINKUP = '1.3.6.1.6.3.1.1.5.4'
+TRAP_OID_COLDSTART = '1.3.6.1.6.3.1.1.5.1'
+TRAP_OID_WARMSTART = '1.3.6.1.6.3.1.1.5.2'
+_TRAP_NAMES = {
+    TRAP_OID_LINKDOWN: 'linkDown', TRAP_OID_LINKUP: 'linkUp',
+    TRAP_OID_COLDSTART: 'coldStart', TRAP_OID_WARMSTART: 'warmStart',
+}
+_TRAP_IGNORED = {TRAP_OID_LINKUP}  # 復旧イベントは新規Alertにしない
+_SEVERITY_WARNING = 2
+_SEVERITY_NAME_BY_LM = {_SEVERITY_WARNING: 'warning', _SEVERITY_CRITICAL: 'critical'}
+
+# RFC3164のsyslog severity(0-7)のうち、実機のLogicMonitor既定
+# Syslog DataSourceがAlertにするのは概ねwarning以上（4以下）。
+# info/debug(6,7)はログとしては記録されてもAlertは立てない
+# （実機同様、平常運用のログでAlertが埋め尽くされるのを避けるため）。
+_SYSLOG_SEVERITY_TO_LM = {
+    0: _SEVERITY_CRITICAL, 1: _SEVERITY_CRITICAL, 2: _SEVERITY_CRITICAL,  # emerg/alert/crit
+    3: _SEVERITY_CRITICAL,  # err
+    4: _SEVERITY_WARNING,   # warning
+}
+
 
 def compute_lmv1_signature(access_key: str, method: str, epoch: str,
                            request_body: str, resource_path: str) -> str:
@@ -106,6 +132,12 @@ class LogicMonitorEngine:
     def reset(self):
         self.devices: dict[int, dict] = {}
         self._id_seq = itertools.count(1)
+        self._event_id_seq = itertools.count(1)
+        # syslog/SNMP Trapから受信したイベント由来のAlert
+        # （インタフェース状態から動的に作るAlertとは別に保持する。
+        # 実機のLogicMonitorも「イベント由来」と「メトリクス閾値由来」の
+        # Alertが両方存在する）
+        self.external_alerts: list[dict] = []
 
     def add_device(self, body: dict):
         name = body.get('name') or body.get('displayName')
@@ -131,6 +163,11 @@ class LogicMonitorEngine:
 
     def delete_device(self, did: int) -> bool:
         return self.devices.pop(did, None) is not None
+
+    def find_device_by_ip(self, ip: str):
+        """実機のLogicMonitorは装置の`name`欄に監視対象IPを入れるのが
+        通例なので、それと同じ約束事でマッチさせる。"""
+        return next((d for d in self.devices.values() if d.get('name') == ip), None)
 
     def _device_alerts(self, lm_device: dict, device_sessions: dict) -> list[dict]:
         """1台ぶんのAlertを、実際の装置状態(DeviceState)から組み立てる。
@@ -171,7 +208,63 @@ class LogicMonitorEngine:
                   else self.devices.values()) if device_id is not None else self.devices.values()
         for lm_device in targets:
             out.extend(self._device_alerts(lm_device, device_sessions))
+        out.extend(a for a in self.external_alerts
+                   if device_id is None or a.get('deviceId') == device_id)
         return out
+
+    def ingest_syslog(self, source_ip: str, severity: int, facility_tag: str,
+                      message: str) -> dict | None:
+        """syslog(RFC3164)を1件受信したときに呼ぶ。実機のLogicMonitorの
+        既定Syslog DataSourceと同じくwarning以上だけAlertにする
+        （info/debugはログとして記録されるだけでAlertにはしない）。
+        Alertにしない場合はNoneを返す。"""
+        lm_severity = _SYSLOG_SEVERITY_TO_LM.get(severity)
+        if lm_severity is None:
+            return None
+        device = self.find_device_by_ip(source_ip)
+        alert = {
+            'id': f'evt-{next(self._event_id_seq)}',
+            'deviceId': device['id'] if device else None,
+            'deviceDisplayName': device['displayName'] if device else source_ip,
+            'resourceTemplateName': 'Syslog',
+            'instanceName': facility_tag,
+            'severity': lm_severity,
+            'severityLabel': _SEVERITY_NAME_BY_LM[lm_severity],
+            'type': 'eventsource',
+            'startEpoch': int(time.time()),
+            'cleared': False,
+            'alertValue': facility_tag,
+            'threshold': 'n/a',
+            'detail': message,
+        }
+        self.external_alerts.append(alert)
+        return alert
+
+    def ingest_trap(self, source_ip: str, trap_oid: str, description: str) -> dict | None:
+        """SNMP Trapを1件受信したときに呼ぶ。linkUp(復旧)のように
+        新規Alertを立てる必要が無いTrapはNoneを返す。"""
+        if trap_oid in _TRAP_IGNORED:
+            return None
+        trap_name = _TRAP_NAMES.get(trap_oid, trap_oid)
+        severity = _SEVERITY_CRITICAL if trap_oid == TRAP_OID_LINKDOWN else _SEVERITY_WARNING
+        device = self.find_device_by_ip(source_ip)
+        alert = {
+            'id': f'evt-{next(self._event_id_seq)}',
+            'deviceId': device['id'] if device else None,
+            'deviceDisplayName': device['displayName'] if device else source_ip,
+            'resourceTemplateName': 'SNMP Trap',
+            'instanceName': trap_name,
+            'severity': severity,
+            'severityLabel': _SEVERITY_NAME_BY_LM[severity],
+            'type': 'eventsource',
+            'startEpoch': int(time.time()),
+            'cleared': False,
+            'alertValue': trap_oid,
+            'threshold': 'n/a',
+            'detail': description or trap_name,
+        }
+        self.external_alerts.append(alert)
+        return alert
 
 
 logicmonitor_engine = LogicMonitorEngine()
