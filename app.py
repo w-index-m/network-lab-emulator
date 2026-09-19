@@ -36,6 +36,7 @@ from engine.protocols import (
 )
 from engine.nexpose import (nexpose_engine, page_of as nexpose_page,
                             SCAN_TEMPLATES as nexpose_scan_templates_catalog)
+from engine.logicmonitor import logicmonitor_engine
 from engine.programmability import (
     app_hosting_engine, eem_engine, openflow_engine,
 )
@@ -551,6 +552,23 @@ async def session_auth_middleware(request, call_next):
         return _Response(
             status_code=401, content="Unauthorized",
             headers={"WWW-Authenticate": f'Basic realm="{_realm}"'})
+    # LogicMonitor REST API v3 は独自のLMv1署名認証（Basicでもトークン
+    # でもない）。署名はメソッド・エポック・リクエスト本文・
+    # リソースパスを含むため、ここでbodyを読んでから検証する必要がある
+    # （FastAPIは後続のリクエストハンドラでも同じbodyを再度読めるよう
+    # request.state経由でキャッシュされたbodyを使う）。
+    if path.startswith("/santaba/rest/"):
+        from engine.logicmonitor import verify_lmv1_auth
+        body_bytes = await request.body()
+        resource_path = path[len("/santaba/rest"):]
+        ok, reason = verify_lmv1_auth(
+            request.headers.get("Authorization", ""),
+            request.method, body_bytes.decode('utf-8', errors='replace'),
+            resource_path)
+        if not ok:
+            return JSONResponse(status_code=401,
+                content={'status': 401, 'errmsg': f'Unauthorized: {reason}'})
+        return await call_next(request)
     # 通常APIはヘッダーまたはクエリパラメータでトークン検証
     token = request.headers.get("X-Session-Token", "") or request.query_params.get("token", "")
     if _valid_token(token):
@@ -7871,6 +7889,51 @@ async def nexpose_delete_exception(eid: int):
     if not nexpose_engine.delete_exception(eid):
         return _np_err(404, f'vulnerability exception {eid} not found')
     return {'links': [{'rel': 'self', 'href': '/api/3/vulnerability_exceptions'}]}
+
+
+# ══════════════════════════════════════════════════════════
+# LogicMonitor REST API v3
+# ══════════════════════════════════════════════════════════
+# LogicMonitorはオンプレ配布物の無い完全SaaS型製品のため「動かす」こと
+# はできない。代わりにNexposeと同じ考え方でDevice/Alertを実装した。
+# 認証はLMv1署名（session_auth_middlewareの/santaba/rest/分岐を参照）。
+# 詳細は docs/logicmonitor-api.md を参照。
+
+@app.get("/santaba/rest/device/devices")
+async def lm_list_devices():
+    return {'total': len(logicmonitor_engine.devices),
+            'items': logicmonitor_engine.list_devices()}
+
+
+@app.post("/santaba/rest/device/devices")
+async def lm_create_device(body: dict):
+    did, err = logicmonitor_engine.add_device(body)
+    if err:
+        return JSONResponse(status_code=422, content={'status': 422, 'errmsg': err})
+    return JSONResponse(status_code=200, content=logicmonitor_engine.get_device(did))
+
+
+@app.get("/santaba/rest/device/devices/{did}")
+async def lm_get_device(did: int):
+    dev = logicmonitor_engine.get_device(did)
+    if dev is None:
+        return JSONResponse(status_code=404,
+            content={'status': 404, 'errmsg': f'device {did} not found'})
+    return dev
+
+
+@app.delete("/santaba/rest/device/devices/{did}")
+async def lm_delete_device(did: int):
+    if not logicmonitor_engine.delete_device(did):
+        return JSONResponse(status_code=404,
+            content={'status': 404, 'errmsg': f'device {did} not found'})
+    return {'status': 200}
+
+
+@app.get("/santaba/rest/alert/alerts")
+async def lm_list_alerts(deviceId: int = None):
+    alerts = logicmonitor_engine.list_alerts(device_sessions, device_id=deviceId)
+    return {'total': len(alerts), 'items': alerts}
 
 
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
