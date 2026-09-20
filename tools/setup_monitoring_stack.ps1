@@ -52,7 +52,12 @@ function Write-Log($msg) {
 
 function Test-Port($port, $path = '/') {
     try {
-        $r = Invoke-WebRequest -Uri "http://localhost:$port$path" -UseBasicParsing -TimeoutSec 2
+        # このスタックはapp.py(235台のエミュレータ)+Loki+Grafana+Prometheus+
+        # Alertmanagerを同時に動かすため負荷が高く、2秒では応答が間に合わず
+        # 実際には正常なサービスを「down」と誤判定することがあった
+        # (ユーザーの実機Windowsテストで確認: 手動curlは成功するのに
+        # Test-Port経由のstatus/setupチェックだけ失敗する事例)。5秒に緩和。
+        $r = Invoke-WebRequest -Uri "http://localhost:$port$path" -UseBasicParsing -TimeoutSec 5
         return $r.StatusCode -eq 200
     } catch {
         return $false
