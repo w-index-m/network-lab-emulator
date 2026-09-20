@@ -387,6 +387,67 @@ function Start-SyslogBridge {
         -WindowStyle Hidden
 }
 
+# ── 7.5 Grafanaにnetlab-syslogダッシュボードを登録 ────────
+function Publish-SyslogDashboard {
+    # Grafana/Lokiの起動直後はヘルスチェックにまだ応答しないことがあり、
+    # 即座にスキップすると登録が永久に行われないまま終わってしまう
+    # (高負荷環境で実際に発生を確認)。最大30秒(3秒x10回)リトライする。
+    $ready = $false
+    for ($i = 0; $i -lt 10; $i++) {
+        if ((Test-Port $GrafanaPort '/api/health') -and (Test-Port $LokiPort '/ready')) {
+            $ready = $true
+            break
+        }
+        Start-Sleep -Seconds 3
+    }
+    if (-not $ready) {
+        Write-Log "grafana: Grafana/Lokiの起動待ちがタイムアウトしたためダッシュボード登録をスキップ"
+        return
+    }
+    Write-Log "grafana: netlab-syslogダッシュボードを登録"
+    $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("admin:admin"))
+    try {
+        $ds = Invoke-RestMethod -Uri "http://localhost:$GrafanaPort/api/datasources/name/Loki" `
+            -Headers @{ Authorization = "Basic $auth" }
+    } catch {
+        Write-Warning "grafana: LokiデータソースのUID取得に失敗したためダッシュボード登録をスキップします"
+        return
+    }
+    $lokiUid = $ds.uid
+    # クエリは source_ip で絞らず job=netlab-syslog のみ(全送信元から受信したログを表示)
+    $dashboard = @{
+        dashboard = @{
+            uid      = "netlab-syslog"
+            title    = "Netlab Syslog"
+            timezone = "browser"
+            refresh  = "10s"
+            time     = @{ from = "now-1h"; to = "now" }
+            panels   = @(
+                @{
+                    id         = 1
+                    type       = "logs"
+                    title      = "syslog (全送信元)"
+                    gridPos    = @{ h = 20; w = 24; x = 0; y = 0 }
+                    datasource = @{ type = "loki"; uid = $lokiUid }
+                    targets    = @(
+                        @{ expr = '{job="netlab-syslog"}'; refId = "A"; datasource = @{ type = "loki"; uid = $lokiUid } }
+                    )
+                }
+            )
+        }
+        overwrite = $true
+    } | ConvertTo-Json -Depth 10
+
+    try {
+        Invoke-RestMethod -Uri "http://localhost:$GrafanaPort/api/dashboards/db" -Method Post `
+            -Body $dashboard -ContentType "application/json" `
+            -Headers @{ Authorization = "Basic $auth" } | Out-Null
+        Write-Log "grafana: ダッシュボードURL http://localhost:$GrafanaPort/d/netlab-syslog"
+    } catch {
+        Write-Warning "grafana: ダッシュボード登録に失敗しました"
+    }
+}
+
 # ── 8. Ollama（任意） ─────────────────────────────────────
 function Start-OllamaIfRequested {
     if (-not $WithOllama) { return }
@@ -424,6 +485,7 @@ function Invoke-Setup {
     Start-Grafana
     Start-Loki
     Start-SyslogBridge
+    Publish-SyslogDashboard
     Start-OllamaIfRequested
     Write-Host ""
     Invoke-Status

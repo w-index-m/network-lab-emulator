@@ -311,6 +311,65 @@ start_syslog_bridge() {
     sleep 1
 }
 
+# ── 7.5 Grafanaにnetlab-syslogダッシュボードを登録 ──
+provision_syslog_dashboard() {
+    # Grafana/Lokiの起動直後は(sleep数秒だけでは)まだヘルスチェックに応答
+    # しないことがあり、その場合ここで即座にスキップすると登録が永久に
+    # 行われないまま終わってしまう(実際に高負荷環境で発生を確認)。
+    # 最大30秒(3秒x10回)リトライしてから諦める。
+    local i
+    for i in $(seq 1 10); do
+        if port_open "$GRAFANA_PORT" && port_open "$LOKI_PORT"; then
+            break
+        fi
+        sleep 3
+    done
+    if ! port_open "$GRAFANA_PORT" || ! port_open "$LOKI_PORT"; then
+        log "grafana: Grafana/Lokiの起動待ちがタイムアウトしたためダッシュボード登録をスキップ"
+        return
+    fi
+    log "grafana: netlab-syslogダッシュボードを登録"
+    local loki_uid
+    loki_uid=$(curl -s -u admin:admin "http://localhost:${GRAFANA_PORT}/api/datasources/name/Loki" \
+        | python3 -c "import json,sys; print(json.load(sys.stdin).get('uid',''))" 2>/dev/null)
+    if [ -z "$loki_uid" ]; then
+        log "grafana: LokiデータソースのUIDが取得できずダッシュボード登録をスキップ"
+        return
+    fi
+    # クエリは source_ip で絞らず job=netlab-syslog のみ(全送信元から受信したログを表示)
+    LOKI_UID="$loki_uid" python3 <<'PYEOF' > "$STACK_DIR/netlab-syslog-dashboard.json"
+import json, os
+uid = os.environ["LOKI_UID"]
+dashboard = {
+    "dashboard": {
+        "uid": "netlab-syslog",
+        "title": "Netlab Syslog",
+        "timezone": "browser",
+        "refresh": "10s",
+        "time": {"from": "now-1h", "to": "now"},
+        "panels": [{
+            "id": 1,
+            "type": "logs",
+            "title": "syslog (全送信元)",
+            "gridPos": {"h": 20, "w": 24, "x": 0, "y": 0},
+            "datasource": {"type": "loki", "uid": uid},
+            "targets": [{
+                "expr": '{job="netlab-syslog"}',
+                "refId": "A",
+                "datasource": {"type": "loki", "uid": uid},
+            }],
+        }],
+    },
+    "overwrite": True,
+}
+print(json.dumps(dashboard))
+PYEOF
+    curl -s -u admin:admin -X POST "http://localhost:${GRAFANA_PORT}/api/dashboards/db" \
+        -H "Content-Type: application/json" \
+        -d @"$STACK_DIR/netlab-syslog-dashboard.json" > "$STACK_DIR/netlab-syslog-dashboard-result.json" || true
+    log "grafana: ダッシュボードURL http://localhost:${GRAFANA_PORT}/d/netlab-syslog"
+}
+
 # ── 8. FRRouting ────────────────────────────────────
 install_frr() {
     if command -v vtysh >/dev/null 2>&1; then
@@ -334,6 +393,7 @@ cmd_setup() {
     fetch_loki
     start_loki
     start_syslog_bridge
+    provision_syslog_dashboard
     install_frr
     echo
     cmd_status
