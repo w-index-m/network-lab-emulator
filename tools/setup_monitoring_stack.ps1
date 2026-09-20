@@ -68,10 +68,16 @@ function Start-App {
     Write-Log "app.py: starting on :$AppPort"
     $venvPython = Join-Path $RepoDir 'venv\Scripts\python.exe'
     $python = if (Test-Path $venvPython) { $venvPython } else { 'python' }
+    # Linux版(.sh)と同様、このスタック用に立てたapp.pyはNETLAB_AUTH_DISABLE=1で
+    # 起動する。付けないとヘルスチェックが401を200と誤判定して「起動失敗」に
+    # なる(実際にはapp.pyは正常に起動しているのに、ログイン必須のため
+    # /api/snmp/dashboardが401を返す)。
+    $env:NETLAB_AUTH_DISABLE = '1'
     Start-Process -FilePath $python -ArgumentList 'app.py' -WorkingDirectory $RepoDir `
         -RedirectStandardOutput "$StackDir\app.log" -RedirectStandardError "$StackDir\app.err.log" `
         -WindowStyle Hidden
-    for ($i = 0; $i -lt 15; $i++) {
+    Remove-Item Env:\NETLAB_AUTH_DISABLE -ErrorAction SilentlyContinue
+    for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Seconds 2
         if (Test-Port $AppPort '/api/snmp/dashboard') { return }
     }
