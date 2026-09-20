@@ -26,8 +26,10 @@ from fastapi.testclient import TestClient
 
 import app as app_module
 from engine.logicmonitor import compute_lmv1_signature, LM_ACCESS_ID, LM_ACCESS_KEY
+import tools.network_ontology_query as onq_module
 from tools.network_ontology_query import (
     nl_to_query_by_keyword, resolve_query, format_answer, loki_query_range,
+    summarize_logs_via_ollama,
 )
 
 client = TestClient(app_module.app)
@@ -259,3 +261,109 @@ class TestBackedByLogs:
         results = resolve_query('http://127.0.0.1:0',
                                 {'entity': 'Alert', 'filters': {}, 'backed_by_logs': True})
         assert all('logs' not in a for a in results)
+
+
+# ══════════════════════════════════════════════════════════
+# AI要約（summarize_logs_via_ollama）
+#
+# tools/ai_grafana_autopilot.pyの_ai_summarizeと同じベストエフォート
+# パターン。Ollama互換のモックHTTPサーバーに対して実際にPOSTし、
+# 正しいプロンプト（Alert情報+ログ本文）が送られること、Ollamaが
+# 応答しない場合は例外を投げずNoneに落ちることを確認する。
+# ══════════════════════════════════════════════════════════
+class _MockOllamaHandler(BaseHTTPRequestHandler):
+    received_prompts = []
+    reply_content = 'テスト要約です。'
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        if self.path == '/api/chat':
+            length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(length))
+            _MockOllamaHandler.received_prompts.append(body['messages'][0]['content'])
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(
+                {'message': {'content': _MockOllamaHandler.reply_content}}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+@pytest.fixture
+def mock_ollama(monkeypatch):
+    _MockOllamaHandler.received_prompts = []
+    _MockOllamaHandler.reply_content = 'テスト要約です。'
+    server = HTTPServer(('127.0.0.1', 0), _MockOllamaHandler)
+    port = server.server_port
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    monkeypatch.setattr(onq_module, 'OLLAMA_URL', f'http://127.0.0.1:{port}')
+    yield f'http://127.0.0.1:{port}'
+    server.shutdown()
+
+
+class TestAiSummary:
+    def test_summarize_posts_alert_and_logs_to_ollama(self, mock_ollama):
+        alert = {'severityLabel': 'critical', 'deviceDisplayName': 'Onto-Log',
+                 'resourceTemplateName': 'Interface Status',
+                 'instanceName': 'GigabitEthernet1/0/1'}
+        logs = ['Sep 19 07:58:25 Onto-Log %LINK-3-UPDOWN: ... changed state to down']
+        summary = summarize_logs_via_ollama(alert, logs)
+        assert summary == 'テスト要約です。'
+        assert len(_MockOllamaHandler.received_prompts) == 1
+        prompt = _MockOllamaHandler.received_prompts[0]
+        assert 'Onto-Log' in prompt
+        assert 'GigabitEthernet1/0/1' in prompt
+        assert logs[0] in prompt
+
+    def test_summarize_returns_none_for_empty_logs(self, mock_ollama):
+        assert summarize_logs_via_ollama({'deviceDisplayName': 'x'}, []) is None
+        assert _MockOllamaHandler.received_prompts == []
+
+    def test_summarize_returns_none_when_ollama_unreachable(self, monkeypatch):
+        monkeypatch.setattr(onq_module, 'OLLAMA_URL', 'http://127.0.0.1:1')
+        summary = summarize_logs_via_ollama(
+            {'deviceDisplayName': 'x'}, ['some log line'])
+        assert summary is None
+
+    def test_resolve_query_attaches_ai_summary_when_requested(self, monkeypatch, mock_loki,
+                                                               mock_ollama):
+        _monkeypatch_urllib(monkeypatch)
+        _dev('onq-sum', 'catalyst', 'Onq-Sum')
+        _lm_post(monkeypatch, '/device/devices',
+                 {'name': '127.0.0.1', 'displayName': 'Onq-Sum', '_device_id': 'onq-sum'})
+        client.post('/api/cli', json={'device_id': 'onq-sum', 'command': 'configure terminal'})
+        client.post('/api/cli', json={'device_id': 'onq-sum',
+                                      'command': 'interface GigabitEthernet1/0/1'})
+        client.post('/api/cli', json={'device_id': 'onq-sum', 'command': 'shutdown'})
+
+        results = resolve_query('http://127.0.0.1:0',
+                                {'entity': 'Alert', 'filters': {'severityLabel': 'critical'},
+                                 'backed_by_logs': True},
+                                loki_url=mock_loki, summarize=True)
+        assert results
+        assert any(a.get('ai_summary') == 'テスト要約です。' for a in results)
+        answer = format_answer({'entity': 'Alert'}, results)
+        assert 'AI要約:' in answer
+
+    def test_resolve_query_without_summarize_flag_has_no_ai_summary_call(
+            self, monkeypatch, mock_loki, mock_ollama):
+        _monkeypatch_urllib(monkeypatch)
+        _dev('onq-nosum', 'catalyst', 'Onq-NoSum')
+        _lm_post(monkeypatch, '/device/devices',
+                 {'name': '127.0.0.1', 'displayName': 'Onq-NoSum', '_device_id': 'onq-nosum'})
+        client.post('/api/cli', json={'device_id': 'onq-nosum', 'command': 'configure terminal'})
+        client.post('/api/cli', json={'device_id': 'onq-nosum',
+                                      'command': 'interface GigabitEthernet1/0/1'})
+        client.post('/api/cli', json={'device_id': 'onq-nosum', 'command': 'shutdown'})
+
+        results = resolve_query('http://127.0.0.1:0',
+                                {'entity': 'Alert', 'filters': {'severityLabel': 'critical'},
+                                 'backed_by_logs': True},
+                                loki_url=mock_loki, summarize=False)
+        assert all(a.get('ai_summary') is None for a in results)
+        assert _MockOllamaHandler.received_prompts == []

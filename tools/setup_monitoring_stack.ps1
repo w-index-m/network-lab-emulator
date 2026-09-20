@@ -31,10 +31,13 @@ param(
     [int]$PromPort = 9090,
     [int]$AlertmanagerPort = 9093,
     [int]$GrafanaPort = 3000,
+    [int]$LokiPort = 3100,
+    [int]$SyslogBridgePort = 5514,
 
     [string]$PromVersion = '2.54.1',
     [string]$AlertmanagerVersion = '0.27.0',
     [string]$GrafanaVersion = '11.2.0',
+    [string]$LokiVersion = '3.2.0',
 
     [switch]$WithOllama,
     [string]$OllamaModel = 'qwen2.5:1.5b'
@@ -259,7 +262,121 @@ function Start-Grafana {
     }
 }
 
-# ── 6. Ollama（任意） ─────────────────────────────────────
+# ── 6. Grafana Loki（ログ集約） ───────────────────────────
+function Get-Loki {
+    $exe = "$StackDir\loki-windows-amd64.exe"
+    if (Test-Path $exe) {
+        Write-Log "loki: binary already present"
+        return $exe
+    }
+    Write-Log "loki: downloading v$LokiVersion"
+    $zip = "$StackDir\loki.zip"
+    Invoke-WebRequest -Uri "https://github.com/grafana/loki/releases/download/v$LokiVersion/loki-windows-amd64.exe.zip" -OutFile $zip
+    Expand-Archive -Path $zip -DestinationPath $StackDir -Force
+    return $exe
+}
+
+function Write-LokiConfig {
+    $dataDir = "$StackDir\loki-data" -replace '\\', '/'
+    @"
+auth_enabled: false
+
+server:
+  http_listen_address: 127.0.0.1
+  http_listen_port: $LokiPort
+  grpc_listen_address: 127.0.0.1
+  grpc_listen_port: 9096
+
+common:
+  instance_addr: 127.0.0.1
+  instance_interface_names:
+    - Loopback Pseudo-Interface 1
+  path_prefix: $dataDir
+  storage:
+    filesystem:
+      chunks_directory: $dataDir/chunks
+      rules_directory: $dataDir/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    instance_interface_names:
+      - Loopback Pseudo-Interface 1
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+frontend_worker:
+  frontend_address: 127.0.0.1:9096
+
+ruler:
+  alertmanager_url: http://localhost:$AlertmanagerPort
+"@ | Out-File -Encoding utf8 "$StackDir\loki-config.yml"
+}
+
+function Start-Loki {
+    if (Test-Port $LokiPort '/ready') {
+        Write-Log "loki: already running on :$LokiPort"
+        return
+    }
+    $exe = Get-Loki
+    New-Item -ItemType Directory -Force -Path "$StackDir\loki-data" | Out-Null
+    Write-LokiConfig
+    Write-Log "loki: starting on :$LokiPort"
+    Start-Process -FilePath $exe -ArgumentList "-config.file=`"$StackDir\loki-config.yml`"" `
+        -WorkingDirectory $StackDir `
+        -RedirectStandardOutput "$StackDir\loki.log" -RedirectStandardError "$StackDir\loki.err.log" `
+        -WindowStyle Hidden
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Seconds 3
+        if (Test-Port $LokiPort '/ready') { break }
+    }
+    if (-not (Test-Port $LokiPort '/ready')) {
+        Write-Warning "loki が起動しませんでした。$StackDir\loki.err.log を確認してください。"
+        return
+    }
+
+    if (Test-Port $GrafanaPort '/api/health') {
+        Write-Log "loki: registering Grafana datasource"
+        $body = @{ name = "Loki"; type = "loki"; url = "http://localhost:$LokiPort"; access = "proxy" } | ConvertTo-Json
+        $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("admin:admin"))
+        try {
+            Invoke-RestMethod -Uri "http://localhost:$GrafanaPort/api/datasources" -Method Post `
+                -Body $body -ContentType "application/json" `
+                -Headers @{ Authorization = "Basic $auth" } | Out-Null
+        } catch {
+            # 既に登録済みの場合は409になるので無視してよい
+        }
+    }
+}
+
+# ── 7. syslog -> Loki ブリッジ ────────────────────────────
+function Start-SyslogBridge {
+    $running = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'python3.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'syslog_to_loki\.py' }
+    if ($running) {
+        Write-Log "syslog_to_loki: already running"
+        return
+    }
+    Write-Log "syslog_to_loki: starting on udp:$SyslogBridgePort -> loki:$LokiPort"
+    $venvPython = Join-Path $RepoDir 'venv\Scripts\python.exe'
+    $python = if (Test-Path $venvPython) { $venvPython } else { 'python' }
+    Start-Process -FilePath $python `
+        -ArgumentList "tools\syslog_to_loki.py --syslog-port $SyslogBridgePort --loki-url http://localhost:$LokiPort" `
+        -WorkingDirectory $RepoDir `
+        -RedirectStandardOutput "$StackDir\syslog_to_loki.log" -RedirectStandardError "$StackDir\syslog_to_loki.err.log" `
+        -WindowStyle Hidden
+}
+
+# ── 8. Ollama（任意） ─────────────────────────────────────
 function Start-OllamaIfRequested {
     if (-not $WithOllama) { return }
 
@@ -294,6 +411,8 @@ function Invoke-Setup {
     Start-Prometheus
     Start-Alertmanager
     Start-Grafana
+    Start-Loki
+    Start-SyslogBridge
     Start-OllamaIfRequested
     Write-Host ""
     Invoke-Status
@@ -307,12 +426,16 @@ function Invoke-Status {
         @{ Name = 'prometheus';   Port = $PromPort;         Path = '/-/healthy' }
         @{ Name = 'alertmanager'; Port = $AlertmanagerPort; Path = '/' }
         @{ Name = 'grafana';      Port = $GrafanaPort;      Path = '/api/health' }
+        @{ Name = 'loki';         Port = $LokiPort;         Path = '/ready' }
     )
     foreach ($c in $checks) {
         $ok = Test-Port $c.Port $c.Path
         $status = if ($ok) { '200' } else { 'down' }
         Write-Host ("{0,-14} :{1,-6} {2}" -f $c.Name, $c.Port, $status)
     }
+    $bridgeRunning = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'python3.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'syslog_to_loki\.py' }
+    Write-Host ("{0,-14} {1}" -f 'syslog_bridge', $(if ($bridgeRunning) { "running(udp:$SyslogBridgePort)" } else { 'not running' }))
     if ($WithOllama) {
         $ollamaOk = Test-Port 11434 '/'
         Write-Host ("{0,-14} :{1,-6} {2}" -f 'ollama', 11434, $(if ($ollamaOk) { '200' } else { 'down' }))
@@ -320,12 +443,12 @@ function Invoke-Status {
 }
 
 function Invoke-Stop {
-    Write-Log "stopping app.py / exporter / prometheus / alertmanager / grafana"
+    Write-Log "stopping app.py / exporter / prometheus / alertmanager / grafana / loki / syslog_bridge"
     Get-Process python -ErrorAction SilentlyContinue | Where-Object {
-        $_.Path -and (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").CommandLine -match 'app\.py|prometheus_exporter\.py'
+        $_.Path -and (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").CommandLine -match 'app\.py|prometheus_exporter\.py|syslog_to_loki\.py'
     } | Stop-Process -Force -ErrorAction SilentlyContinue
 
-    foreach ($name in @('prometheus', 'alertmanager', 'grafana-server')) {
+    foreach ($name in @('prometheus', 'alertmanager', 'grafana-server', 'loki-windows-amd64')) {
         Get-Process $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     }
 }

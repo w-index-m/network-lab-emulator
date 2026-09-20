@@ -40,6 +40,8 @@ Fabric IQは「業務データに散らばった実体・関係を1つのオン�
   python tools/network_ontology_query.py "重大度がcriticalなアラートは？"
   python tools/network_ontology_query.py --loki-url http://localhost:3100 \
       "アラートの根拠となるログは？"
+  python tools/network_ontology_query.py --loki-url http://localhost:3100 --summarize \
+      "アラートの根拠となるログは？"   # 取得したログをOllamaで要約
 """
 
 import argparse
@@ -126,16 +128,48 @@ def loki_query_range(loki_url: str, source_ip: str, start_epoch: float,
     return lines
 
 
-def _attach_log_evidence(base_url: str, loki_url: str, alerts: list[dict]) -> None:
+def summarize_logs_via_ollama(alert: dict, logs: list[str]) -> str | None:
+    """Ollamaがあれば、Alertとその根拠ログを1-2文で日本語要約させる
+    （tools/ai_grafana_autopilot.pyの_ai_summarizeと同じパターン:
+    ベストエフォートで、失敗/未接続なら黙ってNoneを返す）。
+    このモジュールはAIにログの中身を"解釈"させる唯一の箇所で、
+    それ以外（NL2Ontology・クエリ実行）は全て決定的なロジック。"""
+    if httpx is None or not logs:
+        return None
+    prompt = (
+        f'以下はネットワーク監視のAlertと、その前後に実際に届いた生ログです。'
+        f'何が起きたか運用者向けに1-2文で日本語要約してください:\n\n'
+        f'Alert: [{alert.get("severityLabel")}] {alert.get("deviceDisplayName")}: '
+        f'{alert.get("resourceTemplateName")}/{alert.get("instanceName")}\n'
+        f'ログ:\n' + '\n'.join(f'- {line}' for line in logs)
+    )
+    try:
+        r = httpx.post(f'{OLLAMA_URL}/api/chat', timeout=15.0, json={
+            'model': OLLAMA_MODEL,
+            'messages': [{'role': 'user', 'content': prompt}],
+            'stream': False, 'options': {'temperature': 0.1},
+        })
+        if r.status_code == 200:
+            return r.json()['message']['content'].strip()
+    except Exception:
+        pass
+    return None
+
+
+def _attach_log_evidence(base_url: str, loki_url: str, alerts: list[dict],
+                         summarize: bool = False) -> None:
     """各AlertのdeviceIdからLogicMonitor Deviceの`name`(=監視対象IP)を
     引き、その前後のsyslogをLokiから取ってきて`alert['logs']`に詰める。
-    Device未紐付け、あるいはLokiが応答しない場合は空リストのまま。"""
+    Device未紐付け、あるいはLokiが応答しない場合は空リストのまま。
+    `summarize=True`なら、取得したログをOllamaで要約して
+    `alert['ai_summary']`にも詰める（Ollamaが無ければNoneのまま）。"""
     try:
         devices = {d['id']: d for d in _lm_get(base_url, '/device/devices')['items']}
     except Exception:
         devices = {}
     for a in alerts:
         a['logs'] = []
+        a['ai_summary'] = None
         device = devices.get(a.get('deviceId'))
         if device is None:
             continue
@@ -146,6 +180,8 @@ def _attach_log_evidence(base_url: str, loki_url: str, alerts: list[dict]) -> No
             a['logs'] = loki_query_range(loki_url, source_ip, start_epoch, end_epoch)
         except Exception:
             pass
+        if summarize and a['logs']:
+            a['ai_summary'] = summarize_logs_via_ollama(a, a['logs'])
 
 
 # ══════════════════════════════════════════
@@ -211,7 +247,8 @@ def nl_to_query(question: str) -> tuple[dict | None, str]:
 # クエリ実行（実データへの振り分け = Fabric IQのData Binding相当）
 # ══════════════════════════════════════════
 
-def resolve_query(base_url: str, query: dict, loki_url: str = None) -> list[dict]:
+def resolve_query(base_url: str, query: dict, loki_url: str = None,
+                  summarize: bool = False) -> list[dict]:
     entity = query.get('entity')
     if entity == 'Alert':
         alerts = _lm_get(base_url, '/alert/alerts')['items']
@@ -219,7 +256,7 @@ def resolve_query(base_url: str, query: dict, loki_url: str = None) -> list[dict
         for k, v in filters.items():
             alerts = [a for a in alerts if a.get(k) == v]
         if query.get('backed_by_logs') and loki_url:
-            _attach_log_evidence(base_url, loki_url, alerts)
+            _attach_log_evidence(base_url, loki_url, alerts, summarize=summarize)
         return alerts
     if entity == 'Device' and query.get('relationship') == 'connects_to':
         topo = _http_get(base_url, '/api/topology/neighbors')
@@ -246,6 +283,8 @@ def format_answer(query: dict, results: list[dict]) -> str:
                          f'{a["resourceTemplateName"]}/{a["instanceName"]} ({a["detail"]})')
             for log in a.get('logs', []):
                 lines.append(f'      ログ: {log}')
+            if a.get('ai_summary'):
+                lines.append(f'      AI要約: {a["ai_summary"]}')
         return f'{len(results)}件のAlertが見つかりました:\n' + '\n'.join(lines)
     if entity == 'Device':
         if not results:
@@ -263,6 +302,8 @@ def main():
     p.add_argument('--emulator-url', default='http://localhost:8000')
     p.add_argument('--loki-url', default=None,
                    help='指定するとAlertのbacked_by_logs解決でLokiに問い合わせる')
+    p.add_argument('--summarize', action='store_true',
+                   help='取得したログをOllamaで要約する(--loki-url必須、Ollamaが無ければ黙って省略)')
     args = p.parse_args()
 
     query, method = nl_to_query(args.question)
@@ -270,7 +311,8 @@ def main():
     if query is None:
         print('質問を構造化クエリに変換できませんでした。')
         return
-    results = resolve_query(args.emulator_url, query, loki_url=args.loki_url)
+    results = resolve_query(args.emulator_url, query, loki_url=args.loki_url,
+                            summarize=args.summarize)
     print(format_answer(query, results))
 
 

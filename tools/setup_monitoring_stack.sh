@@ -19,7 +19,8 @@
 #     (default: このリポジトリのGitHub Release "grafana" アセット。
 #      dl.grafana.com は一部環境のプロキシでブロックされるため、
 #      GitHub Releases 経由での取得を前提にしている)
-#   APP_PORT / EXPORTER_PORT / PROM_PORT / ALERTMANAGER_PORT / GRAFANA_PORT
+#   APP_PORT / EXPORTER_PORT / PROM_PORT / ALERTMANAGER_PORT / GRAFANA_PORT /
+#   LOKI_PORT / SYSLOG_BRIDGE_PORT
 
 set -euo pipefail
 
@@ -31,10 +32,14 @@ EXPORTER_PORT="${EXPORTER_PORT:-9877}"
 PROM_PORT="${PROM_PORT:-9090}"
 ALERTMANAGER_PORT="${ALERTMANAGER_PORT:-9093}"
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
+LOKI_PORT="${LOKI_PORT:-3100}"
+SYSLOG_BRIDGE_PORT="${SYSLOG_BRIDGE_PORT:-5514}"
 
 PROM_VERSION="2.54.1"
 ALERTMANAGER_VERSION="0.27.0"
+LOKI_VERSION="3.2.0"
 GRAFANA_RELEASE_URL="${GRAFANA_RELEASE_URL:-https://github.com/w-index-m/network-lab-emulator/releases/download/grafana/grafana.tar.gz}"
+LOKI_RELEASE_URL="${LOKI_RELEASE_URL:-https://github.com/grafana/loki/releases/download/v${LOKI_VERSION}/loki-linux-amd64.zip}"
 
 mkdir -p "$STACK_DIR"
 
@@ -204,7 +209,98 @@ start_grafana() {
         > "$STACK_DIR/grafana_datasource.json" || true
 }
 
-# ── 6. FRRouting ────────────────────────────────────
+# ── 6. Grafana Loki（ログ集約） ─────────────────────
+fetch_loki() {
+    if [ -x "$STACK_DIR/loki-linux-amd64" ]; then
+        log "loki: binary already present"
+        return
+    fi
+    log "loki: downloading v${LOKI_VERSION} from ${LOKI_RELEASE_URL}"
+    curl -sL "$LOKI_RELEASE_URL" -o "$STACK_DIR/loki.zip"
+    unzip -oq "$STACK_DIR/loki.zip" -d "$STACK_DIR"
+    chmod +x "$STACK_DIR/loki-linux-amd64"
+}
+
+write_loki_config() {
+    mkdir -p "$STACK_DIR/loki-data"
+    cat > "$STACK_DIR/loki-config.yml" <<EOF
+auth_enabled: false
+
+server:
+  http_listen_address: 127.0.0.1
+  http_listen_port: ${LOKI_PORT}
+  grpc_listen_address: 127.0.0.1
+  grpc_listen_port: 9096
+
+common:
+  instance_addr: 127.0.0.1
+  instance_interface_names:
+    - lo
+  path_prefix: ${STACK_DIR}/loki-data
+  storage:
+    filesystem:
+      chunks_directory: ${STACK_DIR}/loki-data/chunks
+      rules_directory: ${STACK_DIR}/loki-data/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    instance_interface_names:
+      - lo
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+frontend_worker:
+  frontend_address: 127.0.0.1:9096
+
+ruler:
+  alertmanager_url: http://localhost:${ALERTMANAGER_PORT}
+EOF
+}
+
+start_loki() {
+    if port_open "$LOKI_PORT"; then
+        log "loki: already running on :${LOKI_PORT}"
+        return
+    fi
+    write_loki_config
+    log "loki: starting on :${LOKI_PORT}"
+    nohup "$STACK_DIR/loki-linux-amd64" -config.file="$STACK_DIR/loki-config.yml" \
+        > "$STACK_DIR/loki.log" 2>&1 &
+    sleep 3
+
+    if port_open "$GRAFANA_PORT"; then
+        log "loki: registering Grafana datasource"
+        curl -s -X POST "http://admin:admin@localhost:${GRAFANA_PORT}/api/datasources" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"Loki\",\"type\":\"loki\",\"url\":\"http://localhost:${LOKI_PORT}\",\"access\":\"proxy\"}" \
+            > "$STACK_DIR/grafana_loki_datasource.json" || true
+    fi
+}
+
+# ── 7. syslog -> Loki ブリッジ ──────────────────────
+start_syslog_bridge() {
+    if pgrep -f "tools/syslog_to_loki.py" >/dev/null 2>&1; then
+        log "syslog_to_loki: already running"
+        return
+    fi
+    log "syslog_to_loki: starting on udp:${SYSLOG_BRIDGE_PORT} -> loki:${LOKI_PORT}"
+    (cd "$REPO_DIR" && nohup python3 tools/syslog_to_loki.py \
+        --syslog-port "$SYSLOG_BRIDGE_PORT" --loki-url "http://localhost:${LOKI_PORT}" \
+        > "$STACK_DIR/syslog_to_loki.log" 2>&1 &)
+    sleep 1
+}
+
+# ── 8. FRRouting ────────────────────────────────────
 install_frr() {
     if command -v vtysh >/dev/null 2>&1; then
         log "frr: already installed"
@@ -224,6 +320,9 @@ cmd_setup() {
     start_alertmanager
     fetch_grafana
     start_grafana
+    fetch_loki
+    start_loki
+    start_syslog_bridge
     install_frr
     echo
     cmd_status
@@ -236,16 +335,20 @@ cmd_status() {
     printf "%-14s :%-6s " "prometheus"   "$PROM_PORT";         curl -s -o /dev/null -w "%{http_code}\n" -m 2 "http://localhost:${PROM_PORT}/-/healthy" || echo "down"
     printf "%-14s :%-6s " "alertmanager" "$ALERTMANAGER_PORT"; curl -s -o /dev/null -w "%{http_code}\n" -m 2 "http://localhost:${ALERTMANAGER_PORT}/" || echo "down"
     printf "%-14s :%-6s " "grafana"      "$GRAFANA_PORT";      curl -s -o /dev/null -w "%{http_code}\n" -m 2 "http://localhost:${GRAFANA_PORT}/api/health" || echo "down"
+    printf "%-14s :%-6s " "loki"         "$LOKI_PORT";         curl -s -o /dev/null -w "%{http_code}\n" -m 2 "http://localhost:${LOKI_PORT}/ready" || echo "down"
+    printf "%-14s %s\n" "syslog_bridge" "$(pgrep -f 'tools/syslog_to_loki.py' >/dev/null 2>&1 && echo "running(udp:${SYSLOG_BRIDGE_PORT})" || echo 'not running')"
     printf "%-14s %s\n" "frr" "$(command -v vtysh >/dev/null 2>&1 && echo installed || echo 'not installed')"
 }
 
 cmd_stop() {
-    log "stopping app.py / exporter / prometheus / alertmanager / grafana"
+    log "stopping app.py / exporter / prometheus / alertmanager / grafana / loki / syslog_bridge"
     pkill -f "uvicorn app:app" 2>/dev/null || true
     pkill -f "tools/prometheus_exporter.py" 2>/dev/null || true
     pkill -f "$STACK_DIR/prometheus-" 2>/dev/null || true
     pkill -f "$STACK_DIR/alertmanager-" 2>/dev/null || true
     pkill -f "bin/grafana server" 2>/dev/null || true
+    pkill -f "$STACK_DIR/loki-linux-amd64" 2>/dev/null || true
+    pkill -f "tools/syslog_to_loki.py" 2>/dev/null || true
 }
 
 case "${1:-setup}" in

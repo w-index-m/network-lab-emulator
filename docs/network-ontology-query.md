@@ -132,6 +132,67 @@ LogicMonitorのAlert（インタフェース状態から動的に組み立てた
 Lokiに実際に届いた生のsyslog本文が、装置のIP（`127.0.0.1`）を鍵に
 正しく紐付いていることを確認した。
 
+### `--summarize` — 取得したログをOllamaで要約（AI解析）
+
+`backed_by_logs`まではAlertとログをIPで紐付けて**そのまま**返すだけで、
+ログの中身を解釈する部分はなかった（ユーザーから「今、Loki＋AI解析に
+なった？」と聞かれ、まだなっていないと回答した経緯がある）。
+`--summarize`を付けると、取得したAlert1件ごとに、そのAlertと紐づく
+ログをまとめてOllamaに渡し、「何が起きたか」を1-2文の日本語で要約させる
+（`tools/ai_grafana_autopilot.py`の`_ai_summarize`と全く同じベスト
+エフォート方式：`httpx`が無い、Ollamaに繋がらない、レスポンスが200以外、
+何が起きても例外を投げずに`None`を返すだけで、要約なしで結果自体は
+そのまま表示される）。
+
+```python
+def summarize_logs_via_ollama(alert: dict, logs: list[str]) -> str | None:
+    if httpx is None or not logs:
+        return None
+    prompt = (...Alertの重大度/装置/Resource/Instanceと、ログ本文を渡す...)
+    try:
+        r = httpx.post(f'{OLLAMA_URL}/api/chat', timeout=15.0, json={...})
+        if r.status_code == 200:
+            return r.json()['message']['content'].strip()
+    except Exception:
+        pass
+    return None
+```
+
+`--summarize`を付けなければOllamaには一切問い合わせない
+（`resolve_query(..., summarize=False)`が既定値。呼ばないことを
+テストで固定している）。
+
+#### 実際に動かして確認（モックOllamaサーバー + 実Loki + 実エミュレータ）
+
+このサンドボックスには本物のOllamaが無いため、`ai-grafana-autopilot.md`
+と同じ手法で、標準ライブラリだけのモックOllama HTTPサーバー
+（`POST /api/chat`を受けて固定の要約文を返す）を実際に別プロセスで
+立ち上げ、`OLLAMA_URL`をそこに向けた。それ以外（エミュレータ、Loki、
+syslogブリッジ、LogicMonitor登録、`interface .. shutdown`）は
+すべて本物を動かして確認した:
+
+```
+$ OLLAMA_URL=http://127.0.0.1:11499 python tools/network_ontology_query.py \
+    --emulator-url http://127.0.0.1:8098 --loki-url http://localhost:3100 \
+    --summarize "アラートの根拠となるログは？"
+[NL2Ontology: keyword-fallback] {"entity": "Alert", "filters": {}, "backed_by_logs": true}
+2件のAlertが見つかりました:
+  - [critical] Onto-AI-A: Interface Status/GigabitEthernet1/0/1 (GigabitEthernet1/0/1 is down (expected up))
+      ログ: Sep 19 14:54:14 Onto-AI-A %LINK-3-UPDOWN: Interface GigabitEthernet1/0/1, changed state to down
+      ログ: Sep 19 14:54:04 Onto-AI-A %LINK-3-UPDOWN: Interface GigabitEthernet1/0/1, changed state to down
+      ログ: Sep 19 14:54:03 Onto-AI-A %LINK-3-UPDOWN: Interface GigabitEthernet1/0/1, changed state to up
+      AI要約: GigabitEthernet1/0/1でリンクダウンが発生し、インタフェースがdown状態になりました。
+  - [critical] Onto-AI-A: Interface Status/GigabitEthernet1/0/3 (GigabitEthernet1/0/3 is err-disabled (expected up))
+      ログ: (同上)
+      AI要約: GigabitEthernet1/0/1でリンクダウンが発生し、インタフェースがdown状態になりました。
+```
+
+LogicMonitorのAlert（実際のインタフェース状態から動的生成）→
+装置のIPでLokiの実ログに紐付け→そのログをモックOllamaにPOSTして
+返ってきた要約文が、`ai_summary`として結果に正しく載ることを確認した。
+本物のOllamaに繋いだ場合の応答内容は未検証（プロンプト設計とHTTP
+インタフェースの疎通のみ確認）。
+
 ## 使い方
 
 ```bash
@@ -141,13 +202,17 @@ python tools/network_ontology_query.py --emulator-url http://localhost:8000 \
 # Loki連携あり
 python tools/network_ontology_query.py --emulator-url http://localhost:8000 \
     --loki-url http://localhost:3100 "アラートの根拠となるログは？"
+
+# Loki連携 + Ollamaでログを要約
+python tools/network_ontology_query.py --emulator-url http://localhost:8000 \
+    --loki-url http://localhost:3100 --summarize "アラートの根拠となるログは？"
 ```
 
 ## テスト
 
 ```bash
 pytest tests/test_network_ontology_query.py -v
-# 16/16 成功
+# 21/21 成功
 ```
 
 固定している内容：
@@ -165,6 +230,12 @@ pytest tests/test_network_ontology_query.py -v
 7. `backed_by_logs: true`のときだけAlertに`logs`が付き、
    `--loki-url`を指定しなければLokiには一切問い合わせないこと
    （このエミュレータ以外の外部URLを勝手に叩かないことの固定）
+8. `summarize_logs_via_ollama`がAlertとログ本文をOllamaにPOSTし、
+   応答から要約文を取り出せること（モックOllamaサーバーでプロンプト
+   内容も検証）
+9. ログが空、Ollamaに接続できない場合は例外を投げず`None`を返すこと
+10. `--summarize`を付けたときだけ`ai_summary`が付き、付けなければ
+    Ollamaには一切問い合わせないこと（`summarize=False`が既定）
 
 ## 制約・今後の拡張余地
 
@@ -179,7 +250,9 @@ pytest tests/test_network_ontology_query.py -v
   エンジンではなく、3種類の固定クエリ形しか扱えない
 - `backed_by_logs`の時間窓（前120秒〜後60秒）は固定値で、
   質問から動的に調整することはできない
-- Lokiのログ本文自体は解釈しない（キーワード検索や要約はしない、
-  単に時間窓内の生ログをそのまま返すだけ）
-- 結果の自然言語での要約（Fabric IQでいう回答生成部分）はテンプレート
-  ベースの簡易な文言で、Ollamaによる要約はしていない
+- `--summarize`を付けない場合、Lokiのログ本文自体は解釈しない
+  （キーワード検索や要約はしない、単に時間窓内の生ログをそのまま返す）
+- `--summarize`を付けた場合の要約はAlert1件ごとの独立した要約で、
+  複数Alertを横断した傾向分析やレポート生成のようなことはしない
+- Ollamaが使える実環境での応答品質（要約の正確さ）は未検証
+  （このサンドボックスではモックOllamaサーバーでHTTP疎通のみ確認）
