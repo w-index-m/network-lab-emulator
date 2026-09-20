@@ -4,6 +4,16 @@
 - Ollama連携（インストール済みなら自動切替）
 - WebSocket（VRRP/RIP/OSPF/STPプロトコルシミュレーション）
 """
+import sys
+# Windowsのデフォルトコンソール文字コード(cp932)では起動バナーの罫線文字
+# (╔╗╚╝ 等)がエンコードできずUnicodeEncodeErrorでクラッシュするため、
+# 標準出力/エラー出力をUTF-8に固定する。
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 import os, asyncio, json, re, httpx, time, random
 from pathlib import Path
 from datetime import datetime
