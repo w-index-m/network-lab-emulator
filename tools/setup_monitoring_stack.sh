@@ -45,6 +45,17 @@ mkdir -p "$STACK_DIR"
 
 log()  { echo "[setup_monitoring_stack] $*"; }
 port_open() { curl -s -o /dev/null -m 2 "http://localhost:$1/" 2>/dev/null; }
+udp_port_listening() {
+    # UDPはTCPと違い接続確認ができないため、実際にそのポートをLISTENして
+    # いるプロセスがいるかを ss(1) で確認する(なければ /proc/net/udp を見る)。
+    if command -v ss >/dev/null 2>&1; then
+        ss -uln 2>/dev/null | awk '{print $4}' | grep -q ":$1\$"
+    else
+        local hexport
+        hexport=$(printf '%04X' "$1")
+        grep -qi ":${hexport} " /proc/net/udp 2>/dev/null
+    fi
+}
 
 # ── 1. アプリ本体 ──────────────────────────────────
 start_app() {
@@ -336,7 +347,12 @@ cmd_status() {
     printf "%-14s :%-6s " "alertmanager" "$ALERTMANAGER_PORT"; curl -s -o /dev/null -w "%{http_code}\n" -m 2 "http://localhost:${ALERTMANAGER_PORT}/" || echo "down"
     printf "%-14s :%-6s " "grafana"      "$GRAFANA_PORT";      curl -s -o /dev/null -w "%{http_code}\n" -m 2 "http://localhost:${GRAFANA_PORT}/api/health" || echo "down"
     printf "%-14s :%-6s " "loki"         "$LOKI_PORT";         curl -s -o /dev/null -w "%{http_code}\n" -m 2 "http://localhost:${LOKI_PORT}/ready" || echo "down"
-    printf "%-14s %s\n" "syslog_bridge" "$(pgrep -f 'tools/syslog_to_loki.py' >/dev/null 2>&1 && echo "running(udp:${SYSLOG_BRIDGE_PORT})" || echo 'not running')"
+    printf "%-14s :%-6s " "syslog_bridge" "udp/${SYSLOG_BRIDGE_PORT}"
+    if pgrep -f 'tools/syslog_to_loki.py' >/dev/null 2>&1 && udp_port_listening "${SYSLOG_BRIDGE_PORT}"; then
+        echo "listening"
+    else
+        echo "down"
+    fi
     printf "%-14s %s\n" "frr" "$(command -v vtysh >/dev/null 2>&1 && echo installed || echo 'not installed')"
 }
 

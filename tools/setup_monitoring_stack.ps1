@@ -446,7 +446,14 @@ function Invoke-Status {
     }
     $bridgeRunning = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'python3.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match 'syslog_to_loki\.py' }
-    Write-Host ("{0,-14} {1}" -f 'syslog_bridge', $(if ($bridgeRunning) { "running(udp:$SyslogBridgePort)" } else { 'not running' }))
+    # UDPはTCPと違い接続確認ができないため、プロセスの存在だけでなく実際に
+    # そのポートをLISTENしているかをGet-NetUDPEndpointで確認する。
+    $udpListening = $false
+    try {
+        $udpListening = [bool](Get-NetUDPEndpoint -LocalPort $SyslogBridgePort -ErrorAction SilentlyContinue)
+    } catch { }
+    $bridgeStatus = if ($bridgeRunning -and $udpListening) { 'listening' } else { 'down' }
+    Write-Host ("{0,-14} :{1,-6} {2}" -f 'syslog_bridge', "udp/$SyslogBridgePort", $bridgeStatus)
     if ($WithOllama) {
         $ollamaOk = Test-Port 11434 '/'
         Write-Host ("{0,-14} :{1,-6} {2}" -f 'ollama', 11434, $(if ($ollamaOk) { '200' } else { 'down' }))
