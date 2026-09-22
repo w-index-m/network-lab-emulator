@@ -317,6 +317,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
         <button class="launcher-add-btn" onclick="launcherAddDev('cisco')"          style="border-color:#e05a00;color:#e05a00">+ Cisco ISR4321</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('nexus')"          style="border-color:#ff6a00;color:#ff6a00">+ Nexus 9300</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('apresia')"        style="border-color:#00d4aa;color:#00d4aa">+ APRESIA</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('ipcom')"          style="border-color:#ffb000;color:#ffb000">+ IPCOM EX2</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('generic-router')" style="border-color:#a040c0;color:#a040c0">+ Generic Router</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('generic-switch')" style="border-color:#408040;color:#408040">+ Generic Switch</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('pc')"             style="border-color:#606060;color:#808080">+ PC</button>
@@ -398,6 +399,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
           <button class="dev-add-btn" onclick="addDevice('cisco')"    style="border-color:var(--cisco);color:var(--cisco)">＋ Cisco Router</button>
           <button class="dev-add-btn" onclick="addDevice('apresia')"  style="border-color:#00d4aa;color:#00d4aa">＋ APRESIA</button>
           <button class="dev-add-btn" onclick="addDevice('bigip')"    style="border-color:#e4002b;color:#e4002b">＋ F5 BIG-IP</button>
+          <button class="dev-add-btn" onclick="addDevice('ipcom')"    style="border-color:#ffb000;color:#ffb000">＋ IPCOM EX2</button>
           <button class="dev-add-btn" onclick="addDevice('generic-router')" style="border-color:#a040c0;color:#a040c0">＋ 汎用Router</button>
           <button class="dev-add-btn" onclick="addDevice('generic-switch')" style="border-color:#408040;color:#408040">＋ 汎用Switch</button>
           <button class="dev-add-btn" onclick="addDevice('pc')"       style="border-color:#606060;color:#808080">＋ PC</button>
@@ -674,6 +676,7 @@ const DEV_TEMPLATES = {
   'nexus':          {icon:'N', color:'#ff6a00', model:'Nexus 9300',          prefix:'Nexus',  type:'nexus'},
   'apresia':        {icon:'A', color:'#00d4aa', model:'APRESIA ApresiaLight', prefix:'AP',    type:'apresia'},
   'bigip':          {icon:'F', color:'#e4002b', model:'F5 BIG-IP',           prefix:'BIGIP',  type:'bigip'},
+  'ipcom':          {icon:'I', color:'#ffb000', model:'IPCOM EX2',           prefix:'IPCOM',  type:'ipcom'},
   'generic-router': {icon:'R', color:'#a040c0', model:'Generic Router',      prefix:'Router', type:'cisco'},
   'generic-switch': {icon:'S', color:'#408040', model:'Generic Switch',      prefix:'SW',     type:'srs'},
   'pc':             {icon:'H', color:'#606060', model:'Host PC',             prefix:'PC',     type:'pc'},
@@ -1207,6 +1210,14 @@ function bindKeys(id) {
 function getPrompt(id) {
   const d = DEVICES[id];
   const mode = d.mode||'exec';
+  // IPCOM EX2: 操作者EXEC(>)/管理者EXEC(#)を区別し、config系も(config)/(edit)/(edit-if)。
+  if (d.type==='ipcom') {
+    if (mode==='exec') return `${d.hostname}${d.ipcomAdmin?'#':'>'} `;
+    if (mode==='config') return `${d.hostname}(config)# `;
+    if (mode==='edit') return `${d.hostname}(edit)# `;
+    if (mode==='edit-if') return `${d.hostname}(edit-if)# `;
+    return `${d.hostname}# `;
+  }
   const suffix = mode==='config'?'(config)':mode==='config-if'?'(config-if)':mode==='config-router'?'(config-router)':mode==='config-vlan'?'(config-vlan)':mode==='config-vpc-domain'?'(config-vpc-domain)':'';
   return `${d.hostname}${suffix}# `;
 }
@@ -1344,6 +1355,7 @@ async function runCmd(id, cmd) {
     // ホスト名・モード更新
     if(data.hostname) DEVICES[id].hostname = data.hostname;
     if(data.mode)     DEVICES[id].mode     = data.mode;
+    if('ipcom_admin' in data) DEVICES[id].ipcomAdmin = data.ipcom_admin;
 
     // ── VRRP コマンド検出 ──
     // lan <n> vrrp group <g> id <vrid> <priority> <vip>
@@ -1833,6 +1845,7 @@ function defPort(type,n){
   if(type==='cisco')return`GigabitEthernet0/${n%3}`;
   if(type==='asa')return`GigabitEthernet0/${n%3}`;
   if(type==='apresia')return`ge-${n%24}`;
+  if(type==='ipcom')return`lan0.${n}`;
   return`GigabitEthernet0/${n}`;
 }
 // 装置種別ごとの接続インターフェース候補（プルダウン用）
@@ -1859,6 +1872,8 @@ function portOptions(type){
     o.push('Management0/0');
   } else if(type==='pc'){
     o.push('eth0');
+  } else if(type==='ipcom'){
+    for(let i=0;i<=3;i++)o.push(`lan0.${i}`);
   } else {
     for(let i=0;i<=3;i++)o.push(`GigabitEthernet0/${i}`);
   }
@@ -2242,6 +2257,7 @@ function _inferDeviceType(text){
   if(/lan\s+\d+\s+ip\s+address|wan\s+\d+\s+|napt\s+use|remote\s+\d+\s+ap/m.test(t)) return 'sir';
   if(/interface\s+gigabitethernet1\/0\/|switch\s+virtual|spanning-tree/m.test(t)) return 'catalyst';
   if(/interface\s+port\s+\d|loopdetect|apresia/m.test(t)) return 'apresia';
+  if(/interface\s+lan\d+\.\d+|save\s+(running|startup)-config|ipcom\(edit/m.test(t)) return 'ipcom';
   if(/nameif|security-level|access-group.*global/m.test(t)) return 'asa';
   if(/ip\s+address\s+[\d.]+\s+[\d.]+|router\s+(ospf|bgp|eigrp)|interface\s+gigabitethernet0\//m.test(t)) return 'cisco';
   return 'cisco';
@@ -2267,7 +2283,7 @@ async function _importMultipleConfigs(files){
     const type=_inferDeviceType(text);
     const id='dev'+Date.now().toString(36)+i;
     const hostname=_inferHostname(text, file.name.replace(/\.[^.]+$/,''));
-    const colors={sir:'#00c840',srs:'#00a0ff',catalyst:'#1e90ff',cisco:'#e05a00',nexus:'#7050d0',apresia:'#c00040',asa:'#cc4400'};
+    const colors={sir:'#00c840',srs:'#00a0ff',catalyst:'#1e90ff',cisco:'#e05a00',nexus:'#7050d0',apresia:'#c00040',asa:'#cc4400',ipcom:'#ffb000'};
     DEVICES[id]={type,hostname,color:colors[type]||'#888'};
     NODE_POS[id]={x:150+(i%3)*220,y:100+Math.floor(i/3)*160};
     TERMS[id]={busy:false,typed:'',cur:0,history:[],histIdx:-1};

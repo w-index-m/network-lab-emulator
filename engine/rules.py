@@ -127,6 +127,29 @@ class DeviceState:
             self.logging_level = "informational"
             return
 
+        # IPCOM EX2（富士通/PFU系UTMアプライアンス）
+        # インターフェース名は lan<N>.<VLAN-ID> 形式（マニュアル準拠）。
+        if device_type == "ipcom":
+            self.interfaces = {
+                "lan0.0": {"ip": "192.168.1.1", "prefix": 24, "status": "up",
+                           "desc": "", "mac": "00:0e:0e:f2:51:dc",
+                           "auto_negotiation": True, "ip_routing": True},
+                "lan0.1": {"ip": "192.168.100.1", "prefix": 24, "status": "up",
+                           "desc": "", "mac": "00:0e:0e:f2:51:dd",
+                           "auto_negotiation": True, "ip_routing": True},
+            }
+            self.mode = "exec"
+            self._ipcom_admin = False   # admin コマンドで昇格(ipcom># prompt)
+            self.static_routes = []     # [{"dest","gw","distance"}]
+            self.syslog_servers = []
+            self.logging_level = "informational"
+            self.snmp_community = []
+            self.snmp_hosts = []
+            self.snmp_location = ""
+            self.snmp_contact = ""
+            self.banner = ""
+            return
+
         # NX-OS (Nexus 9000)
         if device_type == "nexus":
             self.interfaces = {
@@ -815,6 +838,10 @@ class RuleEngine:
         # APRESIAはOSコマンド体系が独自 → 専用ハンドラへ
         if state.device_type == 'apresia':
             return self._apresia_process(cmd, c, state)
+
+        # IPCOM EX2は「即時/編集モード」+ load/new/save の独自体系 → 専用ハンドラへ
+        if state.device_type == 'ipcom':
+            return self._ipcom_process(cmd, c, state)
 
         # F5 BIG-IP は tmsh 体系 → 専用ハンドラへ
         if state.device_type == 'bigip':
@@ -8979,6 +9006,160 @@ Key Version         : A
             return f'{(bcast_int>>24)&0xff}.{(bcast_int>>16)&0xff}.{(bcast_int>>8)&0xff}.{bcast_int&0xff}'
         except Exception:
             return '255.255.255.255'
+
+    # ─── IPCOM EX2 コマンドエンジン（IPCOM EX2シリーズマニュアル準拠）───
+    # 実機のモード階層:
+    #   ipcom>            操作者EXEC
+    #   ipcom#            管理者EXEC（admin コマンドで昇格）
+    #   ipcom(config)#    グローバル構成定義(即時)。load/new でファイル選択のみ
+    #   ipcom(edit)#      グローバル構成定義(編集)。実際の設定はここで行う
+    #   ipcom(edit-if)#   インターフェース構成定義(編集)
+    # 実機は edit モードでの変更を save running-config/save startup-config
+    # で明示的に反映するまでバッファに留めるが、このエミュレータでは他機種
+    # 同様コマンド投入時点で即座に state へ反映する簡略化をしている
+    # （save/commit はACKメッセージのみを返す）。
+    def _ipcom_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """IPCOM EX2のCLIコマンドを処理する"""
+
+        # ── モード遷移・ログイン ──
+        if c == 'admin':
+            state._ipcom_admin = True
+            return ''
+        if c in ('exit', 'quit', 'logout', 'end'):
+            if state.mode == 'edit-if':
+                state.mode = 'edit'
+            elif state.mode == 'edit':
+                state.mode = 'config'
+            elif state.mode == 'config':
+                state.mode = 'exec'
+            elif state.mode == 'exec' and state._ipcom_admin:
+                state._ipcom_admin = False
+            return ''
+        if c in ('configure terminal', 'conf t', 'configure', 'conf'):
+            if state.mode != 'exec':
+                return '% Unknown command.'
+            if not state._ipcom_admin:
+                return '% Authorization failed.\n  (admin コマンドで管理者EXECに昇格してください)'
+            state.mode = 'config'
+            return ''
+
+        # ── show系はどのモードからでも実行可（実機準拠）──
+        # 注: "show ip route" は app.py の handle_protocol_show が先に
+        # 共有RIBエンジンの出力で応答するため、ここには到達しない
+        # （app.py冒頭のCLIディスパッチ順序の説明を参照）。
+        if re.match(r'^show\s+(interface|interfaces)(\s+\S+)?$', c):
+            return self._ipcom_show_interfaces(state)
+        if re.match(r'^show\s+(running-config|startup-config)$', c):
+            return self._ipcom_show_config(state)
+        if re.match(r'^show\s+ip\s+route$', c):
+            # rib_engineにスタティック/動的ルートが1件もない場合のみここに
+            # 来る(app.py handle_protocol_showがそちらを優先するため)。
+            # 直接接続の経路だけを簡易表示する。
+            lines = []
+            for name, cfg in state.interfaces.items():
+                if cfg.get('ip') and cfg.get('status') == 'up':
+                    lines.append(f'C   {cfg["ip"]}/{cfg["prefix"]} '
+                                f'is directly connected, {name}')
+            return '\n'.join(lines) if lines else '(no routes)'
+        if re.match(r'^show\s+version$', c):
+            return (f'{state.hostname}\n'
+                    f'IPCOM EX2 ソフトウェアシリーズ\n'
+                    f'System uptime: {state.uptime_str()}')
+
+        if state.mode == 'config':
+            if re.match(r'^(load\s+(running-config|startup-config|pppoe-config)|new)$', c):
+                state.mode = 'edit'
+                return ''
+            return '% Unknown command.'
+
+        if state.mode == 'edit':
+            m_if = re.match(r'^interface\s+(\S+)$', c)
+            if m_if:
+                ifname = m_if.group(1)
+                if ifname not in state.interfaces:
+                    state.interfaces[ifname] = {
+                        "ip": "", "prefix": 0, "status": "down", "desc": "",
+                        "auto_negotiation": False, "ip_routing": False,
+                    }
+                state.current_if = ifname
+                state.mode = 'edit-if'
+                return ''
+            m_host = re.match(r'^hostname\s+(\S+)', cmd, re.I)
+            if m_host:
+                state.hostname = m_host.group(1)
+                return ''
+            # "ip route"/"no ip route" は app.py の handle_protocol_config が
+            # 共有RIBエンジン(rib_engine)へ既に反映済み(このrules.py側に来る
+            # 前に実行される二層ディスパッチ、app.py冒頭のコメント参照)。
+            # ここで別途 state 側にも記録すると二重管理になり、
+            # 「show ip route」で見た目だけ整形の異なる重複行が出る不具合が
+            # 実際に起きたため、ここでは受理するだけに留める。
+            if re.match(r'^ip\s+route\s+\S+\s+\S+(\s+distance\s+\d+)?$', c):
+                return ''
+            if re.match(r'^no\s+ip\s+route\s+\S+\s+\S+$', c):
+                return ''
+            if c == 'commit':
+                return 'running-config へ反映しました。'
+            m_save = re.match(
+                r'^save\s+(running-config|startup-config)(\s+force-update)?$', c)
+            if m_save:
+                target = m_save.group(1)
+                return f'{target} へ保存しました。'
+            return '% Unknown command.'
+
+        if state.mode == 'edit-if':
+            iface = state.interfaces.get(state.current_if, {})
+            m_desc = re.match(r'^description\s+(.+)$', cmd)
+            if m_desc:
+                iface['desc'] = m_desc.group(1)
+                return ''
+            m_ip = re.match(r'^ip\s+address\s+(\d+\.\d+\.\d+\.\d+)/(\d+)$', c)
+            if m_ip:
+                iface['ip'] = m_ip.group(1)
+                iface['prefix'] = int(m_ip.group(2))
+                iface['status'] = 'up'
+                return ''
+            if c == 'ip-routing':
+                iface['ip_routing'] = True
+                return ''
+            if c in ('auto-negotiation on', 'auto-negotiation off'):
+                iface['auto_negotiation'] = c.endswith('on')
+                return ''
+            if c in ('shutdown', 'no shutdown'):
+                iface['status'] = 'down' if c == 'shutdown' else 'up'
+                return ''
+            return '% Unknown command.'
+
+        return '% Unknown command.'
+
+    def _ipcom_show_interfaces(self, state: DeviceState) -> str:
+        lines = []
+        for name, cfg in state.interfaces.items():
+            ip = cfg.get('ip') or '(none)'
+            prefix = cfg.get('prefix', 0)
+            status = cfg.get('status', 'down')
+            desc = cfg.get('desc', '')
+            lines.append(f'{name:<12} {ip}/{prefix if ip != "(none)" else ""} '
+                        f'{status:<8} {desc}')
+        return '\n'.join(lines) if lines else '(no interfaces)'
+
+    def _ipcom_show_config(self, state: DeviceState) -> str:
+        # スタティックルートは共有RIBエンジン(rib_engine)が真の情報源
+        # （app.pyのhandle_protocol_configが反映）で、rules.py側からは
+        # 参照できないため、ここではインターフェース設定のみ表示する。
+        lines = [f'hostname {state.hostname}']
+        for name, cfg in state.interfaces.items():
+            lines.append(f'interface {name}')
+            if cfg.get('desc'):
+                lines.append(f'  description {cfg["desc"]}')
+            if cfg.get('auto_negotiation'):
+                lines.append('  auto-negotiation on')
+            if cfg.get('ip'):
+                lines.append(f'  ip address {cfg["ip"]}/{cfg["prefix"]}')
+            if cfg.get('ip_routing'):
+                lines.append('  ip-routing')
+            lines.append('  exit')
+        return '\n'.join(lines)
 
     # ─── APRESIA コマンドエンジン（ApresiaLightGM200マニュアル準拠）─
     def _apresia_process(self, cmd: str, c: str, state: DeviceState) -> str:
