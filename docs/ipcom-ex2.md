@@ -160,11 +160,101 @@ hostname/interface設定→save→exitでのモード降順の連鎖→show系
 独自`state.static_routes`管理を削除してRIBエンジン一本化する
 修正で解消したことも確認済み。
 
+## RIP/OSPF/BGP ルーティング
+
+ユーザーから「一般的なRFCの内容などで実装してほしい」という要望を
+受けて追加。IPCOMのマニュアル（P3NK-6002）記載の`router rip`/
+`router ospf`/`router bgp <asn>`構文が、既存のCisco/Si-R系装置で
+使っている構文とほぼ一致していたため、**独自にRIP/OSPFを再実装
+するのではなく、既存の共有プロトコルエンジン(`rip_engine`/
+`ospf_engine`)にそのまま乗せる**形にした。
+
+```
+ipcom(edit)# router rip
+ipcom(edit-router)# network <ip>/<prefix>
+ipcom(edit-router)# exit
+
+ipcom(edit)# router ospf
+ipcom(edit-router)# network <ip> <wildcard-mask> area <area-id>
+ipcom(edit-router)# exit
+
+ipcom(edit)# router bgp <asn>
+ipcom(edit-router)# neighbor <ip> remote-as <asn>
+ipcom(edit-router)# exit
+```
+
+### なぜ「実装」がほとんど無いのか（app.pyの2層ディスパッチを再利用）
+
+`app.py`のCLIディスパッチは`handle_protocol_show`/
+`handle_protocol_config`が`rule_engine.process`（＝`_ipcom_process`）
+より**先に**実行される2層構造になっている（`app.py`冒頭のコメント
+参照）。RIP/OSPFの`network`/`redistribute`等のサブコマンドは、
+`state._routing_mode`という側路属性だけを見て動いており、
+`state.device_type`や`state.mode`の値を一切問わない。つまり
+IPCOM用に`network`文をパースするコードを書く必要は無く、
+`_ipcom_process`側は「`router rip`/`router ospf`/`router bgp`で
+`config-router`モードへ遷移する」「`config-router`/`edit-if`モードの
+コマンドは（既に反映済みなので）そのまま受理するだけ」の2点だけを
+実装すれば、実際のRIP/OSPFネイバー形成・経路学習が動く。
+
+### 実機検証で見つけた不具合: `router ospf`にプロセスID番号が無い
+
+IPCOM実機のOSPF定義構文はCisco IOSと違い、`router ospf`に
+プロセスID番号を取らない（マニュアルの例もすべて`router ospf`単体）。
+一方`app.py`側のOSPF検出は`^router\s+ospf\s+(\d+)`（数字必須）を
+要求しており、bare `router ospf`だとこの正規表現にマッチせず、
+`handle_protocol_config`が素通りして`_routing_mode`が一切
+設定されない、というバグを実際に`show ip ospf neighbor`が
+`% OSPF is not configured on this device.`を返す形で発見した。
+`_ipcom_process`側で`router ospf`（bare）を検出した際に
+`_routing_mode`/`_ospf_process`等の属性を直接立てるフォールバックを
+追加して解消した。
+
+OSPFの`network`文自体はCisco IOSのワイルドカードマスク構文
+（`network <ip> <wildcard> area <id>`）が共有エンジン側の唯一の
+対応フォーマットのため、IPCOM実機のプレフィックス表記
+（マニュアルには具体例が無いが、他のIPCOMコマンドの慣習からは
+`network <ip>/<prefix> area <id>`が予想される）とは異なる。これは
+「プロトコルの動きを正しく再現する」ことを優先した意図的な簡略化。
+
+### 実際に動かして確認した結果
+
+2台のIPCOM装置を作成しリンクさせ、RIPとOSPFそれぞれで実際に
+ネイバーを形成させた。
+
+**RIP:**
+```
+$ (IPCOM-R1) show ip rip neighbor
+Index   IP Address        Last Update   Bad Pkts   Bad Routes
+1       10.0.0.2          00:00:11      0          0
+
+Routing Information Sources:
+  10.0.0.2            IPCOM-R2          2 routes
+
+$ (IPCOM-R1) show ip route
+...
+R        172.20.2.0/24 [120/1] via 10.0.0.2, lan0.0
+```
+
+IPCOM-R2側だけに存在する`172.20.2.0/24`がRIPで正しく学習され、
+AD/メトリック`[120/1]`も正確に表示された。
+
+**OSPF:**
+```
+$ (IPCOM-R1) show ip ospf neighbor
+Neighbor ID     Pri   State           Dead Time   Address         Interface
+10.0.0.2        1     Full/DR         00:00:28    10.0.0.2        lan0.0
+```
+
+隣接関係が`Full/DR`まで正しく確立した（DR選出込みの実際のOSPF
+ステートマシンが動いていることを確認）。
+
 ## フロントエンド（Web UI）対応
 
 `static/index.html`の以下を拡張:
 - `getPrompt()` — IPCOMは`>`/`#`（操作者/管理者EXEC）と
-  `(config)`/`(edit)`/`(edit-if)`のプロンプトサフィックスを表示
+  `(config)`/`(edit)`/`(edit-if)`/`(edit-router)`のプロンプト
+  サフィックスを表示
 - 「＋ IPCOM EX2」ボタン（ランチャー画面・メイン画面の両方）
 - `DEV_TEMPLATES`、`portOptions()`、`defPort()`、装置種別の色分け、
   設定テキストからのベンダー自動判定（`_inferDeviceType`）
@@ -186,6 +276,10 @@ hostname/interface設定→save→exitでのモード降順の連鎖→show系
   中心テーマだが、ユーザーの選択で今回のスコープ外とした
 - `save`/`commit`は実際にはバッファリングせず、コマンド投入時点で
   即座に反映する簡略化（他機種と同様の割り切り）
+- OSPFの`network`文はCisco IOSワイルドカードマスク構文のみ対応
+  （IPCOM実機のプレフィックス表記の可能性がある構文とは異なる）
+- BGP4は`router bgp <asn>`でモード遷移するところまでのみ確認。
+  `neighbor`等のサブコマンド自体の実機検証はしていない
 - SNMP/syslog/ユーザー認証（`user`/`user-role`構成定義モード等）は
   未対応
 - インターフェース種別は`lan<N>.<VLAN>`のみ。マニュアルにある

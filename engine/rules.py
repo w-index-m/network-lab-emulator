@@ -9026,7 +9026,7 @@ Key Version         : A
             state._ipcom_admin = True
             return ''
         if c in ('exit', 'quit', 'logout', 'end'):
-            if state.mode == 'edit-if':
+            if state.mode in ('edit-if', 'config-router'):
                 state.mode = 'edit'
             elif state.mode == 'edit':
                 state.mode = 'config'
@@ -9098,6 +9098,30 @@ Key Version         : A
                 return ''
             if re.match(r'^no\s+ip\s+route\s+\S+\s+\S+$', c):
                 return ''
+            # router rip / router ospf / router bgp <asn> — ルータ構成定義
+            # モードへ。"network"/"redistribute"等のサブコマンド自体は
+            # app.py の handle_protocol_config が _routing_mode(側路属性)
+            # だけを見て共有プロトコルエンジン(rip_engine/ospf_engine)へ
+            # 既に反映済み(ip route と同じ二層ディスパッチの仕組み)なので、
+            # ここではモード遷移だけ行う。
+            if c == 'router rip':
+                state.mode = 'config-router'
+                return ''
+            if c == 'router ospf':
+                # IPCOMの実機構文はCisco IOSと違いプロセスID引数を取らない。
+                # app.py側のOSPF検出は "router ospf <数字>" を要求するため、
+                # bare "router ospf" ではhandle_protocol_configが素通りして
+                # _routing_modeが設定されない。ここで同じ属性を直接立てる。
+                state._routing_mode = 'ospf'
+                state._ospf_process = getattr(state, '_ospf_process', 1) or 1
+                state._ospf_networks = getattr(state, '_ospf_networks', [])
+                state._rip_pending = False
+                state._bgp_pending = False
+                state.mode = 'config-router'
+                return ''
+            if re.match(r'^router\s+bgp\s+\d+$', c):
+                state.mode = 'config-router'
+                return ''
             if c == 'commit':
                 return 'running-config へ反映しました。'
             m_save = re.match(
@@ -9106,6 +9130,12 @@ Key Version         : A
                 target = m_save.group(1)
                 return f'{target} へ保存しました。'
             return '% Unknown command.'
+
+        if state.mode == 'config-router':
+            # "network"/"redistribute"/"neighbor"/"router-id"等のサブコマンド
+            # 自体は app.py の handle_protocol_config が _routing_mode を
+            # 見て共有プロトコルエンジンへ既に反映済み。ここでは受理するのみ。
+            return ''
 
         if state.mode == 'edit-if':
             iface = state.interfaces.get(state.current_if, {})
@@ -9127,6 +9157,11 @@ Key Version         : A
                 return ''
             if c in ('shutdown', 'no shutdown'):
                 iface['status'] = 'down' if c == 'shutdown' else 'up'
+                return ''
+            # "ip ospf ..."/"ip rip ..." インターフェースサブコマンドは
+            # app.py の handle_protocol_config が既に反映済み（config-router
+            # モードと同じ仕組み）。ここでは受理するのみ。
+            if re.match(r'^ip\s+(ospf|rip)\s+\S', c):
                 return ''
             return '% Unknown command.'
 

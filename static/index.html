@@ -1216,6 +1216,7 @@ function getPrompt(id) {
     if (mode==='config') return `${d.hostname}(config)# `;
     if (mode==='edit') return `${d.hostname}(edit)# `;
     if (mode==='edit-if') return `${d.hostname}(edit-if)# `;
+    if (mode==='config-router') return `${d.hostname}(edit-router)# `;
     return `${d.hostname}# `;
   }
   const suffix = mode==='config'?'(config)':mode==='config-if'?'(config-if)':mode==='config-router'?'(config-router)':mode==='config-vlan'?'(config-vlan)':mode==='config-vpc-domain'?'(config-vpc-domain)':'';
