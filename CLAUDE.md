@@ -145,3 +145,36 @@ their own mode machine (not via `CONFIG_SUBMODES`) are exempt.
   route entries, a device-specific CLI quirk like IPCOM's `router ospf`
   taking no process-id, Windows-only `UnicodeEncodeError`s) that code
   review alone missed.
+
+## ML / anomaly detection notes（機械学習・異常検知メモ）
+
+PyTorch could not be installed in this sandbox (pulls in a multi-GB
+CUDA/cuDNN toolkit that exhausted the ~2.6GB free disk space here), so the
+existing ML-ish tools are plain NumPy: `tools/anomaly_autoencoder.py`
+(reconstruction-error-based anomaly detection) and
+`tools/link_capacity_forecast.py` (traffic forecasting). This turned out to
+be enough — the data volume/complexity this emulator produces doesn't need
+a deep-learning framework. `tools/network_ontology_query.py --summarize`
+separately does AI *interpretation* of retrieved logs via Ollama (not
+anomaly detection).
+
+このサンドボックスではPyTorchがインストールできなかった（数GB規模の
+CUDA/cuDNNツールチェーンを引き込み、空きディスク容量(~2.6GB)を使い切る
+ため）。そのため既存の機械学習系ツールはNumPyのみで実装している:
+`tools/anomaly_autoencoder.py`（再構成誤差ベースの異常検知）と
+`tools/link_capacity_forecast.py`（トラフィック予測）。結果的にこれで
+十分だった — このエミュレータが生成するデータの量・複雑さは深層学習
+フレームワークを必要としない。`tools/network_ontology_query.py
+--summarize`は別途、取得したログをOllama経由でAI要約する機能
+（異常検知ではない）。
+
+Discussed but not yet implemented: applying the same anomaly-detection
+approach to Loki-ingested syslog message frequency/patterns (e.g. flag a
+sudden spike in error logs from one device), then feeding the flagged
+window into the existing Ollama summarization for "what happened" —
+natural next step if picked up later.
+
+検討したが未実装: Lokiに溜まったsyslogのメッセージ頻度・パターンに同じ
+異常検知手法を適用し（例: 特定装置からのエラーログ急増を検知）、検知
+した時間帯を既存のOllama要約に渡して「何が起きたか」を説明させる、
+という組み合わせ。今後着手する場合の自然な次の一歩。
