@@ -168,13 +168,19 @@ CUDA/cuDNNツールチェーンを引き込み、空きディスク容量(~2.6GB
 --summarize`は別途、取得したログをOllama経由でAI要約する機能
 （異常検知ではない）。
 
-Discussed but not yet implemented: applying the same anomaly-detection
-approach to Loki-ingested syslog message frequency/patterns (e.g. flag a
-sudden spike in error logs from one device), then feeding the flagged
-window into the existing Ollama summarization for "what happened" —
-natural next step if picked up later.
+**Implemented**: `tools/syslog_anomaly_detector.py` applies exactly this —
+a 1D simplification of `anomaly_autoencoder.py`'s mean+k*std threshold
+approach to Loki-ingested syslog message counts per time bucket per
+device, flags a spike, and can feed the flagged window into
+`network_ontology_query.py`'s `summarize_logs_via_ollama()` for an AI
+explanation (`--summarize`). Live-verified end-to-end against a real
+running Loki + a real device generating a real syslog burst — see
+`docs/syslog-anomaly-detection.md`.
 
-検討したが未実装: Lokiに溜まったsyslogのメッセージ頻度・パターンに同じ
-異常検知手法を適用し（例: 特定装置からのエラーログ急増を検知）、検知
-した時間帯を既存のOllama要約に渡して「何が起きたか」を説明させる、
-という組み合わせ。今後着手する場合の自然な次の一歩。
+**実装済み**: `tools/syslog_anomaly_detector.py`がまさにこれを実装した
+— `anomaly_autoencoder.py`の平均+k*標準偏差しきい値方式を1次元
+（装置ごと・時間バケットごとのsyslogメッセージ件数）に単純化して適用し、
+急増を検知したら`network_ontology_query.py`の
+`summarize_logs_via_ollama()`に渡してAI要約もできる（`--summarize`）。
+実際に動いているLoki＋実装置が生成した実syslogバーストで
+エンドツーエンド検証済み。詳細は`docs/syslog-anomaly-detection.md`参照。
