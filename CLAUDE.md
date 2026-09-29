@@ -148,25 +148,46 @@ their own mode machine (not via `CONFIG_SUBMODES`) are exempt.
 
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 
-PyTorch could not be installed in this sandbox (pulls in a multi-GB
-CUDA/cuDNN toolkit that exhausted the ~2.6GB free disk space here), so the
-existing ML-ish tools are plain NumPy: `tools/anomaly_autoencoder.py`
-(reconstruction-error-based anomaly detection) and
-`tools/link_capacity_forecast.py` (traffic forecasting). This turned out to
-be enough — the data volume/complexity this emulator produces doesn't need
-a deep-learning framework. `tools/network_ontology_query.py --summarize`
-separately does AI *interpretation* of retrieved logs via Ollama (not
-anomaly detection).
+PyTorch could not be installed in this sandbox early on (pulled in a
+multi-GB CUDA/cuDNN toolkit that exhausted the ~2.6GB free disk space at
+the time), so the existing ML-ish tools are plain NumPy:
+`tools/anomaly_autoencoder.py` (reconstruction-error-based anomaly
+detection) and `tools/link_capacity_forecast.py` (traffic forecasting).
+This turned out to be enough — the data volume/complexity this emulator
+produces doesn't need a deep-learning framework. `tools/network_ontology_query.py
+--summarize` separately does AI *interpretation* of retrieved logs via
+Ollama (not anomaly detection).
 
-このサンドボックスではPyTorchがインストールできなかった（数GB規模の
-CUDA/cuDNNツールチェーンを引き込み、空きディスク容量(~2.6GB)を使い切る
-ため）。そのため既存の機械学習系ツールはNumPyのみで実装している:
+Re-checked later in the session (disk had since grown to ~27GB free):
+disk space is no longer the blocker, but `pip install torch` from the
+default PyPI index now pulls in the full CUDA/cuDNN wheel set regardless
+(`nvidia-cudnn-cu13`, `cuda-toolkit`, `triton` ~248MB, etc. — CPU-only
+PyPI wheels for CUDA-capable platforms don't seem to exist for this
+Python/platform combo), and the official CPU-only wheel index
+(`download.pytorch.org`) is blocked by this environment's egress policy
+(403 on CONNECT). So PyTorch remains impractical here for a different
+reason than before — decided to keep the NumPy implementation rather than
+install the CUDA stack for a CPU-only, GPU-less sandbox.
+
+このサンドボックスではPyTorchが当初インストールできなかった（数GB規模の
+CUDA/cuDNNツールチェーンを引き込み、当時の空きディスク容量(~2.6GB)を
+使い切るため）。そのため既存の機械学習系ツールはNumPyのみで実装している:
 `tools/anomaly_autoencoder.py`（再構成誤差ベースの異常検知）と
 `tools/link_capacity_forecast.py`（トラフィック予測）。結果的にこれで
 十分だった — このエミュレータが生成するデータの量・複雑さは深層学習
 フレームワークを必要としない。`tools/network_ontology_query.py
 --summarize`は別途、取得したログをOllama経由でAI要約する機能
 （異常検知ではない）。
+
+セッション後半で再確認したところ(ディスク空き容量は~27GBまで増えていた)、
+容量自体はもう制約にならないが、デフォルトのPyPIから`pip install torch`
+すると依然としてCUDA/cuDNN一式(`nvidia-cudnn-cu13`, `cuda-toolkit`,
+`triton`約248MB等)が付いてくる（このPython/プラットフォームの組み合わせ
+向けにはCPU専用のPyPIホイールが無い模様）。かつCPU専用ホイールの配布元
+`download.pytorch.org`はこの環境のegressポリシーでブロックされている
+(CONNECTに403)。つまり別の理由でPyTorchは依然として実用的でない —
+GPUの無いこのサンドボックスのためにCUDA一式を入れるより、NumPy実装を
+維持する判断をした。
 
 **Implemented**: `tools/syslog_anomaly_detector.py` applies exactly this —
 a 1D simplification of `anomaly_autoencoder.py`'s mean+k*std threshold
