@@ -13,6 +13,19 @@ devices. See `README.md` for the full feature/protocol matrix and supported
 device types (`device_type`: `catalyst`, `nexus`, `cisco`, `asa`, `sir`,
 `srs`, `apresia`, `bigip`, `ipcom`, `pc`).
 
+**Publicly deployed** at https://network-lab-emulator.onrender.com/ (Render).
+That deployment doesn't have Ollama available, so its `network_ontology_query.py
+--summarize`-style AI-summary features show "Ollamaが検出されませんでした。
+ollama pull llama3 実行後、python app.py を再起動してください。" — expected
+there, not a bug to chase from this sandbox.
+
+**このプロジェクトは https://network-lab-emulator.onrender.com/ (Render) で
+一般公開している。** そのデプロイ環境にはOllamaが無いため、
+`network_ontology_query.py --summarize`のようなAI要約機能では
+「Ollamaが検出されませんでした。ollama pull llama3 実行後、python app.py
+を再起動してください。」という表示が出るのが正常(このサンドボックスから
+追いかけて直すべきバグではない)。
+
 ## Commands
 
 ```bash
