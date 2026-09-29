@@ -60,6 +60,63 @@ except ImportError:
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
+# Ollamaはローカル/サンドボックスにしか存在しないため、Render等の
+# 公開デプロイ環境(https://network-lab-emulator.onrender.com/、
+# CLAUDE.md参照)ではOllamaに接続できず、AI要約/NL2Ontology機能が
+# 常に無効になってしまっていた。外部LLM API(Groq/Mistral、どちらも
+# OpenAI互換のchat completions形式)をフォールバック先として追加し、
+# Ollama不在の環境でも動くようにする。優先順位: Ollama(ローカル優先) ->
+# Groq -> Mistral -> (全滅なら)呼び出し元がNone/フォールバック処理。
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
+MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+
+
+def _chat_completion(messages: list[dict], temperature: float = 0.1,
+                      timeout: float = 15.0) -> str | None:
+    """Ollama -> Groq -> Mistral の順にベストエフォートで問い合わせ、
+    最初に成功した応答本文(文字列)を返す。全滅ならNone。
+
+    Ollamaは `/api/chat` 固有のレスポンス形式(`message.content`)、
+    Groq/MistralはどちらもOpenAI互換の `/chat/completions` 形式
+    (`choices[0].message.content`)なので、レスポンスのパースだけ
+    バックエンドごとに分けている。"""
+    if httpx is None:
+        return None
+
+    try:
+        r = httpx.post(f'{OLLAMA_URL}/api/chat', timeout=timeout, json={
+            'model': OLLAMA_MODEL,
+            'messages': messages,
+            'stream': False, 'options': {'temperature': temperature},
+        })
+        if r.status_code == 200:
+            return r.json()['message']['content'].strip()
+    except Exception:
+        pass
+
+    for api_key, model, url in (
+        (GROQ_API_KEY, GROQ_MODEL, GROQ_URL),
+        (MISTRAL_API_KEY, MISTRAL_MODEL, MISTRAL_URL),
+    ):
+        if not api_key:
+            continue
+        try:
+            r = httpx.post(url, timeout=timeout,
+                            headers={'Authorization': f'Bearer {api_key}'},
+                            json={'model': model, 'messages': messages,
+                                  'temperature': temperature})
+            if r.status_code == 200:
+                return r.json()['choices'][0]['message']['content'].strip()
+        except Exception:
+            pass
+
+    return None
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from engine.logicmonitor import compute_lmv1_signature, LM_ACCESS_ID, LM_ACCESS_KEY
 
@@ -129,11 +186,14 @@ def loki_query_range(loki_url: str, source_ip: str, start_epoch: float,
 
 
 def summarize_logs_via_ollama(alert: dict, logs: list[str]) -> str | None:
-    """Ollamaがあれば、Alertとその根拠ログを1-2文で日本語要約させる
-    （tools/ai_grafana_autopilot.pyの_ai_summarizeと同じパターン:
-    ベストエフォートで、失敗/未接続なら黙ってNoneを返す）。
+    """Ollama(無ければGroq/Mistral、_chat_completion参照)があれば、
+    Alertとその根拠ログを1-2文で日本語要約させる（tools/
+    ai_grafana_autopilot.pyの_ai_summarizeと同じパターン: ベストエフォート
+    で、全バックエンド失敗/未接続なら黙ってNoneを返す）。
     このモジュールはAIにログの中身を"解釈"させる唯一の箇所で、
-    それ以外（NL2Ontology・クエリ実行）は全て決定的なロジック。"""
+    それ以外（NL2Ontology・クエリ実行）は全て決定的なロジック。
+    関数名は元のOllama専用実装時代のまま維持している
+    (呼び出し元・テストとの互換性のため)。"""
     if httpx is None or not logs:
         return None
     prompt = (
@@ -143,17 +203,8 @@ def summarize_logs_via_ollama(alert: dict, logs: list[str]) -> str | None:
         f'{alert.get("resourceTemplateName")}/{alert.get("instanceName")}\n'
         f'ログ:\n' + '\n'.join(f'- {line}' for line in logs)
     )
-    try:
-        r = httpx.post(f'{OLLAMA_URL}/api/chat', timeout=15.0, json={
-            'model': OLLAMA_MODEL,
-            'messages': [{'role': 'user', 'content': prompt}],
-            'stream': False, 'options': {'temperature': 0.1},
-        })
-        if r.status_code == 200:
-            return r.json()['message']['content'].strip()
-    except Exception:
-        pass
-    return None
+    return _chat_completion([{'role': 'user', 'content': prompt}],
+                             temperature=0.1)
 
 
 def _attach_log_evidence(base_url: str, loki_url: str, alerts: list[dict],
@@ -213,17 +264,17 @@ def nl_to_query_by_keyword(question: str) -> dict | None:
 
 
 def nl_to_query_via_ollama(question: str) -> dict | None:
+    """関数名は元のOllama専用実装時代のまま維持しているが、実体は
+    Ollama -> Groq -> Mistral の順にフォールバックする
+    (_chat_completion参照)。"""
     if httpx is None:
         return None
+    content = _chat_completion(
+        [{'role': 'user', 'content': ONTOLOGY_SCHEMA_PROMPT + question}],
+        temperature=0.0, timeout=10.0)
+    if not content:
+        return None
     try:
-        r = httpx.post(f'{OLLAMA_URL}/api/chat', timeout=10.0, json={
-            'model': OLLAMA_MODEL,
-            'messages': [{'role': 'user', 'content': ONTOLOGY_SCHEMA_PROMPT + question}],
-            'stream': False, 'options': {'temperature': 0.0},
-        })
-        if r.status_code != 200:
-            return None
-        content = r.json()['message']['content'].strip()
         m = re.search(r'\{.*\}', content, re.S)
         if not m:
             return None

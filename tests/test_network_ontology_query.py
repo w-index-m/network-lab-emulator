@@ -367,3 +367,122 @@ class TestAiSummary:
                                 loki_url=mock_loki, summarize=False)
         assert all(a.get('ai_summary') is None for a in results)
         assert _MockOllamaHandler.received_prompts == []
+
+
+# ══════════════════════════════════════════════════════════
+# Groq/Mistralフォールバック（_chat_completion）
+#
+# Render等、Ollamaが動かせない公開デプロイ環境向けに追加した
+# フォールバック。OpenAI互換の/chat/completions形式(choices[0].message.
+# content)に対して実際にPOSTし、Ollama不通時にGroq/Mistralへ正しく
+# フォールバックすること、認証ヘッダが正しく付くことを確認する。
+# ══════════════════════════════════════════════════════════
+class _MockOpenAICompatHandler(BaseHTTPRequestHandler):
+    received_requests = []
+    reply_content = 'クラウドAPI経由の要約です。'
+    status_code = 200
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(length))
+        _MockOpenAICompatHandler.received_requests.append({
+            'path': self.path,
+            'auth': self.headers.get('Authorization'),
+            'body': body,
+        })
+        self.send_response(_MockOpenAICompatHandler.status_code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(
+            {'choices': [{'message':
+                          {'content': _MockOpenAICompatHandler.reply_content}}]}
+        ).encode())
+
+
+@pytest.fixture
+def mock_openai_compat(monkeypatch):
+    _MockOpenAICompatHandler.received_requests = []
+    _MockOpenAICompatHandler.reply_content = 'クラウドAPI経由の要約です。'
+    _MockOpenAICompatHandler.status_code = 200
+    server = HTTPServer(('127.0.0.1', 0), _MockOpenAICompatHandler)
+    port = server.server_port
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    # OllamaはあえてTCPポート1(即座に拒否される)に向け、Ollama不通を
+    # 固定した上でGroq/Mistralへのフォールバックだけを検証する
+    monkeypatch.setattr(onq_module, 'OLLAMA_URL', 'http://127.0.0.1:1')
+    yield f'http://127.0.0.1:{port}'
+    server.shutdown()
+
+
+class TestExternalLlmFallback:
+    def test_falls_back_to_groq_when_ollama_unreachable(self, monkeypatch,
+                                                          mock_openai_compat):
+        monkeypatch.setattr(onq_module, 'GROQ_API_KEY', 'test-groq-key')
+        monkeypatch.setattr(onq_module, 'GROQ_URL', mock_openai_compat)
+        monkeypatch.setattr(onq_module, 'MISTRAL_API_KEY', None)
+
+        summary = summarize_logs_via_ollama(
+            {'deviceDisplayName': 'x'}, ['some log line'])
+
+        assert summary == 'クラウドAPI経由の要約です。'
+        assert len(_MockOpenAICompatHandler.received_requests) == 1
+        assert (_MockOpenAICompatHandler.received_requests[0]['auth']
+                == 'Bearer test-groq-key')
+
+    def test_falls_back_to_mistral_when_ollama_and_groq_both_unavailable(
+            self, monkeypatch, mock_openai_compat):
+        monkeypatch.setattr(onq_module, 'GROQ_API_KEY', None)
+        monkeypatch.setattr(onq_module, 'MISTRAL_API_KEY', 'test-mistral-key')
+        monkeypatch.setattr(onq_module, 'MISTRAL_URL', mock_openai_compat)
+
+        summary = summarize_logs_via_ollama(
+            {'deviceDisplayName': 'x'}, ['some log line'])
+
+        assert summary == 'クラウドAPI経由の要約です。'
+        assert len(_MockOpenAICompatHandler.received_requests) == 1
+        assert (_MockOpenAICompatHandler.received_requests[0]['auth']
+                == 'Bearer test-mistral-key')
+
+    def test_ollama_is_preferred_over_groq_when_both_available(self, monkeypatch,
+                                                                 mock_openai_compat,
+                                                                 mock_ollama):
+        # フィクスチャ実行順の都合上mock_openai_compatを先に置き、
+        # 後から実行されるmock_ollamaでOLLAMA_URLを実際に疎通する
+        # モックサーバーへ上書きする(mock_openai_compat単体はOLLAMA_URLを
+        # 不通ポートに固定するため)。
+        monkeypatch.setattr(onq_module, 'GROQ_API_KEY', 'test-groq-key')
+        monkeypatch.setattr(onq_module, 'GROQ_URL', mock_openai_compat)
+
+        summary = summarize_logs_via_ollama(
+            {'deviceDisplayName': 'x'}, ['some log line'])
+
+        assert summary == 'テスト要約です。'
+        assert _MockOpenAICompatHandler.received_requests == []
+
+    def test_returns_none_when_all_backends_unavailable(self, monkeypatch,
+                                                          mock_openai_compat):
+        monkeypatch.setattr(onq_module, 'GROQ_API_KEY', None)
+        monkeypatch.setattr(onq_module, 'MISTRAL_API_KEY', None)
+
+        summary = summarize_logs_via_ollama(
+            {'deviceDisplayName': 'x'}, ['some log line'])
+
+        assert summary is None
+        assert _MockOpenAICompatHandler.received_requests == []
+
+    def test_nl_to_query_via_ollama_also_falls_back_to_groq(self, monkeypatch,
+                                                              mock_openai_compat):
+        monkeypatch.setattr(onq_module, 'GROQ_API_KEY', 'test-groq-key')
+        monkeypatch.setattr(onq_module, 'GROQ_URL', mock_openai_compat)
+        monkeypatch.setattr(onq_module, 'MISTRAL_API_KEY', None)
+        _MockOpenAICompatHandler.reply_content = (
+            '{"entity": "Alert", "filters": {"severityLabel": "critical"}}')
+
+        q = onq_module.nl_to_query_via_ollama('重大なアラートは？')
+
+        assert q == {'entity': 'Alert', 'filters': {'severityLabel': 'critical'}}
+        assert len(_MockOpenAICompatHandler.received_requests) == 1

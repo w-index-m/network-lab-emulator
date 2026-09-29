@@ -203,16 +203,59 @@ python tools/network_ontology_query.py --emulator-url http://localhost:8000 \
 python tools/network_ontology_query.py --emulator-url http://localhost:8000 \
     --loki-url http://localhost:3100 "アラートの根拠となるログは？"
 
-# Loki連携 + Ollamaでログを要約
+# Loki連携 + Ollama(またはGroq/Mistral、後述)でログを要約
 python tools/network_ontology_query.py --emulator-url http://localhost:8000 \
     --loki-url http://localhost:3100 --summarize "アラートの根拠となるログは？"
 ```
+
+## Ollamaが無い環境向け: Groq/Mistralへのフォールバック
+
+このプロジェクトは https://network-lab-emulator.onrender.com/ (Render)
+でも一般公開しているが(CLAUDE.md参照)、Renderの実行環境にはOllamaを
+常駐させられないため、そのままでは`--summarize`やOllama経由の
+NL2Ontologyが常に使えなかった。
+
+`_chat_completion()`が Ollama → Groq → Mistral の順にベストエフォートで
+問い合わせるようにし、`summarize_logs_via_ollama`/`nl_to_query_via_ollama`
+はどちらもこの共通ヘルパー経由になった(関数名はOllama専用実装時代の
+まま後方互換のため維持)。Groq/Mistralはどちらも`/chat/completions`が
+OpenAI互換形式(`choices[0].message.content`)なので、レスポンスの
+パースだけバックエンドごとに分岐している。
+
+環境変数（Renderの場合はサービスのEnvironmentタブから設定）:
+
+```bash
+# Ollama(ローカル/サンドボックス優先。未設定ならデフォルトのlocalhost:11434)
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=llama3
+
+# Groq(OllamaがいなければこちらにフォールバックURL: api.groq.com)
+GROQ_API_KEY=gsk_...
+GROQ_MODEL=llama-3.1-8b-instant   # 省略時のデフォルト
+
+# Mistral(Groqも無ければさらにこちらへフォールバック)
+MISTRAL_API_KEY=...
+MISTRAL_MODEL=mistral-small-latest   # 省略時のデフォルト
+```
+
+優先順位はOllama(ローカル環境を邪魔しない) > Groq > Mistralで、
+いずれも未設定/未接続ならベストエフォートで次へ進み、全滅なら
+（従来通り）例外を投げず`None`を返す。
+
+**未検証な点**: このサンドボックスのegressポリシーで
+`api.groq.com`/`api.mistral.ai`の両方が実際にブロックされている
+（`CONNECT tunnel failed, response 403`）ため、実際のAPIキーでの
+生きたリクエストはこのサンドボックスから検証できていない。
+`tests/test_network_ontology_query.py`のOpenAI互換モックサーバーで
+リクエスト形式（エンドポイント・Authorizationヘッダ・
+レスポンスパース・フォールバック順序）は固定したが、Render環境での
+実際の応答品質・疎通確認はユーザー側で行う必要がある。
 
 ## テスト
 
 ```bash
 pytest tests/test_network_ontology_query.py -v
-# 21/21 成功
+# 26/26 成功
 ```
 
 固定している内容：
@@ -236,6 +279,12 @@ pytest tests/test_network_ontology_query.py -v
 9. ログが空、Ollamaに接続できない場合は例外を投げず`None`を返すこと
 10. `--summarize`を付けたときだけ`ai_summary`が付き、付けなければ
     Ollamaには一切問い合わせないこと（`summarize=False`が既定）
+11. Ollama不通時にGroq/Mistralへ正しくフォールバックすること、
+    `Authorization: Bearer <key>`ヘッダが正しく付くこと（OpenAI互換
+    モックサーバーで検証）
+12. Ollama・Groq両方使える場合はOllamaが優先されること
+13. Ollama/Groq/Mistral全て使えない場合は例外を投げず`None`を返すこと
+14. `nl_to_query_via_ollama`も同じフォールバック経路を通ること
 
 ## 制約・今後の拡張余地
 
@@ -256,3 +305,7 @@ pytest tests/test_network_ontology_query.py -v
   複数Alertを横断した傾向分析やレポート生成のようなことはしない
 - Ollamaが使える実環境での応答品質（要約の正確さ）は未検証
   （このサンドボックスではモックOllamaサーバーでHTTP疎通のみ確認）
+- Groq/Mistralフォールバックも同様に、実APIキーでの生きた応答品質は
+  未検証（このサンドボックスからは`api.groq.com`/`api.mistral.ai`が
+  egressポリシーでブロックされているため、OpenAI互換モックサーバーで
+  リクエスト形式・フォールバック順序のみ確認）

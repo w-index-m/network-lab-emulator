@@ -239,6 +239,47 @@ miss). `tests/test_anomaly_autoencoder_torch.py` mirrors
 backend, `pytest.importorskip('torch')`'d so the file skips cleanly on
 environments without `requirements-ml.txt` installed — 8/8 passed here.
 
+**Found via the full regression suite, not standalone**: the new torch
+tests passed in isolation but failed with
+`AttributeError: type object '__file__' has no attribute 'endswith'`
+when run as part of the ~1350-test full suite — `torch.optim.SGD.__init__`
+lazily imports `torch._dynamo` on its first call, and that import's
+module-level init walks `sys.modules` checking each module's `__file__`;
+some grpc/protobuf-heavy test module collected earlier in the same pytest
+session (this repo has several — gNMI, telemetry, NETCONF) apparently
+registers something in `sys.modules` with a non-string `__file__`,
+which crashes that walk. **Fix**: `tools/anomaly_autoencoder_torch.py`
+now does `import torch._dynamo` at its own module-import time (which
+happens early, during pytest's collection phase, before the
+grpc/protobuf-heavy test modules further down the alphabet get
+collected) — once cached in `sys.modules` it's never re-imported, so the
+optimizer construction inside `fit()` never re-triggers the broken lazy
+path. Confirmed by bisecting a reproducing subset (first 40 test files +
+this one) down to the exact failure, then confirming 0 torch failures
+with the fix in that same subset, then a clean full-suite run
+(1358 passed, only the 2 known-flaky IPsec DPD tests failed).
+
+**フルスイート回帰テストで初めて見つかった、単体では再現しない不具合**:
+新しいtorchテストは単体では通るが、~1350件の全体テストの一部として
+実行すると`AttributeError: type object '__file__' has no attribute
+'endswith'`で失敗した — `torch.optim.SGD.__init__`は初回呼び出し時に
+`torch._dynamo`を遅延importするが、そのモジュール初期化処理が
+`sys.modules`を走査して各モジュールの`__file__`をチェックする。
+同じpytestセッション内でそれより前に収集された何らかのgrpc/protobuf系
+テストモジュール(このリポジトリにはgNMI・テレメトリ・NETCONFなど
+複数該当する)が、`__file__`が文字列でない何かを`sys.modules`に
+登録してしまい、その走査をクラッシュさせていた模様。**対処**:
+`tools/anomaly_autoencoder_torch.py`自身のモジュールimport時点
+(pytestの収集フェーズの早い段階、アルファベット順で後ろにある
+grpc/protobuf系テストモジュールが収集されるより前)で
+`import torch._dynamo`を実行するようにした — 一度`sys.modules`に
+キャッシュされれば再importされないため、`fit()`内でのオプティマイザ
+構築時に壊れた遅延importパスを再度踏むことがなくなる。再現する
+サブセット(アルファベット順先頭40ファイル+このファイル)まで
+二分探索で絞り込んで確認し、同じサブセットで修正後torch関連の失敗が
+0件になることを確認、その後クリーンな全体テストを実行
+(1358件成功、既知のflaky IPsec DPDテスト2件のみ失敗)。
+
 **`tools/anomaly_autoencoder_torch.py`**: torchが導入可能になったことを
 受けて、ユーザーの目的が「今すぐ機能として必要」ではなく「将来もっと
 複雑なモデルを試すための技術スタックの土台」だったため、動いている

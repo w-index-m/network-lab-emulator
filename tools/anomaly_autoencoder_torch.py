@@ -23,6 +23,20 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+# torch.optim.SGD (any torch optimizer, really) lazily imports torch._dynamo
+# on its first call. torch._dynamo's module-level init walks sys.modules and
+# inspects each module's __file__; if that import is deferred until after
+# something else in the same process has registered an unusual module in
+# sys.modules (observed in this repo's full test suite: a grpc/protobuf-heavy
+# test module collected between this module's import and the first fit()
+# call), it can crash with `AttributeError: type object '__file__' has no
+# attribute 'endswith'` - a pytorch/protobuf interaction bug, not anything
+# wrong with the two-line NumPy-style model below. Triggering the import
+# here, at this module's own import time (i.e. as early as possible, before
+# other test modules get collected), sidesteps it: once torch._dynamo is
+# cached in sys.modules it's never re-imported.
+import torch._dynamo  # noqa: F401
+
 
 class TorchAutoencoder(nn.Module):
     """1隠れ層のAutoencoder。activationはtanh、出力層は線形。
