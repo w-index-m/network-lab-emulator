@@ -189,6 +189,81 @@ CUDA/cuDNNツールチェーンを引き込み、当時の空きディスク容�
 GPUの無いこのサンドボックスのためにCUDA一式を入れるより、NumPy実装を
 維持する判断をした。
 
+**PyTorch installed via a GitHub Release mirror workaround**: the user
+downloaded the official CPU-only wheel
+(`torch-2.6.0+cpu-cp311-cp311-linux_x86_64.whl`) from
+`download.pytorch.org/whl/cpu/` on their own machine (not blocked there)
+and uploaded it as a GitHub Release asset on this repo
+(`w-index-m/network-lab-emulator`, release tag `torch-cpu-wheel`) —
+`github.com`/`objects.githubusercontent.com` are *not* blocked by this
+environment's egress policy, only `download.pytorch.org` is. That
+Release asset URL is now pinned in `requirements-ml.txt` as a direct PEP
+508 URL reference (`torch @ https://github.com/.../torch-2.6.0%2Bcpu-...whl`)
+— install it with `pip install -r requirements-ml.txt`. It's intentionally
+kept out of `requirements.txt`/`requirements-dev.txt` since the core app
+and test suite don't need it (still true even now that torch is
+installable) and the pin is Python 3.11/linux_x86_64-specific, not
+portable to other environments without re-uploading a matching wheel.
+Live-verified: `import torch; torch.nn.Linear(3,3)(torch.randn(3,3))`
+runs successfully, `torch.__version__` == `2.6.0+cpu`.
+
+**`tools/anomaly_autoencoder_torch.py`**: with torch now installable, the
+user's stated goal was "use torch as a tech-stack foundation for trying
+more complex models later" rather than an immediate feature need, so
+rather than rewriting the working NumPy implementation, this adds a
+parallel torch-backed twin of `tools/anomaly_autoencoder.py`'s
+`DeviceAnomalyModel` (same public API: `fit`/`score`/`is_anomaly`/
+`threshold`, same 1-hidden-layer/tanh architecture, same mean+k*std
+threshold) using `torch.nn.Module`/`torch.optim.SGD` instead of hand-
+written NumPy forward/backward passes. The NumPy version stays as the
+default/torch-free implementation; this is the base to build a more
+complex model (e.g. an LSTM for `link_capacity_forecast.py`-style time
+series) on top of, once there's a concrete need. Live-verified via its
+own `_demo()` (mirrors `anomaly_autoencoder.py`'s): reproduces the same
+qualitative result (flags the CPU=55% case a fixed 80% threshold would
+miss). `tests/test_anomaly_autoencoder_torch.py` mirrors
+`tests/test_anomaly_autoencoder.py`'s test cases 1:1 against the torch
+backend, `pytest.importorskip('torch')`'d so the file skips cleanly on
+environments without `requirements-ml.txt` installed — 8/8 passed here.
+
+**`tools/anomaly_autoencoder_torch.py`**: torchが導入可能になったことを
+受けて、ユーザーの目的が「今すぐ機能として必要」ではなく「将来もっと
+複雑なモデルを試すための技術スタックの土台」だったため、動いている
+NumPy実装を書き換えるのではなく、`tools/anomaly_autoencoder.py`の
+`DeviceAnomalyModel`と同じ公開API(`fit`/`score`/`is_anomaly`/
+`threshold`、同じ1隠れ層/tanh構成、同じ平均+k*標準偏差しきい値)を
+持つtorchバックエンド版を並行して追加した(`torch.nn.Module`/
+`torch.optim.SGD`を使い、手書きNumPy版の前方伝播・逆伝播を置き換え)。
+NumPy版はtorch不要のデフォルト実装として維持し、こちらは今後もっと
+複雑なモデル(例: `link_capacity_forecast.py`的な時系列予測をLSTM化
+する等)を試す際の土台という位置づけ。自身の`_demo()`
+(`anomaly_autoencoder.py`のものと対応)で実際に動作確認済み:
+固定80%閾値では見逃すCPU=55%のケースを同様に検知するなど、定性的に
+同じ結果を再現。`tests/test_anomaly_autoencoder_torch.py`は
+`tests/test_anomaly_autoencoder.py`のテストケースをそのままtorch
+バックエンド向けに対応させたもので、`pytest.importorskip('torch')`
+により`requirements-ml.txt`未導入の環境ではこのファイルごと
+きれいにskipされる — ここでは8/8成功。
+
+**PyTorchをGitHub Releaseミラー経由でインストール済み**: ユーザーが
+`download.pytorch.org/whl/cpu/`（手元の環境ではブロックされていない）
+から公式CPU専用ホイール
+(`torch-2.6.0+cpu-cp311-cp311-linux_x86_64.whl`)をダウンロードし、この
+リポジトリ(`w-index-m/network-lab-emulator`)のGitHub Releaseアセット
+(タグ`torch-cpu-wheel`)としてアップロードした — `github.com`/
+`objects.githubusercontent.com`はこの環境のegressポリシーでブロック
+されて**いない**（ブロックされているのは`download.pytorch.org`のみ）。
+そのReleaseアセットのURLを`requirements-ml.txt`にPEP 508形式の直接URL
+参照としてピン留めしてある(`torch @ https://github.com/.../
+torch-2.6.0%2Bcpu-...whl`) — `pip install -r requirements-ml.txt`で
+導入できる。本体アプリ・テストスイートは(torchが導入可能になった今でも)
+torchを必要としないため、意図的に`requirements.txt`/`requirements-dev.txt`
+には含めていない。またこのピン留めはPython 3.11/linux_x86_64専用で、
+他環境ではそのままでは使えない（対象環境向けのwhlを同じ手順で再度
+アップロードしてURLを差し替える必要がある）。実際に動作確認済み:
+`import torch; torch.nn.Linear(3,3)(torch.randn(3,3))`が正常に動作、
+`torch.__version__` は `2.6.0+cpu`。
+
 **Implemented**: `tools/syslog_anomaly_detector.py` applies exactly this —
 a 1D simplification of `anomaly_autoencoder.py`'s mean+k*std threshold
 approach to Loki-ingested syslog message counts per time bucket per

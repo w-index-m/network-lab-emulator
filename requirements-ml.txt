@@ -1,0 +1,15 @@
+# 任意: PyTorchを使うML関連ツール向け。requirements.txt/-devには含めない
+# (既存の tools/anomaly_autoencoder.py 等はNumPyのみで動くため、torchは
+# 本体アプリ・テストスイートの動作には不要)。
+#
+# 公式配布元 https://download.pytorch.org/whl/cpu/ はこの開発環境の
+# egressポリシーでブロックされており(403)、デフォルトのPyPIからの
+# `pip install torch` はCPU専用でもCUDA/cuDNN一式を巻き込むため、
+# ユーザーが手元でダウンロードしたCPU専用whlをGitHub Releaseの
+# アセットとしてアップロードし、そのURLを直接参照する形にしている。
+# 詳細はCLAUDE.mdの「ML / anomaly detection notes」を参照。
+#
+# python3.11 / linux_x86_64 専用ビルド。別のPython/OS/CPUアーキテクチャ
+# では動かないため、その場合は同じ手順で対象環境向けのwhlを
+# 別途アップロードしてURLを差し替えること。
+torch @ https://github.com/w-index-m/network-lab-emulator/releases/download/torch-cpu-wheel/torch-2.6.0%2Bcpu-cp311-cp311-linux_x86_64.whl
