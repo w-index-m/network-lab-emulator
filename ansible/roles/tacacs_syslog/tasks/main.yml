@@ -1,0 +1,139 @@
+---
+# tac_plus-ng(TACACS+) を実際にビルド・起動し、authorization/accounting
+# ログを実syslogとしてこのスタックのsyslogブリッジ(syslog_to_loki.py)経由で
+# Lokiへ送る。tools/setup_monitoring_stack.sh/.ps1 が立てるLoki+syslogブリッジ
+# (monitoring_stackロール)が先に動いている前提。
+# べき等: 既にビルド済み/起動済みならスキップする。
+- name: Ensure stack directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Check whether tac_plus-ng build dependencies are already installed
+  ansible.builtin.command: dpkg -s git libpcre2-dev libc-ares-dev libssl-dev
+  register: tacacs_deps_check
+  changed_when: false
+  failed_when: false
+
+# python3-apt (required by ansible.builtin.apt) isn't reliably importable
+# against every python interpreter this role may run under, so shell out to
+# apt-get directly instead - same reasoning as monitoring_stack's approach
+# of favoring plain shell/command tasks for anything not already covered by
+# a well-tested Ansible module.
+- name: Install tac_plus-ng build dependencies
+  ansible.builtin.command: >
+    apt-get install -y git libpcre2-dev libc-ares-dev libssl-dev
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: tacacs_deps_check.rc != 0
+
+- name: Check if tac_plus-ng source is already cloned
+  ansible.builtin.stat:
+    path: "{{ tacacs_src_dir }}/.git"
+  register: tacacs_src
+
+- name: Clone event-driven-servers (tac_plus-ng)
+  ansible.builtin.git:
+    repo: "{{ tacacs_repo_url }}"
+    dest: "{{ tacacs_src_dir }}"
+    depth: 1
+  when: not tacacs_src.stat.exists
+
+- name: Locate built tac_plus-ng binary (any build tree)
+  ansible.builtin.find:
+    paths: "{{ tacacs_src_dir }}/build"
+    patterns: tac_plus-ng
+    recurse: true
+    file_type: file
+  register: tacacs_bin_search_raw
+
+# Only the "fakeroot" install tree ships tac_plus-ng next to its shared libs
+# (libmavis.so etc under ../lib) - the plain build/.../tac_plus-ng/ binary
+# needs LD_LIBRARY_PATH pointed elsewhere and isn't what gets "installed".
+- name: Keep only the fakeroot-installed binary
+  ansible.builtin.set_fact:
+    tacacs_fakeroot_paths: >-
+      {{ tacacs_bin_search_raw.files | selectattr('path', 'search', '/fakeroot/')
+         | map(attribute='path') | list }}
+  when: tacacs_bin_search_raw.matched > 0
+
+- name: Set tac_plus-ng binary search result
+  ansible.builtin.set_fact:
+    tacacs_bin_search: "{{ {'matched': tacacs_fakeroot_paths | default([]) | length} }}"
+
+- name: Configure tac_plus-ng build
+  ansible.builtin.command: ./configure
+  args:
+    chdir: "{{ tacacs_src_dir }}"
+  when: tacacs_bin_search.matched == 0
+
+- name: Build tac_plus-ng
+  ansible.builtin.command: "make -j{{ ansible_processor_vcpus | default(2) }}"
+  args:
+    chdir: "{{ tacacs_src_dir }}"
+  when: tacacs_bin_search.matched == 0
+
+- name: Re-locate fakeroot-installed tac_plus-ng binary after build
+  ansible.builtin.find:
+    paths: "{{ tacacs_src_dir }}/build"
+    patterns: tac_plus-ng
+    recurse: true
+    file_type: file
+  register: tacacs_bin_final_raw
+  when: tacacs_bin_search.matched == 0
+
+- name: Set tac_plus-ng binary path (built just now)
+  ansible.builtin.set_fact:
+    tacacs_fakeroot_paths: >-
+      {{ tacacs_bin_final_raw.files | selectattr('path', 'search', '/fakeroot/')
+         | map(attribute='path') | list }}
+  when: tacacs_bin_search.matched == 0
+
+- name: Set tac_plus-ng binary path fact
+  ansible.builtin.set_fact:
+    tacacs_bin_path: "{{ tacacs_fakeroot_paths[0] }}"
+
+- name: Derive fakeroot lib dir from binary path
+  ansible.builtin.set_fact:
+    tacacs_lib_dir: "{{ tacacs_bin_path | dirname | dirname }}/lib"
+
+- name: Render tac_plus-ng.cfg
+  ansible.builtin.template:
+    src: tac_plus-ng.cfg.j2
+    dest: "{{ stack_dir }}/tac_plus-ng.cfg"
+    mode: "0644"
+
+- name: Check if tac_plus-ng is already listening
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ tacacs_port }}"
+    timeout: 1
+  register: tacacs_check
+  failed_when: false
+
+- name: Start tac_plus-ng
+  ansible.builtin.shell: >
+    LD_LIBRARY_PATH={{ tacacs_lib_dir }}
+    nohup {{ tacacs_bin_path }} -f {{ stack_dir }}/tac_plus-ng.cfg
+    > {{ stack_dir }}/tac_plus.log 2>&1 &
+  args:
+    executable: /bin/bash
+  when: tacacs_check.state | default('') != 'started'
+
+- name: Wait for tac_plus-ng to start listening
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ tacacs_port }}"
+    timeout: 15
+  when: tacacs_check.state | default('') != 'started'
+
+- name: Check whether tacacs_plus Python client is already installed
+  ansible.builtin.command: python3 -c "import tacacs_plus"
+  register: tacacs_plus_check
+  changed_when: false
+  failed_when: false
+
+- name: Install tacacs_plus Python client (for tools/nexus_cmd_to_tacacs.py)
+  ansible.builtin.command: pip3 install tacacs_plus
+  when: tacacs_plus_check.rc != 0
