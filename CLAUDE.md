@@ -207,6 +207,33 @@ role handles both cases. See `docs/dify-ansible.md` for the full
 live-verification transcript (cold start with the daemon stopped,
 Web UI + API responding, and a second idempotent run).
 
+**AAA named method lists + `line con 0`** (`app.py`'s `handle_protocol_config`,
+the `device_type in ('cisco', 'catalyst')` AAA block around
+`aaa new-model`): found while looking at
+[CiscoDevNet/cml-community](https://github.com/CiscoDevNet/cml-community)'s
+`lab-topologies/aaa-tacacs-exploration` for ideas — that lab's exact
+command sequence (`aaa authentication login CONSOLE local` / `aaa
+authorization console` / `aaa authorization exec CONSOLE local` /
+`line con 0` / `login authentication CONSOLE` / `authorization exec
+CONSOLE`) was silently swallowed with no error and never reflected in
+`show running-config`: only the `default` named method list was
+supported for `aaa authentication login`/`aaa authorization exec`, and
+`line con 0` itself wasn't accepted (`line vty` only), so anything
+typed "inside" it (via `config-line` mode, which never got entered)
+was a no-op too. Fixed to accept arbitrary method-list names
+(`state.aaa_authentication_login_lists`/`aaa_authorization_exec_lists`,
+keyed by name, case-preserved) while keeping the pre-existing
+`state.aaa_authentication_login`/`aaa_authorization_exec` single-dict
+attributes as aliases for the `default` entry (existing Nexus
+TACACS+ tests read these directly); added `aaa authorization console`
+and `line con 0` → `config-line` with `login authentication
+<name>`/`authorization exec <name>` sub-commands, tracked separately
+per line type (`state.line_con_*` vs `state.line_vty_*`). Live-verified
+the exact cml-community command sequence against a running instance
+end to end (`show running-config` reflects every line, case preserved);
+`tests/test_aaa_named_method_lists.py` (14 tests) fixes this plus the
+`default`-list backward-compat.
+
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 
 PyTorch could not be installed in this sandbox early on (pulled in a

@@ -2959,6 +2959,16 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ── モデルベースAAA(NACM)の前提となるAAA設定 ──
     # 実機もNETCONF/RESTCONFを使うには aaa new-model と
     # aaa authorization exec が要る。IOSのコマンドなのでIOS系のみ。
+    #
+    # aaa authentication login/authorization exec は"default"だけでなく
+    # 任意の名前付きメソッドリストを許す(IOSの実挙動)。以前は"default"
+    # 固定でしか受理しておらず、"aaa authentication login CONSOLE local"
+    # のような名前付きリスト(console line専用の認証等でよく使われる)が
+    # 黙って無視されていた(何のエラーも出さず状態にも残らない)。
+    # state.aaa_authentication_login_lists / aaa_authorization_exec_lists
+    # に名前ごとに保存しつつ、"default"については既存の単一属性
+    # (aaa_authentication_login / aaa_authorization_exec、show
+    # running-config やテストが直接参照する)も後方互換のため維持する。
     if state.device_type in ('cisco', 'catalyst'):
         if re.match(r'^aaa\s+new-model$', c):
             state.aaa_new_model = True
@@ -2966,21 +2976,61 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         if re.match(r'^no\s+aaa\s+new-model$', c):
             state.aaa_new_model = False
             return ''
+        if re.match(r'^aaa\s+authorization\s+console$', c):
+            state.aaa_authorization_console = True
+            return ''
+        if re.match(r'^no\s+aaa\s+authorization\s+console$', c):
+            state.aaa_authorization_console = False
+            return ''
+        m_aaa_authc = re.match(
+            r'^aaa\s+authentication\s+login\s+(\S+)\s+'
+            r'(?:group\s+(\S+)(\s+local)?|(local))$', c)
+        if m_aaa_authc:
+            m_o = re.match(
+                r'^aaa\s+authentication\s+login\s+(\S+)\s+'
+                r'(?:group\s+(\S+)(\s+local)?|(local))$', orig, re.I)
+            name = (m_o or m_aaa_authc).group(1)
+            entry = {
+                'group': (m_o or m_aaa_authc).group(2) or '',
+                'local_fallback': bool(m_aaa_authc.group(3)
+                                       or m_aaa_authc.group(4)),
+            }
+            if not hasattr(state, 'aaa_authentication_login_lists'):
+                state.aaa_authentication_login_lists = {}
+            state.aaa_authentication_login_lists[name] = entry
+            if name.lower() == 'default':
+                state.aaa_authentication_login = entry
+            return ''
+        m_no_aaa_authc = re.match(
+            r'^no\s+aaa\s+authentication\s+login\s+(\S+)', c)
+        if m_no_aaa_authc:
+            name = m_no_aaa_authc.group(1)
+            getattr(state, 'aaa_authentication_login_lists', {}).pop(name, None)
+            if name.lower() == 'default':
+                state.aaa_authentication_login = None
+            return ''
         m_aaa_exec = re.match(
-            r'^aaa\s+authorization\s+exec\s+default\s+'
+            r'^aaa\s+authorization\s+exec\s+(\S+)\s+'
             r'(?:group\s+(\S+)(\s+local)?|(local))$', c)
         if m_aaa_exec:
-            m_o = re.match(r'^aaa\s+authorization\s+exec\s+default\s+'
+            m_o = re.match(r'^aaa\s+authorization\s+exec\s+(\S+)\s+'
                            r'(?:group\s+(\S+)(\s+local)?|(local))$',
                            orig, re.I)
-            state.aaa_authorization_exec = {
-                'group': (m_o or m_aaa_exec).group(1) or '',
-                'local_fallback': bool(m_aaa_exec.group(2)
-                                       or m_aaa_exec.group(3)),
+            name = (m_o or m_aaa_exec).group(1)
+            entry = {
+                'group': (m_o or m_aaa_exec).group(2) or '',
+                'local_fallback': bool(m_aaa_exec.group(3)
+                                       or m_aaa_exec.group(4)),
             }
+            if not hasattr(state, 'aaa_authorization_exec_lists'):
+                state.aaa_authorization_exec_lists = {}
+            state.aaa_authorization_exec_lists[name] = entry
+            if name.lower() == 'default':
+                state.aaa_authorization_exec = entry
             return ''
         if re.match(r'^no\s+aaa\s+authorization\s+exec\s+default', c):
             state.aaa_authorization_exec = None
+            getattr(state, 'aaa_authorization_exec_lists', {}).pop('default', None)
             return ''
 
         # username <name> [privilege <0-15>] {password|secret} [0|5|7] <pw>
@@ -3219,16 +3269,37 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             state.restconf_service_acl = acls
             return ''
 
-    # ── line vty / transport input ──
+    # ── line con/vty / transport input / login authentication /
+    #    authorization exec ──
     # 以前は running-config に "transport input ssh telnet" が固定で
     # 書かれているだけで、コマンドが未実装だった。つまり telnet を
     # 止める手段が無く、平文管理の所見を直せなかった。
+    # "line con 0" 自体も以前は受理されなかった(config-lineに遷移せず、
+    # 中に入れた login authentication/authorization exec も黙って
+    # 無視されていた)。
     if state.device_type in ('cisco', 'catalyst'):
-        m_line = re.match(r'^line\s+(vty)\s+(\d+)(?:\s+(\d+))?\s*$', c)
+        m_line = re.match(r'^line\s+(con|vty)\s+(\d+)(?:\s+(\d+))?\s*$', c)
         if m_line and state.mode in ('config', 'config-line'):
             state.mode = 'config-line'
+            state._line_type = m_line.group(1)
             state._vty_range = (int(m_line.group(2)),
                                 int(m_line.group(3) or m_line.group(2)))
+            return ''
+        m_login_authc = re.match(r'^login\s+authentication\s+(\S+)$', c)
+        if m_login_authc and state.mode == 'config-line':
+            m_o = re.match(r'^login\s+authentication\s+(\S+)$', orig, re.I)
+            attr = ('line_con_login_authentication'
+                    if getattr(state, '_line_type', 'vty') == 'con'
+                    else 'line_vty_login_authentication')
+            setattr(state, attr, (m_o or m_login_authc).group(1))
+            return ''
+        m_authz_exec = re.match(r'^authorization\s+exec\s+(\S+)$', c)
+        if m_authz_exec and state.mode == 'config-line':
+            m_o = re.match(r'^authorization\s+exec\s+(\S+)$', orig, re.I)
+            attr = ('line_con_authorization_exec'
+                    if getattr(state, '_line_type', 'vty') == 'con'
+                    else 'line_vty_authorization_exec')
+            setattr(state, attr, (m_o or m_authz_exec).group(1))
             return ''
         m_ti = re.match(r'^transport\s+input\s+(.+)$', c)
         if m_ti and state.mode == 'config-line':
@@ -4428,14 +4499,22 @@ def _build_running_config(device_id: str, state) -> str:
         # AAA（モデルベースAAAの前提。NETCONF/RESTCONFを使うには必要）
         if getattr(state, 'aaa_new_model', False):
             lines.append('aaa new-model')
-            _ax = getattr(state, 'aaa_authorization_exec', None)
-            if _ax:
+            for _name, _al in (getattr(state, 'aaa_authentication_login_lists', None) or {}).items():
+                if _al.get('group'):
+                    _sfx = ' local' if _al.get('local_fallback') else ''
+                    lines.append(f'aaa authentication login {_name} group '
+                                 f'{_al["group"]}{_sfx}')
+                else:
+                    lines.append(f'aaa authentication login {_name} local')
+            if getattr(state, 'aaa_authorization_console', False):
+                lines.append('aaa authorization console')
+            for _name, _ax in (getattr(state, 'aaa_authorization_exec_lists', None) or {}).items():
                 if _ax.get('group'):
                     _sfx = ' local' if _ax.get('local_fallback') else ''
-                    lines.append('aaa authorization exec default group '
+                    lines.append(f'aaa authorization exec {_name} group '
                                  f'{_ax["group"]}{_sfx}')
                 else:
-                    lines.append('aaa authorization exec default local')
+                    lines.append(f'aaa authorization exec {_name} local')
             lines.append('!')
         # RESTCONF/NETCONF
         if getattr(state, 'http_secure_server', False):
@@ -4856,6 +4935,12 @@ def _build_running_config(device_id: str, state) -> str:
         # line con / line vty
         lines.append('!')
         lines.append('line con 0')
+        _con_login_authc = getattr(state, 'line_con_login_authentication', None)
+        if _con_login_authc:
+            lines.append(f' login authentication {_con_login_authc}')
+        _con_authz_exec = getattr(state, 'line_con_authorization_exec', None)
+        if _con_authz_exec:
+            lines.append(f' authorization exec {_con_authz_exec}')
         lines.append(' exec-timeout 0 0')
         lines.append(' logging synchronous')
         lines.append(' transport preferred none')
@@ -4864,12 +4949,17 @@ def _build_running_config(device_id: str, state) -> str:
         # 手段も無かった。実際の設定値を出す。
         _ti = getattr(state, 'vty_transport_input', None)
         _ti_line = ' transport input ' + _format_transport_input(_ti)
-        lines.append('line vty 0 4')
-        lines.append(' login local')
-        lines.append(_ti_line)
-        lines.append('line vty 5 15')
-        lines.append(' login local')
-        lines.append(_ti_line)
+        _vty_login_authc = getattr(state, 'line_vty_login_authentication', None)
+        _vty_authz_exec = getattr(state, 'line_vty_authorization_exec', None)
+        for _vty_range_line in ('line vty 0 4', 'line vty 5 15'):
+            lines.append(_vty_range_line)
+            if _vty_login_authc:
+                lines.append(f' login authentication {_vty_login_authc}')
+            else:
+                lines.append(' login local')
+            if _vty_authz_exec:
+                lines.append(f' authorization exec {_vty_authz_exec}')
+            lines.append(_ti_line)
         # syslog
         syslog = getattr(state, 'syslog_servers', [])
         if syslog:
