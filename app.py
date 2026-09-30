@@ -1040,8 +1040,6 @@ async def cli_command(body: dict):
         "mode": state.mode,
         "hostname": state.hostname,
     }
-    if state.device_type == 'ipcom':
-        result["ipcom_admin"] = getattr(state, '_ipcom_admin', False)
     return result
 
 
@@ -4235,8 +4233,6 @@ def _build_running_config(device_id: str, state) -> str:
     is_nexus = state.device_type == 'nexus'
 
     if is_apresia:
-        return rule_engine.process('show running-config', state)
-    if state.device_type == 'ipcom':
         return rule_engine.process('show running-config', state)
 
     # ── NX-OS (Nexus 9000) running-config ──

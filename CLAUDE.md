@@ -11,7 +11,7 @@ NETCONF/SSH-CLI/Telnet-CLI, gNMI over gRPC), so real clients (ncclient,
 gnmic/pygnmi, snmpwalk, an actual ssh/telnet client) can connect to emulated
 devices. See `README.md` for the full feature/protocol matrix and supported
 device types (`device_type`: `catalyst`, `nexus`, `cisco`, `asa`, `sir`,
-`srs`, `apresia`, `bigip`, `ipcom`, `pc`).
+`srs`, `apresia`, `bigip`, `pc`).
 
 **Publicly deployed** at https://network-lab-emulator.onrender.com/ (Render).
 That deployment doesn't have Ollama available, so its `network_ontology_query.py
@@ -74,10 +74,10 @@ run for that command.** This means:
   key off `state._routing_mode` (a side-channel attribute set by e.g.
   `router rip`/`router ospf`) rather than `state.device_type`, so a new
   device type's `router rip`/`network ...` commands can "just work" for
-  free without reimplementing RIP/OSPF — see how `device_type == "ipcom"`
-  was wired up in `engine/rules.py` (`_ipcom_process`) for the pattern:
-  transition the mode, then let the already-executed `app.py` layer's
-  side effects stand rather than re-deriving state locally. Duplicating
+  free without reimplementing RIP/OSPF — the pattern is: transition the
+  mode in the device-specific `_xxx_process` handler, then let the
+  already-executed `app.py` layer's side effects stand rather than
+  re-deriving state locally. Duplicating
   state between the two layers (e.g. a device-specific `state.static_routes`
   list next to the shared `rib_engine`) has caused real duplicate/garbled
   output bugs in this codebase — prefer delegating to the shared engine.
@@ -85,7 +85,7 @@ run for that command.** This means:
 ### Device-specific CLI dialects: dedicated `_xxx_process` handlers
 
 `RuleEngine.process()` dispatches entirely different CLI grammars (`pc`,
-`asa`, `apresia`, `bigip`, `ipcom`) to a self-contained `_xxx_process(cmd, c,
+`asa`, `apresia`, `bigip`) to a self-contained `_xxx_process(cmd, c,
 state)` method before falling into the shared Cisco/IOS-style command tree
 that `catalyst`/`cisco`/`srs`/`sir`/`nexus` share. When adding a device
 whose CLI paradigm doesn't fit the Cisco `exec → config → config-if` mode
@@ -103,8 +103,8 @@ source of "% Invalid input detected" bugs when adding a new sub-mode.
 config sub-mode; don't hand-edit the allow-list or the exit table
 separately. `tests/test_config_submodes.py` exhaustively checks the
 registry's internal consistency (every submode's parent is reachable, no
-cycles, etc.) — device-specific handlers like `_ipcom_process` that manage
-their own mode machine (not via `CONFIG_SUBMODES`) are exempt.
+cycles, etc.) — device-specific handlers like `_apresia_process` that
+manage their own mode machine (not via `CONFIG_SUBMODES`) are exempt.
 
 ### Key modules
 
@@ -137,6 +137,38 @@ their own mode machine (not via `CONFIG_SUBMODES`) are exempt.
   instance, not just code review) rather than just a design description.
   Follow that pattern for new docs.
 
+**IPCOM EX2 support was added earlier this session, then removed at the
+user's request** ("ipcomに関するエミュレータ動作があれば削除して欲しい").
+Removed: the `device_type == "ipcom"` branch of `DeviceState.__init__`,
+the `_ipcom_process`/`_ipcom_show_interfaces`/`_ipcom_show_config`
+handlers and their dispatch in `RuleEngine.process()` (`engine/rules.py`),
+the two `state.device_type == 'ipcom'` checks in `app.py`, all IPCOM
+references in `static/index.html` (add-device buttons, `DEVICE_META`
+entry, `getPrompt()` branch, `ipcom_admin` sync, `defPort()`/
+`portOptions()` entries, `_inferDeviceType()` regex, the color map), and
+`docs/ipcom-ex2.md`. No test file referenced "ipcom" at all, so this was
+a clean removal with nothing to update on the test side. Full regression
+suite confirmed clean afterward (only the two known-flaky IPsec DPD
+tests). If IPCOM support is wanted again, `git log` on
+`claude/affectionate-johnson-rz69wa`/`main` around this point has the
+original implementation to revive rather than rebuilding from scratch.
+
+**IPCOM EX2対応はこのセッションの前半で追加したが、ユーザーの依頼**
+（「ipcomに関するエミュレータ動作があれば削除して欲しい」）**により削除した。**
+削除対象: `DeviceState.__init__`の`device_type == "ipcom"`分岐、
+`_ipcom_process`/`_ipcom_show_interfaces`/`_ipcom_show_config`ハンドラと
+`RuleEngine.process()`でのディスパッチ(`engine/rules.py`)、`app.py`の
+`state.device_type == 'ipcom'`チェック2箇所、`static/index.html`内の
+全IPCOM参照(装置追加ボタン、`DEVICE_META`エントリ、`getPrompt()`の分岐、
+`ipcom_admin`同期、`defPort()`/`portOptions()`のエントリ、
+`_inferDeviceType()`の正規表現、色マップ)、`docs/ipcom-ex2.md`。
+テストファイルは一切"ipcom"を参照していなかったため、テスト側の
+修正は不要なクリーンな削除だった。削除後、全体回帰テストで
+クリーンであることを確認済み(既知のflaky IPsec DPDテスト2件のみ)。
+もし再度IPCOM対応が必要になった場合、`claude/affectionate-johnson-rz69wa`
+/`main`のこの時点付近の`git log`に元の実装が残っているので、
+ゼロから作り直すのではなくそちらを復活させればよい。
+
 ## Working conventions for this repo (established in this session)
 
 - Development happens on `claude/affectionate-johnson-rz69wa`; push there
@@ -155,9 +187,8 @@ their own mode machine (not via `CONFIG_SUBMODES`) are exempt.
 - Live-verify new features against a real running instance
   (`NETLAB_AUTH_DISABLE=1 python -m uvicorn app:app ...` + `curl`/`/api/cli`)
   before writing it up — this has repeatedly caught real bugs (duplicate
-  route entries, a device-specific CLI quirk like IPCOM's `router ospf`
-  taking no process-id, Windows-only `UnicodeEncodeError`s) that code
-  review alone missed.
+  route entries, device-specific CLI quirks, Windows-only
+  `UnicodeEncodeError`s) that code review alone missed.
 
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 
