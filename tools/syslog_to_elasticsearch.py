@@ -27,7 +27,6 @@ import json
 import re
 import socket
 import sys
-import time
 import urllib.request
 from datetime import datetime, timezone
 

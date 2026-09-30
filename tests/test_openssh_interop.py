@@ -25,7 +25,6 @@ OpenSSHクライアントとの相互接続 — 実機の `ssh`/`sshpass` で確
 
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import time

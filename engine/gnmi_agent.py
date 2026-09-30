@@ -20,10 +20,8 @@ IOS-XE 17.3以降のCLIは gnmi-yang ではなく gnxi 系:
 import json
 import os
 import sys
-import threading
 import time
 from concurrent import futures
-from typing import Optional
 
 _PROTO_DIR = os.path.join(os.path.dirname(__file__), 'gnmi_proto')
 if _PROTO_DIR not in sys.path:

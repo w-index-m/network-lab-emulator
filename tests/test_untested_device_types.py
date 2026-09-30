@@ -16,8 +16,6 @@
 import os
 import sys
 
-import pytest
-
 os.environ.setdefault('NETLAB_AUTH_DISABLE', '1')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
