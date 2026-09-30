@@ -25,7 +25,6 @@ NETCONFで edit-config した結果は show ip interface brief や RESTCONF
     （subtree フィルタのみ対応）
 """
 
-import asyncio
 import logging
 import socket
 import threading

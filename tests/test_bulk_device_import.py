@@ -15,7 +15,6 @@ os.environ.setdefault('NETLAB_AUTH_DISABLE', '1')
 os.environ.setdefault('NETLAB_FAST_TIMERS', '1')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-import httpx
 from fastapi.testclient import TestClient
 
 import app as app_module

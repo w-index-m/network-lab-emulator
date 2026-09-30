@@ -211,9 +211,10 @@ def scenario_rip_chain():
     time.sleep(7)
     r1 = cli("rp1", "show ip route rip")
     r3 = cli("rp3", "show ip route rip")
-    # RIPは距離ベクトル: 2ホップ先のLANはメトリック3で学習
-    check("RP1がRP3のLAN 192.168.13.0 をRIP学習(metric3)",
-          "192.168.13.0" in r1 and "/3" in r1, r1)
+    # RIPは距離ベクトル: 直結網はメトリック0で広告するため隣接は[120/1]、
+    # 2ホップ先は[120/2]になる(実機準拠、コミット57e9808で検証済み)
+    check("RP1がRP3のLAN 192.168.13.0 をRIP学習(metric2)",
+          "192.168.13.0" in r1 and "/2" in r1, r1)
     check("RP3がRP1のLAN 192.168.11.0 をRIP学習(逆方向)", "192.168.11.0" in r3, r3)
     p13 = cli("rp1", "ping 192.168.13.1")
     p31 = cli("rp3", "ping 192.168.11.1")
