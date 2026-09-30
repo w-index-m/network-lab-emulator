@@ -144,6 +144,28 @@ class TestBgpL2vpnEvpnAddressFamily:
         assert 'neighbor 10.0.0.2 activate' in out
         assert 'advertise-all-vni' in out
 
+    def test_bgp_router_id_command_is_reflected(self):
+        """router bgp配下の"router-id X.X.X.X"がshow bgpに反映されること。
+
+        state.bgpの初期値には表示用のもっともらしいダミー値
+        （router_id="10.1.0.1"）が入っており、"router bgp <n>"は
+        asnだけを上書きしてrouter_idを更新していなかったため、
+        実際に"router-id"を打ってもダミー値のまま変わらなかった
+        （EVPN対応でrouter-idを使うようになって顕在化した）。
+        """
+        _dev('nx-evpn-12')
+        _run('nx-evpn-12', ['configure terminal', 'router bgp 65001',
+                            'router-id 10.9.9.9', 'end'])
+        out = _cli('nx-evpn-12', 'show bgp l2vpn evpn summary')
+        # address-family未設定なので本来は"not configured"だが、
+        # router_id自体の反映確認のため直接stateを見る形にはせず
+        # まずaddress-familyありのケースで確認する
+        _run('nx-evpn-12', ['configure terminal', 'router bgp 65001',
+                            'address-family l2vpn evpn', 'end'])
+        out = _cli('nx-evpn-12', 'show bgp l2vpn evpn summary')
+        assert 'BGP router identifier 10.9.9.9' in out
+        assert 'BGP router identifier 10.1.0.1' not in out
+
 
 class TestNotConfigured:
     def test_show_bgp_l2vpn_evpn_without_config(self):
@@ -191,3 +213,125 @@ class TestNexusDashboardApi:
         sw = next(s for s in r.json()['switches'] if s['device_id'] == 'nx-evpn-11')
         assert sw['overlay_enabled'] is True
         assert sw['vxlan_ready'] is False
+
+
+# ══════════════════════════════════════════════════════════
+# Catalyst 9000 (IOS-XE) のスタンドアロンVXLAN EVPN
+#
+# NX-OSとは文法が違う:
+#   - "feature nv overlay"/"evpn"ではなく "l2vpn evpn" が起点
+#   - VLAN⇔VNIは "vlan <n>" 配下の "vn-segment" ではなく
+#     "vlan configuration <n>" 配下の "member evpn-instance <n> vni <n>"
+#   - "ingress-replication" に "protocol bgp" が付かない
+#     （"host-reachability protocol bgp" の方で既に決まっているため）
+# 装置の内部状態(state.nve/evpn_vnis/vlan_vn_segment)はNX-OSと共通の
+# データモデルに正規化して持たせているので、show running-config /
+# /api/nexus/dashboard はNexusと同じ形で確認できる。
+# ══════════════════════════════════════════════════════════
+C9K_EVPN_SETUP = [
+    'configure terminal',
+    'interface loopback0',
+    'ip address 10.0.0.1 255.255.255.255',
+    'exit',
+    'l2vpn evpn',
+    'replication-type ingress',
+    'router-id loopback0',
+    'instance 10010 vlan-based',
+    'encapsulation vxlan',
+    'exit',
+    'exit',
+    'vlan configuration 10',
+    'member evpn-instance 10010 vni 10010',
+    'exit',
+    'interface nve1',
+    'no shutdown',
+    'source-interface loopback0',
+    'host-reachability protocol bgp',
+    'member vni 10010',
+    'ingress-replication',
+    'exit',
+    'exit',
+    'router bgp 65001',
+    'address-family l2vpn evpn',
+    'neighbor 10.0.0.2 activate',
+    'end',
+]
+
+
+class TestCatalyst9000Evpn:
+    def test_l2vpn_evpn_instance_stored_and_shown(self):
+        _dev('c9k-evpn-1', type_='catalyst')
+        _run('c9k-evpn-1', C9K_EVPN_SETUP)
+        out = _cli('c9k-evpn-1', 'show running-config')
+        assert 'l2vpn evpn' in out
+        assert 'replication-type ingress' in out
+        assert 'instance 10010 vlan-based' in out
+        assert 'encapsulation vxlan' in out
+
+    def test_vlan_configuration_maps_vlan_to_vni(self):
+        _dev('c9k-evpn-2', type_='catalyst')
+        _run('c9k-evpn-2', C9K_EVPN_SETUP)
+        out = _cli('c9k-evpn-2', 'show running-config')
+        assert 'vlan configuration 10' in out
+        assert 'member evpn-instance 10010 vni 10010' in out
+
+    def test_nve_interface_uses_ios_xe_ingress_replication_syntax(self):
+        """IOS-XEは"ingress-replication"だけで"protocol bgp"を付けない。"""
+        _dev('c9k-evpn-3', type_='catalyst')
+        _run('c9k-evpn-3', C9K_EVPN_SETUP)
+        out = _cli('c9k-evpn-3', 'show running-config')
+        assert 'host-reachability protocol bgp' in out
+        assert 'member vni 10010' in out
+        assert '  ingress-replication' in out
+        assert 'ingress-replication protocol bgp' not in out
+
+    def test_show_nve_vni_and_peers_work_same_as_nexus(self):
+        _dev('c9k-evpn-4', type_='catalyst')
+        _run('c9k-evpn-4', C9K_EVPN_SETUP)
+        assert '10010' in _cli('c9k-evpn-4', 'show nve vni')
+        assert '10.0.0.2' in _cli('c9k-evpn-4', 'show nve peers')
+
+    def test_address_family_reflected_under_router_bgp(self):
+        _dev('c9k-evpn-5', type_='catalyst')
+        _run('c9k-evpn-5', C9K_EVPN_SETUP)
+        out = _cli('c9k-evpn-5', 'show running-config')
+        assert 'address-family l2vpn evpn' in out
+        assert 'neighbor 10.0.0.2 activate' in out
+
+    def test_dashboard_api_reports_catalyst_as_vtep(self):
+        _dev('c9k-evpn-6', type_='catalyst')
+        _run('c9k-evpn-6', C9K_EVPN_SETUP)
+        r = client.get('/api/nexus/dashboard')
+        sw = next(s for s in r.json()['switches'] if s['device_id'] == 'c9k-evpn-6')
+        assert sw['role'] == 'VTEP'
+        assert sw['overlay_enabled'] is True
+        assert sw['vxlan_ready'] is True
+        assert sw['features'] == ['l2vpn evpn']
+        assert {'vlan': 10, 'vni': 10010} in sw['vlan_vni_map']
+        assert any(p['peer_ip'] == '10.0.0.2' for p in sw['nve_peers'])
+
+    def test_evpn_commands_are_rejected_on_generic_cisco(self):
+        """l2vpn evpn / vlan configuration はNexusとCatalystだけの構文。
+        汎用'cisco'デバイスタイプでは受理されず、configモードのまま
+        （config-l2vpn-evpn等の専用サブモードに入らない）。"""
+        _dev('generic-cisco-evpn', type_='cisco')
+        _cli('generic-cisco-evpn', 'configure terminal')
+        r = client.post('/api/cli', json={'device_id': 'generic-cisco-evpn',
+                                          'command': 'l2vpn evpn'})
+        assert r.json()['mode'] != 'config-l2vpn-evpn'
+
+    def test_nexus_and_catalyst_evpn_syntax_do_not_cross_contaminate(self):
+        """NexusのCLIコマンド('evpn'グローバルモード)はCatalystでは
+        使えず、逆にCatalystの'l2vpn evpn'はNexusでは使えないこと
+        （専用サブモードに入らないことで確認する）。"""
+        _dev('nx-strict', type_='nexus')
+        _cli('nx-strict', 'configure terminal')
+        r = client.post('/api/cli', json={'device_id': 'nx-strict',
+                                          'command': 'l2vpn evpn'})
+        assert r.json()['mode'] != 'config-l2vpn-evpn'
+
+        _dev('c9k-strict', type_='catalyst')
+        _cli('c9k-strict', 'configure terminal')
+        r = client.post('/api/cli', json={'device_id': 'c9k-strict',
+                                          'command': 'evpn'})
+        assert r.json()['mode'] != 'config-evpn'

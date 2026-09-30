@@ -1,0 +1,14 @@
+---
+# tools/setup_monitoring_stack.sh の stack_dir と揃える(同じLoki/syslogブリッジを共有する)
+stack_dir: /tmp/netlab-stack
+repo_dir: "{{ playbook_dir }}/.."
+
+tacacs_src_dir: /tmp/event-driven-servers
+tacacs_repo_url: https://github.com/MarcJHuber/event-driven-servers
+tacacs_port: 4949
+tacacs_key: demo
+tacacs_user: demo
+tacacs_password: demo
+
+syslog_port: 5514
+loki_port: 3100

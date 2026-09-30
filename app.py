@@ -4,6 +4,16 @@
 - Ollama連携（インストール済みなら自動切替）
 - WebSocket（VRRP/RIP/OSPF/STPプロトコルシミュレーション）
 """
+import sys
+# Windowsのデフォルトコンソール文字コード(cp932)では起動バナーの罫線文字
+# (╔╗╚╝ 等)がエンコードできずUnicodeEncodeErrorでクラッシュするため、
+# 標準出力/エラー出力をUTF-8に固定する。
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 import os, asyncio, json, re, httpx, time, random
 from pathlib import Path
 from datetime import datetime
@@ -11,7 +21,7 @@ from typing import Dict, Optional
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,8 +41,14 @@ from engine.protocols import (
     vnet, rip_engine, ospf_engine, bgp_engine, eigrp_engine, stp_engine, rib_engine,
     icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
     nat_engine, cef_engine, dp_engine, snmp_agent,
-    genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine,
+    genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine, mpls_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
+)
+from engine.nexpose import (nexpose_engine, page_of as nexpose_page,
+                            SCAN_TEMPLATES as nexpose_scan_templates_catalog)
+from engine.logicmonitor import logicmonitor_engine
+from engine.programmability import (
+    app_hosting_engine, eem_engine, openflow_engine,
 )
 from engine.syslog_sender import syslog_dispatcher, snmp_dispatcher, ntp_client
 from engine.ike_engine import (
@@ -388,9 +404,19 @@ def _load_config():
           f"{len(data.get('links',[]))} links")
 
 
+# CLIを実行するイベントループ。lifespan で捕まえる（SSHサーバの
+# ワーカースレッドから run_coroutine_threadsafe で投げるため）
+_MAIN_LOOP = [None]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global USE_OLLAMA
+    # SSH CLIサーバのワーカースレッドからCLIを実行するために、
+    # 動いているイベントループを捕まえておく。
+    # （このアプリは lifespan を使っているので @app.on_event("startup")
+    #   は呼ばれない。そちらに書いてもループは None のままになる）
+    _MAIN_LOOP[0] = asyncio.get_running_loop()
     USE_OLLAMA = await detect_ollama()
     mode = f"Ollama ({OLLAMA_MODEL})" if USE_OLLAMA else "ルールベース（オフライン）"
     print(f"""
@@ -519,9 +545,10 @@ async def session_auth_middleware(request, call_next):
         if _AUTH_DISABLED or _valid_token(token):
             return await call_next(request)
         return _Response(status_code=403, content="認証が必要です")
-    # RESTCONF: 実機同様、セッショントークンではなくHTTP Basic認証
-    # （リクエスト毎にユーザー名/パスワードを渡す方式）を使う
-    if path.startswith("/restconf/"):
+    # RESTCONF と Nexpose(InsightVM) API は、実機同様セッショントークン
+    # ではなく HTTP Basic 認証（リクエスト毎にユーザー名/パスワード）を使う。
+    # Nexpose API v3 の securityDefinitions も type: basic になっている。
+    if path.startswith("/restconf/") or path.startswith("/api/3/"):
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Basic "):
             import base64 as _b64
@@ -531,9 +558,27 @@ async def session_auth_middleware(request, call_next):
                 user, pw = "", ""
             if _secrets.compare_digest(user, _AUTH_USER) and _secrets.compare_digest(pw, _AUTH_PASS):
                 return await call_next(request)
+        _realm = 'Nexpose' if path.startswith("/api/3/") else 'RESTCONF'
         return _Response(
             status_code=401, content="Unauthorized",
-            headers={"WWW-Authenticate": 'Basic realm="RESTCONF"'})
+            headers={"WWW-Authenticate": f'Basic realm="{_realm}"'})
+    # LogicMonitor REST API v3 は独自のLMv1署名認証（Basicでもトークン
+    # でもない）。署名はメソッド・エポック・リクエスト本文・
+    # リソースパスを含むため、ここでbodyを読んでから検証する必要がある
+    # （FastAPIは後続のリクエストハンドラでも同じbodyを再度読めるよう
+    # request.state経由でキャッシュされたbodyを使う）。
+    if path.startswith("/santaba/rest/"):
+        from engine.logicmonitor import verify_lmv1_auth
+        body_bytes = await request.body()
+        resource_path = path[len("/santaba/rest"):]
+        ok, reason = verify_lmv1_auth(
+            request.headers.get("Authorization", ""),
+            request.method, body_bytes.decode('utf-8', errors='replace'),
+            resource_path)
+        if not ok:
+            return JSONResponse(status_code=401,
+                content={'status': 401, 'errmsg': f'Unauthorized: {reason}'})
+        return await call_next(request)
     # 通常APIはヘッダーまたはクエリパラメータでトークン検証
     token = request.headers.get("X-Session-Token", "") or request.query_params.get("token", "")
     if _valid_token(token):
@@ -679,6 +724,90 @@ async def snmp_dashboard():
     return {'polled_at': now, 'devices': devices}
 
 
+# 実機の出力モディファイア。`section` は「一致した行＋その配下の
+# インデント行」を出す（running-config を機能単位で見るときに使う）。
+_OUTPUT_MODIFIERS = ('include', 'exclude', 'begin', 'section', 'count')
+
+# `|` を出力モディファイアとして扱ってよいコマンドだけに限定する。
+# 設定コマンドには出力モディファイアが無く、逆に `|` を値として
+# 含むもの（`ip as-path access-list 1 permit ^$|^100$` 等）があるため、
+# 無条件に分割すると壊れる。
+_PIPE_OK_RE = re.compile(r'^\s*(?:sh|sho|show|dir|more)\b', re.I)
+
+
+def _split_output_modifier(command: str):
+    """`show ... | include foo` を (本体, 種別, 引数) に割る。
+
+    モディファイアが無ければ None。短縮形（`inc` / `exc` / `beg` /
+    `sec`）も実機同様に受ける。
+    """
+    if '|' not in command or not _PIPE_OK_RE.match(command):
+        return None
+    base, _sep, rest = command.partition('|')
+    rest = rest.strip()
+    if not rest:
+        return None
+    parts = rest.split(None, 1)
+    word = parts[0].lower()
+    kind = next((m for m in _OUTPUT_MODIFIERS if m.startswith(word)), None)
+    if kind is None:
+        return None
+    arg = parts[1].strip() if len(parts) > 1 else ''
+    if kind != 'count' and not arg:
+        return None
+    return base.strip(), kind, arg
+
+
+def _apply_output_modifier(text: str, kind: str, arg: str) -> str:
+    """出力モディファイアを適用する。
+
+    実機は正規表現を受けるので `re` で照合するが、`(` の付け忘れ等で
+    壊れたパターンを投げられても落ちないよう、その場合は部分一致に
+    フォールバックする。
+    """
+    lines = (text or '').splitlines()
+    if kind == 'count':
+        return str(len(lines))
+
+    try:
+        rx = re.compile(arg)
+
+        def hit(line):
+            return rx.search(line) is not None
+    except re.error:
+        def hit(line):
+            return arg in line
+
+    if kind == 'include':
+        return '\n'.join(l for l in lines if hit(l))
+    if kind == 'exclude':
+        return '\n'.join(l for l in lines if not hit(l))
+    if kind == 'begin':
+        for i, l in enumerate(lines):
+            if hit(l):
+                return '\n'.join(lines[i:])
+        return ''
+    # section: 一致した行と、それに続くインデントされた行
+    out = []
+    i = 0
+    while i < len(lines):
+        if not hit(lines[i]):
+            i += 1
+            continue
+        out.append(lines[i])
+        indent = len(lines[i]) - len(lines[i].lstrip())
+        i += 1
+        while i < len(lines):
+            nxt = lines[i]
+            if not nxt.strip():
+                break
+            if len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+            out.append(nxt)
+            i += 1
+    return '\n'.join(out)
+
+
 @app.post("/api/cli")
 async def cli_command(body: dict):
     """
@@ -692,6 +821,14 @@ async def cli_command(body: dict):
     if device_id not in device_sessions:
         dev = DEFAULT_DEVICES.get(device_id, {"type": "cisco", "hostname": device_id})
         device_sessions[device_id] = DeviceState(dev["type"], dev["hostname"])
+        # /api/deviceでの作成時は直後にrib_engine等へ登録しているが、
+        # /api/cli経由の自動生成ではこれが抜けており、生成直後1回目の
+        # "show ip route"だけがrib_engine未登録のためルールエンジン側の
+        # (実インタフェースと無関係な)デフォルト表示にフォールバックし、
+        # 2回目以降の呼び出しと結果が食い違う不具合があった。ここで
+        # 即座に登録しておくことで初回から一貫した結果にする。
+        _register_icmp(device_id)
+        vnet.device_types[device_id] = device_sessions[device_id].device_type
 
     state = device_sessions[device_id]
     state._device_id = device_id   # rules.py からデータプレーン参照用
@@ -699,6 +836,17 @@ async def cli_command(body: dict):
     # クリアコマンドはフロントエンドで処理
     if command.lower() in ("cls", "clear screen"):
         return {"output": "\x0c", "mode": state.mode, "hostname": state.hostname}
+
+    # ── 出力モディファイア（`show ... | include foo`）──
+    # 実装が無く、`|` 以降が無視されて全文が返っていた。
+    # 元のコマンドを実行してから、その出力を絞る。
+    _mod = _split_output_modifier(command)
+    if _mod is not None:
+        _base, _kind, _arg = _mod
+        _inner = await cli_command({**body, "command": _base})
+        _inner["output"] = _apply_output_modifier(
+            _inner.get("output", ""), _kind, _arg)
+        return _inner
 
     # ── terminal length/width/monitor 等（実機と同様、表示設定のみで
     # 状態には影響しない）── unicon等の自動化ツールが接続直後に必ず
@@ -724,13 +872,42 @@ async def cli_command(body: dict):
     if snmp_out is not None:
         return {"output": snmp_out, "mode": state.mode, "hostname": state.hostname}
 
+    # ══════════════════════════════════════════════════════
+    # CLIディスパッチの順序（重要）
+    # ══════════════════════════════════════════════════════
+    # このエミュレータは CLI を2層で処理する。上から順に見て、
+    # **最初に非Noneを返した層が勝つ**。
+    #
+    #   1. app.py の handle_protocol_show(...)    … show系
+    #   2. app.py の handle_protocol_config(...)  … 設定系
+    #   3. engine/rules.py の RuleEngine.process(...) … 上記で拾われな
+    #      かったものの受け皿（ベンダ別の既定応答・補完・ヘルプなど）
+    #
+    # したがって **app.py 側に同じコマンドのハンドラがあると、
+    # rules.py 側の実装には決して到達しない**。rules.py にある
+    # `_show_ip_route` のように「app.py 側が条件付きでフォールスルー
+    # したときだけ動く」コードが存在するので、rules.py を直すときは
+    # 先に app.py 側で拾われていないかを必ず確認すること。
+    # （app.py 側を直さずに rules.py を直して「変わらない」と悩む、
+    #   という事故が繰り返し起きている）
+    #
+    # 新しいコマンドを足すときの原則:
+    #   - プロトコルエンジンの状態を読む/書くもの → app.py 側
+    #   - 装置種別ごとの定型応答・ヘルプ・補完     → rules.py 側
     # ── プロトコル動的show（エンジンが起動していればエンジンの出力を優先）──
     proto_output = await handle_protocol_show(device_id, command, state)
     if proto_output is not None:
         return {"output": proto_output, "mode": state.mode, "hostname": state.hostname}
 
     # ── プロトコル設定コマンド検出 ──
-    await handle_protocol_config(device_id, command, state)
+    # 戻り値は基本的に使わない(ここでは主に副作用目的の呼び出し)が、
+    # エラーメッセージ文字列を返している箇所だけは黙殺せずCLI出力に反映する
+    # （以前は常に握り潰されており、不正値を入れてもエラーが一切
+    # 表示されなかった）。空文字列/Noneは従来通り後続のrule_engine処理に
+    # フォールスルーする。
+    config_out = await handle_protocol_config(device_id, command, state)
+    if config_out:
+        return {"output": config_out, "mode": state.mode, "hostname": state.hostname}
 
     # ── NX-OS TACACS+ / AAA 設定 ──
     tacacs_out = _handle_nexus_tacacs_config(device_id, command, state)
@@ -858,11 +1035,14 @@ async def cli_command(body: dict):
         if ollama_out:
             output = ollama_out
 
-    return {
+    result = {
         "output": output,
         "mode": state.mode,
         "hostname": state.hostname,
     }
+    if state.device_type == 'ipcom':
+        result["ipcom_admin"] = getattr(state, '_ipcom_admin', False)
+    return result
 
 
 
@@ -905,6 +1085,16 @@ async def _flap_interface_down(device_id: str, state, iface_for_flap: str):
     # HSRP object tracking: このIFをtrack対象にしているグループがあれば
     # priorityを下げる（グループ自体のIFがdownする場合とは別経路）
     await vrrp_engine.hsrp_track_down(device_id, iface_for_flap)
+    # 実OSPFリスナーは lo 上で待ち受けているため、装置側のIFをshutdown
+    # しても勝手には落ちない。落としたIFのIPで待ち受けているリスナーを
+    # 明示的に停止しないと、隣接がFullのまま残って学習経路も撤回されず、
+    # フローティングスタティック等のバックアップ経路へ切り替わらない。
+    _down_ip = state.interfaces.get(iface_for_flap, {}).get('ip', '')
+    if _down_ip:
+        from engine.real_ospf_agent import _running_agents, stop_ospf_agent
+        _resp = _running_agents.get(device_id)
+        if _resp is not None and getattr(_resp, 'my_ip', '') == _down_ip:
+            stop_ospf_agent(device_id, 'interface shutdown')
     peer_ids = vnet.get_peers_on_interface(device_id, iface_for_flap)
     if peer_ids:
         await ospf_engine.interface_down(device_id, peer_ids)
@@ -962,6 +1152,11 @@ async def _flap_interface_up(device_id: str, state, iface_for_flap: str):
     # EIGRP: 復旧したリンクの相手と隣接を張り直す
     await eigrp_engine.interface_up(
         device_id, vnet.get_peers_on_interface(device_id, iface_for_flap))
+    # OSPF: shutdownで停止した実リスナーを再起動して隣接を張り直す
+    _on = ospf_engine.nodes.get(device_id)
+    if _on and _on.get('enabled'):
+        from engine.real_ospf_agent import ensure_ospf_agent
+        ensure_ospf_agent(device_id, device_sessions, ospf_engine)
     # STP: リンク回復を両端に通知（ポート再追加・再収束）
     _peers_up = vnet.get_peers_on_interface(device_id, iface_for_flap)
     if stp_engine.nodes.get(device_id, {}).get('enabled') or any(
@@ -988,6 +1183,29 @@ async def _flap_interface_up(device_id: str, state, iface_for_flap: str):
 # ══════════════════════════════════════════
 # プロトコルコマンド処理
 # ══════════════════════════════════════════
+def orig_groups(m, orig):
+    """小文字化したコマンドでのマッチ結果から、大小文字を保った値を取り出す。
+
+    このコードベースは判定用に `c = command.lower()` を使う慣習だが、
+    その match オブジェクトから値（名前・鍵・ホスト名・ファイル名など）を
+    そのまま取り出すと大小文字が潰れる。実害が出た例:
+      - snmp-server community / neighbor password / tacacs-server key
+        … 認証情報が小文字化され、本物のクライアントから認証できない
+      - route-map / ACL 名 … running-config が投入した名前と食い違う
+      - ZBFW の policy-map 名、Si-Rの事前共有鍵、ISMUのファイル名、
+        MDTのxpath … 過去に同じ原因で4件のバグを出している
+    同じパターンを元コマンドに当て直して、大小文字を保った match を返す。
+    元コマンドに当たらなければ元の match をそのまま返す（安全側）。
+    """
+    if m is None:
+        return None
+    try:
+        om = re.match(m.re.pattern, orig, m.re.flags | re.IGNORECASE)
+    except re.error:
+        return m
+    return om or m
+
+
 async def handle_protocol_config(device_id: str, command: str, state: DeviceState):
     """設定コマンドを検出してプロトコルエンジンを起動/更新"""
     c = command.lower().strip()
@@ -1203,9 +1421,10 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # "route-map AWS-PRIMARY-IN permit 10"
     rm_def = re.match(r'^route-map\s+(\S+)\s+(permit|deny)(?:\s+(\d+))?', c)
     if rm_def:
-        state._current_route_map = rm_def.group(1)
+        _og = orig_groups(rm_def, orig)
+        state._current_route_map = _og.group(1)
         # 空のマップを用意（set句が無くても存在させる）
-        bgp_engine.add_route_map(device_id, rm_def.group(1))
+        bgp_engine.add_route_map(device_id, _og.group(1))
         return
     # route-map内 "set as-path prepend 65000 65000"
     rm_prepend = re.match(r'^set\s+as-path\s+prepend\s+([\d\s]+)', c)
@@ -1756,11 +1975,38 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         ipfilter_engine.add_rule(device_id, num, action, proto, src, dst,
                                  dst_port=port)
         return
+    # Cisco名前付き標準ACL: "ip access-list standard MGMT_ACL" → サブモードへ
+    # NETCONF/RESTCONFのサービスレベルACL(送信元アドレスだけで絞る)は
+    # 標準ACLで書くのが通例だが、標準ACL自体が未実装だった。
+    m_std_acl = re.match(r'^ip\s+access-list\s+standard\s+(\S+)\s*$', orig, re.I)
+    if m_std_acl:
+        state.mode = 'config-std-nacl'
+        state._current_acl_name = m_std_acl.group(1)
+        ipfilter_engine.acls[device_id].setdefault(m_std_acl.group(1), [])
+        ipfilter_engine.acl_kind[device_id][m_std_acl.group(1)] = 'standard'
+        return
+    if state.mode == 'config-std-nacl':
+        # [<seq>] permit|deny {any | host A.B.C.D | A.B.C.D W.W.W.W | A.B.C.D}
+        m_std_rule = re.match(
+            r'^(?:(\d+)\s+)?(permit|deny)\s+'
+            r'(any|host\s+[\d.]+|[\d.]+(?:\s+[\d.]+)?)\s*$', orig, re.I)
+        if m_std_rule:
+            acl_name = getattr(state, '_current_acl_name', None)
+            if acl_name:
+                ipfilter_engine.add_rule(
+                    device_id, acl_name, m_std_rule.group(2).lower(),
+                    protocol='ip', src=m_std_rule.group(3).strip(), dst='any',
+                    seq=int(m_std_rule.group(1)) if m_std_rule.group(1) else None)
+            return
+        if re.match(r'^remark\s+', orig, re.I):
+            return
+
     # Cisco名前付き拡張ACL: "ip access-list extended TEST_ACL" → サブモードへ
     m_named_acl = re.match(r'^ip\s+access-list\s+extended\s+(\S+)', orig, re.I)
     if m_named_acl:
         state.mode = 'config-ext-nacl'
         state._current_acl_name = m_named_acl.group(1)
+        ipfilter_engine.acl_kind[device_id][m_named_acl.group(1)] = 'extended'
         return
     # 名前付き拡張ACLサブモード内: "permit ip 10.0.0.0 0.0.0.255 any" 等
     if state.mode == 'config-ext-nacl':
@@ -1795,8 +2041,9 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ACL適用: Cisco "ip access-group 10 in" / Si-R "lan 0 acl NAME in"
     acl_apply = re.match(r'^ip\s+access-group\s+(\S+)\s+(in|out)', c)
     if acl_apply:
+        _og = orig_groups(acl_apply, orig)
         ipfilter_engine.apply_acl(device_id, 'lan0', acl_apply.group(2),
-                                  acl_apply.group(1))
+                                  _og.group(1))
         return
     sir_acl_apply = re.match(r'^lan\s+(\d+)\s+acl\s+(\S+)\s+(in|out)', orig, re.I)
     if sir_acl_apply:
@@ -1905,10 +2152,21 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # Cisco: "snmp-server community public ro"
     snmp_comm = re.match(r'^snmp-server\s+community\s+(\S+)\s+(ro|rw|read-only|read-write)', c)
     if snmp_comm:
-        name, perm = snmp_comm.group(1), snmp_comm.group(2)
+        _og = orig_groups(snmp_comm, orig)
+        name, perm = _og.group(1), snmp_comm.group(2)
         perm = 'ro' if perm in ('ro', 'read-only') else 'rw'
-        if not any(c_['name'] == name for c_ in state.snmp_community):
+        # 既存の名前を再指定したら権限を更新する（実機の挙動）。
+        # 以前は既存名を丸ごと無視していたため、ro→rw の変更が効かなかった。
+        for c_ in state.snmp_community:
+            if c_['name'] == name:
+                c_['perm'] = perm
+                break
+        else:
             state.snmp_community.append({'name': name, 'perm': perm})
+        # 設定したコミュニティをSNMPエージェント側へ反映する。これが無いと
+        # 装置作成時の既定(public)のまま残り、設定したコミュニティでは
+        # 読めず public では読めてしまう、という逆の状態になる。
+        _register_icmp(device_id)
         return
     # Cisco: "snmp-server host 192.168.1.200 traps public"
     snmp_host = re.match(r'^snmp-server\s+host\s+([\d.]+)'
@@ -1988,7 +2246,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # (実機と同様、直前に選択されたユーザーへの「カレント」設定として動作する)
     sir_snmp_user_name = re.match(r'^snmp\s+user\s+name\s+(\S+)$', c)
     if sir_snmp_user_name and hasattr(state, 'sir_snmp_users'):
-        _name = sir_snmp_user_name.group(1)
+        _name = orig_groups(sir_snmp_user_name, orig).group(1)
         state.sir_snmp_users.setdefault(_name, {
             'address': '', 'auth': 'none', 'priv': 'none',
             'write': 'none', 'read': 'all', 'read_view': None,
@@ -2032,6 +2290,19 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         views.append({'subtree_number': subtree_number,
                       'type': sir_snmp_view.group(3), 'name': sir_snmp_view.group(4)})
         views.sort(key=lambda v: v['subtree_number'])
+        return
+    # no snmp-server community [<name>] — 名前を省くと全削除
+    # （未実装だったため、一度設定したコミュニティを消せなかった）
+    no_comm = re.match(r'^no\s+snmp-server\s+community(?:\s+(\S+))?'
+                       r'(?:\s+(?:ro|rw|read-only|read-write))?\s*$', c)
+    if no_comm:
+        name = orig_groups(no_comm, orig).group(1)
+        if name:
+            state.snmp_community = [c_ for c_ in state.snmp_community
+                                    if c_['name'] != name]
+        else:
+            state.snmp_community = []
+        _register_icmp(device_id)
         return
     # no snmp-server host
     no_snmp = re.match(r'^no\s+snmp-server\s+host\s+([\d.]+)', c)
@@ -2272,7 +2543,32 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             return
 
     # ── OSPF ──
+    # Apresia(ApresiaLightGM200等)は実機マニュアルにOSPF自体のコマンド
+    # 体系が存在しない(L2アクセススイッチのため)。他機種と違い
+    # device_typeでの除外が無かったため、実機では通らないはずの
+    # "router ospf"がそのまま受理されOSPFが起動してしまっていた。
+    # "no router ospf <n>" はどのハンドラにも一致せず素通りしていたため、
+    # OSPFプロセスが消えず(show ip protocolsに残る)、学習経路も
+    # show ip route に残り続けていた。実機同様にプロセスごと落とす。
+    no_ospf_m = re.match(r'^no\s+router\s+ospf(?:\s+(\d+))?\s*$', c)
+    if no_ospf_m and state.device_type != 'apresia':
+        from engine.real_ospf_agent import stop_ospf_agent
+        stop_ospf_agent(device_id, 'process removed')
+        await ospf_engine.stop(device_id)
+        onode = ospf_engine.nodes.get(device_id)
+        if onode:
+            onode['routes'] = []
+            onode['networks'] = []
+            onode['lsdb'] = {}
+            onode.get('_learned_external', {}).clear()
+        state._routing_mode = None
+        state._ospf_networks = []
+        state._ospf_pending = False
+        return ''
+
     ospf_m = re.match(r'^router\s+ospf\s+(\d+)', c)
+    if ospf_m and state.device_type == 'apresia':
+        return "% Invalid input detected at '^' marker."
     if ospf_m and not (state.device_type == 'nexus' and
                        'ospf' not in getattr(state, 'nx_features', set())):
         state._routing_mode = 'ospf'
@@ -2283,7 +2579,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         state._bgp_pending = False
         # ★ returnしない → RuleEngineがmode='config-router'に遷移する
     # Si-R: "ospf use on" / "ospf area <area>"
-    if re.match(r'^ospf\s+use\s+on', c):
+    if re.match(r'^ospf\s+use\s+on', c) and state.device_type != 'apresia':
         state._routing_mode = 'ospf'
         state._ospf_process = getattr(state, '_ospf_process', 1)
         state._ospf_networks = getattr(state, '_ospf_networks', [])
@@ -2313,7 +2609,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                  state._ospf_networks,
                                  getattr(state, '_ospf_area', '0.0.0.0'))
         ospf_engine.ensure_auto_router_id(
-            device_id, _pick_ospf_default_router_id(state))
+            device_id, _pick_ospf_default_router_id(state, device_id))
         from engine.real_ospf_agent import ensure_ospf_agent
         ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
@@ -2351,7 +2647,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                 state._ospf_networks,
                                 state._ospf_area)
         ospf_engine.ensure_auto_router_id(
-            device_id, _pick_ospf_default_router_id(state))
+            device_id, _pick_ospf_default_router_id(state, device_id))
         from engine.real_ospf_agent import ensure_ospf_agent
         ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return ''
@@ -2362,6 +2658,19 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         ospf_engine.set_router_id(device_id, ospf_rid.group(1))
         if hasattr(state, 'ospf') and isinstance(state.ospf, dict):
             state.ospf['router_id'] = ospf_rid.group(1)
+        return
+
+    # "router-id X.X.X.X" (BGP) — router bgp配下。装置初期状態の
+    # state.bgpにはshow bgp用のもっともらしいダミー値
+    # （asn=65001, router_id="10.1.0.1"）が入っており、router bgp <n>
+    # はasnだけを上書きしてrouter_idを更新していなかったため、
+    # EVPN対応でrouter-idを打ってもshow bgp l2vpn evpn summaryに
+    # 反映されずダミー値のままになっていた不具合を修正
+    bgp_rid = re.match(r'^router-id\s+([\d.]+)', c)
+    if (bgp_rid and state.mode == 'config-router'
+            and getattr(state, '_current_router', '') == 'bgp'):
+        if hasattr(state, 'bgp') and isinstance(state.bgp, dict):
+            state.bgp['router_id'] = bgp_rid.group(1)
         return
 
     # "network 10.0.0.0 0.0.0.255 area 0" (Cisco IOS形式)
@@ -2389,7 +2698,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                  state._ospf_networks,
                                  state._ospf_area)
         ospf_engine.ensure_auto_router_id(
-            device_id, _pick_ospf_default_router_id(state))
+            device_id, _pick_ospf_default_router_id(state, device_id))
         from engine.real_ospf_agent import ensure_ospf_agent
         ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
@@ -2409,7 +2718,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                                  getattr(state, '_ospf_process', 1),
                                  state._ospf_networks, area)
         ospf_engine.ensure_auto_router_id(
-            device_id, _pick_ospf_default_router_id(state))
+            device_id, _pick_ospf_default_router_id(state, device_id))
         from engine.real_ospf_agent import ensure_ospf_agent
         ensure_ospf_agent(device_id, device_sessions, ospf_engine)
         return
@@ -2458,7 +2767,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if bgp_m:
         state._routing_mode = 'bgp'
         state._bgp_as = int(bgp_m.group(1))
-        await bgp_engine.start(device_id, hostname, state._bgp_as)
+        await bgp_engine.start(device_id, hostname, state._bgp_as,
+                               _pick_ospf_default_router_id(state, device_id))
         return
     # Si-R: "bgp use on"
     if re.match(r'^bgp\s+use\s+on', c):
@@ -2470,7 +2780,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if sir_bgp_as:
         state._routing_mode = 'bgp'
         state._bgp_as = int(sir_bgp_as.group(1))
-        await bgp_engine.start(device_id, hostname, state._bgp_as)
+        await bgp_engine.start(device_id, hostname, state._bgp_as,
+                               _pick_ospf_default_router_id(state, device_id))
         return
     # Si-R: "bgp neighbor <n> address <ip> remote-as <as>"
     sir_bgp_nbr = re.match(r'^bgp\s+neighbor\s+\d+\s+(?:address\s+)?(\S+)\s+remote-as\s+(\d+)', c)
@@ -2511,7 +2822,8 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ── AWS DX/VPN: neighbor <ip> password <pw>（TCP MD5認証）──
     bgp_pw = re.match(r'^neighbor\s+([\d.]+)\s+password\s+(?:\d\s+)?(\S+)', c)
     if bgp_pw and getattr(state, '_routing_mode', '') == 'bgp':
-        nip, pw = bgp_pw.group(1), bgp_pw.group(2)
+        _og = orig_groups(bgp_pw, orig)
+        nip, pw = bgp_pw.group(1), _og.group(2)
         peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
         if peer_id:
             bgp_engine.set_neighbor_password(device_id, peer_id, pw)
@@ -2519,7 +2831,9 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ── neighbor <ip> route-map <name> in|out（AS-path prepend / local-pref適用）──
     bgp_rm = re.match(r'^neighbor\s+([\d.]+)\s+route-map\s+(\S+)\s+(in|out)', c)
     if bgp_rm and getattr(state, '_routing_mode', '') == 'bgp':
-        nip, rmname, direction = bgp_rm.group(1), bgp_rm.group(2), bgp_rm.group(3)
+        _og = orig_groups(bgp_rm, orig)
+        nip, rmname, direction = (bgp_rm.group(1), _og.group(2),
+                                  bgp_rm.group(3))
         peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
         if peer_id:
             bgp_engine.set_neighbor_route_map(device_id, peer_id, rmname, direction)
@@ -2578,13 +2892,499 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             pri = n['bridge_priority'] if (n and n.get('bridge_priority', 32768) != 32768) else 32768
         await stp_engine.start(device_id, hostname, mode, pri)
         return
-    # Si-R: "stp mode stp" / "stp mode rstp"
-    sir_stp_mode = re.match(r'^stp\s+mode\s+(stp|rstp)', c)
+    # Si-R: "stp mode disable|stp"（マニュアル5.1.1。rstpは実機には無いが
+    # 後方互換のため許容しておく）
+    sir_stp_mode = re.match(r'^stp\s+mode\s+(disable|stp|rstp)', c)
     if sir_stp_mode:
         mode = sir_stp_mode.group(1)
+        if mode == 'disable':
+            n = stp_engine.nodes.get(device_id)
+            if n:
+                n['enabled'] = False
+            return
         pri = getattr(state, '_stp_priority', 32768)
         await stp_engine.start(device_id, hostname, mode, pri)
         return
+    # Si-R: "stp age <max_age>s"（マニュアル5.1.2。6〜40秒）
+    sir_stp_age = re.match(r'^stp\s+age\s+(\d+)s?$', c)
+    if sir_stp_age:
+        val = int(sir_stp_age.group(1))
+        if not (6 <= val <= 40):
+            return ('<ERROR> : 3 : format error\n'
+                    '  (最大有効時間は6〜40秒で指定してください)')
+        state._sir_stp_age = val
+        n = stp_engine.nodes.get(device_id)
+        if n:
+            n['max_age'] = val
+        return
+    # Si-R: "stp delay <delay_time>s"（マニュアル5.1.3。4〜30秒）
+    sir_stp_delay = re.match(r'^stp\s+delay\s+(\d+)s?$', c)
+    if sir_stp_delay:
+        val = int(sir_stp_delay.group(1))
+        if not (4 <= val <= 30):
+            return ('<ERROR> : 3 : format error\n'
+                    '  (最大中継遅延時間は4〜30秒で指定してください)')
+        state._sir_stp_delay = val
+        n = stp_engine.nodes.get(device_id)
+        if n:
+            n['forward_delay'] = val
+        return
+    # Si-R: "stp hello <time>s"（マニュアル5.1.4。1〜10秒）
+    sir_stp_hello = re.match(r'^stp\s+hello\s+(\d+)s?$', c)
+    if sir_stp_hello:
+        val = int(sir_stp_hello.group(1))
+        if not (1 <= val <= 10):
+            return ('<ERROR> : 3 : format error\n'
+                    '  (Helloメッセージ送信間隔は1〜10秒で指定してください)')
+        state._sir_stp_hello = val
+        n = stp_engine.nodes.get(device_id)
+        if n:
+            n['sir_hello_time'] = val
+        return
+    # Si-R: "stp domain <instance_id> priority <priority>"（マニュアル5.1.5。
+    # G210/G211/G120/G121はインスタンスID 0のみ。4096刻みの有効値のみ許容）
+    sir_stp_domain_pri = re.match(r'^stp\s+domain\s+(\d+)\s+priority\s+(\d+)$', c)
+    if sir_stp_domain_pri:
+        instance_id, priority = int(sir_stp_domain_pri.group(1)), int(sir_stp_domain_pri.group(2))
+        if instance_id != 0:
+            return ('<ERROR> : 3 : format error\n'
+                    '  (この機種のSTPインスタンスIDは0のみです)')
+        if not (0 <= priority <= 61440 and priority % 4096 == 0):
+            return ('<ERROR> : 3 : format error\n'
+                    '  (優先度は0〜61440の4096刻みで指定してください)')
+        state._stp_priority = priority
+        n = stp_engine.nodes.get(device_id)
+        if n and n.get('enabled'):
+            await stp_engine.start(device_id, hostname, n['mode'], priority)
+        return
+
+    # ── モデルベースAAA(NACM)の前提となるAAA設定 ──
+    # 実機もNETCONF/RESTCONFを使うには aaa new-model と
+    # aaa authorization exec が要る。IOSのコマンドなのでIOS系のみ。
+    if state.device_type in ('cisco', 'catalyst'):
+        if re.match(r'^aaa\s+new-model$', c):
+            state.aaa_new_model = True
+            return ''
+        if re.match(r'^no\s+aaa\s+new-model$', c):
+            state.aaa_new_model = False
+            return ''
+        m_aaa_exec = re.match(
+            r'^aaa\s+authorization\s+exec\s+default\s+'
+            r'(?:group\s+(\S+)(\s+local)?|(local))$', c)
+        if m_aaa_exec:
+            m_o = re.match(r'^aaa\s+authorization\s+exec\s+default\s+'
+                           r'(?:group\s+(\S+)(\s+local)?|(local))$',
+                           orig, re.I)
+            state.aaa_authorization_exec = {
+                'group': (m_o or m_aaa_exec).group(1) or '',
+                'local_fallback': bool(m_aaa_exec.group(2)
+                                       or m_aaa_exec.group(3)),
+            }
+            return ''
+        if re.match(r'^no\s+aaa\s+authorization\s+exec\s+default', c):
+            state.aaa_authorization_exec = None
+            return ''
+
+        # username <name> [privilege <0-15>] {password|secret} [0|5|7] <pw>
+        # 従来は受理するだけで装置状態に保存しておらず、NETCONFの認証も
+        # NACMのグループ判定も admin 固定でしか試せなかった。
+        m_user = re.match(
+            r'^username\s+(\S+)(?:\s+privilege\s+(\d+))?'
+            r'(?:\s+(?:password|secret)(?:\s+[057])?\s+(\S+))?\s*$', orig, re.I)
+        if m_user and state.mode == 'config':
+            name = m_user.group(1)
+            priv = int(m_user.group(2)) if m_user.group(2) else 1
+            if not 0 <= priv <= 15:
+                return '% Invalid privilege level'
+            users = [u for u in (getattr(state, 'users', []) or [])
+                     if u.get('name') != name]
+            users.append({'name': name, 'privilege': priv,
+                          'password': m_user.group(3) or ''})
+            state.users = users
+            return ''
+        m_no_user = re.match(r'^no\s+username\s+(\S+)', orig, re.I)
+        if m_no_user and state.mode == 'config':
+            state.users = [u for u in (getattr(state, 'users', []) or [])
+                           if u.get('name') != m_no_user.group(1)]
+            return ''
+
+        # enable secret/password（`enable`によるprivileged EXECへの
+        # 昇格に使う。SSH/Telnet CLIサーバがこれと突き合わせる。
+        # secret があれば実機同様 secret を優先する）
+        m_enable = re.match(r'^enable\s+(secret|password)(?:\s+[057])?'
+                            r'\s+(\S+)\s*$', orig, re.I)
+        if m_enable and state.mode == 'config':
+            kind, pw = m_enable.group(1).lower(), m_enable.group(2)
+            if kind == 'secret':
+                state.enable_secret = pw
+            else:
+                state.enable_password = pw
+            return ''
+        m_no_enable = re.match(r'^no\s+enable\s+(secret|password)\s*$',
+                               orig, re.I)
+        if m_no_enable and state.mode == 'config':
+            attr = ('enable_secret' if m_no_enable.group(1).lower() == 'secret'
+                   else 'enable_password')
+            if hasattr(state, attr):
+                delattr(state, attr)
+            return ''
+
+    # ── EEM / アプリケーションホスティング / OpenFlow ──
+    if state.device_type in ('cisco', 'catalyst'):
+        _p = _handle_programmability(device_id, command, orig, c, state)
+        if _p is not None:
+            return _p
+
+    # ── モデル駆動型テレメトリ（MDT / telemetry ietf subscription）──
+    # 実機構文:
+    #   telemetry ietf subscription <id>
+    #    encoding encode-kvgpb | encode-json
+    #    filter xpath <xpath>
+    #    source-address <ip>
+    #    stream yang-push | native
+    #    update-policy periodic <centiseconds> | on-change
+    #    receiver ip address <ip> <port> protocol grpc-tcp|cntp-tcp|native
+    if state.device_type in ('cisco', 'catalyst'):
+        m_mdt = re.match(r'^(no\s+)?telemetry\s+ietf\s+subscription\s+(\d+)\s*$', c)
+        if m_mdt:
+            subs = getattr(state, 'mdt_subscriptions', None)
+            if subs is None:
+                subs = state.mdt_subscriptions = {}
+            sid = int(m_mdt.group(2))
+            if m_mdt.group(1):
+                subs.pop(sid, None)
+                return ''
+            subs.setdefault(sid, {
+                'id': sid, 'type': 'Configured', 'stream': '',
+                'encoding': '', 'xpath': '', 'source_address': '',
+                'trigger': '', 'period': None, 'receivers': [],
+            })
+            state.mode = 'config-mdt'
+            state._mdt_sub = sid
+            return ''
+        if state.mode == 'config-mdt':
+            sub = (getattr(state, 'mdt_subscriptions', {}) or {}).get(
+                getattr(state, '_mdt_sub', None))
+            if sub is not None:
+                m = re.match(r'^encoding\s+(encode-kvgpb|encode-json|encode-xml)$', c)
+                if m:
+                    sub['encoding'] = m.group(1)
+                    return ''
+                m = re.match(r'^filter\s+xpath\s+(\S+)$', orig, re.I)
+                if m:
+                    sub['xpath'] = m.group(1)
+                    return ''
+                m = re.match(r'^source-address\s+([\d.]+)$', c)
+                if m:
+                    sub['source_address'] = m.group(1)
+                    return ''
+                m = re.match(r'^stream\s+(yang-push|native)$', c)
+                if m:
+                    sub['stream'] = m.group(1)
+                    return ''
+                m = re.match(r'^update-policy\s+periodic\s+(\d+)$', c)
+                if m:
+                    period = int(m.group(1))
+                    # 実機は100～4294967295センチ秒
+                    if period < 100:
+                        return ('% Period must be at least 100 centiseconds '
+                                '(1 second)')
+                    sub['trigger'] = 'periodic'
+                    sub['period'] = period
+                    return ''
+                if re.match(r'^update-policy\s+on-change$', c):
+                    sub['trigger'] = 'on-change'
+                    sub['period'] = None
+                    return ''
+                m = re.match(r'^receiver\s+ip\s+address\s+([\d.]+)\s+(\d+)'
+                             r'\s+protocol\s+(grpc-tcp|cntp-tcp|native|tls)$', c)
+                if m:
+                    rcv = {'address': m.group(1), 'port': int(m.group(2)),
+                           'protocol': m.group(3), 'state': 'Connected'}
+                    sub['receivers'] = [r for r in sub['receivers']
+                                        if not (r['address'] == rcv['address']
+                                                and r['port'] == rcv['port'])]
+                    sub['receivers'].append(rcv)
+                    return ''
+                m = re.match(r'^no\s+receiver\s+ip\s+address\s+([\d.]+)\s+(\d+)', c)
+                if m:
+                    sub['receivers'] = [
+                        r for r in sub['receivers']
+                        if not (r['address'] == m.group(1)
+                                and r['port'] == int(m.group(2)))]
+                    return ''
+
+    # ── gNMI / gNXI（IOS-XE 17.3以降は gnmi-yang ではなく gnxi 系）──
+    #   gnxi                 … 機能の有効化
+    #   gnxi server          … 非TLSサーバ（既定ポート 50052）
+    #   gnxi port <n>
+    #   gnxi secure-init / secure-server / secure-port <n> / secure-password-auth
+    if state.device_type in ('cisco', 'catalyst'):
+        m_gnxi = re.match(r'^(no\s+)?gnxi'
+                          r'(?:\s+(server|secure-server|secure-init|'
+                          r'secure-password-auth|secure-allow-self-signed-trustpoint))?'
+                          r'(?:\s+(port|secure-port)\s+(\d+))?\s*$', c)
+        if m_gnxi:
+            from engine.gnmi_agent import (ensure_gnmi_agent,
+                                           stop_gnmi_agent)
+            neg = bool(m_gnxi.group(1))
+            sub = m_gnxi.group(2)
+            portkind, portnum = m_gnxi.group(3), m_gnxi.group(4)
+            if portkind:
+                p = int(portnum)
+                if not 1 <= p <= 65535:
+                    return '% Invalid port number'
+                if portkind == 'port':
+                    state.gnxi_port = 50052 if neg else p
+                else:
+                    state.gnxi_secure_port = 9339 if neg else p
+                # ポート変更は再起動しないと効かない
+                stop_gnmi_agent(device_id)
+                ensure_gnmi_agent(device_id, device_sessions,
+                                  on_change=lambda: _register_icmp(device_id))
+                return ''
+            if sub is None:
+                state.gnxi_enabled = not neg
+                if neg:
+                    state.gnxi_server = False
+                    state.gnxi_secure_server = False
+                    stop_gnmi_agent(device_id)
+                return ''
+            if sub == 'server':
+                if not getattr(state, 'gnxi_enabled', False):
+                    return '% Enable "gnxi" first'
+                state.gnxi_server = not neg
+                _register_icmp(device_id)
+                if neg:
+                    stop_gnmi_agent(device_id)
+                else:
+                    ensure_gnmi_agent(device_id, device_sessions,
+                                      on_change=lambda: _register_icmp(device_id))
+                return ''
+            if sub == 'secure-server':
+                if not getattr(state, 'gnxi_enabled', False):
+                    return '% Enable "gnxi" first'
+                if not getattr(state, 'gnxi_secure_init', False):
+                    return ('% Run "gnxi secure-init" before enabling '
+                            'the secure server')
+                state.gnxi_secure_server = not neg
+                return ''
+            if sub == 'secure-init':
+                state.gnxi_secure_init = not neg
+                if not neg:
+                    state.gnxi_trustpoint = 'gnxi-cert'
+                return ''
+            if sub == 'secure-password-auth':
+                state.gnxi_secure_password_auth = not neg
+                return ''
+            if sub == 'secure-allow-self-signed-trustpoint':
+                state.gnxi_self_signed = not neg
+                return ''
+
+    # ── NETCONF/RESTCONF サービスレベルACL ──
+    # 実機構文:
+    #   netconf-yang ssh {ipv4|ipv6} access-list name <acl>
+    #   netconf-yang ssh port <n>
+    #   restconf {ipv4|ipv6} access-list name <acl>
+    # インタフェースACLと違い、サービスへの着信を送信元アドレスだけで絞る。
+    if state.device_type in ('cisco', 'catalyst'):
+        m_nc_acl = re.match(
+            r'^(no\s+)?netconf-yang\s+ssh\s+(ipv4|ipv6)\s+'
+            r'access-list\s+name\s+(\S+)', orig, re.I)
+        if m_nc_acl:
+            acls = getattr(state, 'netconf_service_acl', {}) or {}
+            if m_nc_acl.group(1):
+                acls.pop(m_nc_acl.group(2).lower(), None)
+            else:
+                acls[m_nc_acl.group(2).lower()] = m_nc_acl.group(3)
+            state.netconf_service_acl = acls
+            return ''
+        m_nc_port = re.match(r'^(no\s+)?netconf-yang\s+ssh\s+port\s+(\d+)', c)
+        if m_nc_port:
+            if m_nc_port.group(1):
+                state.netconf_ssh_port = 830
+            else:
+                port = int(m_nc_port.group(2))
+                if not 1 <= port <= 65535:
+                    return '% Invalid port number'
+                state.netconf_ssh_port = port
+            return ''
+        m_rc_acl = re.match(
+            r'^(no\s+)?restconf\s+(ipv4|ipv6)\s+access-list\s+name\s+(\S+)',
+            orig, re.I)
+        if m_rc_acl:
+            acls = getattr(state, 'restconf_service_acl', {}) or {}
+            if m_rc_acl.group(1):
+                acls.pop(m_rc_acl.group(2).lower(), None)
+            else:
+                acls[m_rc_acl.group(2).lower()] = m_rc_acl.group(3)
+            state.restconf_service_acl = acls
+            return ''
+
+    # ── line vty / transport input ──
+    # 以前は running-config に "transport input ssh telnet" が固定で
+    # 書かれているだけで、コマンドが未実装だった。つまり telnet を
+    # 止める手段が無く、平文管理の所見を直せなかった。
+    if state.device_type in ('cisco', 'catalyst'):
+        m_line = re.match(r'^line\s+(vty)\s+(\d+)(?:\s+(\d+))?\s*$', c)
+        if m_line and state.mode in ('config', 'config-line'):
+            state.mode = 'config-line'
+            state._vty_range = (int(m_line.group(2)),
+                                int(m_line.group(3) or m_line.group(2)))
+            return ''
+        m_ti = re.match(r'^transport\s+input\s+(.+)$', c)
+        if m_ti and state.mode == 'config-line':
+            words = m_ti.group(1).split()
+            allowed = set()
+            for w in words:
+                if w == 'all':
+                    allowed |= {'ssh', 'telnet'}
+                elif w == 'none':
+                    allowed = set()
+                    break
+                elif w in ('ssh', 'telnet'):
+                    allowed.add(w)
+                else:
+                    return f'% Invalid input detected at \'^\' marker.\n  {w}'
+            state.vty_transport_input = allowed
+            # telnet の許可/不許可をそのまま実リスナーに反映する
+            from engine.telnet_cli_agent import ensure_telnet_cli_agent
+            ensure_telnet_cli_agent(device_id, device_sessions, _run_cli_sync)
+            return ''
+
+    # ── crypto key generate rsa ── 実機はRSA鍵を作って初めてSSHが
+    # 起動する。ここで TCP/22 の実CLIリスナーを立ち上げるので、
+    # 本物のSSHクライアントでログインして show コマンドを打てる。
+    if state.device_type in ('cisco', 'catalyst'):
+        m_key = re.match(r'^crypto\s+key\s+generate\s+rsa'
+                         r'(?:\s+(?:general-keys|usage-keys))?'
+                         r'(?:\s+modulus\s+(\d+))?\s*$', c)
+        if m_key and state.mode == 'config':
+            modulus = int(m_key.group(1)) if m_key.group(1) else 1024
+            if not 360 <= modulus <= 4096:
+                return '% Invalid modulus size'
+            state.ssh_rsa_key = True
+            state.ssh_rsa_modulus = modulus
+            from engine.ssh_cli_agent import ensure_ssh_cli_agent
+            ensure_ssh_cli_agent(device_id, device_sessions, _run_cli_sync)
+            return (f'The name for the keys will be: {state.hostname}.netlab\n'
+                    f'% The key modulus size is {modulus} bits\n'
+                    f'% Generating {modulus} bit RSA keys, keys will be '
+                    f'non-exportable...\n[OK]')
+        m_nokey = re.match(r'^crypto\s+key\s+zeroize\s+rsa\s*$', c)
+        if m_nokey and state.mode == 'config':
+            state.ssh_rsa_key = False
+            from engine.ssh_cli_agent import stop_ssh_cli_agent
+            stop_ssh_cli_agent(device_id)
+            return '% All RSA keys will be removed.'
+
+    # ── ip ssh pubkey-chain（SSH公開鍵認証）──
+    # ここまでSSHはパスワード認証のみだった。実機同様、あらかじめ
+    # 登録した公開鍵でも認証できるようにする。
+    #
+    #   ip ssh pubkey-chain
+    #    username netadmin
+    #     key-string
+    #      <base64本体。複数行に分けて貼ってよい>
+    #     exit
+    #    exit
+    #   exit
+    #
+    # key-string配下は「値をそのまま貼り付ける」特殊モードなので、
+    # 通常のコマンド解釈をせず、行をそのまま蓄積して exit/end で確定する。
+    if state.device_type in ('cisco', 'catalyst'):
+        if state.mode == 'config-ssh-pubkey-key':
+            if c in ('exit', 'end'):
+                blob = ''.join(getattr(state, '_ssh_pubkey_buf', []))
+                err = _finalize_ssh_pubkey(state, blob.strip())
+                if hasattr(state, '_ssh_pubkey_buf'):
+                    del state._ssh_pubkey_buf
+                if c == 'end':
+                    for _attr in ('_ssh_pubkey_user', '_ssh_pubkey_buf'):
+                        if hasattr(state, _attr):
+                            delattr(state, _attr)
+                    state.mode = 'exec'
+                else:
+                    state.mode = 'config-ssh-pubkey-user'
+                return err or ''
+            # データ行（大小文字を保ったまま蓄積。base64は大小文字を区別する）
+            if orig.strip():
+                state._ssh_pubkey_buf.append(orig.strip())
+            return ''
+
+        if c == 'ip ssh pubkey-chain' and state.mode == 'config':
+            state.mode = 'config-ssh-pubkey'
+            return ''
+        if c == 'no ip ssh pubkey-chain' and state.mode == 'config':
+            state.ssh_pubkeys = {}
+            return ''
+
+        if state.mode == 'config-ssh-pubkey':
+            m_puser = re.match(r'^username\s+(\S+)\s*$', orig, re.I)
+            if m_puser:
+                state.mode = 'config-ssh-pubkey-user'
+                state._ssh_pubkey_user = m_puser.group(1)
+                return ''
+            m_nopuser = re.match(r'^no\s+username\s+(\S+)\s*$', orig, re.I)
+            if m_nopuser:
+                keys = getattr(state, 'ssh_pubkeys', None) or {}
+                keys.pop(m_nopuser.group(1), None)
+                state.ssh_pubkeys = keys
+                return ''
+
+        if state.mode == 'config-ssh-pubkey-user' and c == 'key-string':
+            state._ssh_pubkey_buf = []
+            state.mode = 'config-ssh-pubkey-key'
+            return ''
+
+    # ── NETCONF-YANG ── netconf-yang を入れると実機同様
+    # SSHの netconf サブシステム(TCP 830)が待ち受けを始める。
+    # ncclient等の実物のNETCONFクライアントから接続できる。
+    if c in ('netconf-yang', 'no netconf-yang') and \
+            state.device_type in ('cisco', 'catalyst'):
+        # 先にrules.py側でstate.netconf_enabledが立つよう、ここでは
+        # フラグを直接見ずコマンド文字列で判断する
+        from engine.netconf_agent import ensure_netconf_agent, stop_netconf_agent
+        if c == 'netconf-yang':
+            state.netconf_enabled = True
+            _register_icmp(device_id)
+            ensure_netconf_agent(device_id, device_sessions,
+                                 on_change=lambda: _register_icmp(device_id))
+        else:
+            state.netconf_enabled = False
+            stop_netconf_agent(device_id)
+        # rules.py側でも running-config 用のフラグ処理をさせるため
+        # ここではreturnしない
+
+    # ── MPLS(LDP) ── Cisco IOS-XE/NX-OS専用（Si-Rは実機に機能自体が無く、
+    # Apresiaはレイヤー2スイッチのためMPLSは対象外。device_typeで除外する）
+    _mpls_capable = state.device_type in ('cisco', 'catalyst', 'nexus')
+    if c == 'mpls ip' and state.mode == 'config':
+        if not _mpls_capable:
+            return "% Invalid input detected at '^' marker."
+        mpls_engine.enable_global(device_id)
+        mpls_engine.refresh_neighbors(device_id)
+        for peer_id in vnet.get_neighbors(device_id):
+            mpls_engine.refresh_neighbors(peer_id)
+        return
+    # インタフェース単位の有効化: "mpls ip"（config-ifモード内）
+    if c == 'mpls ip' and state.mode == 'config-if' and state.current_if:
+        if not _mpls_capable:
+            return "% Invalid input detected at '^' marker."
+        mpls_engine.enable_interface(device_id, state.current_if)
+        mpls_engine.refresh_neighbors(device_id)
+        for peer_id in vnet.get_neighbors(device_id):
+            mpls_engine.refresh_neighbors(peer_id)
+        return
+    if c == 'no mpls ip' and state.mode == 'config-if' and state.current_if:
+        if not _mpls_capable:
+            return "% Invalid input detected at '^' marker."
+        mpls_engine.disable_interface(device_id, state.current_if)
+        mpls_engine.refresh_neighbors(device_id)
+        for peer_id in vnet.get_neighbors(device_id):
+            mpls_engine.refresh_neighbors(peer_id)
+        return
+
     # Cisco: "spanning-tree vlan <vlan-id> priority <priority>"
     stp_vlan_pri = re.match(r'^spanning-tree\s+vlan\s+(\d+)\s+priority\s+(\d+)', c)
     if stp_vlan_pri:
@@ -2986,6 +3786,64 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
             return None
         return arp_engine.format_show_arp(device_id, state.device_type)
 
+    # ── モデル駆動型テレメトリ（MDT）状態表示 ──
+    if state.device_type in ('cisco', 'catalyst'):
+        subs = getattr(state, 'mdt_subscriptions', {}) or {}
+        m_tshow = re.match(r'^show\s+telemetry\s+ietf\s+subscription\s+'
+                           r'(all|\d+)(\s+detail|\s+receiver)?\s*$', c)
+        if m_tshow:
+            what = m_tshow.group(1)
+            mode = (m_tshow.group(2) or '').strip()
+            if what == 'all':
+                out = ['Telemetry subscription brief', '',
+                       'ID               Type        State       Filter type',
+                       '-' * 53]
+                for sid in sorted(subs):
+                    sub = subs[sid]
+                    ftype = 'xpath' if sub['xpath'] else '-'
+                    st_ = 'Valid' if _mdt_valid(sub) else 'Invalid'
+                    out.append(f'{sid:<17}{sub["type"]:<12}{st_:<12}{ftype}')
+                return '\n'.join(out)
+            sid = int(what)
+            sub = subs.get(sid)
+            if sub is None:
+                return f'% Subscription {sid} not found'
+            if mode == 'receiver':
+                if not sub['receivers']:
+                    return f'Subscription ID: {sid}\n(No receivers configured)'
+                out = []
+                for r in sub['receivers']:
+                    out += [f'Subscription ID: {sid}',
+                            f'Address: {r["address"]}',
+                            f'Port: {r["port"]}',
+                            f'Protocol: {r["protocol"]}',
+                            f'State: {r["state"]}']
+                return '\n'.join(out)
+            out = [f'Subscription ID: {sid}',
+                   f'Type: {sub["type"]}',
+                   f'State: {"Valid" if _mdt_valid(sub) else "Invalid"}',
+                   f'Stream: {sub["stream"] or "(not set)"}',
+                   f'Filter type: {"xpath" if sub["xpath"] else "(not set)"}',
+                   f'XPath: {sub["xpath"] or "(not set)"}',
+                   f'Update Trigger: {sub["trigger"] or "(not set)"}']
+            if sub['trigger'] == 'periodic':
+                out.append(f'Period: {sub["period"]}')
+            out += [f'Encoding: {sub["encoding"] or "(not set)"}',
+                    f'Source Address: {sub["source_address"] or "(not set)"}',
+                    '', 'Receivers:',
+                    'Address          Port             Protocol',
+                    '-' * 66]
+            for r in sub['receivers']:
+                out.append(f'{r["address"]:<17}{r["port"]:<17}{r["protocol"]}')
+            return '\n'.join(out)
+
+    # ── gNXI / gNMI 状態表示 ──
+    m_gnxi_show = re.match(r'^show\s+gnxi\s+state(\s+detail)?\s*$', c)
+    if m_gnxi_show and state.device_type in ('cisco', 'catalyst'):
+        from engine.gnmi_agent import format_show_gnxi_state
+        state._device_id = device_id
+        return format_show_gnxi_state(state, detail=bool(m_gnxi_show.group(1)))
+
     # ── ACL / パケットフィルタ表示 ──
     if re.match(r'^show\s+(ip\s+)?access-list', c) or re.match(r'^show\s+acl', c):
         return ipfilter_engine.format_show_acl(device_id, state.device_type)
@@ -3002,6 +3860,18 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
             bgp_engine.nodes.get(device_id, {}).get('enabled'),
         ])
         if has_static or has_dynamic:
+            # 実機は引数で表示を絞る。以前は引数を無視して常に全経路を
+            # 返していたため、"show ip route <宛先>" で採用中の経路の
+            # AD/メトリック/学習元を確認できなかった。
+            m_detail = re.match(r'^show\s+ip\s+route\s+(\d+\.\d+\.\d+\.\d+)\s*$', c)
+            if m_detail:
+                return rib_engine.format_show_ip_route_detail(
+                    device_id, m_detail.group(1))
+            m_proto = re.match(r'^show\s+ip\s+route\s+'
+                               r'(connected|static|ospf|rip|bgp|eigrp)\s*$', c)
+            if m_proto:
+                return rib_engine.format_show_ip_route_proto(
+                    device_id, m_proto.group(1))
             return rib_engine.format_show_ip_route(device_id, state.hostname)
         # どちらもなければルールベースのデフォルト表示に任せる
 
@@ -3023,7 +3893,9 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     if re.match(r'^show\s+ip\s+ospf\s+interface', c):
         return ospf_engine.format_show_ospf_interface(device_id)
     if re.match(r'^show\s+ip\s+ospf\s+neighbor', c):
-        return ospf_engine.format_show_ospf_neighbor(device_id)
+        if state.device_type == 'sir':
+            return _format_ospf_neighbor_sir(device_id)
+        return ospf_engine.format_show_ospf_neighbor(device_id, device_sessions)
     if re.match(r'^show\s+ip\s+ospf\s+database', c):
         return ospf_engine.format_show_ospf_database(device_id)
     if re.match(r'^show\s+ip\s+ospf\s+route', c):
@@ -3092,7 +3964,19 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     if re.match(r'^show\s+spanning-tree', c):
         n = stp_engine.nodes.get(device_id)
         if n and n.get('enabled'):
+            if state.device_type == 'sir':
+                return _format_spanning_tree_sir(device_id, state)
             return stp_engine.format_show_spanning_tree(device_id)
+
+    # MPLS(LDP)
+    if re.match(r'^show\s+mpls\s+interfaces?', c):
+        return mpls_engine.format_show_mpls_interfaces(device_id, state)
+    if re.match(r'^show\s+mpls\s+ldp\s+neighbor', c):
+        return mpls_engine.format_show_mpls_ldp_neighbor(device_id, device_sessions)
+    if re.match(r'^show\s+mpls\s+ldp\s+bindings?', c):
+        return mpls_engine.format_show_mpls_ldp_bindings(device_id)
+    if re.match(r'^show\s+mpls\s+forwarding-table', c):
+        return mpls_engine.format_show_mpls_forwarding_table(device_id)
 
     # プロトコルログ表示
     if re.match(r'^show\s+(protocol\s+)?log', c) or c == 'show logging protocol':
@@ -3352,6 +4236,8 @@ def _build_running_config(device_id: str, state) -> str:
 
     if is_apresia:
         return rule_engine.process('show running-config', state)
+    if state.device_type == 'ipcom':
+        return rule_engine.process('show running-config', state)
 
     # ── NX-OS (Nexus 9000) running-config ──
     if is_nexus:
@@ -3425,6 +4311,8 @@ def _build_running_config(device_id: str, state) -> str:
             if _nve:
                 if _nve.get('source_interface'):
                     body.append(f'  source-interface {_nve["source_interface"]}')
+                if _nve.get('host_reachability_bgp'):
+                    body.append('  host-reachability protocol bgp')
                 for vni, m in sorted(_nve.get('members', {}).items()):
                     suffix = ' associate-vrf' if m.get('associate_vrf') else ''
                     body.append(f'  member vni {vni}{suffix}')
@@ -3508,16 +4396,192 @@ def _build_running_config(device_id: str, state) -> str:
         lines.append('!')
         lines.append(f'hostname {state.hostname}')
         lines.append('!')
+        # enable secret/password（`enable`での昇格に使う。SSH/Telnet
+        # CLIサーバが privilege 15 未満のローカルユーザに対してこれと
+        # 突き合わせる）
+        if getattr(state, 'enable_secret', None):
+            lines.append(f'enable secret {state.enable_secret}')
+        elif getattr(state, 'enable_password', None):
+            lines.append(f'enable password {state.enable_password}')
+        if getattr(state, 'enable_secret', None) or getattr(state, 'enable_password', None):
+            lines.append('!')
+        # ローカルユーザ（NETCONFの認証とNACMのグループ判定に使う）
+        _users = getattr(state, 'users', None) or []
+        if _users:
+            for _u in _users:
+                _p = f' privilege {_u["privilege"]}' if _u.get('privilege', 1) != 1 else ''
+                _pw = f' secret {_u["password"]}' if _u.get('password') else ''
+                lines.append(f'username {_u["name"]}{_p}{_pw}')
+            lines.append('!')
+        # SSH公開鍵（ip ssh pubkey-chain）
+        _pubkeys = getattr(state, 'ssh_pubkeys', None) or {}
+        if _pubkeys:
+            lines.append('ip ssh pubkey-chain')
+            for _uname, _keylist in _pubkeys.items():
+                lines.append(f' username {_uname}')
+                for _entry in _keylist:
+                    _algo, _b64 = _entry.split(' ', 1)
+                    lines.append('  key-string')
+                    # 実機同様、base64本体だけを折り返して出す
+                    for _i in range(0, len(_b64), 64):
+                        lines.append(f'   {_b64[_i:_i + 64]}')
+                    lines.append('  exit')
+                lines.append(' exit')
+            lines.append('exit')
+            lines.append('!')
+        # AAA（モデルベースAAAの前提。NETCONF/RESTCONFを使うには必要）
+        if getattr(state, 'aaa_new_model', False):
+            lines.append('aaa new-model')
+            _ax = getattr(state, 'aaa_authorization_exec', None)
+            if _ax:
+                if _ax.get('group'):
+                    _sfx = ' local' if _ax.get('local_fallback') else ''
+                    lines.append('aaa authorization exec default group '
+                                 f'{_ax["group"]}{_sfx}')
+                else:
+                    lines.append('aaa authorization exec default local')
+            lines.append('!')
         # RESTCONF/NETCONF
         if getattr(state, 'http_secure_server', False):
             lines.append('ip http secure-server')
+        # EEM applet
+        for _an, _ap in (eem_engine.applets.get(device_id, {}) or {}).items():
+            _bypass = (' authorization bypass'
+                       if _ap.get('authorization_bypass') else '')
+            lines.append(f'event manager applet {_an}{_bypass}')
+            for _ev in _ap['events']:
+                if _ev['type'] == 'none':
+                    lines.append(' event none')
+                elif _ev['type'] == 'syslog':
+                    lines.append(f' event syslog pattern "{_ev["pattern"]}"')
+                elif _ev['type'] == 'cli':
+                    lines.append(f' event cli pattern "{_ev["pattern"]}" '
+                                 f'sync {_ev.get("sync", "no")}')
+                elif _ev['type'] == 'timer':
+                    lines.append(f' event timer watchdog time {_ev["time"]}')
+            for _ac in _ap['actions']:
+                if _ac['type'] == 'syslog':
+                    lines.append(f' action {_ac["seq"]} syslog msg "{_ac["arg"]}"')
+                elif _ac['type'] == 'cli':
+                    lines.append(f' action {_ac["seq"]} cli command "{_ac["arg"]}"')
+                else:
+                    lines.append(f' action {_ac["seq"]} {_ac["type"]} "{_ac["arg"]}"')
+            lines.append('!')
+        for _pf, _pd in (eem_engine.policies.get(device_id, {}) or {}).items():
+            lines.append(f'event manager policy {_pf} type {_pd["type"]}')
+        # アプリケーションホスティング
+        if app_hosting_engine.iox_enabled(device_id):
+            lines.append('iox')
+            lines.append('!')
+        for _aid, _app in (app_hosting_engine.apps.get(device_id, {})
+                           or {}).items():
+            lines.append(f'app-hosting appid {_aid}')
+            if _app['vnics']:
+                lines.append(' app-vnic AppGigabitEthernet trunk')
+                for _v in _app['vnics']:
+                    lines.append(f'  vlan {_v["vlan"]} guest-interface '
+                                 f'{_v["guest_interface"]}')
+                    if _v.get('ip'):
+                        lines.append(f'   guest-ipaddress {_v["ip"]} '
+                                     f'netmask {_v["netmask"]}')
+            if _app['gateway']:
+                lines.append(f' app-default-gateway {_app["gateway"]} '
+                             f'guest-interface {_app["gateway_gi"]}')
+            if _app['type'] == 'docker':
+                lines.append(' app-resource docker')
+            if _app['profile'] and _app['profile'] != 'default':
+                lines.append(f' app-resource profile {_app["profile"]}')
+                for _k, _lbl in (('cpu', 'cpu'), ('memory', 'memory'),
+                                 ('disk', 'persist-disk'), ('vcpu', 'vcpu')):
+                    if _app[_k]:
+                        lines.append(f'  {_lbl} {_app[_k]}')
+            if _app['nameserver']:
+                lines.append(f' name-server0 {_app["nameserver"]}')
+            if _app['auto_start']:
+                lines.append(' start')
+            lines.append('!')
+        # OpenFlow
+        _ofn = openflow_engine.nodes.get(device_id)
+        if _ofn and _ofn['feature']:
+            lines.append('feature openflow')
+            lines.append('openflow')
+            for _sid, _sw in _ofn['switches'].items():
+                lines.append(f' switch {_sid} pipeline {_sw["pipeline"]}')
+                for _ct in _sw['controllers']:
+                    _vrf = f' vrf {_ct["vrf"]}' if _ct['vrf'] else ''
+                    lines.append(f'  controller ipv4 {_ct["ip"]} '
+                                 f'port {_ct["port"]}{_vrf} '
+                                 f'security {_ct["security"]}')
+                lines.append(f'  datapath-id {_sw["dpid"]}')
+            lines.append('!')
+        for _sid in sorted(getattr(state, 'mdt_subscriptions', {}) or {}):
+            _sub = state.mdt_subscriptions[_sid]
+            lines.append(f'telemetry ietf subscription {_sid}')
+            if _sub['encoding']:
+                lines.append(f' encoding {_sub["encoding"]}')
+            if _sub['xpath']:
+                lines.append(f' filter xpath {_sub["xpath"]}')
+            if _sub['source_address']:
+                lines.append(f' source-address {_sub["source_address"]}')
+            if _sub['stream']:
+                lines.append(f' stream {_sub["stream"]}')
+            if _sub['trigger'] == 'periodic':
+                lines.append(f' update-policy periodic {_sub["period"]}')
+            elif _sub['trigger'] == 'on-change':
+                lines.append(' update-policy on-change')
+            for _r in _sub['receivers']:
+                lines.append(f' receiver ip address {_r["address"]} '
+                             f'{_r["port"]} protocol {_r["protocol"]}')
+            lines.append('!')
+        if getattr(state, 'gnxi_enabled', False):
+            lines.append('gnxi')
+            if getattr(state, 'gnxi_secure_init', False):
+                lines.append('gnxi secure-init')
+            if getattr(state, 'gnxi_server', False):
+                lines.append('gnxi server')
+            if getattr(state, 'gnxi_port', 50052) != 50052:
+                lines.append(f'gnxi port {state.gnxi_port}')
+            if getattr(state, 'gnxi_secure_server', False):
+                lines.append('gnxi secure-server')
+            if getattr(state, 'gnxi_secure_port', 9339) != 9339:
+                lines.append(f'gnxi secure-port {state.gnxi_secure_port}')
+            if getattr(state, 'gnxi_secure_password_auth', False):
+                lines.append('gnxi secure-password-auth')
+            lines.append('!')
         if getattr(state, 'restconf_enabled', False):
             lines.append('restconf')
+        for _af, _acl in (getattr(state, 'restconf_service_acl', {}) or {}).items():
+            lines.append(f'restconf {_af} access-list name {_acl}')
         if getattr(state, 'netconf_enabled', False):
             lines.append('netconf-yang')
+        for _af, _acl in (getattr(state, 'netconf_service_acl', {}) or {}).items():
+            lines.append(f'netconf-yang ssh {_af} access-list name {_acl}')
+        if getattr(state, 'netconf_ssh_port', 830) != 830:
+            lines.append(f'netconf-yang ssh port {state.netconf_ssh_port}')
         if (getattr(state, 'http_secure_server', False) or
                 getattr(state, 'restconf_enabled', False) or
                 getattr(state, 'netconf_enabled', False)):
+            lines.append('!')
+        # EVPN/VXLAN（Catalyst 9000, IOS-XE構文のスタンドアロンVXLAN EVPN。
+        # NX-OSの"feature nv overlay"+"evpn"に相当するが、IOS-XEには
+        # featureコマンドが無く"l2vpn evpn"配下にinstance/vlan-basedで書く）
+        _l2vpn = getattr(state, 'l2vpn_evpn', None)
+        _evpn_vnis_c = getattr(state, 'evpn_vnis', {})
+        if _l2vpn or _evpn_vnis_c:
+            lines.append('l2vpn evpn')
+            if _l2vpn and _l2vpn.get('replication_type'):
+                lines.append(f' replication-type {_l2vpn["replication_type"]}')
+            if _l2vpn and _l2vpn.get('router_id'):
+                lines.append(f' router-id {_l2vpn["router_id"]}')
+            for vni, v in sorted(_evpn_vnis_c.items()):
+                lines.append(f' instance {vni} vlan-based')
+                if v.get('encapsulation'):
+                    lines.append(f'  encapsulation {v["encapsulation"]}')
+            lines.append('!')
+        _vn_seg_c = getattr(state, 'vlan_vn_segment', {})
+        for vid, vni in sorted(_vn_seg_c.items()):
+            lines.append(f'vlan configuration {vid}')
+            lines.append(f' member evpn-instance {vni} vni {vni}')
             lines.append('!')
         # インタフェース（state.interfacesの全ポートを表示）
         info = icmp_engine.device_ips.get(device_id, {})
@@ -3530,13 +4594,36 @@ def _build_running_config(device_id: str, state) -> str:
         if state_ifaces:
             for ifname, iinfo in state_ifaces.items():
                 lines.append(f'interface {ifname}')
+                # description は実機のrunning-configにも出るが未出力だった。
+                # NETCONF/RESTCONFで description を書いた結果がCLI側の
+                # running-configに現れず、反映されたのか分からなかった。
+                _desc = (state.interfaces.get(ifname, {}).get('desc')
+                         or state.interfaces.get(ifname, {}).get('description'))
+                if _desc:
+                    lines.append(f' description {_desc}')
                 # サブインタフェースはIPより先にencapsulationを出す（実機と同じ順）
                 _enc = iinfo.get('encapsulation')
                 if _enc:
                     lines.append(f' encapsulation {_enc["type"]} {_enc["vlan"]}'
                                  + (' native' if _enc.get('native') else ''))
+                # nve（VXLAN EVPNのオーバーレイ終端インタフェース、Catalyst 9000
+                # のIOS-XE構文はNX-OSと共通。member vni配下のingress-replication
+                # だけIOS-XEは"protocol bgp"を付けない）
+                _nve_c = getattr(state, 'nve', {}).get(ifname)
                 ip = iinfo.get('ip', '')
-                if ip:
+                if _nve_c:
+                    if _nve_c.get('source_interface'):
+                        lines.append(f' source-interface {_nve_c["source_interface"]}')
+                    if _nve_c.get('host_reachability_bgp'):
+                        lines.append(' host-reachability protocol bgp')
+                    for vni, m in sorted(_nve_c.get('members', {}).items()):
+                        suffix = ' associate-vrf' if m.get('associate_vrf') else ''
+                        lines.append(f' member vni {vni}{suffix}')
+                        if m.get('ingress_replication'):
+                            lines.append('  ingress-replication')
+                        if m.get('mcast_group'):
+                            lines.append(f'  mcast-group {m["mcast_group"]}')
+                elif ip:
                     mask = _prefix_to_mask(iinfo.get('prefix', 24))
                     lines.append(f' ip address {ip} {mask}')
                 elif iinfo.get('vlan') and iinfo.get('vlan') not in ('', 'trunk'):
@@ -3628,7 +4715,18 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append('!')
             lines.append(f'router ospf {on["process_id"]}')
             for net in on['networks']:
-                lines.append(f' network {net.split("/")[0]} 0.0.0.255 area {on["area_id"]}')
+                # ワイルドカードは実際のプレフィックス長から復元する。
+                # 常に 0.0.0.255 を出していたため、"network <lo> 0.0.0.0"
+                # (ループバックの/32) を入れても running-config には
+                # /24 相当で出てしまい、投入した設定と食い違っていた。
+                _n, _, _p = net.partition('/')
+                try:
+                    _wc_int = (0xffffffff >> int(_p)) if _p else 0xffffffff
+                except ValueError:
+                    _wc_int = 0x000000ff
+                _wc = '.'.join(str((_wc_int >> s) & 0xff)
+                               for s in (24, 16, 8, 0))
+                lines.append(f' network {_n} {_wc} area {on["area_id"]}')
             for _aid, _atype in sorted(on.get('area_types', {}).items()):
                 if _atype in ('nssa', 'stub'):
                     lines.append(f' area {_aid} {_atype}')
@@ -3647,10 +4745,36 @@ def _build_running_config(device_id: str, state) -> str:
                     lines.append(f' neighbor {nbr_ip} remote-as {remote_as}')
             for net in bn.get('networks', []):
                 lines.append(f' network {net.split("/")[0]} mask {_prefix_to_mask(int(net.split("/")[1]) if "/" in net else 24)}')
+            # EVPN/VXLAN: address-family l2vpn evpn（Catalyst 9000も
+            # NX-OSと同じくBGPのaddress-family配下でneighbor activateする）
+            _af_c = getattr(state, 'bgp', {}).get('l2vpn_evpn') if isinstance(getattr(state, 'bgp', None), dict) else None
+            if _af_c and _af_c.get('enabled'):
+                lines.append(' address-family l2vpn evpn')
+                for nbr_ip in sorted(_af_c.get('activated_neighbors', [])):
+                    lines.append(f'  neighbor {nbr_ip} activate')
+                if _af_c.get('advertise_all_vni'):
+                    lines.append('  advertise-all-vni')
+                lines.append(' exit-address-family')
         # ACL
         acls = ipfilter_engine.acls.get(device_id, {})
         for name, rules in acls.items():
             lines.append('!')
+            kind = ipfilter_engine.acl_kind.get(device_id, {}).get(name)
+            if kind and not name.isdigit():
+                # 実機(IOS-XE)の名前付きACLは
+                #   ip access-list standard NAME
+                #    10 permit 10.0.0.0 0.0.0.255
+                # という入れ子で出る。ASA形式の1行表記で出していたため、
+                # running-configをそのまま投入し直せなかった。
+                lines.append(f'ip access-list {kind} {name}')
+                for r in rules:
+                    if kind == 'standard':
+                        lines.append(f' {r.seq} {r.action} {r.src}')
+                    else:
+                        portstr = f' eq {r.dst_port}' if r.dst_port else ''
+                        lines.append(f' {r.seq} {r.action} {r.protocol} '
+                                     f'{r.src} {r.dst}{portstr}')
+                continue
             for r in rules:
                 if r.protocol == 'ip' and r.dst == 'any' and not r.dst_port:
                     lines.append(f'access-list {name} {r.action} {r.src}')
@@ -3739,12 +4863,17 @@ def _build_running_config(device_id: str, state) -> str:
         lines.append(' exec-timeout 0 0')
         lines.append(' logging synchronous')
         lines.append(' transport preferred none')
+        # transport input は以前ここに固定文字列で書かれていたため、
+        # 設定を変えても running-config が変わらず、telnet を止める
+        # 手段も無かった。実際の設定値を出す。
+        _ti = getattr(state, 'vty_transport_input', None)
+        _ti_line = ' transport input ' + _format_transport_input(_ti)
         lines.append('line vty 0 4')
         lines.append(' login local')
-        lines.append(' transport input ssh telnet')
+        lines.append(_ti_line)
         lines.append('line vty 5 15')
         lines.append(' login local')
-        lines.append(' transport input ssh telnet')
+        lines.append(_ti_line)
         # syslog
         syslog = getattr(state, 'syslog_servers', [])
         if syslog:
@@ -3891,8 +5020,9 @@ def _handle_nexus_tacacs_config(device_id: str, command: str, state: DeviceState
     if m_tac_host:
         if not hasattr(state, 'tacacs_hosts'):
             state.tacacs_hosts = []
+        _og = orig_groups(m_tac_host, orig)
         ip = m_tac_host.group(1)
-        key = m_tac_host.group(2) or ''
+        key = _og.group(2) or ''
         port = int(m_tac_host.group(3)) if m_tac_host.group(3) else 49
         existing = next((h for h in state.tacacs_hosts if h['host'] == ip), None)
         if existing:
@@ -4498,17 +5628,30 @@ def _network_address(ip: str, prefix: int) -> str:
         return f'{ip}/{prefix}'
 
 
-def _pick_ospf_default_router_id(state) -> str:
+def _pick_ospf_default_router_id(state, device_id: str = None) -> str:
     """`router-id`未設定時のOSPF Router ID自動選出（Cisco仕様）。
     稼働中(up)のLoopbackインタフェースの最大IPを優先し、
-    無ければ稼働中の他インタフェースの最大IPを返す。該当が無ければ''。"""
+    無ければ稼働中の他インタフェースの最大IPを返す。該当が無ければ''。
+
+    device_idを渡した場合、実際にvnetでリンクされているインタフェースを
+    優先する。Si-R/Catalyst等は未接続でも同一の工場出荷時デフォルトIP
+    (wan1=203.0.113.1等)を全装置で共有しているため、それをそのまま
+    採用すると無関係な複数装置のRouter IDが衝突してしまう
+    （実機ではケーブル未接続のポートに他機と同じIPが刺さったままに
+    なることは無い）。リンク済みインタフェースの候補が無い場合のみ、
+    未接続でも従来通りの選出にフォールバックする。"""
     def _ip_key(ip):
         try:
             return tuple(int(x) for x in ip.split('.'))
         except Exception:
             return (0, 0, 0, 0)
 
+    linked_ifaces = set()
+    if device_id:
+        linked_ifaces = set(vnet.interface_links.get(device_id, {}).values())
+
     loopback_ips = []
+    linked_ips = []
     other_ips = []
     for name, info in state.interfaces.items():
         ip = info.get('ip')
@@ -4518,10 +5661,118 @@ def _pick_ospf_default_router_id(state) -> str:
             continue
         if name.lower().startswith('loopback'):
             loopback_ips.append(ip)
+        elif name in linked_ifaces:
+            linked_ips.append(ip)
         else:
             other_ips.append(ip)
-    pool = loopback_ips or other_ips
+    pool = loopback_ips or linked_ips or other_ips
     return max(pool, key=_ip_key) if pool else ''
+
+
+def _format_spanning_tree_sir(device_id: str, state) -> str:
+    """Si-R形式の show spanning-tree（コマンドリファレンス 61.3.1）。
+
+    Cisco形式(VLAN別/Rapid-PVST+前提)とは見出し・列構成が異なり、
+    実機はポートを"ether <group> <port>"名で表示しIEEE 802.1D固定
+    (RSTPは無い)。stp age/delay/helloで設定したタイマー値はここでの
+    表示にのみ反映し(未指定時はマニュアル記載のデフォルト20/15/2秒)、
+    BPDU送信間隔などプロトコル側の実動作までは変更しない
+    （実装コストとのトレードオフ。必要なら別途エンジンに配線する）。
+    """
+    n = stp_engine.nodes.get(device_id)
+    if not n or not n.get('enabled'):
+        return '<ERROR> Spanning tree is not configured.'
+    is_root = n.get('root_bridge_id') == n.get('bridge_id')
+    age = getattr(state, '_sir_stp_age', 20)
+    delay = getattr(state, '_sir_stp_delay', 15)
+    hello = getattr(state, '_sir_stp_hello', 2)
+
+    lines = ['Spanning tree enabled protocol IEEE']
+    lines.append('Root ID    Priority    ' + str(n['bridge_priority'] if is_root
+                 else int(n['root_bridge_id'].split('.', 1)[0])
+                 if '.' in n.get('root_bridge_id', '') else n['bridge_priority']))
+    root_mac = n['bridge_mac'] if is_root else n.get('root_bridge_id', '').split('.', 1)[-1]
+    lines.append(f'           Address     {root_mac}')
+    if not is_root:
+        lines.append(f'           Cost        {n.get("root_path_cost", 0)}')
+    lines.append(f'           Hello Time {hello}sec  Max Age {age}sec  '
+                 f'Forward Delay {delay}sec')
+    lines.append('')
+    lines.append(f'Bridge ID  Priority    {n["bridge_priority"]}')
+    lines.append(f'           Address     {n["bridge_mac"]}')
+    lines.append(f'           Hello Time {hello}sec  Max Age {age}sec  '
+                 f'Forward Delay {delay}sec')
+    stp_mode_disp = 'stp' if n.get('mode') != 'rstp' else 'rstp'
+    lines.append(f'STP Mode   {stp_mode_disp}')
+    lines.append('')
+    lines.append('Interface       Port ID  Status(Role)          Designated Bridge ID')
+    for port in n.get('ports', {}).values():
+        lan = port.get('name', '')
+        grp_port = None
+        for (grp, p) in rule_engine._sir_ether_ports(state):
+            if rule_engine._sir_lan_for_ether(state, grp, p) == lan:
+                grp_port = f'ether {grp} {p}'
+                break
+        iface_disp = grp_port or lan
+        role = port.get('role', 'DESIGNATED').capitalize()
+        pstate = {'FORWARDING': 'Forwarding', 'BLOCKING': 'Blocking',
+                  'DISCARDING': 'Blocking', 'LEARNING': 'Learning',
+                  'LISTENING': 'Listening'}.get(port.get('state', ''), port.get('state', ''))
+        lines.append(f'{iface_disp:<16}128.1    {pstate}({role})'
+                     f'{"":<10}{n["bridge_priority"]} {n["bridge_mac"]}')
+    return '\n'.join(lines)
+
+
+def _format_ospf_neighbor_sir(device_id: str) -> str:
+    """Si-R形式の show ip ospf neighbor（コマンドリファレンス 50.1.5）。
+
+    Ciscoスタイル(1行1テーブル)とは異なり、実機はインタフェースごとに
+    見出し("Neighbor with lan0 result:")を分けて表示する。DDL/ReqL/RtrLは
+    DBD/LSR/LSRxmtキューの長さだが、このエミュレータはそれらのキューを
+    個別追跡していないため0固定とする(Full到達後は実機でも通常0)。
+    """
+    n = ospf_engine.nodes.get(device_id)
+    if not n or not n.get('enabled'):
+        return '<ERROR> No OSPF is configured.'
+    if not n['neighbors']:
+        return ('Neighbor information with all interfaces, result:\n'
+                '(No neighbors)')
+
+    by_iface: dict = {}
+    for nid, nbr in n['neighbors'].items():
+        iface = nbr.iface if getattr(nbr, 'iface', None) else 'lan0'
+        by_iface.setdefault(iface, []).append((nid, nbr))
+
+    lines = ['Neighbor information with all interfaces, result:']
+    for iface in sorted(by_iface):
+        lines.append(f'Neighbor with {iface} result:')
+        lines.append('Neighbor ID     Pri  State        Deadtime  Address          DDL  ReqL  RtrL')
+        for nid, nbr in by_iface[iface]:
+            role = getattr(nbr, 'role', None)
+            if not role:
+                if n.get('dr') == nid:
+                    role = 'DR'
+                elif n.get('bdr') == nid:
+                    role = 'BDR'
+                else:
+                    role = 'Other'
+            state_str = f'{nbr.state}/{role}'
+            elapsed = time.time() - nbr.uptime
+            dead_left = max(0, n['dead_interval'] - (elapsed % n['dead_interval']))
+            h = int(dead_left // 3600)
+            m = int((dead_left % 3600) // 60)
+            s_ = int(dead_left % 60)
+            dead_str = f'{h:02d}:{m:02d}:{s_:02d}'
+            peer_node = ospf_engine.nodes.get(nid, {})
+            peer_ips = list(peer_node.get('_peer_ips', {}).values())
+            peer_ip = (getattr(nbr, 'ip', None)
+                       or (peer_ips[0] if peer_ips else nbr.router_id))
+            lines.append(
+                f'{nbr.router_id:<16}{1:<5}{state_str:<13}{dead_str:<10}'
+                f'{peer_ip:<17}{0:<5}{0:<6}{0}'
+            )
+        lines.append('')
+    return '\n'.join(lines).rstrip()
 
 
 def _format_ospf_route_sir(device_id: str) -> str:
@@ -4668,10 +5919,20 @@ def _register_icmp(device_id: str):
     if isinstance(_sc, list) and _sc:
         _first = _sc[0]
         _comm = _first.get('name', 'public') if isinstance(_first, dict) else str(_first)
+    # 設定されているコミュニティを**すべて**渡す。1つしか渡していなかった
+    # ため、2つ目以降のコミュニティでは読めず、しかも _auth が public を
+    # 常に許していたので「設定を変えても public で読める」状態だった。
+    _ro, _rw = [], []
+    for _c in (_sc if isinstance(_sc, list) else []):
+        if not isinstance(_c, dict) or not _c.get('name'):
+            continue
+        (_rw if (_c.get('perm') or 'ro').lower() == 'rw' else _ro).append(_c['name'])
     snmp_agent.register(device_id, state.device_type, state.hostname,
                         contact=getattr(state, 'snmp_contact', ''),
                         location=getattr(state, 'snmp_location', ''),
-                        community=_comm)
+                        community=_comm,
+                        communities=_ro + _rw,   # RWでも読み取りはできる
+                        rw_communities=_rw)
     # 実UDP SNMPエージェント（snmpget/snmpwalkに応答する側）を動的起動する。
     # start_all_snmp_agents はアプリ起動時に存在した装置しか対象にしないため、
     # これが無いとアプリ起動後に追加した装置はWalk/Getに応答しなかった。
@@ -4682,6 +5943,15 @@ def _register_icmp(device_id: str):
         asyncio.ensure_future(ensure_snmp_agent(device_id, device_sessions, snmp_agent))
     except RuntimeError:
         pass  # イベントループが無い呼び出し元（起動シーケンス等）からは無視
+    # SSH/Telnet の実CLIリスナーも管理IPの変更に追従させる
+    # （鍵が無い / telnet が許可されていなければ何もしない）
+    try:
+        from engine.ssh_cli_agent import ensure_ssh_cli_agent
+        from engine.telnet_cli_agent import ensure_telnet_cli_agent
+        ensure_ssh_cli_agent(device_id, device_sessions, _run_cli_sync)
+        ensure_telnet_cli_agent(device_id, device_sessions, _run_cli_sync)
+    except Exception:
+        pass
 
     def _net_addr(ip, prefix):
         try:
@@ -4791,11 +6061,142 @@ async def api_load():
     _load_config()
     return {"ok": True, "devices": list(device_sessions.keys())}
 
+def _format_transport_input(value) -> str:
+    """vty の transport input を実機の表記に直す
+
+    既定（未設定）は ssh のみ。実機の既定は telnet も許可だが、
+    装置を作っただけで平文ポートが開くのは事故のもとなので、
+    このエミュレータでは明示設定を要求する
+    （docs/telnet-cli-server.md に明記）。
+    """
+    allowed = set(value) if value else {'ssh'}
+    if not allowed:
+        return 'none'
+    if allowed >= {'ssh', 'telnet'}:
+        return 'all'
+    return ' '.join(sorted(allowed))
+
+
+def _finalize_ssh_pubkey(state, blob: str):
+    """`ip ssh pubkey-chain` の key-string で貼り付けられた値を確定する。
+
+    実機は base64 本体だけを貼らせる（`ssh-rsa` 等のアルゴリズム名は
+    付けない）が、`~/.ssh/id_rsa.pub` をそのまま貼りたくなるのが自然
+    なので、OpenSSH形式（`ssh-rsa AAAA... comment`）で始まる場合も
+    受け付ける。戻り値はエラーメッセージ（成功時は空文字列）。
+    """
+    if not blob:
+        return '% Incomplete command.'
+    user = getattr(state, '_ssh_pubkey_user', None)
+    if not user:
+        return '% No username specified.'
+    parts = blob.split()
+    _known_algos = ('ssh-rsa', 'ssh-ed25519', 'ssh-dss',
+                    'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384',
+                    'ecdsa-sha2-nistp521')
+    algo_hint = parts[0] if parts and parts[0] in _known_algos else None
+    if algo_hint:
+        b64 = parts[1] if len(parts) > 1 else ''
+    else:
+        b64 = ''.join(blob.split())
+    if not b64:
+        return '% Invalid key data.'
+    try:
+        import base64 as _b64mod
+        raw = _b64mod.b64decode(b64, validate=True)
+    except Exception:
+        return '% Invalid base64 key data.'
+    if not raw:
+        return '% Invalid key data.'
+    # 鍵の種類は blob 自身の先頭フィールドに書かれている（SSHワイヤ形式は
+    # 自己記述的）。実機にアルゴリズム名を別途書かせる方式は無いので、
+    # 素のbase64本体だけが貼られる（＝行頭のヒントが無い）のが通常。
+    # 以前はここで無条件に 'ssh-rsa' を仮定していたため、ed25519/ecdsa
+    # 鍵は常に「RSAとして解釈できない」で弾かれていた。
+    try:
+        import paramiko
+        actual_algo = paramiko.Message(raw).get_text()
+    except Exception:
+        return '% Invalid key data.'
+    if algo_hint and algo_hint != actual_algo:
+        return (f'% Key type mismatch: declared "{algo_hint}" but the key '
+                f'data is "{actual_algo}"')
+    algo = actual_algo
+    # 実際に鍵として構築できるか確認する（形だけ整えたゴミを弾く）。
+    # 型名だけ読めても、その後ろのmpint/バイト列が壊れていれば
+    # 鍵としては無効なので、該当クラスで実際にパースさせる。
+    try:
+        # paramiko のバージョンによっては DSSKey が無い（4.0でDSA/DSS
+        # サポートが落ちた）。dict内包表記の時点でAttributeErrorになり、
+        # 「鍵の種類に関わらず必ず Invalid key data になる」という
+        # 分かりにくい壊れ方をしていたので、無い属性は素通りする。
+        _key_class_names = {
+            'ssh-rsa': 'RSAKey', 'ssh-dss': 'DSSKey',
+            'ssh-ed25519': 'Ed25519Key',
+            'ecdsa-sha2-nistp256': 'ECDSAKey',
+            'ecdsa-sha2-nistp384': 'ECDSAKey',
+            'ecdsa-sha2-nistp521': 'ECDSAKey',
+        }
+        cls_name = _key_class_names.get(algo)
+        cls = getattr(paramiko, cls_name, None) if cls_name else None
+        if cls is None:
+            return f'% Unsupported key type: {algo}'
+        cls(data=raw)
+    except Exception:
+        return '% Invalid key data.'
+    keys = getattr(state, 'ssh_pubkeys', None) or {}
+    entry_list = keys.setdefault(user, [])
+    entry = f'{algo} {b64}'
+    if entry not in entry_list:
+        entry_list.append(entry)
+    state.ssh_pubkeys = keys
+    return ''
+
+
+def _run_cli_sync(device_id: str, command: str) -> str:
+    """SSHサーバのスレッドからCLIを実行する橋渡し
+
+    `/api/cli` と**同じ経路**を通す。SSH越しの結果とWeb UIの結果が
+    食い違わないよう、ここで別実装を作らないこと。
+
+    CLI処理はイベントループ上の非同期関数なので、ワーカースレッドからは
+    run_coroutine_threadsafe で投げて結果を待つ。
+    """
+    loop = _MAIN_LOOP[0]
+    if loop is None:                                    # pragma: no cover
+        return '% CLI is not available'
+    fut = asyncio.run_coroutine_threadsafe(
+        cli_command({'device_id': device_id, 'command': command}), loop)
+    try:
+        return (fut.result(timeout=30) or {}).get('output', '')
+    except Exception as e:                              # pragma: no cover
+        return f'% {e}'
+
+
+def _stop_real_listeners(dev_id: str):
+    """装置が持っている実リスナーをすべて止める（個別の失敗は無視）"""
+    for mod, fn in (('engine.netconf_agent', 'stop_netconf_agent'),
+                    ('engine.gnmi_agent', 'stop_gnmi_agent'),
+                    ('engine.snmp_udp_agent', 'stop_snmp_agent'),
+                    ('engine.ssh_cli_agent', 'stop_ssh_cli_agent'),
+                    ('engine.telnet_cli_agent', 'stop_telnet_cli_agent'),
+                    ('engine.real_ospf_agent', 'stop_ospf_agent')):
+        try:
+            m = __import__(mod, fromlist=[fn])
+            getattr(m, fn)(dev_id)
+        except Exception:
+            pass
+
+
 @app.delete("/api/device/{dev_id}")
 async def remove_device(dev_id: str):
     """装置を削除。関連する各エンジンの登録も掃除する。"""
     if dev_id in device_sessions:
         del device_sessions[dev_id]
+    # 実リスナー（NETCONF/gNMI/SNMP/OSPF）を止めてポートを解放する。
+    # これが無いと装置を消しても TCP/830 や UDP/161 が開いたまま残り、
+    # 同じIPで装置を作り直すと "Address already in use" になる。
+    _stop_real_listeners(dev_id)
     # ICMP/到達性・トポロジー登録を除去（残すとメンバー疎通判定等で誤検出する）
     icmp_engine.device_ips.pop(dev_id, None)
     for peer in list(vnet.get_neighbors(dev_id)):
@@ -5334,7 +6735,283 @@ def _restconf_ietf_interface(ifname: str, iinfo: dict) -> dict:
     return entry
 
 
-def _restconf_check(device_id: str):
+def _handle_programmability(device_id, command, orig, c, state):
+    """EEM / app-hosting / OpenFlow の設定・show を処理する。
+    対象外なら None を返して後続のハンドラに任せる。"""
+
+    # ══════ EEM ══════
+    m = re.match(r'^(no\s+)?event\s+manager\s+applet\s+(\S+)'
+                 r'(\s+authorization\s+bypass)?\s*$', orig, re.I)
+    if m:
+        if m.group(1):
+            eem_engine.remove_applet(device_id, m.group(2))
+            return ''
+        eem_engine.add_applet(device_id, m.group(2), bool(m.group(3)))
+        state.mode = 'config-applet'
+        state._eem_applet = m.group(2)
+        return ''
+
+    if state.mode == 'config-applet':
+        name = getattr(state, '_eem_applet', '')
+        if re.match(r'^event\s+none\s*$', c):
+            eem_engine.add_event(device_id, name, 'none', {})
+            return ''
+        m = re.match(r'^event\s+syslog\s+pattern\s+"(.*)"\s*$', orig, re.I)
+        if m:
+            eem_engine.add_event(device_id, name, 'syslog',
+                                 {'pattern': m.group(1)})
+            return ''
+        m = re.match(r'^event\s+cli\s+pattern\s+"(.*)"'
+                     r'(?:\s+sync\s+(yes|no))?\s*$', orig, re.I)
+        if m:
+            eem_engine.add_event(device_id, name, 'cli',
+                                 {'pattern': m.group(1),
+                                  'sync': m.group(2) or 'no'})
+            return ''
+        m = re.match(r'^event\s+timer\s+watchdog\s+time\s+(\d+)\s*$', c)
+        if m:
+            eem_engine.add_event(device_id, name, 'timer',
+                                 {'time': int(m.group(1))})
+            return ''
+        # action <seq> syslog msg "..." / cli command "..." / puts "..."
+        m = re.match(r'^action\s+(\S+)\s+syslog\s+msg\s+"(.*)"\s*$', orig, re.I)
+        if m:
+            eem_engine.add_action(device_id, name, m.group(1), 'syslog',
+                                  m.group(2))
+            return ''
+        m = re.match(r'^action\s+(\S+)\s+cli\s+command\s+"(.*)"\s*$', orig, re.I)
+        if m:
+            eem_engine.add_action(device_id, name, m.group(1), 'cli',
+                                  m.group(2))
+            return ''
+        m = re.match(r'^action\s+(\S+)\s+puts\s+"(.*)"\s*$', orig, re.I)
+        if m:
+            eem_engine.add_action(device_id, name, m.group(1), 'puts',
+                                  m.group(2))
+            return ''
+
+    m = re.match(r'^(no\s+)?event\s+manager\s+policy\s+(\S+)'
+                 r'(?:\s+type\s+(user|system))?\s*$', orig, re.I)
+    if m:
+        if m.group(1):
+            eem_engine.unregister_policy(device_id, m.group(2))
+            return ''
+        eem_engine.register_policy(device_id, m.group(2), m.group(3) or 'user')
+        return ''
+
+    m = re.match(r'^event\s+manager\s+directory\s+user\s+policy\s+(\S+)\s*$',
+                 orig, re.I)
+    if m:
+        eem_engine.policy_dir[device_id] = m.group(1)
+        return ''
+
+    m = re.match(r'^event\s+manager\s+run\s+(\S+)\s*$', orig, re.I)
+    if m:
+        # action cli command を実際にルールエンジンへ流す。
+        # これによりappletから装置の設定を本当に変更できる。
+        def _exec(cmd_text):
+            return rule_engine.process(cmd_text, state)
+        out, _ok = eem_engine.run_applet(device_id, m.group(1), cli_exec=_exec)
+        return out
+
+    if re.match(r'^show\s+event\s+manager\s+policy\s+registered', c):
+        return eem_engine.format_policy_registered(device_id)
+    if re.match(r'^show\s+event\s+manager\s+policy\s+available', c):
+        return eem_engine.format_policy_available(device_id)
+    if re.match(r'^show\s+event\s+manager\s+history\s+events', c):
+        return eem_engine.format_history_events(device_id)
+    if re.match(r'^show\s+event\s+manager\s+statistics', c):
+        return eem_engine.format_statistics(device_id)
+    if re.match(r'^show\s+event\s+manager\s+directory\s+user', c):
+        return eem_engine.format_directory_user(device_id)
+
+    # ══════ アプリケーションホスティング ══════
+    if re.match(r'^(no\s+)?iox\s*$', c):
+        app_hosting_engine.set_iox(device_id, not c.startswith('no'))
+        return ''
+
+    m = re.match(r'^(no\s+)?app-hosting\s+appid\s+(\S+)\s*$', orig, re.I)
+    if m and state.mode in ('config', 'config-app-hosting'):
+        if m.group(1):
+            app_hosting_engine.remove_app(device_id, m.group(2))
+            return ''
+        app_hosting_engine.config_app(device_id, m.group(2))
+        state.mode = 'config-app-hosting'
+        state._app_id = m.group(2)
+        return ''
+
+    if state.mode == 'config-app-hosting':
+        app = app_hosting_engine._dev(device_id).get(
+            getattr(state, '_app_id', ''))
+        if app is not None:
+            m = re.match(r'^app-vnic\s+AppGigabitEthernet\s+(trunk|vlan-access)',
+                         orig, re.I)
+            if m:
+                state._app_vnic_mode = m.group(1).lower()
+                return ''
+            m = re.match(r'^vlan\s+(\d+)\s+guest-interface\s+(\d+)\s*$', c)
+            if m:
+                vlan, gi = int(m.group(1)), int(m.group(2))
+                app['vnics'] = [v for v in app['vnics']
+                                if v['guest_interface'] != gi]
+                app['vnics'].append({'vlan': vlan, 'guest_interface': gi,
+                                     'ip': '', 'netmask': ''})
+                state._app_vnic_gi = gi
+                return ''
+            m = re.match(r'^guest-ipaddress\s+([\d.]+)\s+netmask\s+([\d.]+)\s*$', c)
+            if m:
+                gi = getattr(state, '_app_vnic_gi', None)
+                for v in app['vnics']:
+                    if v['guest_interface'] == gi:
+                        v['ip'], v['netmask'] = m.group(1), m.group(2)
+                        return ''
+                return '% Configure "vlan <id> guest-interface <n>" first'
+            m = re.match(r'^app-default-gateway\s+([\d.]+)'
+                         r'\s+guest-interface\s+(\d+)\s*$', c)
+            if m:
+                app['gateway'], app['gateway_gi'] = m.group(1), m.group(2)
+                return ''
+            m = re.match(r'^app-resource\s+docker\s*$', c)
+            if m:
+                app['type'] = 'docker'
+                return ''
+            m = re.match(r'^app-resource\s+profile\s+(\S+)\s*$', c)
+            if m:
+                app['profile'] = m.group(1)
+                return ''
+            m = re.match(r'^(cpu|memory|persist-disk|vcpu)\s+(\d+)\s*$', c)
+            if m:
+                key = {'cpu': 'cpu', 'memory': 'memory',
+                       'persist-disk': 'disk', 'vcpu': 'vcpu'}[m.group(1)]
+                app[key] = int(m.group(2))
+                return ''
+            m = re.match(r'^name-server\d*\s+([\d.]+)\s*$', c)
+            if m:
+                app['nameserver'] = m.group(1)
+                return ''
+            m = re.match(r'^run-opts\s+\d+\s+"(.*)"\s*$', orig, re.I)
+            if m:
+                app['run_opts'] = m.group(1)
+                return ''
+            if re.match(r'^start\s*$', c):
+                app['auto_start'] = True
+                return ''
+
+    m = re.match(r'^app-hosting\s+(install|activate|start|stop|deactivate|'
+                 r'uninstall)\s+appid\s+(\S+)(?:\s+package\s+(\S+))?\s*$',
+                 orig, re.I)
+    if m:
+        op, appid, pkg = m.group(1).lower(), m.group(2), m.group(3)
+        if op == 'install':
+            if not pkg:
+                return '% package <url> is required'
+            out, _ = app_hosting_engine.install(device_id, appid, pkg)
+            return out
+        out, _ = getattr(app_hosting_engine, op)(device_id, appid)
+        return out
+
+    if re.match(r'^show\s+app-hosting\s+list\s*$', c):
+        return app_hosting_engine.format_list(device_id)
+    m = re.match(r'^show\s+app-hosting\s+detail\s+appid\s+(\S+)\s*$', orig, re.I)
+    if m:
+        return app_hosting_engine.format_detail(device_id, m.group(1))
+    if re.match(r'^show\s+app-hosting\s+resource\s*$', c):
+        return app_hosting_engine.format_resource(device_id)
+    if re.match(r'^show\s+iox\b', c):
+        return ('IOx service (CAF)             : '
+                + ('Running' if app_hosting_engine.iox_enabled(device_id)
+                   else 'Not Running')
+                + '\nIOx service (HA)              : Not Supported'
+                + '\nIOx service (IOxman)          : '
+                + ('Running' if app_hosting_engine.iox_enabled(device_id)
+                   else 'Not Running')
+                + '\nIOx service (Sec storage)     : Not Supported'
+                + '\nLibvirtd 1.3.4                : Running')
+
+    # ══════ OpenFlow ══════
+    m = re.match(r'^boot\s+mode\s+(openflow|normal)\s*$', c)
+    if m:
+        openflow_engine.set_boot_mode(device_id, m.group(1))
+        if m.group(1) == 'openflow':
+            return ('Changes to the boot mode preferences have been stored\n'
+                    '%% Reload the switch to apply the new boot mode')
+        return 'Changes to the boot mode preferences have been stored'
+
+    if re.match(r'^(no\s+)?feature\s+openflow\s*$', c):
+        neg = c.startswith('no')
+        if not openflow_engine.enable_feature(device_id, not neg):
+            return ('% OpenFlow requires the switch to be in OpenFlow boot '
+                    'mode. Configure "boot mode openflow" and reload.')
+        return ''
+
+    if re.match(r'^openflow\s*$', c) and state.mode == 'config':
+        if not openflow_engine.feature_enabled(device_id):
+            return '% Enable "feature openflow" first'
+        state.mode = 'config-openflow'
+        return ''
+
+    if state.mode in ('config-openflow', 'config-openflow-switch'):
+        m = re.match(r'^switch\s+(\d+)\s+pipeline\s+(\d+)\s*$', c)
+        if m:
+            openflow_engine.add_switch(device_id, int(m.group(1)),
+                                       int(m.group(2)))
+            state.mode = 'config-openflow-switch'
+            state._of_switch = int(m.group(1))
+            return ''
+    if state.mode == 'config-openflow-switch':
+        sid = getattr(state, '_of_switch', 1)
+        m = re.match(r'^(no\s+)?controller\s+ipv4\s+([\d.]+)\s+port\s+(\d+)'
+                     r'(?:\s+vrf\s+(\S+))?(?:\s+security\s+(none|tls))?\s*$',
+                     orig, re.I)
+        if m:
+            if m.group(1):
+                openflow_engine.remove_controller(device_id, sid, m.group(2),
+                                                  int(m.group(3)))
+            else:
+                openflow_engine.add_controller(
+                    device_id, sid, m.group(2), int(m.group(3)),
+                    m.group(4) or '', (m.group(5) or 'none').lower())
+            return ''
+        m = re.match(r'^datapath-id\s+(0x[0-9a-f]+)\s*$', c)
+        if m:
+            openflow_engine._node(device_id)['switches'][sid]['dpid'] = \
+                m.group(1)
+            return ''
+        m = re.match(r'^probe-interval\s+(\d+)\s*$', c)
+        if m:
+            openflow_engine._node(device_id)['switches'][sid][
+                'probe_interval'] = int(m.group(1))
+            return ''
+        if re.match(r'^logging\s+flow-mod\s*$', c):
+            openflow_engine._node(device_id)['switches'][sid][
+                'logging_flow_mod'] = True
+            return ''
+
+    m = re.match(r'^show\s+openflow\s+switch\s+(\d+)'
+                 r'(\s+controllers?|\s+flows?(?:\s+list)?|\s+ports)?\s*$', c)
+    if m:
+        sid = int(m.group(1))
+        what = (m.group(2) or '').strip()
+        if what.startswith('controller'):
+            return openflow_engine.format_controllers(device_id, sid)
+        if what.startswith('flow'):
+            return openflow_engine.format_flows(device_id, sid)
+        if what == 'ports':
+            return openflow_engine.format_ports(
+                device_id, sid, getattr(state, 'interfaces', {}))
+        return openflow_engine.format_switch(device_id, sid)
+
+    return None
+
+
+def _mdt_valid(sub: dict) -> bool:
+    """実機は stream / encoding / filter / receiver が揃って初めて Valid になる"""
+    return bool(sub.get('stream') and sub.get('encoding')
+                and sub.get('xpath') and sub.get('receivers')
+                and sub.get('trigger'))
+
+
+def _restconf_check(device_id: str, request=None):
     """RESTCONFが有効か確認し、無効ならエラーレスポンスを返す（有効ならNone）"""
     state = device_sessions.get(device_id)
     if state is None:
@@ -5364,17 +7041,30 @@ def _restconf_check(device_id: str):
                 "error-message": ('HTTPS server is not running on this device. '
                                    'Configure "ip http secure-server" to enable it '
                                    '(restconf alone does not start the HTTPS listener).')}]}})
+    # サービスレベルACL: 送信元アドレスで着信を絞る
+    # (restconf ipv4 access-list name <acl>)
+    acl_name = (getattr(state, 'restconf_service_acl', {}) or {}).get('ipv4')
+    if acl_name and request is not None:
+        src_ip = getattr(getattr(request, 'client', None), 'host', '') or ''
+        if src_ip and not ipfilter_engine.check_source(device_id, acl_name, src_ip):
+            # 実機はACLで落とされた場合そもそも応答しないが、
+            # ここでは理由が分かるよう403で返す
+            return JSONResponse(status_code=403, content={
+                "ietf-restconf:errors": {"error": [{
+                    "error-type": "transport", "error-tag": "access-denied",
+                    "error-message": (f'source {src_ip} denied by RESTCONF '
+                                      f'service ACL "{acl_name}"')}]}})
     return None
 
 
 @app.get("/restconf/{device_id}/data/ietf-interfaces:interfaces")
-async def restconf_get_interfaces(device_id: str):
+async def restconf_get_interfaces(device_id: str, request: Request):
     """
     RESTCONF (ietf-interfaces) 相当のGET。実機と違い、このエミュレータは
     複数装置を1プロセスで扱うため、URLに device_id を含める形にしている
     （実機は対象装置のIP自体でルーティングされるためこの区別は不要）。
     """
-    err = _restconf_check(device_id)
+    err = _restconf_check(device_id, request)
     if err is not None:
         return err
     state = device_sessions[device_id]
@@ -5385,8 +7075,8 @@ async def restconf_get_interfaces(device_id: str):
 
 
 @app.get("/restconf/{device_id}/data/ietf-interfaces:interfaces/interface={ifname:path}")
-async def restconf_get_interface(device_id: str, ifname: str):
-    err = _restconf_check(device_id)
+async def restconf_get_interface(device_id: str, ifname: str, request: Request):
+    err = _restconf_check(device_id, request)
     if err is not None:
         return err
     state = device_sessions[device_id]
@@ -5401,7 +7091,8 @@ async def restconf_get_interface(device_id: str, ifname: str):
 
 
 @app.put("/restconf/{device_id}/data/ietf-interfaces:interfaces/interface={ifname:path}")
-async def restconf_put_interface(device_id: str, ifname: str, body: dict):
+async def restconf_put_interface(device_id: str, ifname: str, body: dict,
+                                 request: Request = None):
     """
     interfaceのenabled(=shutdown/no shutdown相当)を書き換える。
     実機RESTCONFの部分実装で、対応しているのは enabled のみ。
@@ -5412,7 +7103,7 @@ async def restconf_put_interface(device_id: str, ifname: str, body: dict):
     `status_code == 204` を成功判定に使っており、200+JSONボディでは
     ないことを確認したため、それに合わせて修正した。
     """
-    err = _restconf_check(device_id)
+    err = _restconf_check(device_id, request)
     if err is not None:
         return err
     state = device_sessions[device_id]
@@ -5528,9 +7219,14 @@ async def nexus_dashboard():
     Cisco Nexus Dashboard 風のファブリック俯瞰ビュー用データ。
     実際のNexus Dashboard(旧DCNM/Nexus Dashboard Fabric Controller)の
     ような「ファブリック単位でのVXLAN EVPN状態の一覧化」を、
-    このエミュレータ内のNexus装置（device_type == 'nexus'）の
-    状態（feature有効化、VLAN⇔VNIマッピング、nve1のメンバーVNI、
-    BGP EVPNアドレスファミリ）から組み立てて返す。
+    このエミュレータ内でVXLAN EVPNを喋れる装置
+    （device_type == 'nexus' または 'catalyst'）の状態
+    （feature有効化/l2vpn evpn有効化、VLAN⇔VNIマッピング、nve1の
+    メンバーVNI、BGP EVPNアドレスファミリ）から組み立てて返す。
+    NX-OSは"feature nv overlay"+"evpn"、IOS-XE(Catalyst 9000)は
+    "l2vpn evpn"と文法が違うが、どちらも同じstate.nve/evpn_vnis/
+    vlan_vn_segmentに正規化して持っているので、ここでは装置種別を
+    意識せず同じ形で返せる。
     実際のNexus DashboardのAPI/データモデルそのものではなく、
     このエミュレータのCLI実装内容をダッシュボード形式に投影したもの。
     """
@@ -5538,14 +7234,23 @@ async def nexus_dashboard():
     vni_index: Dict[int, dict] = {}
 
     for device_id, state in device_sessions.items():
-        if state.device_type != 'nexus':
+        if state.device_type not in ('nexus', 'catalyst'):
             continue
-        features = sorted(getattr(state, 'nx_features', set()))
         nve_map = getattr(state, 'nve', {})
         evpn_vnis = getattr(state, 'evpn_vnis', {})
         vn_segment = getattr(state, 'vlan_vn_segment', {})
         bgp = getattr(state, 'bgp', None) or {}
         af = bgp.get('l2vpn_evpn') if isinstance(bgp, dict) else None
+
+        if state.device_type == 'nexus':
+            features = sorted(getattr(state, 'nx_features', set()))
+            overlay_enabled = 'nv overlay' in features
+        else:
+            # IOS-XE(Catalyst 9000)には"feature"コマンドが無いので、
+            # "l2vpn evpn"に入った(state.l2vpn_evpnがある)ことを
+            # NX-OSの"feature nv overlay"相当として扱う
+            features = ['l2vpn evpn'] if getattr(state, 'l2vpn_evpn', None) else []
+            overlay_enabled = bool(features)
 
         nve_peers = []
         member_vnis = []
@@ -5565,7 +7270,6 @@ async def nexus_dashboard():
                     "mcast_group": m.get('mcast_group') or None,
                 })
 
-        overlay_enabled = 'nv overlay' in features
         vxlan_ready = overlay_enabled and bool(nve_map) and bool(af and af.get('enabled'))
 
         switch_entry = {
@@ -5623,6 +7327,67 @@ async def get_topology():
             "vrrp_state": state.vrrp.get("state") if hasattr(state, 'vrrp') else None,
         }
     return {"devices": devices}
+
+
+@app.get("/api/topology/neighbors")
+async def get_topology_neighbors():
+    """全装置のCDP/LLDP隣接情報をJSONで返す。
+
+    `show cdp neighbors`/`show lldp neighbors`はテキスト整形されて
+    おり、外部ツールがトポロジー図を描くには`state.cdp_neighbors`/
+    `.lldp_neighbors`を都度パースし直す必要があった。ここでは
+    その構造化データをそのまま返す（`tools/topology_diagram.py`が
+    これを叩いてMermaid/Graphvizの図を組み立てる）。
+
+    実機のCDP/LLDPと同じく、あくまで「隣にどんな装置がいるか」を
+    ネイバー広告から知る仕組みなので、リンクが無い区間や
+    CDP/LLDPが無効な装置は見えない（実機と同じ制約）。
+    """
+    # CDP/LLDPはネイバーをhostnameで記録している（device_idではない）ので、
+    # エッジを組み立てる際にhostname→device_idへ引き直す必要がある
+    hostname_to_id = {st.hostname: dev_id for dev_id, st in device_sessions.items()}
+
+    devices = {}
+    edges = []
+    seen_edges = set()
+    for dev_id, state in device_sessions.items():
+        cdp = list(getattr(state, 'cdp_neighbors', []) or [])
+        lldp = list(getattr(state, 'lldp_neighbors', []) or [])
+        devices[dev_id] = {
+            "hostname": state.hostname,
+            "type": state.device_type,
+            "cdp_neighbors": [
+                {"device": n.get('device'), "local_if": n.get('local_if'),
+                 "remote_if": n.get('port'), "platform": n.get('platform')}
+                for n in cdp
+            ],
+            # LLDPはCDPと違うキー名(system_name/port_id)を使っている
+            "lldp_neighbors": [
+                {"device": n.get('system_name'), "local_if": n.get('local_if'),
+                 "remote_if": n.get('port_id'), "platform": n.get('platform')}
+                for n in lldp
+            ],
+        }
+        # 片方向にしか見えていなくても1本のエッジとして扱う
+        # （実機でも自分だけCDPが無効だと相手側だけに見える、という
+        # ことが起こるが、図としては同じリンクとして描きたいため）
+        merged = {n.get('device'): n for n in cdp}
+        for n in lldp:
+            merged.setdefault(n.get('system_name'), {
+                'local_if': n.get('local_if'), 'port': n.get('port_id')})
+        for remote_hostname, n in merged.items():
+            remote_id = hostname_to_id.get(remote_hostname)
+            if not remote_id:
+                continue
+            key = tuple(sorted((dev_id, remote_id)))
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            edges.append({
+                "a": dev_id, "a_if": n.get('local_if'),
+                "b": remote_id, "b_if": n.get('port'),
+            })
+    return {"devices": devices, "edges": edges}
 
 # ══════════════════════════════════════════
 # WebSocket（プロトコルシミュレーション）
@@ -5835,6 +7600,389 @@ async def root():
     if index.exists():
         return HTMLResponse(index.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>index.html が見つかりません</h1>")
+
+# ══════════════════════════════════════════════════════════
+# Nexpose / InsightVM Console API v3
+# ══════════════════════════════════════════════════════════
+# Rapid7公式のSwagger 2.0仕様(206エンドポイント)のうち、脆弱性スキャナ
+# として筋が通る最小限だけを実装している:
+#     Site作成 -> スキャン -> Asset検出 -> Vulnerability -> Report
+# スキャン対象はこのエミュレータ上の装置。装置で実際に有効化した管理
+# サービス(SNMP/NETCONF/gNMI)が、そのまま検出結果に効く。
+# 詳細と未対応範囲は docs/nexpose-api.md を参照。
+
+def _np_err(status: int, message: str):
+    """実機のエラー書式に合わせる"""
+    return JSONResponse(status_code=status, content={
+        'status': str(status), 'message': message})
+
+
+@app.get("/api/3")
+async def nexpose_root():
+    return {'links': [{'rel': 'self', 'href': '/api/3'}],
+            'resources': ['sites', 'scans', 'assets', 'vulnerabilities',
+                          'reports']}
+
+
+@app.get("/api/3/administration/info")
+async def nexpose_info():
+    return {'productName': 'Nexpose (emulated)', 'version': '6.6.х',
+            'hostName': 'netlab-console'}
+
+
+# ── Sites ─────────────────────────────────
+@app.get("/api/3/sites")
+async def nexpose_sites(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_engine.sites.values()), page, size)
+
+
+@app.post("/api/3/sites")
+async def nexpose_create_site(body: dict):
+    sid, err = nexpose_engine.create_site(body)
+    if err:
+        return _np_err(400, err)
+    return JSONResponse(status_code=201, content={
+        'id': sid, 'links': [{'rel': 'self', 'href': f'/api/3/sites/{sid}'}]})
+
+
+@app.get("/api/3/sites/{sid}")
+async def nexpose_site(sid: int):
+    site = nexpose_engine.sites.get(sid)
+    if site is None:
+        return _np_err(404, f'site {sid} not found')
+    return site
+
+
+@app.delete("/api/3/sites/{sid}")
+async def nexpose_delete_site(sid: int):
+    if not nexpose_engine.delete_site(sid):
+        return _np_err(404, f'site {sid} not found')
+    return {'links': [{'rel': 'self', 'href': f'/api/3/sites/{sid}'}]}
+
+
+@app.put("/api/3/sites/{sid}/included_targets")
+async def nexpose_site_targets(sid: int, body: list = Body(...)):
+    if not nexpose_engine.set_targets(sid, body):
+        return _np_err(404, f'site {sid} not found')
+    return {'addresses': body}
+
+
+@app.get("/api/3/sites/{sid}/assets")
+async def nexpose_site_assets(sid: int, page: int = 0, size: int = 10):
+    if sid not in nexpose_engine.sites:
+        return _np_err(404, f'site {sid} not found')
+    rows = [a for a in nexpose_engine.assets.values() if a.get('_site') == sid]
+    return nexpose_page(rows, page, size)
+
+
+@app.post("/api/3/sites/{sid}/scans")
+async def nexpose_start_scan(sid: int, body: dict = None):
+    # スキャンは実際にソケットを開いて待つ（同期I/O）。そのままawaitせずに
+    # 呼ぶとイベントループを止めてしまい、同じループ上で動いている
+    # SNMP UDPエージェントが応答できずに「閉じている」と誤検出する。
+    scan_id, err = await asyncio.to_thread(
+        nexpose_engine.start_scan, sid, device_sessions, body)
+    if err:
+        # 存在しないサイトは404、テンプレート指定ミスはリクエスト側の誤りで400
+        return _np_err(404 if 'not found' in err else 400, err)
+    return JSONResponse(status_code=201, content={
+        'id': scan_id,
+        'links': [{'rel': 'self', 'href': f'/api/3/scans/{scan_id}'}]})
+
+
+@app.get("/api/3/sites/{sid}/scans")
+async def nexpose_site_scans(sid: int, page: int = 0, size: int = 10):
+    if sid not in nexpose_engine.sites:
+        return _np_err(404, f'site {sid} not found')
+    rows = [s for s in nexpose_engine.scans.values() if s.get('_site') == sid]
+    return nexpose_page(rows, page, size)
+
+
+# ── Scans ─────────────────────────────────
+@app.get("/api/3/scans")
+async def nexpose_scans(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_engine.scans.values()), page, size)
+
+
+@app.get("/api/3/scans/{scan_id}")
+async def nexpose_scan(scan_id: int):
+    scan = nexpose_engine.scans.get(scan_id)
+    if scan is None:
+        return _np_err(404, f'scan {scan_id} not found')
+    return scan
+
+
+@app.post("/api/3/scans/{scan_id}/{status}")
+async def nexpose_scan_status(scan_id: int, status: str):
+    ok, err = nexpose_engine.set_scan_status(scan_id, status)
+    if not ok:
+        return _np_err(404 if 'not found' in (err or '') else 400, err)
+    return {'links': [{'rel': 'self', 'href': f'/api/3/scans/{scan_id}'}]}
+
+
+# ── Assets ────────────────────────────────
+@app.get("/api/3/assets")
+async def nexpose_assets(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_engine.assets.values()), page, size)
+
+
+@app.get("/api/3/assets/{aid}")
+async def nexpose_asset(aid: int):
+    a = nexpose_engine.assets.get(aid)
+    if a is None:
+        return _np_err(404, f'asset {aid} not found')
+    return a
+
+
+@app.get("/api/3/assets/{aid}/services")
+async def nexpose_asset_services(aid: int, page: int = 0, size: int = 10):
+    a = nexpose_engine.assets.get(aid)
+    if a is None:
+        return _np_err(404, f'asset {aid} not found')
+    return nexpose_page(a['services'], page, size)
+
+
+@app.get("/api/3/assets/{aid}/vulnerabilities")
+async def nexpose_asset_vulns(aid: int, page: int = 0, size: int = 10):
+    rows = nexpose_engine.asset_vulnerabilities(aid)
+    if rows is None:
+        return _np_err(404, f'asset {aid} not found')
+    return nexpose_page(rows, page, size)
+
+
+# ── Vulnerabilities ───────────────────────
+@app.get("/api/3/vulnerabilities")
+async def nexpose_vulns(page: int = 0, size: int = 10):
+    return nexpose_page(nexpose_engine.list_vulnerabilities(), page, size)
+
+
+@app.get("/api/3/vulnerabilities/{vid}")
+async def nexpose_vuln(vid: str):
+    v = nexpose_engine.get_vulnerability(vid)
+    if v is None:
+        return _np_err(404, f'vulnerability {vid} not found')
+    return v
+
+
+@app.get("/api/3/vulnerabilities/{vid}/assets")
+async def nexpose_vuln_assets(vid: str):
+    if nexpose_engine.get_vulnerability(vid) is None:
+        return _np_err(404, f'vulnerability {vid} not found')
+    return {'resources': nexpose_engine.vulnerability_assets(vid)}
+
+
+@app.get("/api/3/vulnerabilities/{vid}/solutions")
+async def nexpose_vuln_solutions(vid: str):
+    rows = nexpose_engine.vulnerability_solutions(vid)
+    if rows is None:
+        return _np_err(404, f'vulnerability {vid} not found')
+    return {'resources': rows}
+
+
+# ── Reports ───────────────────────────────
+@app.get("/api/3/reports")
+async def nexpose_reports(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_engine.reports.values()), page, size)
+
+
+@app.post("/api/3/reports")
+async def nexpose_create_report(body: dict):
+    rid, err = nexpose_engine.create_report(body)
+    if err:
+        return _np_err(400, err)
+    return JSONResponse(status_code=201, content={
+        'id': rid, 'links': [{'rel': 'self', 'href': f'/api/3/reports/{rid}'}]})
+
+
+@app.post("/api/3/reports/{rid}/generate")
+async def nexpose_generate_report(rid: int):
+    inst, err = nexpose_engine.generate_report(rid)
+    if err:
+        return _np_err(404, err)
+    return JSONResponse(status_code=201, content={
+        'id': inst,
+        'links': [{'rel': 'self',
+                   'href': f'/api/3/reports/{rid}/history/{inst}'}]})
+
+
+@app.get("/api/3/reports/{rid}/history")
+async def nexpose_report_history(rid: int):
+    rows = nexpose_engine.report_history(rid)
+    if rows is None:
+        return _np_err(404, f'report {rid} not found')
+    return {'resources': rows}
+
+
+@app.get("/api/3/reports/{rid}/content")
+async def nexpose_report_content(rid: int):
+    """実機はPDF/HTML等のバイナリを返すが、検証しやすいテキストで返す
+    （エミュレータ独自。実機APIには無いパス）"""
+    body = nexpose_engine.report_content(rid)
+    if body is None:
+        return _np_err(404, f'report {rid} not found')
+    return _Response(status_code=200, content=body,
+                     media_type='text/plain; charset=utf-8')
+
+
+@app.get("/api/3/scan_templates")
+async def nexpose_scan_templates(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_scan_templates_catalog.values()), page, size)
+
+
+@app.get("/api/3/scan_templates/{tid}")
+async def nexpose_scan_template(tid: str):
+    t = nexpose_scan_templates_catalog.get(tid)
+    if t is None:
+        return _np_err(404, f'scan template {tid} not found')
+    return t
+
+
+# ── 認証スキャン用の資格情報 ──
+@app.get("/api/3/sites/{sid}/site_credentials")
+async def nexpose_site_credentials(sid: int, page: int = 0, size: int = 10):
+    rows = nexpose_engine.list_site_credentials(sid)
+    if rows is None:
+        return _np_err(404, f'site {sid} not found')
+    return nexpose_page(rows, page, size)
+
+
+@app.post("/api/3/sites/{sid}/site_credentials")
+async def nexpose_add_site_credential(sid: int, body: dict):
+    cid, err = nexpose_engine.add_site_credential(sid, body)
+    if err:
+        return _np_err(404 if 'not found' in err else 400, err)
+    return JSONResponse(status_code=201, content={
+        'id': cid,
+        'links': [{'rel': 'self',
+                   'href': f'/api/3/sites/{sid}/site_credentials/{cid}'}]})
+
+
+@app.delete("/api/3/sites/{sid}/site_credentials/{cid}")
+async def nexpose_delete_site_credential(sid: int, cid: int):
+    ok, err = nexpose_engine.delete_site_credential(sid, cid)
+    if not ok:
+        return _np_err(404, err)
+    return {'links': [{'rel': 'self', 'href': f'/api/3/sites/{sid}'}]}
+
+
+# ── 脆弱性例外（承認されると次のスキャンから計上されない）──
+@app.get("/api/3/vulnerability_exceptions")
+async def nexpose_exceptions(page: int = 0, size: int = 10):
+    return nexpose_page(list(nexpose_engine.exceptions.values()), page, size)
+
+
+@app.post("/api/3/vulnerability_exceptions")
+async def nexpose_create_exception(body: dict):
+    eid, err = nexpose_engine.create_exception(body)
+    if err:
+        return _np_err(400, err)
+    return JSONResponse(status_code=201, content={
+        'id': eid,
+        'links': [{'rel': 'self',
+                   'href': f'/api/3/vulnerability_exceptions/{eid}'}]})
+
+
+@app.get("/api/3/vulnerability_exceptions/{eid}")
+async def nexpose_exception(eid: int):
+    exc = nexpose_engine.exceptions.get(eid)
+    if exc is None:
+        return _np_err(404, f'vulnerability exception {eid} not found')
+    return exc
+
+
+@app.post("/api/3/vulnerability_exceptions/{eid}/{action}")
+async def nexpose_review_exception(eid: int, action: str, body: dict = None):
+    ok, err = nexpose_engine.review_exception(
+        eid, action, (body or {}).get('comment', ''))
+    if not ok:
+        return _np_err(404 if 'not found' in err else 400, err)
+    return nexpose_engine.exceptions[eid]
+
+
+@app.delete("/api/3/vulnerability_exceptions/{eid}")
+async def nexpose_delete_exception(eid: int):
+    if not nexpose_engine.delete_exception(eid):
+        return _np_err(404, f'vulnerability exception {eid} not found')
+    return {'links': [{'rel': 'self', 'href': '/api/3/vulnerability_exceptions'}]}
+
+
+# ══════════════════════════════════════════════════════════
+# LogicMonitor REST API v3
+# ══════════════════════════════════════════════════════════
+# LogicMonitorはオンプレ配布物の無い完全SaaS型製品のため「動かす」こと
+# はできない。代わりにNexposeと同じ考え方でDevice/Alertを実装した。
+# 認証はLMv1署名（session_auth_middlewareの/santaba/rest/分岐を参照）。
+# 詳細は docs/logicmonitor-api.md を参照。
+
+@app.get("/santaba/rest/device/devices")
+async def lm_list_devices():
+    return {'total': len(logicmonitor_engine.devices),
+            'items': logicmonitor_engine.list_devices()}
+
+
+@app.post("/santaba/rest/device/devices")
+async def lm_create_device(body: dict):
+    did, err = logicmonitor_engine.add_device(body)
+    if err:
+        return JSONResponse(status_code=422, content={'status': 422, 'errmsg': err})
+    return JSONResponse(status_code=200, content=logicmonitor_engine.get_device(did))
+
+
+@app.get("/santaba/rest/device/devices/{did}")
+async def lm_get_device(did: int):
+    dev = logicmonitor_engine.get_device(did)
+    if dev is None:
+        return JSONResponse(status_code=404,
+            content={'status': 404, 'errmsg': f'device {did} not found'})
+    return dev
+
+
+@app.delete("/santaba/rest/device/devices/{did}")
+async def lm_delete_device(did: int):
+    if not logicmonitor_engine.delete_device(did):
+        return JSONResponse(status_code=404,
+            content={'status': 404, 'errmsg': f'device {did} not found'})
+    return {'status': 200}
+
+
+@app.get("/santaba/rest/alert/alerts")
+async def lm_list_alerts(deviceId: int = None):
+    alerts = logicmonitor_engine.list_alerts(device_sessions, device_id=deviceId)
+    return {'total': len(alerts), 'items': alerts}
+
+
+@app.post("/santaba/rest/_emulator/events")
+async def lm_ingest_event(body: dict):
+    """実機のLogicMonitor REST API v3には存在しない、このエミュレータ
+    独自の拡張エンドポイント。実際のLogicMonitor Collectorは監視対象
+    からsyslog/SNMP Trapを受信し、LogicMonitorのクラウド側に独自の
+    内部プロトコルで転送する（公開REST APIではない）。このエミュレータ
+    では`tools/logicmonitor_collector.py`が実際にUDPでsyslog/SNMP Trapを
+    受信し、その代わりにここへLMv1署名付きでPOSTする。
+
+    body: {"type": "syslog", "source_ip": "...", "severity": 3,
+           "facility_tag": "LINK", "message": "..."}
+       または
+          {"type": "trap", "source_ip": "...", "trap_oid": "...",
+           "description": "..."}
+    """
+    etype = body.get('type')
+    source_ip = body.get('source_ip')
+    if not source_ip:
+        return JSONResponse(status_code=422,
+            content={'status': 422, 'errmsg': 'source_ip is required'})
+    if etype == 'syslog':
+        alert = logicmonitor_engine.ingest_syslog(
+            source_ip, body.get('severity', 6),
+            body.get('facility_tag', 'SYSLOG'), body.get('message', ''))
+    elif etype == 'trap':
+        alert = logicmonitor_engine.ingest_trap(
+            source_ip, body.get('trap_oid', ''), body.get('description', ''))
+    else:
+        return JSONResponse(status_code=422,
+            content={'status': 422, 'errmsg': f'unknown event type: {etype!r}'})
+    return {'status': 200, 'alert': alert}
+
 
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 

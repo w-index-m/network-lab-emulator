@@ -26,6 +26,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # tests/test_openssh_interop.py は本物のOpenSSHクライアントで
+      # SSH CLIサーバ(engine/ssh_cli_agent.py)を叩く。ssh/sshpassが
+      # 無い環境では自動的にスキップされるが、ubuntu-latestランナーは
+      # sshpassだけ未導入なのでここで入れておく（実機ssh相互接続の
+      # 回帰、特にヒアドキュメント一括投入時のパスワード空振り不具合を
+      # CIでも検出できるようにする）。
+      - name: Install sshpass for OpenSSH interop tests
+        run: sudo apt-get update && sudo apt-get install -y sshpass
+
       - name: Lint (ruff)
         run: ruff check .
 

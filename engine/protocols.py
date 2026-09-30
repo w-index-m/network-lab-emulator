@@ -165,6 +165,28 @@ class VirtualNetwork:
         if loop_path:
             self._notify_loop_events(a, b, iface_a or a, iface_b or b, loop_path)
 
+    def ifaces_between(self, a: str, b: str) -> set:
+        """a から b へ向かう **すべての** ローカルIF名を返す。
+
+        interface_links は {peer -> iface} と1本しか覚えられないため、
+        同一ペア間に並列リンクを張ると後勝ちで上書きされる。
+        並列リンクを全部持っているのは link_ifaces のほうなので、
+        「そのピアへ向かうIF」を扱う処理は必ずこちらを使うこと。
+        （主回線と予備回線を張ったラボで、主回線をshutdownしても
+          予備回線側のIF名しか見えず判定を誤る、という事故が起きた）
+        """
+        out = set(getattr(self, 'link_ifaces', {}).get(a, {}).get(b, set()))
+        single = self.interface_links.get(a, {}).get(b)
+        if single:
+            out.add(single)
+        return out
+
+    def up_ifaces_between(self, a: str, b: str) -> set:
+        """a から b へ向かうIFのうち、a側でshutdownされていないもの"""
+        down = {self._norm_iface(x) for x in self.down_interfaces.get(a, set())}
+        return {i for i in self.ifaces_between(a, b)
+                if self._norm_iface(i) not in down}
+
     def _edge_up(self, a: str, b: str) -> bool:
         """a-b間の物理リンクが1本でも生きていれば True。
         並列リンクは全down時のみ断とする。iface情報が無ければ従来通りup扱い。"""
@@ -241,8 +263,11 @@ class VirtualNetwork:
         """指定インターフェース経由で接続されているpeer device_idのセット。
         インターフェース名は短縮形/正式形の差を吸収して照合する。"""
         target = self._norm_iface(iface)
-        return {peer for peer, if_name in self.interface_links.get(device_id, {}).items()
-                if if_name == iface or self._norm_iface(if_name) == target}
+        # 並列リンクがあると interface_links には1本しか載らないため、
+        # そのIF経由のピアを取りこぼす。link_ifaces を含めて照合する。
+        return {peer for peer in self.links.get(device_id, set())
+                if any(self._norm_iface(x) == target
+                       for x in self.ifaces_between(device_id, peer))}
 
     def remove_link(self, a: str, b: str):
         self.links[a].discard(b)
@@ -448,8 +473,12 @@ class VirtualNetwork:
             if not self._edge_up(src_id, peer_id):
                 continue
             if down:
-                connecting_iface = self.interface_links.get(src_id, {}).get(peer_id)
-                if connecting_iface and connecting_iface in down:
+                # そのピアへ向かうIFが1本でも生きていれば届く。
+                # 以前は interface_links の1本だけを見ていたため、
+                # 並列リンク構成で主回線を落としても予備回線側のIF名が
+                # 見えていて「まだ生きている」と誤判定していた。
+                ifs = self.ifaces_between(src_id, peer_id)
+                if ifs and not self.up_ifaces_between(src_id, peer_id):
                     continue
             # L2マルチキャスト系プロトコル（RIP/OSPF/STP/VRRP/LACP）は
             # 同一セグメントのみ届く
@@ -485,11 +514,10 @@ class VirtualNetwork:
 
     def _live_neighbors(self, node: str) -> list:
         """物理リンクが生きている(=downでない)直結隣接を返す"""
-        down = self.down_interfaces.get(node, set())
         out = []
         for peer in self.links.get(node, set()):
-            cif = self.interface_links.get(node, {}).get(peer)
-            if cif and cif in down:
+            ifs = self.ifaces_between(node, peer)
+            if ifs and not self.up_ifaces_between(node, peer):
                 continue
             if not self._edge_up(node, peer):
                 continue
@@ -606,8 +634,12 @@ class RipEngine:
             parts = net.split('/')
             if len(parts) == 2:
                 self._add_route(device_id, RipRoute(
+                    # 直結ネットワークのRIPメトリックは0（実機Cisco準拠）。
+                    # 受信側が+1して1になるため、隣接ルータの直結網は
+                    # show ip route で [120/1] と表示される。ここを1に
+                    # すると全ての学習経路が実機より1大きくなる。
                     network=parts[0], prefix=int(parts[1]),
-                    metric=1, next_hop='0.0.0.0',
+                    metric=0, next_hop='0.0.0.0',
                     learned_from='direct'
                 ))
 
@@ -706,8 +738,10 @@ class RipEngine:
             for net in n['networks']:
                 parts = net.split('/')
                 if len(parts) == 2:
+                    # 直結ネットワークはメトリック0で広告する（受信側で
+                    # +1され、実機同様に隣接では[120/1]になる）
                     entries.append({'network': parts[0], 'prefix': int(parts[1]),
-                                    'metric': 1, 'next_hop': '0.0.0.0'})
+                                    'metric': 0, 'next_hop': '0.0.0.0'})
             # 再配信ルート（他プロトコルから注入されたもの）
             for net, info in n.get('redistributed', {}).items():
                 parts = net.split('/')
@@ -927,10 +961,19 @@ class RipEngine:
         lines = ['FP Destination/Mask     Gateway           Metric   Time    Interface']
         for r in n['table']:
             fp = '*C' if r.learned_from == 'direct' else '*R'
-            age = 'none' if r.learned_from == 'direct' else \
-                  f'{int((time.time()-r.timestamp)//60):02d}:{int((time.time()-r.timestamp)%60):02d}'
-            via = '0.0.0.0' if r.learned_from == 'direct' else r.learned_from_hostname or r.next_hop
-            lines.append(f'{fp:<3}{r.network}/{r.prefix:<20}{via:<18}{str(r.metric):<9}{age:<8}lan0')
+            if r.learned_from == 'direct':
+                gateway = '0.0.0.0'
+                age = 'none'
+                iface = rib_engine._iface_for_network(device_id, r.network, r.prefix) or 'lan0'
+            else:
+                # ゲートウェイ欄は実機同様にネクストホップIPを表示する
+                # （ホスト名ではない）。Timeも「学習からの経過時間」ではなく
+                # 「タイムアウトまでの残り時間」のカウントダウン表示。
+                gateway = r.next_hop
+                remaining = max(0, 180 - int(time.time() - r.timestamp))
+                age = f'{remaining // 60:02d}:{remaining % 60:02d}'
+                iface = rib_engine._iface_for_nexthop(device_id, r.next_hop) or 'lan0'
+            lines.append(f'{fp:<3}{r.network}/{r.prefix:<20}{gateway:<18}{str(r.metric):<9}{age:<8}{iface}')
         lines.append(f'The number of entries : {len(n["table"])}')
         return '\n'.join(lines)
 
@@ -1218,6 +1261,73 @@ class OspfEngine:
             await self._send_hello(device_id)
             await asyncio.sleep(n['hello_interval'])
 
+    def ospf_enabled_ifaces(self, device_id: str):
+        """network文でOSPFが有効になっているインタフェース名の集合を返す。
+
+        実機のOSPFは `network <addr> <wildcard> area <n>` に一致した
+        インタフェースの上でしか動かない。これを見ずに全リンクへHelloを
+        流していたため、OSPFに入れていないバックアップ回線の上でも隣接が
+        成立し、主回線をshutdownしてもOSPF経路が生き残って
+        フローティングスタティックへ切り替わらなかった。
+
+        戻り値 None は「networkが未設定で判断できない」を表し、
+        呼び出し側は従来どおり全インタフェースを対象にする。
+        """
+        import ipaddress
+        n = self.nodes.get(device_id) or {}
+        nets = []
+        for net in (n.get('networks') or []):
+            try:
+                nets.append(ipaddress.ip_network(net, strict=False))
+            except ValueError:
+                continue
+        if not nets:
+            return None
+        out = set()
+        ifaces = icmp_engine.device_ips.get(device_id, {}).get('interfaces', {})
+        for name, info in ifaces.items():
+            ip = info.get('ip') if isinstance(info, dict) else None
+            if not ip:
+                continue
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            if any(addr in net for net in nets):
+                out.add(name)
+        return out
+
+    def _non_ospf_peers(self, device_id: str) -> set:
+        """OSPFが有効なインタフェースが1本も無いピアの集合。
+
+        同一ペア間に並列リンクがある場合、interface_links は
+        {peer -> iface} と1本しか覚えていないため、そちらを見ると
+        「主回線はOSPF、予備回線は非OSPF」という構成で判定を誤る。
+        並列リンクを全部持っている link_ifaces を使う。
+        """
+        enabled = self.ospf_enabled_ifaces(device_id)
+        if enabled is None:
+            return set()
+        norm = {vnet._norm_iface(x) for x in enabled}
+        out = set()
+        for peer in vnet.links.get(device_id, set()):
+            ifs = vnet.ifaces_between(device_id, peer)
+            if not ifs:
+                continue          # iface情報が無ければ従来どおり許可
+            ospf_ifs = [x for x in ifs if vnet._norm_iface(x) in norm]
+            if not ospf_ifs:
+                out.add(peer)
+                continue
+            # OSPFが有効なリンクが全部shutdownされていれば到達不能。
+            # broadcast_to_neighbors は peer→iface を1本しか覚えていない
+            # ため、並列リンク構成では主回線を落としても予備回線側で
+            # 送信できてしまう。ここで明示的に落とす。
+            down = {vnet._norm_iface(x)
+                    for x in vnet.down_interfaces.get(device_id, set())}
+            if all(vnet._norm_iface(x) in down for x in ospf_ifs):
+                out.add(peer)
+        return out
+
     async def _send_hello(self, device_id: str):
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
@@ -1247,13 +1357,19 @@ class OspfEngine:
             'auth_mode': n.get('auth_mode', ''),
             'auth_key': n.get('auth_key', ''),
         }
-        await vnet.broadcast_to_neighbors(device_id, pkt)
+        # OSPFに入れていないインタフェースの先へはHelloを出さない
+        await vnet.broadcast_to_neighbors(
+            device_id, pkt, exclude=self._non_ospf_peers(device_id))
 
     async def receive_hello(self, receiver_id: str, msg: dict):
         n = self.nodes.get(receiver_id)
         if not n or not n['enabled']:
             return
         src_id = msg.get('src_id')
+        # 受信側でも、OSPFが有効でないインタフェースに届いたHelloは無視する
+        # （送信側が古い実装/別ベンダでも隣接が張られてしまわないように）
+        if src_id in self._non_ospf_peers(receiver_id):
+            return
         src_hostname = msg.get('src_hostname', src_id)
         router_id = msg.get('router_id', src_id)
         area_id = msg.get('area_id')
@@ -1803,7 +1919,12 @@ class OspfEngine:
             })
 
     # ── show コマンド出力 ──────────────────
-    def format_show_ospf_neighbor(self, device_id: str) -> str:
+    _OSPF_STATE_RANK = {
+        'Full': 6, 'Loading': 5, 'Exchange': 4, 'ExStart': 3,
+        'TwoWay': 2, '2-Way': 2, 'Init': 1, 'Down': 0,
+    }
+
+    def format_show_ospf_neighbor(self, device_id: str, device_sessions: dict = None) -> str:
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
             return '% OSPF is not configured on this device.'
@@ -1813,7 +1934,21 @@ class OspfEngine:
         if not n['neighbors']:
             lines.append('(No neighbors)')
             return '\n'.join(lines)
+
+        # 同一router_idに対して、内部エンジン(device_id をキーに保持し
+        # Helloで正しくFullまで進む)と実UDPリスナー(engine/real_ospf_agent.py。
+        # router_id文字列をキーに保持し、DBD交換までは進まずInitのまま
+        # 残ることがある)の二重登録が起きることがある。表示上は
+        # router_idごとに最も進んだstateのエントリ1件だけを残す。
+        best_by_rid = {}
         for nid, nbr in n['neighbors'].items():
+            rid = nbr.router_id
+            rank = self._OSPF_STATE_RANK.get(nbr.state, 0)
+            cur = best_by_rid.get(rid)
+            if cur is None or rank > self._OSPF_STATE_RANK.get(cur[1].state, 0):
+                best_by_rid[rid] = (nid, nbr)
+
+        for nid, nbr in best_by_rid.values():
             nbr_node = self.nodes.get(nid)
             pri = nbr_node.get('priority', 1) if nbr_node else 1
             # DR/BDR/DROther判定
@@ -1833,15 +1968,25 @@ class OspfEngine:
             m = int((dead_left % 3600) // 60)
             s_ = int(dead_left % 60)
             dead_str = f'{h:02d}:{m:02d}:{s_:02d}'
-            # ネイバーIPは相手ノードのIPから推定（実IPがあれば使用）。
-            # 実OSPFリスナー(engine/real_ospf_agent.py)経由の外部ピアは
-            # ospf_engine.nodes に登録が無いので、ネイバー自身が持つ
-            # 実IPを優先する
-            peer_node = self.nodes.get(nid, {})
-            peer_ips = list(peer_node.get('_peer_ips', {}).values())
-            peer_ip = (getattr(nbr, 'ip', None)
-                       or (peer_ips[0] if peer_ips else f'10.0.{abs(hash(nid))%200+1}.1'))
-            iface = nbr.iface if hasattr(nbr, 'iface') and nbr.iface else 'GigabitEthernet0/0/0'
+            # ネイバーIP/インタフェースは、vnetの実リンク情報と相手側の
+            # 実インタフェースIPから解決する（device_sessionsが渡された
+            # 場合のみ）。解決できない場合のみ従来通りのフォールバック。
+            iface = getattr(nbr, 'iface', None)
+            peer_ip = getattr(nbr, 'ip', None)
+            local_iface = vnet.interface_links.get(device_id, {}).get(nid)
+            if local_iface and not iface:
+                iface = local_iface
+            if device_sessions is not None and not peer_ip:
+                peer_state = device_sessions.get(nid)
+                peer_iface = vnet.interface_links.get(nid, {}).get(device_id)
+                if peer_state and peer_iface:
+                    peer_ip = peer_state.interfaces.get(peer_iface, {}).get('ip')
+            if not peer_ip:
+                peer_node = self.nodes.get(nid, {})
+                peer_ips = list(peer_node.get('_peer_ips', {}).values())
+                peer_ip = peer_ips[0] if peer_ips else f'10.0.{abs(hash(nid))%200+1}.1'
+            if not iface:
+                iface = 'GigabitEthernet0/0/0'
             lines.append(
                 f'{nbr.router_id:<16}{pri:<6}{state_str:<16}{dead_str:<12}'
                 f'{peer_ip:<16}{iface}'
@@ -2070,7 +2215,12 @@ class BgpEngine:
             self.nodes[device_id] = {
                 'enabled': False,
                 'local_as': None,
-                'router_id': f'10.1.0.{device_id}',
+                # Router IDは start() で「明示設定 > 実インタフェースIP >
+                # フォールバック」の順に決める。ここで f'10.1.0.{device_id}'
+                # のような値を入れると、device_idが数値でない場合に
+                # "10.1.0.test-dev" のような不正なIDになる（従来は start()
+                # が毎回上書きしていたため表面化していなかった）。
+                'router_id': '',
                 'hostname': device_id,
                 'sessions': {},    # neighbor_id -> BgpSession
                 'rib_in': [],      # List[BgpRoute]
@@ -2168,12 +2318,20 @@ class BgpEngine:
                 route.communities = list(rm['communities'])
         return route
 
-    async def start(self, device_id: str, hostname: str, local_as: int):
+    async def start(self, device_id: str, hostname: str, local_as: int,
+                    router_id: str = ''):
         n = self._node(device_id)
         n['enabled'] = True
         n['local_as'] = int(local_as)
         n['hostname'] = hostname
-        n['router_id'] = f'10.1.0.{abs(hash(device_id)) % 254 + 1}'
+        # Router IDは実機同様「明示設定 > 実インタフェースのIP」の順で
+        # 決める。以前はhash由来の架空IP(10.1.0.x)を毎回無条件に代入して
+        # おり、show ip bgp summary に実在しないIDが出るうえ、
+        # "bgp router-id" で設定した値も router bgp のたびに潰れていた。
+        if router_id:
+            n['router_id'] = router_id
+        elif not n.get('router_id'):
+            n['router_id'] = f'10.1.0.{abs(hash(device_id)) % 254 + 1}'
         await vnet.send_to(device_id, {
             'type': 'bgp_log',
             'message': vendor_log.bgp_start(vnet.ws_send_callbacks.get(f'_type_{device_id}','cisco'), n['hostname'], local_as, n['router_id'])
@@ -2989,13 +3147,26 @@ class StpEngine:
                         f'(sys-id-ext {vlan}) configured')
         }))
 
+    @staticmethod
+    def _port_name_for_peer(device_id: str, peer_id: str, fallback: str) -> str:
+        """
+        リンクの実インタフェース名（vnet.interface_links）が分かれば
+        それを使い、無ければ従来通り "ether N" にフォールバックする。
+
+        以前は常に "ether N" という合成名を使っていたため、Catalyst等
+        実機のインタフェース名(GigabitEthernet1/0/1等)を期待する
+        show spanning-tree の出力が実機と食い違っていた。
+        """
+        real = vnet.interface_links.get(device_id, {}).get(peer_id)
+        return real or fallback
+
     def _init_ports(self, device_id: str):
         n = self.nodes.get(device_id)
         if not n:
             return
         # 接続済みの隣接ノードからポートを生成
         for i, peer_id in enumerate(vnet.get_neighbors(device_id), 1):
-            port_name = f'ether {i}'
+            port_name = self._port_name_for_peer(device_id, peer_id, f'ether {i}')
             if port_name not in n['ports']:
                 n['ports'][port_name] = {
                     'name': port_name, 'state': 'FORWARDING',
@@ -3464,7 +3635,7 @@ class StpEngine:
         port_num = 1
         while f'ether {port_num}' in n['ports']:
             port_num += 1
-        port_name = f'ether {port_num}'
+        port_name = self._port_name_for_peer(device_id, peer_id, f'ether {port_num}')
         n['ports'][port_name] = {
             'name': port_name,
             'state': 'DISCARDING' if n['mode'] == 'rstp' else 'BLOCKING',
@@ -3631,7 +3802,8 @@ class StpEngine:
             # ポート番号(Prio.Nbr の Nbr部分)は本エンジンでは個別管理して
             # おらず、show spanning-tree vlan の一覧表示側でも "1" 固定で
             # 出しているのに合わせる（実機では実際のポートインデックス）。
-            port_str = f'1   ({root_port_name})' if root_port_name else '0'
+            port_str = (f'1   ({dp_engine._short_port(root_port_name)})'
+                        if root_port_name else '0')
             lines.append(f'             Cost        {n.get("root_path_cost", 0)}'
                           f'  Port {port_str}')
             lines.append('             Hello Time  2 sec  Max Age 20 sec  Forward Delay 15 sec')
@@ -3658,8 +3830,9 @@ class StpEngine:
                 'ROOT': 'Root ', 'DESIGNATED': 'Desg ', 'ALTERNATE': 'Altn ',
                 'BACKUP': 'Back ', 'DISABLED': 'Dis  ',
             }.get(port['role'], port['role'][:5])
+            short_name = dp_engine._short_port(port["name"])
             lines.append(
-                f'{port["name"]:<20}{role_short} {state_short} {str(port["cost"]):<10}'
+                f'{short_name:<20}{role_short} {state_short} {str(port["cost"]):<10}'
                 f'{str(port["priority"])+".1":<9}P2p{pf_str}{rg_str}'
             )
         return '\n'.join(lines)
@@ -3784,6 +3957,12 @@ class RibEngine:
                     if is_connected and not iface:
                         iface = self._iface_for_network(
                             device_id, r.network, r.prefix) or ''
+                    elif not is_connected and not iface:
+                        # 実機は"ip route <net> <mask> <next-hop>"のように
+                        # インタフェースを省略しても、次ホップと同一セグメント
+                        # にあるインタフェース名をshow ip routeに表示する。
+                        # 以前はr.ifaceが未設定のままだと空欄になっていた。
+                        iface = self._iface_for_nexthop(device_id, r.next_hop) or ''
                     candidates.append({
                         'network': r.network, 'prefix': r.prefix,
                         'next_hop': r.next_hop, 'ad': r.ad,
@@ -3809,7 +3988,16 @@ class RibEngine:
         # OSPF
         onode = ospf_engine.nodes.get(device_id)
         if onode and onode.get('enabled'):
+            _own_rid = onode.get('router_id') or ''
             for r in onode.get('routes', []):
+                # 自分自身のrouter-idを次ホップとするOSPF経路は採用しない。
+                # 自分のLSA由来で「自分の直結NWへ自分経由で行く」経路が
+                # 生まれており、直結経路がshutdownで消えた瞬間に
+                # "O 10.90.1.0/24 via <自分> , Loopback0" という
+                # 実機に存在しない経路として表面化していた。
+                if (r.get('via') != 'direct' and _own_rid
+                        and r.get('next_hop') == _own_rid):
+                    continue
                 src = 'connected' if r['via'] == 'direct' else 'ospf'
                 ad = AD_VALUES['connected'] if src == 'connected' else AD_VALUES['ospf']
                 candidates.append({
@@ -3852,6 +4040,36 @@ class RibEngine:
                              or self._iface_for_network(device_id, r['prefix'],
                                                         r['prefix_len']) or '',
                 })
+
+        # shutdown中のインタフェースを出口とする経路はRIBから外す。
+        # 実機はインタフェースをshutdownした時点で、そのIFの直結経路
+        # (C/L)も、そのIFを出口として学習した動的経路も即座に
+        # ルーティングテーブルから取り除く。ここで除外しないと、
+        # リンクを落としても show ip route に古い経路が残り続け、
+        # 転送判定にもその経路が使われてしまう。
+        down_ifaces = {vnet._norm_iface(x)
+                       for x in vnet.down_interfaces.get(device_id, set())}
+        if down_ifaces:
+            def _exit_iface(c):
+                """この経路の出口IF。動的経路は next_hop に内部ID/router-id
+                が入っていて iface が空のことがあり、そのままだと
+                「ifaceが無い経路」として下のフィルタを素通りしてしまう。
+                （主リンクをshutdownしてもOSPF経路が残り、フローティング
+                  スタティックへ切り替わらない原因になっていた）"""
+                if c.get('iface'):
+                    return c['iface']
+                if c['source'] in ('rip', 'ospf', 'bgp', 'eigrp'):
+                    nh = icmp_engine.resolve_learned_next_hop(
+                        device_id, c.get('next_hop', ''))
+                    if nh:
+                        return self._iface_for_nexthop(device_id, nh) or ''
+                return ''
+
+            candidates = [
+                c for c in candidates
+                if not (_exit_iface(c)
+                        and vnet._norm_iface(_exit_iface(c)) in down_ifaces)
+            ]
 
         # 宛先ごとにAD最小（同ADならmetric最小）を選択
         best = {}
@@ -4001,6 +4219,92 @@ class RibEngine:
                     f"via {disp_next_hop}, {disp_iface}"
                 )
         return '\n'.join(lines)
+
+    def format_show_ip_route_proto(self, device_id: str, proto: str) -> str:
+        """show ip route {connected|static|ospf|rip|bgp|eigrp}
+
+        指定プロトコル由来の経路だけに絞って表示する。以前は引数を
+        まったく見ずに全テーブルを返していた。"""
+        full = self.format_show_ip_route(device_id)
+        head, _, body = full.partition('\n\n')
+        code_of = {'connected': 'C', 'static': 'S', 'rip': 'R',
+                   'ospf': 'O', 'bgp': 'B', 'eigrp': 'D'}
+        want = code_of.get(proto)
+        kept = []
+        for ln in body.split('\n'):
+            if not ln.strip() or ln.startswith('Gateway of last resort'):
+                continue
+            first = ln[0]
+            if want == 'C' and first in ('C', 'L'):
+                kept.append(ln)
+            elif want and first == want:
+                kept.append(ln)
+        return '\n'.join([head, ''] + kept) if kept else head + '\n'
+
+    def format_show_ip_route_detail(self, device_id: str, target: str) -> str:
+        """show ip route <A.B.C.D>
+
+        実機は該当経路の詳細ブロック(Routing entry for ...)を返す。
+        以前は引数を無視して全テーブルを出していたため、どの経路が
+        実際に採用されているのか(AD/メトリック/学習元)が確認できなかった。
+        """
+        try:
+            tgt = vnet._ip_to_int(target)
+        except Exception:
+            return '% Invalid input detected'
+        best = None
+        for r in self.get_best_routes(device_id):
+            p = int(r['prefix'])
+            mask = (0xffffffff << (32 - p)) & 0xffffffff if p else 0
+            try:
+                if (vnet._ip_to_int(r['network']) & mask) != (tgt & mask):
+                    continue
+            except Exception:
+                continue
+            # ロンゲストマッチ
+            if best is None or p > int(best['prefix']):
+                best = r
+        if best is None:
+            return f'% Network not in table'
+        net = f"{best['network']}/{best['prefix']}"
+        src = best['source']
+        known = {
+            'connected': 'connected', 'static': 'static',
+            'ospf': f'"ospf {ospf_engine.nodes.get(device_id, {}).get("process_id", 1)}"',
+            'rip': '"rip"', 'eigrp': '"eigrp"', 'bgp': '"bgp"',
+        }.get(src, f'"{src}"')
+        out = [f'Routing entry for {net}']
+        if src == 'connected':
+            out.append(f'  Known via "connected", distance 0, metric 0 '
+                       f'(connected, via interface)')
+            out.append('  Routing Descriptor Blocks:')
+            out.append(f"  * directly connected, via {best['iface']}")
+            out.append('      Route metric is 0, traffic share count is 1')
+            return '\n'.join(out)
+        nh = best['next_hop']
+        if src in ('rip', 'ospf', 'bgp', 'eigrp'):
+            nh = icmp_engine.resolve_learned_next_hop(device_id, nh) or nh
+        # 動的経路は next_hop が内部ID/router-idのことがあり、その場合
+        # iface が空のまま渡ってくる。表示直前に実IPから解決する。
+        if not best.get('iface'):
+            best = dict(best)
+            best['iface'] = (self._iface_for_nexthop(device_id, nh)
+                             or self._iface_for_network(
+                                 device_id, best['network'],
+                                 int(best['prefix'])) or '')
+        extra = ', type intra area' if src == 'ospf' else ''
+        out.append(f"  Known via {known}, distance {best['ad']}, "
+                   f"metric {best['metric']}{extra}")
+        if src == 'static':
+            out.append('  Routing Descriptor Blocks:')
+            out.append(f"  * {nh}, via {best['iface']}")
+        else:
+            out.append(f"  Last update from {nh} on {best['iface']}")
+            out.append('  Routing Descriptor Blocks:')
+            out.append(f"  * {nh}, from {nh}, via {best['iface']}")
+        out.append(f"      Route metric is {best['metric']}, "
+                   f"traffic share count is 1")
+        return '\n'.join(out)
 
     @staticmethod
     def _iface_for_network(device_id: str, network: str,
@@ -5616,7 +5920,15 @@ class SnmpAgent:
 
     def register(self, device_id: str, device_type: str, hostname: str,
                  contact: str = '', location: str = '',
-                 community: str = 'public'):
+                 community: str = 'public', communities=None,
+                 rw_communities=None):
+        """装置をSNMPエージェントに登録する。
+
+        communities には装置に設定されている読み取り可能な
+        コミュニティ名をすべて渡す（`snmp-server community` の
+        RO/RW 両方）。1つしか持てないと、2つ目以降のコミュニティで
+        読めなくなる。
+        """
         # 既存の書込済み値（snmpset）があれば保持
         prev = self.devices.get(device_id, {})
         self.devices[device_id] = {
@@ -5624,6 +5936,8 @@ class SnmpAgent:
             'contact': prev.get('contact') or contact,
             'location': prev.get('location') or location,
             'community': community,
+            'communities': list(communities) if communities else [],
+            'rw_communities': list(rw_communities) if rw_communities else [],
             'rw_community': prev.get('rw_community', 'private'),
             'overrides': prev.get('overrides', {}),  # snmpsetで書込んだOID値
             'if_admin': prev.get('if_admin', {}),    # ifAdminStatus上書き
@@ -5729,7 +6043,17 @@ class SnmpAgent:
                 return (o, t, v)
         return None
 
-    def getnext(self, device_id: str, oid: str):
+    def getnext(self, device_id: str, oid: str, community: str = None):
+        """SNMP GETNEXT
+
+        community を渡すと照合する。以前は照合が一切無く、GETは
+        コミュニティを見るのに GETNEXT/WALK は素通りしていたため、
+        でたらめなコミュニティで snmpwalk するとMIBが丸ごと読めた。
+        既定の None は「呼び出し元が内部利用（照合済み/不要）」を意味し、
+        ダッシュボード等の既存の内部呼び出しと互換を保つ。
+        """
+        if community is not None and not self._auth(device_id, community):
+            return 'AUTH_FAIL'
         oid = oid.lstrip('.')
         mib = self._build_mib(device_id)
         for o, t, v in mib:
@@ -5752,9 +6076,22 @@ class SnmpAgent:
         return result
 
     def _auth(self, device_id: str, community: str) -> bool:
-        # コミュニティ名チェック（デフォルトpublicは常に許可）
-        cfg = self.devices.get(device_id, {}).get('community', 'public')
-        return community in ('public', cfg) or community == cfg
+        """読み取りコミュニティの照合
+
+        以前は設定に関わらず 'public' を常に許可していたため、
+        `snmp-server community s3cret-only ro` と設定しても public で
+        中身が読めてしまっていた。装置にコミュニティが設定されていれば
+        そのどれかに一致することを要求する。
+
+        何も設定されていない装置は、これまで通り既定の 'public' で
+        読める（このエミュレータは装置作成時に暗黙の public で
+        登録しているため）。
+        """
+        d = self.devices.get(device_id, {})
+        configured = d.get('communities') or []
+        if configured:
+            return community in configured
+        return community == d.get('community', 'public')
 
     @staticmethod
     def _oid_gt(a: str, b: str) -> bool:
@@ -5817,6 +6154,10 @@ class IpFilterEngine:
         self.acls: Dict[str, Dict[str, list]] = defaultdict(lambda: defaultdict(list))
         # device_id -> {(iface, direction) -> acl_name}
         self.applied: Dict[str, Dict[tuple, str]] = defaultdict(dict)
+        # device_id -> {acl_name -> 'standard'|'extended'}
+        # 名前付きACLは名前から種別を判別できないため明示的に覚えておく
+        # （standardなのに "Extended IP access list" と表示されていた）
+        self.acl_kind: Dict[str, Dict[str, str]] = defaultdict(dict)
 
     def add_rule(self, device_id: str, acl_name: str, action: str,
                  protocol: str = 'ip', src: str = 'any', dst: str = 'any',
@@ -5847,6 +6188,18 @@ class IpFilterEngine:
             return True
         if spec.startswith('host '):
             return spec.split()[1] == ip
+        # Cisco形式の「アドレス + ワイルドカードマスク」(10.0.0.0 0.0.0.255)。
+        # 名前付きACLの permit/deny 行はこの形で入るため、対応していないと
+        # どのルールにもマッチせず暗黙denyになってしまう。
+        parts = spec.split()
+        if len(parts) == 2 and all(p.count('.') == 3 for p in parts):
+            try:
+                wc = self._ip_to_int(parts[1])
+                mask = (~wc) & 0xffffffff
+                return (self._ip_to_int(ip) & mask) == \
+                       (self._ip_to_int(parts[0]) & mask)
+            except Exception:
+                return False
         if '/' in spec:
             net, prefix = spec.split('/')
             prefix = int(prefix)
@@ -5856,6 +6209,24 @@ class IpFilterEngine:
             except Exception:
                 return False
         return spec == ip
+
+    def check_source(self, device_id: str, acl_name: str, src_ip: str) -> bool:
+        """送信元IPが名前付きACLで許可されるか（サービスレベルACL用）。
+
+        NETCONF/RESTCONFの `... access-list name <acl>` は、インタフェース
+        ではなくサービスへの着信を送信元アドレスだけで絞る。存在しない
+        ACL名を指定した場合、実機は「一致するものが無い＝全拒否」ではなく
+        素通しになるため、ここでもTrueを返す。
+        """
+        if not acl_name:
+            return True
+        rules = self.acls.get(device_id, {}).get(acl_name, [])
+        if not rules:
+            return True
+        for rule in rules:
+            if self._match_addr(rule.src, src_ip):
+                return rule.action == 'permit'
+        return False        # 暗黙deny
 
     def check_packet(self, device_id: str, iface: str, direction: str,
                      src_ip: str, dst_ip: str, protocol: str = 'ip',
@@ -5893,11 +6264,27 @@ class IpFilterEngine:
         lines = []
         for name, rules in acls.items():
             if device_type in ('catalyst', 'cisco'):
-                # 数字なら standard/extended 判定
-                kind = 'Standard' if name.isdigit() and int(name) < 100 else 'Extended'
-                lines.append(f'{kind} IP access list {name}')
+                kind = self.acl_kind.get(device_id, {}).get(name)
+                if not kind:
+                    # 番号付きACLは番号帯で決まる（1-99/1300-1999が標準）
+                    kind = ('standard' if name.isdigit() and int(name) < 100
+                            else 'extended')
+                lines.append(f'{kind.capitalize()} IP access list {name}')
                 for r in rules:
-                    if r.protocol == 'ip' and r.dst == 'any' and not r.dst_port:
+                    if kind == 'standard':
+                        # 実機の標準ACL表記:
+                        #   10 permit 10.99.0.0, wildcard bits 0.0.0.255
+                        #   20 permit 192.0.2.7
+                        #   30 deny   any
+                        src = r.src.strip()
+                        parts = src.split()
+                        if len(parts) == 2 and all(x.count('.') == 3
+                                                   for x in parts):
+                            src = f'{parts[0]}, wildcard bits {parts[1]}'
+                        elif src.startswith('host '):
+                            src = src.split()[1]
+                        lines.append(f'    {r.seq} {r.action:<6} {src}')
+                    elif r.protocol == 'ip' and r.dst == 'any' and not r.dst_port:
                         lines.append(f'    {r.seq} {r.action} {r.src}')
                     else:
                         portstr = f' eq {r.dst_port}' if r.dst_port else ''
@@ -6787,14 +7174,28 @@ class EigrpEngine:
             elif existing.learned_from == 'direct':
                 continue                       # 直結が常に優先
             elif fd < existing.fd or existing.learned_from == src_id:
-                existing.fd = fd
-                existing.rd = rd
-                existing.next_hop = next_hop
-                existing.learned_from = src_id
-                existing.learned_from_hostname = msg.get('src_hostname', src_id)
-                existing.external = bool(e.get('external'))
+                # 実機のEIGRPは「トポロジテーブルが実際に変化したとき」
+                # だけUpdateを出す。以前は同じ隣接から同じ経路を再受信
+                # しただけでも changed=True にしていたため、
+                #   receive -> _send_update -> send_to -> receive -> ...
+                # とUpdateを撃ち返し合って無限再帰し、2台構成でEIGRPを
+                # 設定した瞬間にRecursionErrorでAPIが500を返していた。
+                # (vnet.send_to は receive を直接awaitするので、
+                #  メッセージループではなくスタックが伸び続ける)
+                external = bool(e.get('external'))
+                if (existing.fd, existing.rd, existing.next_hop,
+                        existing.learned_from, existing.external) != (
+                        fd, rd, next_hop, src_id, external):
+                    existing.fd = fd
+                    existing.rd = rd
+                    existing.next_hop = next_hop
+                    existing.learned_from = src_id
+                    existing.learned_from_hostname = msg.get('src_hostname',
+                                                             src_id)
+                    existing.external = external
+                    changed = True
+                # 変化が無くても生存確認としてタイムスタンプは更新する
                 existing.timestamp = time.time()
-                changed = True
         if changed:
             await self._send_update(receiver_id)
 
@@ -7619,6 +8020,335 @@ class VrrpEngine:
 
 
 vrrp_engine = VrrpEngine()
+
+
+@dataclass
+class GlbpGroup:
+    group_id: int
+    vip: str = ''
+    priority: int = 100
+    preempt: bool = False           # GLBPもデフォルトpreempt無効
+    state: str = 'Init'             # Init / Listen / Standby / Active(AVG)
+    interface: str = ''
+    hello_interval: int = 3         # 実機デフォルト hello 3秒 / hold 10秒
+    hold_time: int = 10
+    load_balancing: str = 'round-robin'
+    weighting: int = 100
+    hello_task: Optional[Any] = None
+    dead_task: Optional[Any] = None
+    peer_id: str = ''
+    peer_ip: str = ''
+    peer_priority: int = 0
+    # AVF(仮想フォワーダ)。forwarder番号 -> {'owner','state','vmac'}
+    forwarders: Dict[int, dict] = field(default_factory=dict)
+
+
+class GlbpEngine:
+    """
+    GLBP（Gateway Load Balancing Protocol）
+
+    HSRP/VRRPと違い、1グループ内で AVG(Active Virtual Gateway) が1台、
+    各ルータが AVF(Active Virtual Forwarder) として別々の仮想MACを持ち、
+    ARP応答時にAVGが仮想MACを振り分けることで負荷分散する。
+
+    実装している範囲:
+      - AVG選出（priority比較、同値ならIPが大きい方。preempt対応）
+      - 仮想フォワーダ(AVF)の割り当てと仮想MAC 0007.b400.XXYY
+      - weighting による転送能力の表現
+      - show glbp / show glbp brief
+
+    未対応（実機との差）:
+      - weighting track による自動降格、client cache、認証、
+        load-balancing の実際のARP応答振り分け
+    """
+
+    def __init__(self):
+        self.groups: Dict[str, Dict[int, GlbpGroup]] = defaultdict(dict)
+
+    def _g(self, device_id: str, gid: int) -> GlbpGroup:
+        if gid not in self.groups[device_id]:
+            self.groups[device_id][gid] = GlbpGroup(group_id=gid)
+        return self.groups[device_id][gid]
+
+    @staticmethod
+    def virtual_mac(gid: int, forwarder: int) -> str:
+        """GLBPの仮想MACは 0007.b400.xxyy（xx=グループ, yy=フォワーダ番号）"""
+        return f'0007.b400.{gid:02x}{forwarder:02x}'
+
+    def set_ip(self, device_id: str, gid: int, vip: str, iface: str = ''):
+        g = self._g(device_id, gid)
+        g.vip = vip
+        if iface:
+            g.interface = iface
+        return g
+
+    def set_priority(self, device_id: str, gid: int, priority: int):
+        self._g(device_id, gid).priority = priority
+
+    def set_preempt(self, device_id: str, gid: int, enabled: bool = True):
+        self._g(device_id, gid).preempt = enabled
+
+    def set_weighting(self, device_id: str, gid: int, weight: int):
+        self._g(device_id, gid).weighting = weight
+
+    def set_load_balancing(self, device_id: str, gid: int, mode: str):
+        self._g(device_id, gid).load_balancing = mode
+
+    def set_timers(self, device_id: str, gid: int, hello: int, hold: int):
+        g = self._g(device_id, gid)
+        g.hello_interval = hello
+        g.hold_time = hold
+
+    def remove(self, device_id: str, gid: int):
+        self.groups.get(device_id, {}).pop(gid, None)
+
+    def _peers(self, device_id: str, gid: int):
+        """同一グループを設定していて、かつ実際にリンクしている装置"""
+        out = []
+        for peer_id in vnet.get_neighbors(device_id):
+            pg = self.groups.get(peer_id, {}).get(gid)
+            if pg and pg.vip:
+                out.append((peer_id, pg))
+        return out
+
+    def elect(self, device_id: str, gid: int, device_sessions=None):
+        """AVG選出とAVF割り当てを行う。
+
+        実機は priority が大きい方がAVG、同値ならインタフェースIPが
+        大きい方が勝つ。preemptが無効なら、既にAVGが居る場合は
+        priorityが高くても奪わない。
+        """
+        g = self.groups.get(device_id, {}).get(gid)
+        if not g or not g.vip:
+            return
+        peers = self._peers(device_id, gid)
+        my_ip = self._iface_ip(device_id, g, device_sessions)
+
+        best_id, best_g, best_ip = device_id, g, my_ip
+        for pid, pg in peers:
+            pip = self._iface_ip(pid, pg, device_sessions)
+            if (pg.priority, pip) > (best_g.priority, best_ip):
+                best_id, best_g, best_ip = pid, pg, pip
+
+        # preempt無効時は、既にActiveの装置が居ればそのまま維持する
+        active = [(pid, pg) for pid, pg in peers if pg.state == 'Active']
+        if active and not g.preempt and best_id == device_id and \
+                g.state != 'Active':
+            best_id = active[0][0]
+
+        g.state = 'Active' if best_id == device_id else 'Standby'
+        if peers:
+            g.peer_id = peers[0][0]
+            g.peer_ip = self._iface_ip(peers[0][0], peers[0][1], device_sessions)
+            g.peer_priority = peers[0][1].priority
+
+        # AVF割り当て: AVGが自分と各ピアにフォワーダ番号を1から振る
+        members = [device_id] + [pid for pid, _ in peers]
+        members.sort()
+        g.forwarders = {}
+        for i, m in enumerate(members, 1):
+            g.forwarders[i] = {
+                'owner': m,
+                'state': 'Active' if m == device_id else 'Listen',
+                'vmac': self.virtual_mac(gid, i),
+            }
+
+    @staticmethod
+    def _iface_ip(device_id: str, g: GlbpGroup, device_sessions=None) -> str:
+        if device_sessions is None:
+            return ''
+        st = device_sessions.get(device_id)
+        if st is None:
+            return ''
+        if g.interface:
+            return st.interfaces.get(g.interface, {}).get('ip', '') or ''
+        for info in st.interfaces.values():
+            if info.get('ip') and info['ip'] != '127.0.0.1':
+                return info['ip']
+        return ''
+
+    def format_show_glbp(self, device_id: str, device_sessions=None) -> str:
+        groups = self.groups.get(device_id, {})
+        if not groups:
+            return ''
+        lines = []
+        for gid in sorted(groups):
+            g = groups[gid]
+            self.elect(device_id, gid, device_sessions)
+            lines.append(f'{g.interface or "Vlan1"} - Group {gid}')
+            lines.append(f'  State is {g.state}')
+            lines.append(f'  Virtual IP address is {g.vip}')
+            lines.append(f'  Hello time {g.hello_interval} sec, '
+                         f'hold time {g.hold_time} sec')
+            lines.append(f'  Priority {g.priority} (default 100)')
+            lines.append(f'  Weighting {g.weighting} (default 100), '
+                         f'thresholds: lower 1, upper 100')
+            lines.append(f'  Load balancing: {g.load_balancing}')
+            lines.append(f'  Group members:')
+            for num, f in sorted(g.forwarders.items()):
+                lines.append(f'    Forwarder {num} - {f["owner"]} '
+                             f'({f["vmac"]}) state {f["state"]}')
+            lines.append('')
+        return '\n'.join(lines).rstrip()
+
+    def format_show_glbp_brief(self, device_id: str, device_sessions=None) -> str:
+        groups = self.groups.get(device_id, {})
+        if not groups:
+            return ''
+        lines = ['Interface   Grp  Fwd Pri State    Address         '
+                 'Active router   Standby router']
+        for gid in sorted(groups):
+            g = groups[gid]
+            self.elect(device_id, gid, device_sessions)
+            # 実機の show glbp brief はインタフェース名を短縮表記で出す
+            # （列幅がフル名を想定していないため、そのまま出すと崩れる）
+            ifn = dp_engine._short_port(g.interface or 'Vlan1')
+            act = 'local' if g.state == 'Active' else (g.peer_ip or 'unknown')
+            sby = (g.peer_ip or 'unknown') if g.state == 'Active' else 'local'
+            lines.append(f'{ifn:<12}{gid:<5}{"-":<4}'
+                         f'{g.priority:<4}{g.state:<9}{g.vip:<16}'
+                         f'{act:<16}{sby}')
+            for num, f in sorted(g.forwarders.items()):
+                owner = 'local' if f['owner'] == device_id else f['owner']
+                lines.append(f'{ifn:<12}{gid:<5}{num:<4}'
+                             f'{"-":<4}{f["state"]:<9}{f["vmac"]:<16}{owner}')
+        return '\n'.join(lines)
+
+
+glbp_engine = GlbpEngine()
+
+
+class TrackEngine:
+    """
+    拡張オブジェクトトラッキング（Enhanced Object Tracking）
+
+    実機の `track <object-number> ...` は、インタフェースの回線状態や
+    経路の到達性を「オブジェクト」として抽象化し、HSRP/VRRP/GLBPの
+    priority減算やスタティックルートの有効/無効に紐付ける仕組み。
+
+    対応:
+      track <n> interface <iface> line-protocol
+      track <n> interface <iface> ip routing
+      track <n> ip route <prefix>/<len> reachability
+      track <n> list boolean and|or          （object <n> で子を列挙）
+      （サブモード: delay up <sec> / delay down <sec>）
+
+    未対応（実機との差）:
+      track ip sla / track stub-object / threshold weight・percentage
+    """
+
+    def __init__(self):
+        # device_id -> {obj_num: {...}}
+        self.objects: Dict[str, Dict[int, dict]] = defaultdict(dict)
+
+    def add_interface_object(self, device_id: str, num: int, iface: str,
+                             kind: str = 'line-protocol'):
+        self.objects[device_id][num] = {
+            'type': 'interface', 'iface': iface, 'kind': kind,
+            'state': 'Up', 'delay_up': 0, 'delay_down': 0,
+        }
+        return self.objects[device_id][num]
+
+    def add_route_object(self, device_id: str, num: int, network: str,
+                         prefix: int):
+        self.objects[device_id][num] = {
+            'type': 'route', 'network': network, 'prefix': prefix,
+            'kind': 'reachability', 'state': 'Down',
+            'delay_up': 0, 'delay_down': 0,
+        }
+        return self.objects[device_id][num]
+
+    def add_list_object(self, device_id: str, num: int, op: str):
+        self.objects[device_id][num] = {
+            'type': 'list', 'op': op, 'members': [],
+            'kind': f'boolean {op}', 'state': 'Down',
+            'delay_up': 0, 'delay_down': 0,
+        }
+        return self.objects[device_id][num]
+
+    def remove(self, device_id: str, num: int):
+        self.objects.get(device_id, {}).pop(num, None)
+
+    def get(self, device_id: str, num: int):
+        return self.objects.get(device_id, {}).get(num)
+
+    def refresh(self, device_id: str, state=None):
+        """装置の現在の状態からオブジェクトの Up/Down を再評価する"""
+        objs = self.objects.get(device_id)
+        if not objs:
+            return
+        down_ifaces = {vnet._norm_iface(x)
+                       for x in vnet.down_interfaces.get(device_id, set())}
+        routes = None
+        for num, o in objs.items():
+            if o['type'] == 'interface':
+                iface = o['iface']
+                admin_down = vnet._norm_iface(iface) in down_ifaces
+                if state is not None and not admin_down:
+                    info = state.interfaces.get(iface)
+                    if info is None:
+                        admin_down = True
+                    elif info.get('status') in ('down', 'administratively down',
+                                                 'notconnect', 'disabled'):
+                        admin_down = True
+                    elif o['kind'] == 'ip routing' and not info.get('ip'):
+                        # "ip routing" はIPが載っていることも条件になる
+                        admin_down = True
+                o['state'] = 'Down' if admin_down else 'Up'
+            elif o['type'] == 'route':
+                if routes is None:
+                    routes = {(r['network'], r['prefix'])
+                              for r in rib_engine.get_best_routes(device_id)}
+                o['state'] = ('Up' if (o['network'], o['prefix']) in routes
+                              else 'Down')
+        # listオブジェクトは他オブジェクトの結果に依存するので後で評価
+        for num, o in objs.items():
+            if o['type'] != 'list':
+                continue
+            members = [objs.get(m) for m in o['members']]
+            states = [m['state'] == 'Up' for m in members if m]
+            if not states:
+                o['state'] = 'Down'
+            elif o['op'] == 'and':
+                o['state'] = 'Up' if all(states) else 'Down'
+            else:
+                o['state'] = 'Up' if any(states) else 'Down'
+
+    def format_show_track(self, device_id: str, num: int = None,
+                          state=None) -> str:
+        self.refresh(device_id, state)
+        objs = self.objects.get(device_id, {})
+        if not objs:
+            return '%No tracking process'
+        lines = []
+        for n in sorted(objs):
+            if num is not None and n != num:
+                continue
+            o = objs[n]
+            if o['type'] == 'interface':
+                lines.append(f'Track {n}')
+                lines.append(f'  Interface {o["iface"]} {o["kind"]}')
+                lines.append(f'  {o["kind"].capitalize()} is {o["state"]}')
+            elif o['type'] == 'route':
+                lines.append(f'Track {n}')
+                lines.append(f'  IP route {o["network"]}/{o["prefix"]} reachability')
+                lines.append(f'  Reachability is {o["state"]}')
+            else:
+                lines.append(f'Track {n}')
+                lines.append(f'  List boolean {o["op"]}')
+                lines.append(f'  Boolean {o["op"]} is {o["state"]}')
+                for m in o['members']:
+                    mo = objs.get(m)
+                    if mo:
+                        lines.append(f'    {m} object {mo["state"]}')
+            lines.append(f'    {0} changes, last change never')
+            lines.append('')
+        if not lines:
+            return f'%Track object {num} does not exist'
+        return '\n'.join(lines).rstrip()
+
+
+track_engine = TrackEngine()
 
 
 # ══════════════════════════════════════════
@@ -10064,6 +10794,175 @@ class ApresiaMessageEngine:
                 msg = log.get('message', '') if isinstance(log, dict) else str(log)
                 lines.append(f'  {msg}')
         return '\n'.join(lines)
+
+
+class MplsEngine:
+    """
+    MPLS(LDP)の簡易実装。Cisco IOS-XE/NX-OSでのラベル配布動作を模擬する。
+
+    実装範囲:
+    - グローバル有効化(mpls ip)、インタフェース単位の有効化
+    - 隣接リンク上で双方が mpls ip 有効ならLDPネイバーをOperationalにする
+      （実際のHello/Session確立シーケンスは省略し即時Operational扱い）
+    - rib_engineのベストルートから宛先ごとにローカルラベルを採番
+    - show mpls interfaces / show mpls ldp neighbor / show mpls ldp
+      bindings / show mpls forwarding-table
+
+    対象外(実装していない): LSPのホップ単位でのラベルスワップ計算、
+    RSVP-TE、MPLS-VPN/VRF、TTL/QoS処理。show mpls forwarding-tableの
+    outgoing labelは実際にLDPで配布された値ではなく、宛先ネットワーク
+    ごとに決定的に算出した表示用の値であることに注意
+    （毎回同じ入力なら同じ値になるが、実際のLDPネゴシエーション結果
+    ではない）。
+    """
+
+    def __init__(self):
+        self.nodes: Dict[str, dict] = {}
+
+    def _node(self, device_id: str) -> dict:
+        if device_id not in self.nodes:
+            self.nodes[device_id] = {
+                'enabled': False,
+                'interfaces': set(),
+                'neighbors': {},
+                '_next_label': 16,
+                'labels': {},   # (network, prefix) -> local_label
+            }
+        return self.nodes[device_id]
+
+    def enable_global(self, device_id: str):
+        self._node(device_id)['enabled'] = True
+
+    def enable_interface(self, device_id: str, iface: str):
+        n = self._node(device_id)
+        n['interfaces'].add(iface)
+        n['enabled'] = True
+
+    def disable_interface(self, device_id: str, iface: str):
+        self._node(device_id)['interfaces'].discard(iface)
+
+    def is_enabled(self, device_id: str) -> bool:
+        n = self.nodes.get(device_id)
+        return bool(n and n['enabled'])
+
+    def _label_for(self, device_id: str, network: str, prefix: int) -> int:
+        n = self._node(device_id)
+        key = (network, prefix)
+        if key not in n['labels']:
+            n['labels'][key] = n['_next_label']
+            n['_next_label'] += 1
+        return n['labels'][key]
+
+    def refresh_neighbors(self, device_id: str):
+        """vnetで実際にリンクしている相手のうち、双方でMPLSがインタ
+        フェース単位で有効な組み合わせだけをLDPネイバーとして認識する。"""
+        n = self._node(device_id)
+        n['neighbors'] = {}
+        if not n['enabled']:
+            return
+        for peer_id in vnet.get_neighbors(device_id):
+            local_iface = vnet.interface_links.get(device_id, {}).get(peer_id)
+            peer_iface = vnet.interface_links.get(peer_id, {}).get(device_id)
+            if not local_iface or local_iface not in n['interfaces']:
+                continue
+            peer_n = self.nodes.get(peer_id)
+            if not peer_n or not peer_n['enabled']:
+                continue
+            if not peer_iface or peer_iface not in peer_n['interfaces']:
+                continue
+            n['neighbors'][peer_id] = {'iface': local_iface, 'state': 'Operational'}
+
+    def format_show_mpls_interfaces(self, device_id: str, state) -> str:
+        n = self.nodes.get(device_id)
+        lines = ['Interface              IP            Tunnel   BGP  Static  Operational']
+        if not n or not n['interfaces']:
+            lines.append('(no MPLS interfaces)')
+            return '\n'.join(lines)
+        for iface in sorted(n['interfaces']):
+            info = state.interfaces.get(iface, {})
+            ip = 'Yes' if info.get('ip') else 'No'
+            up = info.get('status') == 'up'
+            lines.append(f'{iface:<23}{ip:<14}No       No   No      {"Yes" if up else "No"}')
+        return '\n'.join(lines)
+
+    def format_show_mpls_ldp_neighbor(self, device_id: str, device_sessions) -> str:
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return '% MPLS LDP is not configured on this device.'
+        if not n['neighbors']:
+            return '(No LDP neighbors)'
+        lines = []
+        local_state = device_sessions.get(device_id)
+        for peer_id, info in n['neighbors'].items():
+            peer_state = device_sessions.get(peer_id)
+            peer_iface_info = (peer_state.interfaces.get(
+                vnet.interface_links.get(peer_id, {}).get(device_id, ''), {})
+                if peer_state else {})
+            peer_ip = peer_iface_info.get('ip', '0.0.0.0')
+            # Local LDP Identは「自分側のLDP識別子(IP:ラベル空間)」。
+            # 以前は対向のホスト名を出しており実機と食い違っていた。
+            local_ip = '0.0.0.0'
+            if local_state:
+                local_ip = (local_state.interfaces.get(info.get('iface', ''), {})
+                            .get('ip') or '0.0.0.0')
+            lines.append(f'    Peer LDP Ident: {peer_ip}:0; '
+                         f'Local LDP Ident {local_ip}:0')
+            lines.append(f'\tTCP connection: {peer_ip}.646 - {info["iface"]}')
+            lines.append(f'\tState: {info["state"]}; Msgs sent/rcvd: 0/0; Downstream')
+            lines.append(f'\tUp time: 00:00:10')
+            lines.append(f'\tLDP discovery sources:')
+            lines.append(f'\t  {info["iface"]}, Src IP addr: {peer_ip}')
+            lines.append('')
+        return '\n'.join(lines).rstrip()
+
+    def format_show_mpls_ldp_bindings(self, device_id: str) -> str:
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return '% MPLS LDP is not configured on this device.'
+        routes = rib_engine.get_best_routes(device_id)
+        if not routes:
+            return '(No LDP bindings)'
+        lines = []
+        for r in routes:
+            net, prefix = r['network'], r['prefix']
+            label = self._label_for(device_id, net, prefix)
+            local_tag = 'imp-null' if r.get('source') == 'connected' else str(label)
+            lines.append(f'  {net}/{prefix}')
+            lines.append(f'\tlocal binding:  label: {local_tag}')
+        return '\n'.join(lines)
+
+    def format_show_mpls_forwarding_table(self, device_id: str) -> str:
+        n = self.nodes.get(device_id)
+        if not n or not n['enabled']:
+            return '% MPLS is not configured on this device.'
+        routes = rib_engine.get_best_routes(device_id)
+        lines = ['Local      Outgoing   Prefix           Bytes Label   Outgoing   Next Hop',
+                  'Label      Label      or Tunnel Id      Switched    interface']
+        if not routes:
+            lines.append('(no MPLS forwarding entries)')
+            return '\n'.join(lines)
+        for r in routes:
+            net, prefix = r['network'], r['prefix']
+            local_label = self._label_for(device_id, net, prefix)
+            if r.get('source') == 'connected':
+                out_label = 'Pop Label'
+            else:
+                # 実際のLDPで配布された値ではなく、宛先ごとに決定的に
+                # 算出した表示専用の値（クラスdocstring参照）
+                out_label = str(16 + (abs(hash((device_id, net, prefix))) % 900))
+            iface = r.get('iface', '-') or '-'
+            next_hop = r.get('next_hop') or None
+            if r.get('source') == 'connected' or not next_hop or next_hop == '0.0.0.0':
+                next_hop_disp = 'point2point'
+            else:
+                next_hop_disp = next_hop
+            lines.append(
+                f'{local_label:<11}{out_label:<11}{net + "/" + str(prefix):<18}'
+                f'{0:<12}{iface:<23}{next_hop_disp}')
+        return '\n'.join(lines)
+
+
+mpls_engine = MplsEngine()
 
 
 apresia_msg = ApresiaMessageEngine()

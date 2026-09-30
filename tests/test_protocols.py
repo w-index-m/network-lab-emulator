@@ -78,7 +78,7 @@ class TestRip:
 
     @pytest.mark.asyncio
     async def test_metric_increment(self, fresh_engines):
-        """学習したルートのメトリックが+1される"""
+        """隣接の直結網を学習するとメトリック1になる（実機の[120/1]相当）"""
         e = fresh_engines
         _link(e, 'A', 'B')
         await e['rip'].start('A', 'R-A', ['10.0.0.0/24'])
@@ -89,7 +89,9 @@ class TestRip:
         learned = [r for r in e['rip'].nodes['B']['table']
                    if r.network == '10.0.0.0']
         assert learned, "ルート未学習"
-        assert learned[0].metric == 2, f"metric期待2、実際{learned[0].metric}"
+        # 実機Cisco準拠: 直結網はメトリック0で広告され、受信側で+1されて
+        # 1になる（show ip route では [120/1]）。
+        assert learned[0].metric == 1, f"metric期待1、実際{learned[0].metric}"
         await e['rip'].stop('A')
         await e['rip'].stop('B')
 

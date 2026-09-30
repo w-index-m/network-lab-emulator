@@ -8,9 +8,10 @@ network-lab-emulator と、監視・AIツール一式をWindows PCにセット�
 
 ## スクリプト1本でまとめて実行する場合
 
-Prometheus/Alertmanager/Grafanaのダウンロード〜起動〜Grafanaへの
-データソース登録までを1本にまとめた `tools/setup_monitoring_stack.ps1`
-がある（Linux版 `tools/setup_monitoring_stack.sh` のPowerShell移植）。
+Prometheus/Alertmanager/Grafana/Grafana Loki（+syslogブリッジ）の
+ダウンロード〜起動〜Grafanaへのデータソース登録までを1本にまとめた
+`tools/setup_monitoring_stack.ps1` がある（Linux版
+`tools/setup_monitoring_stack.sh` のPowerShell移植）。
 べき等（既に起動しているサービスはスキップ）なので、何度実行しても安全。
 
 ```powershell
@@ -165,6 +166,101 @@ Invoke-RestMethod -Uri "http://localhost:3000/api/datasources" -Method Post `
   -Body $body -ContentType "application/json" `
   -Headers @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("admin:admin")) }
 ```
+
+## 3.5. Grafana Loki（ログ集約、任意）
+
+`docs/loki-setup.md`（Linux版）と同じもの。Loki本体はzip配布で、
+バイナリ名が`loki-windows-amd64.exe`になる点以外はLinux版と同じ設定。
+
+```powershell
+cd $work
+
+Invoke-WebRequest `
+  -Uri "https://github.com/grafana/loki/releases/download/v3.2.0/loki-windows-amd64.exe.zip" `
+  -OutFile "loki.zip"
+Expand-Archive -Path "loki.zip" -DestinationPath "." -Force
+
+New-Item -ItemType Directory -Force -Path "$work\loki-data" | Out-Null
+
+@"
+auth_enabled: false
+
+server:
+  http_listen_address: 127.0.0.1
+  http_listen_port: 3100
+  grpc_listen_address: 127.0.0.1
+  grpc_listen_port: 9096
+
+common:
+  instance_addr: 127.0.0.1
+  instance_interface_names:
+    - Loopback Pseudo-Interface 1
+  path_prefix: $work/loki-data
+  storage:
+    filesystem:
+      chunks_directory: $work/loki-data/chunks
+      rules_directory: $work/loki-data/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    instance_interface_names:
+      - Loopback Pseudo-Interface 1
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+frontend_worker:
+  frontend_address: 127.0.0.1:9096
+
+ruler:
+  alertmanager_url: http://localhost:9093
+"@ | Out-File -Encoding utf8 "$work\loki-config.yml"
+```
+
+```powershell
+# ウィンドウ4: Loki
+cd $work
+.\loki-windows-amd64.exe -config.file=loki-config.yml
+```
+
+- Loki: http://localhost:3100/ready
+
+GrafanaのLokiデータソース登録:
+
+```powershell
+$body = @{ name = "Loki"; type = "loki"; url = "http://localhost:3100"; access = "proxy" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://localhost:3000/api/datasources" -Method Post `
+  -Body $body -ContentType "application/json" `
+  -Headers @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("admin:admin")) }
+```
+
+装置のsyslogをLokiに転送するブリッジ（`tools/syslog_to_loki.py`、
+Linux版と同一コード）:
+
+```powershell
+# ウィンドウ5: syslog -> Loki ブリッジ
+cd $env:USERPROFILE\Documents\network-lab-emulator
+.\venv\Scripts\Activate.ps1
+python tools\syslog_to_loki.py --syslog-port 5514 --loki-url http://localhost:3100
+```
+
+装置側では `logging host <このブリッジを動かすPCのIP> 5514` を設定する。
+
+**注意**: `-config.file`のパス区切りには`\`ではなく`/`を使う
+（YAML内の`instance_interface_names`はWindowsのループバック
+インタフェース名`Loopback Pseudo-Interface 1`を指定する必要がある。
+Linux版の`lo`とは異なる点に注意）。このリポジトリの環境では
+Windows実機での起動確認はしておらず、`tools/setup_monitoring_stack.ps1`
+のパース確認（PowerShell構文エラーが無いこと）のみ行っている。
 
 ## 4. Ollama + 軽量モデル
 

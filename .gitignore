@@ -40,3 +40,7 @@ tools/monitor_watchlist.json
 chef/local-mode-cache/
 chef/nodes/
 chef/chef_guid
+
+# ベンダーマニュアルPDF（再配布可否が不明なためgit管理しない。
+# docs/reference/ 配下に実装検証用として置くのはローカルのみ）
+docs/reference/*.pdf

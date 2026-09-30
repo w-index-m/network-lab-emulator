@@ -127,6 +127,29 @@ class DeviceState:
             self.logging_level = "informational"
             return
 
+        # IPCOM EX2（富士通/PFU系UTMアプライアンス）
+        # インターフェース名は lan<N>.<VLAN-ID> 形式（マニュアル準拠）。
+        if device_type == "ipcom":
+            self.interfaces = {
+                "lan0.0": {"ip": "192.168.1.1", "prefix": 24, "status": "up",
+                           "desc": "", "mac": "00:0e:0e:f2:51:dc",
+                           "auto_negotiation": True, "ip_routing": True},
+                "lan0.1": {"ip": "192.168.100.1", "prefix": 24, "status": "up",
+                           "desc": "", "mac": "00:0e:0e:f2:51:dd",
+                           "auto_negotiation": True, "ip_routing": True},
+            }
+            self.mode = "exec"
+            self._ipcom_admin = False   # admin コマンドで昇格(ipcom># prompt)
+            self.static_routes = []     # [{"dest","gw","distance"}]
+            self.syslog_servers = []
+            self.logging_level = "informational"
+            self.snmp_community = []
+            self.snmp_hosts = []
+            self.snmp_location = ""
+            self.snmp_contact = ""
+            self.banner = ""
+            return
+
         # NX-OS (Nexus 9000)
         if device_type == "nexus":
             self.interfaces = {
@@ -240,6 +263,11 @@ class DeviceState:
             # ether <group> <port> snmp trap linkdown/linkup <enable|disable>
             # 未設定時はいずれも enable（マニュアル 4.9.1）
             self.sir_ether_trap = {}
+            # ether <group> <port> mode <speed>。未設定時は auto（マニュアル 4.1.4）
+            self.sir_ether_mode = {}
+            # ether <group> <port> duplex <full|half>。未設定時は full（マニュアル 4.1.5）
+            # mode が auto または 1000 の場合はこの設定は無視される。
+            self.sir_ether_duplex = {}
 
         self.routes = [
             {"fp":"*C","dest":"192.168.1.0/24","gw":"192.168.1.1","dist":0, "iface":"lan0"},
@@ -425,6 +453,71 @@ def _expand_port_list(raw: str):
         elif chunk.isdigit():
             ports.append(int(chunk))
     return ports
+
+
+# ══════════════════════════════════════════════════════════
+# 設定サブモードの登録簿
+# ══════════════════════════════════════════════════════════
+# 新しい設定サブモードを足すときは **ここに1行追加するだけ** でよい。
+#   parent : exit したときに戻るモード
+#   attrs  : exit 時に消すコンテキスト属性（このモード専用のもの）
+#
+# 以前は
+#   (1) process() の「設定コマンドを通すモード」許可リスト
+#   (2) _cmd_exit() の戻り先リスト
+# の2か所に別々に書く必要があり、片方を忘れるとコマンドがハンドラに
+# 届かず "% Invalid input detected" になった。ZBFW実装時に実際に踏み、
+# 原因特定に時間を溶かしている。両方をこの1つの表から導出する。
+#
+# 正しく登録されているかは tests/test_config_submodes.py が
+# 全モードを総当たりで検証する。
+CONFIG_SUBMODES = {
+    # モード名                  親モード              exit時に消す属性
+    "config-if":               ("config",            ()),
+    "config-line":             ("config",            ('_vty_range',)),
+    "config-router":           ("config",            ()),
+    "config-vlan":             ("config",            ()),
+    "config-crypto":           ("config",            ('_ike_policy_num',)),
+    "config-monitor":          ("config",            ('_monitor_sid',)),
+    "config-cmap":             ("config",            ('_cmap_name', '_cmap_seq',
+                                                      '_qos_cmap')),
+    "config-pmap":             ("config",            ('_qos_pmap',)),
+    "config-pmap-c":           ("config-pmap",       ('_qos_class',)),
+    "config-vs-domain":        ("config",            ()),
+    "config-vpc-domain":       ("config",            ()),
+    "config-dhcp":             ("config",            ('_dhcp_pool',)),
+    "config-dhcpv6":           ("config",            ('_dhcpv6_pool',)),
+    "config-bba":              ("config",            ('_bba_group',)),
+    "config-evpn":             ("config",            ()),
+    "config-evpn-vni":         ("config-evpn",       ('_evpn_vni',)),
+    "config-l2vpn-evpn":       ("config",            ()),
+    "config-l2vpn-evpn-instance": ("config-l2vpn-evpn", ('_evpn_vni',)),
+    "config-vlan-config":      ("config",            ('_current_vlan',)),
+    "config-nve-vni":          ("config-if",         ('_nve_member_vni',)),
+    "config-bgp-af":           ("config-router",     ()),
+    "config-sec-zone":         ("config",            ('_zbfw_zone',)),
+    "config-sec-zone-pair":    ("config",            ('_zbfw_pair',)),
+    "config-track":            ("config",            ('_track_obj',)),
+    "config-sg-tacacs":        ("config",            ('_aaa_group_name',)),
+    "config-std-nacl":         ("config",            ('_current_acl_name',)),
+    "config-ext-nacl":         ("config",            ('_current_acl_name',)),
+    "config-mdt":              ("config",            ('_mdt_sub',)),
+    "config-applet":           ("config",            ('_eem_applet',)),
+    "config-app-hosting":      ("config",            ('_app_id', '_app_vnic_mode',
+                                                      '_app_vnic_gi')),
+    "config-openflow":         ("config",            ()),
+    "config-openflow-switch":  ("config-openflow",   ('_of_switch',)),
+    # ip ssh pubkey-chain（SSH公開鍵認証）。key-stringサブモードは
+    # 「行をそのまま貼り付ける」特殊な入力モードで、exit/endの確定処理
+    # (_finalize_ssh_pubkey) はapp.py側が先に横取りするため、ここでの
+    # 遷移先は「取りこぼした場合に備えた保険」の意味合いが強い。
+    "config-ssh-pubkey":       ("config",            ()),
+    "config-ssh-pubkey-user":  ("config-ssh-pubkey", ('_ssh_pubkey_user',)),
+    "config-ssh-pubkey-key":   ("config-ssh-pubkey-user", ('_ssh_pubkey_buf',)),
+}
+
+# 設定コマンドを _cmd_config に通すモード一覧（config本体＋全サブモード）
+CONFIG_MODES = frozenset({"config"}) | frozenset(CONFIG_SUBMODES)
 
 
 class RuleEngine:
@@ -746,11 +839,20 @@ class RuleEngine:
         if state.device_type == 'apresia':
             return self._apresia_process(cmd, c, state)
 
+        # IPCOM EX2は「即時/編集モード」+ load/new/save の独自体系 → 専用ハンドラへ
+        if state.device_type == 'ipcom':
+            return self._ipcom_process(cmd, c, state)
+
         # F5 BIG-IP は tmsh 体系 → 専用ハンドラへ
         if state.device_type == 'bigip':
             return self._bigip_process(cmd, c, state)
 
         # モード遷移
+        # 実機の end は「どの設定モードからでも特権EXECへ一気に戻る」。
+        # 以前は exit と同じ扱いで一段だけ戻していたため、
+        # interface配下で end しても config のままだった。
+        if c == "end" and state.mode in CONFIG_MODES:
+            return self._cmd_end(state)
         if c in ("exit", "end", "quit"):
             return self._cmd_exit(cmd, state)
         if c == "exit-address-family" and state.mode == "config-bgp-af":
@@ -790,6 +892,21 @@ class RuleEngine:
         if c == 'evpn' and state.mode == "config" and state.device_type == 'nexus':
             state.mode = 'config-evpn'
             return ""
+        # EVPN/VXLAN: l2vpn evpn グローバルサブモード（Catalyst 9000のIOS-XE構文。
+        # NX-OSの"evpn"に相当するが、featureコマンドが要らない分だけ
+        # ここがEVPN機能の起点になる）
+        if c == 'l2vpn evpn' and state.mode == "config" and state.device_type == 'catalyst':
+            if not hasattr(state, 'l2vpn_evpn') or not isinstance(state.l2vpn_evpn, dict):
+                state.l2vpn_evpn = {'replication_type': '', 'router_id': ''}
+            state.mode = 'config-l2vpn-evpn'
+            return ""
+        # EVPN/VXLAN: vlan configuration <n>（Catalyst 9000のIOS-XE構文。
+        # NX-OSの"vlan <n>"配下の"vn-segment"に相当する、VLAN⇔VNIの対応付け）
+        m_vc = re.match(r'^vlan\s+configuration\s+(\d+)$', c)
+        if m_vc and state.mode == "config" and state.device_type == 'catalyst':
+            state._current_vlan = int(m_vc.group(1))
+            state.mode = 'config-vlan-config'
+            return ""
         # EVPN/VXLAN: router bgp 配下の address-family l2vpn evpn サブモード
         if re.match(r'^address-family\s+l2vpn\s+evpn', c) and state.mode == "config-router":
             if not hasattr(state, 'bgp') or not isinstance(state.bgp, dict):
@@ -802,9 +919,13 @@ class RuleEngine:
             state.mode = 'config-bgp-af'
             return ""
 
-        # ISSU の show（show install / show issu）は専用ハンドラ優先
+        # ISSU/ISMU の show（show install / show issu）は専用ハンドラ優先。
+        # ISMU(データモデル更新)を先に見て、該当しなければISSU(イメージ)へ。
         if (re.match(r'^show\s+(install|issu)\b', c) and
                 state.device_type in ('catalyst', 'nexus')):
+            ismu_show = self._cmd_ismu(cmd, state)
+            if ismu_show is not None:
+                return ismu_show
             issu_show = self._cmd_issu(cmd, state)
             if issu_show is not None:
                 return issu_show
@@ -838,16 +959,16 @@ class RuleEngine:
                 icmp_engine.clear_icmp_stats(device_id)
             return ""
 
-        # 設定コマンド
-        if state.mode in ("config", "config-if", "config-router", "config-vlan",
-                          "config-crypto", "config-monitor",
-                          "config-cmap", "config-pmap", "config-pmap-c",
-                          "config-vs-domain", "config-dhcp", "config-bba",
-                          "config-evpn", "config-evpn-vni", "config-nve-vni",
-                          "config-bgp-af"):
+        # 設定コマンド（許可モードは CONFIG_SUBMODES 登録簿から導出する）
+        if state.mode in CONFIG_MODES:
             return self._cmd_config(cmd, state)
 
-        # ── ISSU / ソフトウェアアップグレード（Catalyst / Nexus）──
+        # ── ISMU(データモデル更新) / ISSU(ソフトウェア更新) ──
+        # どちらも install コマンドを共有するため、.dmp.bin を扱うISMUを
+        # 先に判定し、対象外(None)なら従来のISSU処理へ回す。
+        ismu_out = self._cmd_ismu(cmd, state)
+        if ismu_out is not None:
+            return ismu_out
         issu_out = self._cmd_issu(cmd, state)
         if issu_out is not None:
             return issu_out
@@ -879,41 +1000,41 @@ class RuleEngine:
 
     # ─── モード遷移 ───────────────────────────
     def _cmd_exit(self, cmd, state):
-        if state.mode == "config-if":
-            state.mode = "config"
-        elif state.mode == "config-pmap-c":
-            # policy-map class サブモード → policy-map サブモードへ戻る
-            state.mode = "config-pmap"
-            if hasattr(state, '_qos_class'):
-                delattr(state, '_qos_class')
-        # EVPN/VXLAN: ネストしたサブモードは一段だけ戻す
-        elif state.mode == "config-nve-vni":
-            # interface nve1 配下の member vni サブモード → interface(config-if)へ
-            state.mode = "config-if"
-            if hasattr(state, '_nve_member_vni'):
-                delattr(state, '_nve_member_vni')
-        elif state.mode == "config-evpn-vni":
-            # evpn 配下の vni <n> l2 サブモード → evpn サブモードへ
-            state.mode = "config-evpn"
-            if hasattr(state, '_evpn_vni'):
-                delattr(state, '_evpn_vni')
-        elif state.mode == "config-bgp-af":
-            # router bgp 配下の address-family サブモード → router bgpへ
-            state.mode = "config-router"
-        elif state.mode in ("config-router", "config-vlan", "config-vpc-domain",
-                             "config-crypto", "config-monitor",
-                             "config-cmap", "config-pmap", "config-vs-domain",
-                             "config-dhcp", "config-sg-tacacs", "config-ext-nacl",
-                             "config-bba", "config-evpn"):
-            state.mode = "config"
-            # Clear sub-context pointers
-            for attr in ('_ike_policy_num', '_cmap_name', '_cmap_seq', '_monitor_sid',
-                         '_qos_cmap', '_qos_pmap', '_qos_class', '_dhcp_pool',
-                         '_aaa_group_name', '_current_acl_name', '_bba_group'):
+        """一段だけ上のモードへ戻る。
+
+        戻り先と消すコンテキスト属性は CONFIG_SUBMODES 登録簿から引く。
+        以前はここに戻り先リストを直書きしており、process() 側の許可
+        リストと二重管理になっていた（片方の登録漏れでコマンドが
+        ハンドラに届かない事故を実際に起こしている）。
+        """
+        entry = CONFIG_SUBMODES.get(state.mode)
+        if entry is not None:
+            parent, attrs = entry
+            state.mode = parent
+            for attr in attrs:
                 if hasattr(state, attr):
                     delattr(state, attr)
-        elif state.mode == "config":
+            return ""
+        if state.mode == "config":
             state.mode = "exec"
+        return ""
+
+    def _cmd_end(self, state):
+        """end: どの設定サブモードからでも特権EXECまで戻る。
+
+        途中のサブモードが持っていたコンテキスト属性は全部消す
+        （残すと次に入ったサブモードが古い名前を掴む）。
+        """
+        mode = state.mode
+        seen = set()
+        while mode in CONFIG_SUBMODES and mode not in seen:
+            seen.add(mode)
+            parent, attrs = CONFIG_SUBMODES[mode]
+            for attr in attrs:
+                if hasattr(state, attr):
+                    delattr(state, attr)
+            mode = parent
+        state.mode = "exec"
         return ""
 
     def _cmd_configure(self, state):
@@ -1155,12 +1276,18 @@ class RuleEngine:
             return self._show_arp(state)
 
         # ── show etherchannel (Catalyst/SR-S) ──
-        if re.match(r'^show\s+etherchannel\s+summary', c):
-            return self._show_etherchannel_summary(state)
-        if re.match(r'^show\s+etherchannel\s+detail', c):
-            return self._show_etherchannel_detail(state)
-        if re.match(r'^show\s+etherchannel', c):
-            return self._show_etherchannel_summary(state)
+        # 実機は "show etherchannel [<group>] {summary|detail|...}" のように
+        # グループ番号を挟める。以前は番号付きの形にマッチせず、
+        # "show etherchannel 1 detail" が summary にフォールスルーしていた。
+        m_ec = re.match(r'^show\s+etherchannel(?:\s+(\d+))?'
+                        r'(?:\s+(summary|detail|port-channel|port|protocol))?'
+                        r'\s*$', c)
+        if m_ec:
+            grp = int(m_ec.group(1)) if m_ec.group(1) else None
+            what = m_ec.group(2) or 'summary'
+            if what == 'detail':
+                return self._show_etherchannel_detail(state, grp)
+            return self._show_etherchannel_summary(state, grp)
 
         # ── show lacp (Catalyst/SR-S/Nexus) ──
         if re.match(r'^show\s+lacp\s+neighbor', c):
@@ -1217,6 +1344,90 @@ class RuleEngine:
         if re.match(r'^show\s+ip\s+verify\s+source', c):
             return self._format_show_ip_verify(state)
 
+        # ── show ipv6 dhcp pool / show ipv6 interface brief ──
+        if re.match(r'^show\s+ipv6\s+dhcp\s+pool', c) and \
+                state.device_type in ('cisco', 'catalyst'):
+            pools = getattr(state, 'dhcpv6_pools', {}) or {}
+            if not pools:
+                return '% No IPv6 DHCP pools configured'
+            out = []
+            for name, p in pools.items():
+                out.append(f'DHCPv6 pool: {name}')
+                if p.get('prefix'):
+                    out.append(f'  Address allocation prefix: {p["prefix"]}')
+                if p.get('dns'):
+                    out.append(f'  DNS server: {p["dns"]}')
+                if p.get('domain'):
+                    out.append(f'  Domain name: {p["domain"]}')
+                for code, val in sorted(p.get('options', {}).items()):
+                    out.append(f'  Option {code}: {val}')
+                out.append('')
+            return '\n'.join(out).rstrip()
+
+        if re.match(r'^show\s+ipv6\s+interface\s+brief', c) and \
+                state.device_type in ('cisco', 'catalyst', 'nexus'):
+            out = []
+            for ifn, i in state.interfaces.items():
+                if not (i.get('ipv6') or i.get('ipv6_enabled')):
+                    continue
+                st = i.get('status', 'down')
+                out.append(f'{ifn:<24}[{"up" if st in ("up","connected") else "down"}/'
+                           f'{"up" if st in ("up","connected") else "down"}]')
+                if i.get('ipv6'):
+                    out.append(f'    {i["ipv6"]}')
+            return '\n'.join(out) if out else '% No IPv6 interfaces configured'
+
+        # ── show glbp / show ip nhrp / show ip wccp ──
+        if re.match(r'^show\s+glbp', c) and \
+                state.device_type in ('cisco', 'catalyst', 'nexus'):
+            from engine.protocols import glbp_engine
+            _did = getattr(state, '_device_id', None) or state.hostname
+            try:
+                from app import device_sessions as _ds
+            except Exception:
+                _ds = None
+            if 'brief' in c:
+                out = glbp_engine.format_show_glbp_brief(_did, _ds)
+            else:
+                out = glbp_engine.format_show_glbp(_did, _ds)
+            return out if out else '% GLBP is not configured'
+
+        if re.match(r'^show\s+ip\s+nhrp', c) and \
+                state.device_type in ('cisco', 'catalyst'):
+            return self._format_show_ip_nhrp(state)
+
+        if re.match(r'^show\s+ip\s+wccp', c) and \
+                state.device_type in ('cisco', 'catalyst'):
+            return self._format_show_ip_wccp(state)
+
+        # ── show track（拡張オブジェクトトラッキング）──
+        m = re.match(r'^show\s+track(?:\s+(\d+))?\s*$', c)
+        if m and state.device_type in ('cisco', 'catalyst', 'nexus'):
+            from engine.protocols import track_engine
+            _did = getattr(state, '_device_id', None) or state.hostname
+            return track_engine.format_show_track(
+                _did, int(m.group(1)) if m.group(1) else None, state)
+
+        # ── ZBFW(Zone-Based Firewall) ──
+        if re.match(r'^show\s+zone\s+security', c):
+            out = self._format_show_zone_security(state)
+            return out if out else '% No security zones configured.'
+        m = re.match(r'^show\s+policy-map\s+type\s+inspect\s+zone-pair(?:\s+(\S+))?$', c)
+        if m:
+            m2 = re.match(r'^show\s+policy-map\s+type\s+inspect\s+zone-pair(?:\s+(\S+))?$',
+                          cmd.strip(), re.I)
+            name = (m2.group(1) if m2 else None) or m.group(1)
+            out = self._format_show_zone_pair_security(state, name)
+            return out if out else '% No zone-pairs configured.'
+        if re.match(r'^show\s+zone-pair\s+security', c):
+            out = self._format_show_zone_pair_security(state)
+            return out if out else '% No zone-pairs configured.'
+
+        # ── show auto qos（Auto-QoS 適用インタフェース一覧）──
+        if re.match(r'^show\s+auto\s+qos', c):
+            out = self._format_show_auto_qos(state)
+            return out if out else 'AutoQoS not enabled on any interface'
+
         # ── show QoS（MQC / 各社固有）──
         if re.match(r'^show\s+class-map', c):
             return self._format_show_class_map(state)
@@ -1224,7 +1435,12 @@ class RuleEngine:
             return self._format_show_policy_map_interface(state)
         m = re.match(r'^show\s+policy-map(?:\s+type\s+\S+)?(?:\s+(\S+))?$', c)
         if m and not (m.group(1) and m.group(1) == 'interface'):
-            return self._format_show_policy_map(state, m.group(1))
+            # policy-map名は大文字小文字を保持したまま検索する
+            # （AutoQos-4.0-... のような名前が見つからなくなるため）
+            m2 = re.match(r'^show\s+policy-map(?:\s+type\s+\S+)?(?:\s+(\S+))?$',
+                          cmd.strip(), re.I)
+            name = (m2.group(1) if m2 else None) or m.group(1)
+            return self._format_show_policy_map(state, name)
         # APRESIA / Si-R: show qos / show mls qos
         if re.match(r'^show\s+(mls\s+qos|qos)', c):
             if state.device_type in ('apresia', 'sir'):
@@ -2195,15 +2411,35 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             return 'down'
         return 'up' if info.get('ip') else 'down'
 
+    def _sir_effective_speed_duplex(self, state, grp, port):
+        """ether mode/duplex の設定から実効的な速度/デュプレックスを求める。
+
+        マニュアル 4.1.4/4.1.5 の仕様:
+        - mode 未設定時は auto、duplex 未設定時は full
+        - mode 1000 を指定した場合、duplex の設定は無効になり常に full
+        - mode auto を指定した場合も duplex の設定は無効になり、
+          対向とのネゴシエーション結果次第（エミュレータではリンクアップ
+          時は1000M Fullで揃うものとして扱う）
+        - mode 100/10 を指定した場合のみ duplex の設定が有効になる
+        """
+        mode = getattr(state, 'sir_ether_mode', {}).get((grp, port), 'auto')
+        duplex = getattr(state, 'sir_ether_duplex', {}).get((grp, port), 'full')
+        if mode in ('auto', '1000'):
+            return mode, '1000M', 'full'
+        return mode, f'{mode}M', duplex
+
     def _show_ether(self, state):
         lines = []
         for (grp, port) in self._sir_ether_ports(state):
             status = self._sir_port_status(state, grp, port)
             lan = self._sir_lan_for_ether(state, grp, port) or '-'
+            mode = getattr(state, 'sir_ether_mode', {}).get((grp, port), 'auto')
             lines.append(f"[ETHER GROUP-{grp} PORT-{port}]")
             lines.append(f"description      : Ether_Group_{grp}_Port_{port}")
             if status == 'up':
-                lines.append("status           : auto 1000M Full MDI-X")
+                _, speed_str, duplex = self._sir_effective_speed_duplex(state, grp, port)
+                neg = 'auto' if mode == 'auto' else 'fixed'
+                lines.append(f"status           : {neg} {speed_str} {duplex.capitalize()} MDI-X")
                 lines.append("media            : Metal")
                 lines.append("flow control     : send on, receive on")
             elif status == 'disable':
@@ -2217,7 +2453,7 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             lines.append("type             : Normal")
             lines.append(f"since            : "
                          f"{state.startup_time.strftime('%b %d %H:%M:%S %Y')}")
-            lines.append("config           : mode(auto), mdi(auto), media(-)")
+            lines.append(f"config           : mode({mode}), mdi(auto), media(-)")
             lines.append(f"                   (lan: {lan})")
             lines.append("")
         return "\n".join(lines)
@@ -2230,7 +2466,8 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         for (grp, port) in self._sir_ether_ports(state):
             status = self._sir_port_status(state, grp, port)
             if status == 'up':
-                media, mdi, speed, duplex, flow = 'metal', 'MDIX', '1000M', 'full', 'TxRx'
+                _, speed, duplex = self._sir_effective_speed_duplex(state, grp, port)
+                media, mdi, flow = 'metal', 'MDIX', 'TxRx'
             else:
                 media = mdi = speed = duplex = flow = '-'
             lines.append(
@@ -2314,8 +2551,12 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
   internal_temp        : {temp} C"""
 
     # ─── show etherchannel summary ────────────────────────────
-    def _show_etherchannel_summary(self, state):
+    def _show_etherchannel_summary(self, state, group=None):
         cgs = getattr(state, 'channel_groups', {})
+        if group is not None:
+            if group not in cgs:
+                return f"Channel-group {group} does not exist."
+            cgs = {group: cgs[group]}
         lines = [
             "Flags:  D - down        P - bundled in port-channel",
             "        I - stand-alone s - suspended",
@@ -2350,8 +2591,12 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
             lines.append(f"{grp_id:<7}{po_field:<14}{proto:<12}" + " ".join(member_strs))
         return "\n".join(lines)
 
-    def _show_etherchannel_detail(self, state):
+    def _show_etherchannel_detail(self, state, group=None):
         cgs = getattr(state, 'channel_groups', {})
+        if group is not None:
+            if group not in cgs:
+                return f"Channel-group {group} does not exist."
+            cgs = {group: cgs[group]}
         if not cgs:
             return "No EtherChannels configured."
         lines = []
@@ -3370,8 +3615,8 @@ Configuration Revision            : 5"""
             return '  No IPsec SA established.'
         advance_all_sir_dpd(state)
         lines = [
-            '  Remote       Local        Protocol  SPI(In)    SPI(Out)   State',
-            '  -----------  -----------  --------  ---------  ---------  -----------',
+            '  Remote           Local            Protocol  SPI(In)    SPI(Out)   State',
+            '  ---------------  ---------------  --------  ---------  ---------  -----------',
         ]
         for tid, t in tunnels.items():
             remote = t.get('remote_ip', '?.?.?.?')
@@ -3382,7 +3627,7 @@ Configuration Revision            : 5"""
             if t.get('dpd_state') == 'detecting':
                 spi_in = spi_out = '-'
                 state_str = 'DPD-DETECT'
-                lines.append(f'  {remote:<13}{local:<13}{proto:<10}{spi_in:<11}{spi_out:<11}{state_str}')
+                lines.append(f'  {remote:<17}{local:<17}{proto:<10}{spi_in:<11}{spi_out:<11}{state_str}')
                 continue
             if status == 'established' and phase2 == 'MATURE':
                 spi_in  = t.get('spi_in',  f'0x{abs(hash(remote+str(tid)))%0xffffffff:08x}')
@@ -3394,7 +3639,7 @@ Configuration Revision            : 5"""
             else:
                 spi_in = spi_out = '-'
                 state_str = 'LARVAL'
-            lines.append(f'  {remote:<13}{local:<13}{proto:<10}{spi_in:<11}{spi_out:<11}{state_str}')
+            lines.append(f'  {remote:<17}{local:<17}{proto:<10}{spi_in:<11}{spi_out:<11}{state_str}')
         return '\n'.join(lines)
 
     def _sir_show_ipsec_tunnel(self, state: DeviceState) -> str:
@@ -3764,6 +4009,33 @@ Configuration Revision            : 5"""
                                  + (' native' if _enc.get('native') else ''))
                 if ip:
                     lines.append(f" ip address {ip} {mask}")
+                if ifdata.get('ipv6'):
+                    lines.append(f" ipv6 address {ifdata['ipv6']}/"
+                                 f"{ifdata.get('ipv6_prefix', 64)}")
+                elif ifdata.get('ipv6_enabled'):
+                    lines.append(" ipv6 enable")
+                for _h in ifdata.get('helper_addresses', []) or []:
+                    lines.append(f" ip helper-address {_h}")
+                if ifdata.get('tcp_mss'):
+                    lines.append(f" ip tcp adjust-mss {ifdata['tcp_mss']}")
+                if ifdata.get('nd_cache_expire'):
+                    lines.append(f" ipv6 nd cache expire {ifdata['nd_cache_expire']}"
+                                 + (" refresh" if ifdata.get('nd_cache_refresh') else ""))
+                if ifdata.get('nd_proxy'):
+                    lines.append(" ipv6 nd proxy")
+                for _d, _di in ifdata.get('dhcpv6_relay_dest', []) or []:
+                    lines.append(f" ipv6 dhcp relay destination {_d}"
+                                 + (f" {_di}" if _di else ""))
+                # Auto-QoS が自動生成する行（実機の running-config と同じ順）
+                if ifdata.get('trust_device'):
+                    lines.append(f" trust device {ifdata['trust_device']}")
+                if ifdata.get('auto_qos'):
+                    lines.append(f" auto qos {ifdata['auto_qos']}")
+                _sp = ifdata.get('service_policy') or {}
+                if _sp.get('input'):
+                    lines.append(f" service-policy input {_sp['input']}")
+                if _sp.get('output'):
+                    lines.append(f" service-policy output {_sp['output']}")
                 if status == 'up':
                     lines.append(" no shutdown")
                 else:
@@ -4005,6 +4277,171 @@ Configuration Revision            : 5"""
             state.qos_pmaps = {}   # {name: {'type','classes': {cname: [actions]}}}
         return state.qos_cmaps, state.qos_pmaps
 
+    # ── Auto-QoS (AutoQos-4.0) ────────────────────────────────
+    # Catalyst 9200/9300(IOS-XE)が "auto qos ..." 1コマンドで自動生成する
+    # class-map / policy-map 一式。名前・match条件・帯域配分は下記を参照:
+    #   https://www.cisco.com/c/en/us/support/docs/switches/
+    #     catalyst-9200-series-switches/222225-configure-autoqos-on-catalyst-9000-switc.html
+    #   https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/
+    #     software/release/17-15/configuration_guide/qos/b_1715_qos_9300_cg/
+    #     configuring_auto_qos.html
+    # 出力ポリシー(AutoQos-4.0-Output-Policy)は全モード共通。
+    _AUTOQOS_INPUT_CMAPS = {
+        'AutoQos-4.0-Voip-Data-Class':   ('match-all', ['dscp ef']),
+        'AutoQos-4.0-Voip-Signal-Class': ('match-all', ['dscp cs3']),
+        'AutoQos-4.0-Default-Class':     ('match-any', ['access-group name AutoQos-4.0-Acl-Default']),
+    }
+    _AUTOQOS_OUTPUT_CMAPS = {
+        'AutoQos-4.0-Output-Priority-Queue':      ('match-any', ['dscp cs4  cs5  ef', 'cos  5']),
+        'AutoQos-4.0-Output-Control-Mgmt-Queue':  ('match-any', ['dscp cs2  cs3  cs6  cs7', 'cos  3']),
+        'AutoQos-4.0-Output-Multimedia-Conf-Queue': ('match-any', ['dscp af41 af42 af43', 'cos  4']),
+        'AutoQos-4.0-Output-Trans-Data-Queue':    ('match-any', ['dscp af21 af22 af23', 'cos  2']),
+        'AutoQos-4.0-Output-Bulk-Data-Queue':     ('match-any', ['dscp af11 af12 af13', 'cos  1']),
+        'AutoQos-4.0-Output-Scavenger-Queue':     ('match-any', ['dscp cs1']),
+        'AutoQos-4.0-Output-Multimedia-Strm-Queue': ('match-any', ['dscp af31 af32 af33']),
+    }
+    _AUTOQOS_OUTPUT_POLICY = [
+        ('AutoQos-4.0-Output-Priority-Queue',
+         ['priority level 1', 'police rate percent 30']),
+        ('AutoQos-4.0-Output-Control-Mgmt-Queue',
+         ['bandwidth remaining percent 10', 'queue-buffers ratio 10']),
+        ('AutoQos-4.0-Output-Multimedia-Conf-Queue',
+         ['bandwidth remaining percent 10', 'queue-buffers ratio 10']),
+        ('AutoQos-4.0-Output-Trans-Data-Queue',
+         ['bandwidth remaining percent 10', 'queue-buffers ratio 10']),
+        ('AutoQos-4.0-Output-Bulk-Data-Queue',
+         ['bandwidth remaining percent 4', 'queue-buffers ratio 10']),
+        ('AutoQos-4.0-Output-Scavenger-Queue',
+         ['bandwidth remaining percent 1', 'queue-buffers ratio 10']),
+        ('AutoQos-4.0-Output-Multimedia-Strm-Queue',
+         ['bandwidth remaining percent 10', 'queue-buffers ratio 10']),
+        ('class-default',
+         ['bandwidth remaining percent 25', 'queue-buffers ratio 25']),
+    ]
+    # モード → (入力ポリシー名, trust device 値)
+    _AUTOQOS_MODES = {
+        'voip cisco-phone':      ('AutoQos-4.0-CiscoPhone-Input-Policy', 'cisco-phone'),
+        'voip cisco-softphone':  ('AutoQos-4.0-CiscoSoftPhone-Input-Policy', None),
+        'voip trust':            (None, None),
+        'video cts':             ('AutoQos-4.0-CTS-Input-Policy', 'cts'),
+        'video ip-camera':       ('AutoQos-4.0-IPCamera-Input-Policy', 'ip-camera'),
+        'video media-player':    ('AutoQos-4.0-MediaPlayer-Input-Policy', 'media-player'),
+        'classify':              ('AutoQos-4.0-Classify-Input-Policy', None),
+        'classify police':       ('AutoQos-4.0-Classify-Police-Input-Policy', None),
+        'trust cos':             (None, None),
+        'trust dscp':            (None, None),
+    }
+
+    def _autoqos_apply(self, state, iface: str, mode: str):
+        """auto qos <mode> をインタフェースに適用し、実機同様に
+        グローバルのclass-map/policy-mapと、インタフェースの
+        trust device / service-policy を自動生成する。"""
+        cmaps, pmaps = self._qos_store(state)
+        in_policy, trust_dev = self._AUTOQOS_MODES[mode]
+
+        # 入力側（入力ポリシーを持つモードのみ）
+        if in_policy:
+            for name, (mt, matches) in self._AUTOQOS_INPUT_CMAPS.items():
+                cmaps.setdefault(name, {'match_type': mt, 'matches': list(matches)})
+            pmaps.setdefault(in_policy, {'type': 'qos', 'classes': {}})
+            pmaps[in_policy]['classes'].setdefault(
+                'AutoQos-4.0-Voip-Data-Class',
+                ['set dscp ef', 'police cir 128000 bc 8000'])
+            pmaps[in_policy]['classes'].setdefault(
+                'AutoQos-4.0-Voip-Signal-Class',
+                ['set dscp cs3', 'police cir 32000 bc 8000'])
+            pmaps[in_policy]['classes'].setdefault(
+                'AutoQos-4.0-Default-Class',
+                ['set dscp default', 'police cir 10000000 bc 8000'])
+
+        # 出力側（全モード共通）
+        for name, (mt, matches) in self._AUTOQOS_OUTPUT_CMAPS.items():
+            cmaps.setdefault(name, {'match_type': mt, 'matches': list(matches)})
+        pmaps.setdefault('AutoQos-4.0-Output-Policy', {'type': 'qos', 'classes': {}})
+        for cname, actions in self._AUTOQOS_OUTPUT_POLICY:
+            pmaps['AutoQos-4.0-Output-Policy']['classes'].setdefault(
+                cname, list(actions))
+
+        info = state.interfaces.setdefault(iface, {})
+        info['auto_qos'] = mode
+        if trust_dev:
+            info['trust_device'] = trust_dev
+        if mode == 'trust cos':
+            info['qos_trust'] = 'cos'
+        elif mode == 'trust dscp':
+            info['qos_trust'] = 'dscp'
+        sp = info.setdefault('service_policy', {})
+        if in_policy:
+            sp['input'] = in_policy
+        sp['output'] = 'AutoQos-4.0-Output-Policy'
+
+    def _autoqos_remove(self, state, iface: str):
+        info = state.interfaces.get(iface, {})
+        info.pop('auto_qos', None)
+        info.pop('trust_device', None)
+        info.pop('qos_trust', None)
+        info.pop('service_policy', None)
+
+    def _format_show_auto_qos(self, state):
+        rows = [(ifn, i['auto_qos']) for ifn, i in state.interfaces.items()
+                if i.get('auto_qos')]
+        if not rows:
+            return ''
+        out = []
+        for ifn, mode in rows:
+            out.append(f'{ifn}')
+            out.append(f'auto qos {mode}')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
+    def _zbfw_store(self, state):
+        """Zone-Based Firewall設定の保存領域をstateに用意して返す"""
+        if not hasattr(state, 'zbfw_zones'):
+            state.zbfw_zones = {}    # {name: {'description'}}
+        if not hasattr(state, 'zbfw_pairs'):
+            state.zbfw_pairs = {}    # {name: {'source','destination','policy'}}
+        return state.zbfw_zones, state.zbfw_pairs
+
+    def _format_show_zone_security(self, state):
+        zones = getattr(state, 'zbfw_zones', {}) or {}
+        if not zones:
+            return ''
+        out = []
+        for name, info in zones.items():
+            members = [ifn for ifn, iinfo in state.interfaces.items()
+                       if iinfo.get('zone_member') == name]
+            out.append(f'zone {name}')
+            if info.get('description'):
+                out.append(f'  Description: {info["description"]}')
+            out.append(f'  Member Interfaces:')
+            if members:
+                for m in members:
+                    out.append(f'    {m}')
+            else:
+                out.append('    (none)')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
+    def _format_show_zone_pair_security(self, state, name=None):
+        pairs = getattr(state, 'zbfw_pairs', {}) or {}
+        pmaps = getattr(state, 'qos_pmaps', {}) or {}
+        if not pairs:
+            return ''
+        out = []
+        for pname, info in pairs.items():
+            if name and pname != name:
+                continue
+            policy = info.get('policy') or '(none)'
+            out.append(f'Zone-pair name {pname}')
+            out.append(f'  Source-Zone {info["source"]}  Destination-Zone {info["destination"]}')
+            out.append(f'  service-policy {policy}')
+            pol = pmaps.get(info.get('policy'), {})
+            for cname, actions in pol.get('classes', {}).items():
+                action_str = actions[-1] if actions else '(no action)'
+                out.append(f'    Class-map: {cname} ({action_str})')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
     def _cmd_qos(self, cmd, state):
         """
         QoS設定（Modular QoS CLI と各社固有）。
@@ -4028,6 +4465,40 @@ Configuration Revision            : 5"""
                     state.qos_simple = []
                 state.qos_simple.append(cmd.strip())
                 state.qos_enabled = True
+                return ""
+
+        # ── Auto-QoS（Catalyst/Cisco IOS-XE。インタフェース配下）──
+        #   auto qos voip {cisco-phone|cisco-softphone|trust}
+        #   auto qos video {cts|ip-camera|media-player}
+        #   auto qos classify [police]
+        #   auto qos trust {cos|dscp}
+        if dt in ('cisco', 'catalyst') and state.mode == 'config-if':
+            m = re.match(r'^(no\s+)?auto\s+qos\b(.*)$', c)
+            if m:
+                iface = state.current_if or ''
+                if m.group(1):          # no auto qos
+                    self._autoqos_remove(state, iface)
+                    return ""
+                arg = ' '.join(m.group(2).split())
+                # 実機の制約: 自動QoSはSVI(Vlanインタフェース)では
+                # サポートされない
+                if iface.lower().startswith('vlan'):
+                    return ('% Auto-QoS is not supported on SVI interface '
+                            f'{iface}')
+                if arg not in self._AUTOQOS_MODES:
+                    return self._cmd_error(cmd, state, reason='invalid')
+                self._autoqos_apply(state, iface, arg)
+                return ""
+        # インタフェース配下の trust device（Auto-QoSが自動生成する行を
+        # 手で投入した場合も受理する）
+        if dt in ('cisco', 'catalyst') and state.current_if:
+            m = re.match(r'^(no\s+)?trust\s+device\s+(\S+)$', c)
+            if m:
+                info = state.interfaces.setdefault(state.current_if, {})
+                if m.group(1):
+                    info.pop('trust_device', None)
+                else:
+                    info['trust_device'] = m.group(2)
                 return ""
 
         # ── MQC: class-map [type qos] [match-any|match-all] NAME ──
@@ -4069,9 +4540,10 @@ Configuration Revision            : 5"""
             return ""
 
         # config-pmap 内: class NAME → config-pmap-c
+        # ("class type inspect NAME"のように型指定が挟まることがある)
         if state.mode == 'config-pmap':
             pname = getattr(state, '_qos_pmap', None)
-            m = re.match(r'^class\s+(\S+)', cmd.strip(), re.I)
+            m = re.match(r'^class(?:\s+type\s+\S+)?\s+(\S+)', cmd.strip(), re.I)
             if m and pname is not None:
                 cname = m.group(1)
                 pmaps[pname]['classes'].setdefault(cname, [])
@@ -4086,8 +4558,8 @@ Configuration Revision            : 5"""
             cname = getattr(state, '_qos_class', None)
             if pname is None or cname is None:
                 return ""
-            # 別class に切り替え
-            m = re.match(r'^class\s+(\S+)', cmd.strip(), re.I)
+            # 別class に切り替え（"class type inspect NAME"の型指定にも対応）
+            m = re.match(r'^class(?:\s+type\s+\S+)?\s+(\S+)', cmd.strip(), re.I)
             if m:
                 cname = m.group(1)
                 pmaps[pname]['classes'].setdefault(cname, [])
@@ -4099,6 +4571,12 @@ Configuration Revision            : 5"""
             if m:
                 pmaps[pname]['classes'][cname].append(cmd.strip())
                 return ""
+            # ── ZBFW(Zone-Based Firewall): policy-map type inspect 内の
+            # class type inspect アクション ──
+            m = re.match(r'^(inspect|drop|pass)$', cmd.strip(), re.I)
+            if m and pmaps[pname].get('type') == 'inspect':
+                pmaps[pname]['classes'][cname].append(cmd.strip().lower())
+                return ""
             return None
 
         # ── interface: service-policy {input|output} NAME ──
@@ -4109,6 +4587,58 @@ Configuration Revision            : 5"""
             sp = state.interfaces.setdefault(state.current_if, {}).setdefault('service_policy', {})
             sp[m.group(1)] = pname
             return ""
+
+        # ── ZBFW(Zone-Based Firewall): zone security <name> ──
+        if dt in ('cisco', 'catalyst', 'nexus'):
+            zones, pairs = self._zbfw_store(state)
+            m = re.match(r'^zone\s+security\s+(\S+)$', c)
+            if m and state.mode == 'config':
+                m2 = re.match(r'^zone\s+security\s+(\S+)$', cmd.strip(), re.I)
+                name = m2.group(1) if m2 else m.group(1)
+                zones.setdefault(name, {'description': ''})
+                state._zbfw_zone = name
+                state.mode = 'config-sec-zone'
+                return ""
+            if state.mode == 'config-sec-zone':
+                name = getattr(state, '_zbfw_zone', None)
+                if name is None:
+                    return ""
+                m = re.match(r'^description\s+(.+)$', cmd.strip(), re.I)
+                if m:
+                    zones[name]['description'] = m.group(1)
+                    return ""
+                return None
+
+            # ── zone-pair security <name> source <src> destination <dst> ──
+            m = re.match(
+                r'^zone-pair\s+security\s+(\S+)\s+source\s+(\S+)\s+destination\s+(\S+)$', c)
+            if m and state.mode == 'config':
+                m2 = re.match(
+                    r'^zone-pair\s+security\s+(\S+)\s+source\s+(\S+)\s+destination\s+(\S+)$',
+                    cmd.strip(), re.I)
+                name, src, dst = (m2.group(1), m2.group(2), m2.group(3)) if m2 else \
+                    (m.group(1), m.group(2), m.group(3))
+                pairs[name] = {'source': src, 'destination': dst, 'policy': None}
+                state._zbfw_pair = name
+                state.mode = 'config-sec-zone-pair'
+                return ""
+            if state.mode == 'config-sec-zone-pair':
+                name = getattr(state, '_zbfw_pair', None)
+                if name is None:
+                    return ""
+                m = re.match(r'^service-policy\s+type\s+inspect\s+(\S+)$', cmd.strip(), re.I)
+                if m:
+                    pairs[name]['policy'] = m.group(1)
+                    return ""
+                return None
+
+            # ── interface: zone-member security <name> ──
+            m = re.match(r'^zone-member\s+security\s+(\S+)$', c)
+            if m and state.current_if:
+                m2 = re.match(r'^zone-member\s+security\s+(\S+)$', cmd.strip(), re.I)
+                name = m2.group(1) if m2 else m.group(1)
+                state.interfaces.setdefault(state.current_if, {})['zone_member'] = name
+                return ""
 
         return None
 
@@ -4312,6 +4842,242 @@ Configuration Revision            : 5"""
             }
         return state.issu
 
+    # ── ISMU（In-Service Model Update）───────────────────
+    #
+    # ISSUが「ソフトウェアイメージ」を入れ替えるのに対し、ISMUは
+    # リロードせずに **データモデル(YANG)だけ** を更新する仕組み。
+    # パッケージは .dmp.bin で、命名規則は
+    #   <プラットフォーム>-<ライセンス>.<リリース>.<DDTS ID>.dmp.bin
+    #   例) cat9k-universalk9.17.09.03.CSCvk58435.dmp.bin
+    # 実機は add / activate 時にイメージとプラットフォームの一致を確認し、
+    # 食い違っていればインストールを失敗させる。
+    _DMP_RE = re.compile(
+        r'^(?:(?P<dev>[\w-]+):)?(?P<plat>[a-z0-9]+)-(?P<lic>[\w]+)\.'
+        r'(?P<rel>\d+\.\d+\.\d+)\.(?P<ddts>CSC\w+)\.dmp\.bin$', re.I)
+
+    def _ismu_store(self, state):
+        if not hasattr(state, 'ismu'):
+            state.ismu = {'packages': [], 'log': []}
+        return state.ismu
+
+    @staticmethod
+    def _ismu_platform(state):
+        return {'catalyst': 'cat9k', 'nexus': 'nxos'}.get(state.device_type, 'cat9k')
+
+    def _ismu_parse(self, state, path):
+        """.dmp.bin のファイル名を解析。ISMU対象でなければ None。
+        戻り値は (情報dict, エラーメッセージ) のどちらか一方が None。"""
+        # "flash:xxx.dmp.bin" のような装置プレフィックスとディレクトリを外す
+        base = path.split('/')[-1].split(':')[-1]
+        m = self._DMP_RE.match(base)
+        if not m:
+            if base.lower().endswith('.dmp.bin'):
+                return None, (f'FAILED: install_add : Invalid package name "{base}". '
+                              'Expected <platform>-<license>.<release>.'
+                              '<DDTS>.dmp.bin')
+            return None, None                      # ISMU対象外(通常のイメージ)
+        issu = self._issu_store(state)
+        plat = self._ismu_platform(state)
+        if m.group('plat').lower() != plat:
+            return None, (f'FAILED: install_add : Platform mismatch. '
+                          f'Package is for "{m.group("plat")}", '
+                          f'this device is "{plat}"')
+        if m.group('rel') != issu['current']:
+            return None, (f'FAILED: install_add : Image version mismatch. '
+                          f'Package targets {m.group("rel")}, '
+                          f'running version is {issu["current"]}')
+        return {'file': path, 'base': base, 'platform': m.group('plat'),
+                'license': m.group('lic'), 'release': m.group('rel'),
+                'ddts': m.group('ddts'), 'st': 'I'}, None
+
+    def _ismu_find(self, state, path):
+        base = path.split('/')[-1].split(':')[-1]
+        for p in self._ismu_store(state)['packages']:
+            if p['base'] == base:
+                return p
+        return None
+
+    def _ismu_log(self, state, msg):
+        self._ismu_store(state)['log'].append(msg)
+
+    def _cmd_ismu(self, cmd, state):
+        """データモデル更新パッケージ(.dmp.bin)のinstallワークフロー。
+        ISMU対象でなければ None を返し、従来のISSU(IMG)処理に任せる。"""
+        if state.device_type != 'catalyst':
+            return None
+        c = cmd.lower().strip()
+        orig = cmd.strip()
+        store = self._ismu_store(state)
+
+        def _path(m, group=1):
+            """小文字化前の元コマンドからファイルパスを取り出す。
+            cのマッチ結果をそのまま使うと DDTS ID (CSCvk58435) まで
+            小文字になり、実機と表示が食い違う。"""
+            om = re.match(m.re.pattern, orig, re.I)
+            return (om.group(group) if om and om.group(group)
+                    else m.group(group))
+
+        m_add = re.match(r'^install\s+add\s+file\s+(\S+)'
+                         r'((?:\s+activate)?(?:\s+commit)?)\s*$', c)
+        if m_add:
+            info, err = self._ismu_parse(state, _path(m_add))
+            if err:
+                self._ismu_log(state, err)
+                return err
+            if info is None:
+                return None                        # 通常のイメージ → ISSU側へ
+            existing = self._ismu_find(state, info['file'])
+            if existing:
+                return (f'FAILED: install_add : Package {info["base"]} '
+                        'is already added')
+            store['packages'].append(info)
+            out = [f'install_add: START {info["file"]}',
+                   'install_add: Adding DMP',
+                   '--- Starting Add ---',
+                   'Performing Add on all members',
+                   '  [1] Add package(s) on switch 1',
+                   '  [1] Finished Add on switch 1',
+                   'Checking status of Add on [1]',
+                   'Add: Passed on [1]',
+                   'Finished Add',
+                   '',
+                   f'SUCCESS: install_add {info["file"]}']
+            tail = m_add.group(2) or ''
+            if 'activate' in tail:
+                info['st'] = 'U'
+                out.append('install_activate: Activating DMP '
+                           '(no reload required for model update)')
+                out.append(f'SUCCESS: install_activate {info["base"]}')
+            if 'commit' in tail:
+                info['st'] = 'C'
+                out.append(f'SUCCESS: install_commit {info["base"]}')
+            self._ismu_log(state, f'install_add {info["base"]} -> {info["st"]}')
+            return '\n'.join(out)
+
+        m_act = re.match(r'^install\s+activate\s+file\s+(\S+)\s*(commit)?\s*$', c)
+        if m_act:
+            info, err = self._ismu_parse(state, _path(m_act))
+            if err:
+                return err
+            if info is None:
+                return None
+            pkg = self._ismu_find(state, _path(m_act))
+            if pkg is None:
+                return (f'FAILED: install_activate : Package {info["base"]} '
+                        'is not added. Run "install add file ..." first.')
+            pkg['st'] = 'C' if m_act.group(2) else 'U'
+            self._ismu_log(state, f'install_activate {pkg["base"]} -> {pkg["st"]}')
+            return '\n'.join([
+                f'install_activate: START {pkg["file"]}',
+                'install_activate: Activating DMP',
+                'Following packages shall be activated:',
+                f'  {pkg["base"]}',
+                'Model update does not require a reload.',
+                f'SUCCESS: install_activate {pkg["base"]}',
+            ] + ([] if m_act.group(2) else [
+                '',
+                '※ commit するには "install commit" を実行してください'
+                '（未commitは自動ロールバック対象）']))
+
+        m_deact = re.match(r'^install\s+deactivate\s+file\s+(\S+)\s*$', c)
+        if m_deact:
+            pkg = self._ismu_find(state, _path(m_deact))
+            if pkg is None:
+                return None
+            if pkg['st'] not in ('U', 'C'):
+                return (f'FAILED: install_deactivate : {pkg["base"]} '
+                        'is not activated')
+            pkg['st'] = 'D'
+            self._ismu_log(state, f'install_deactivate {pkg["base"]}')
+            return '\n'.join([
+                f'install_deactivate: START {pkg["file"]}',
+                f'SUCCESS: install_deactivate {pkg["base"]}',
+            ])
+
+        m_rm = re.match(r'^install\s+remove\s+(?:file\s+(\S+)|(inactive))\s*$', c)
+        if m_rm:
+            if m_rm.group(2):
+                removed = [p for p in store['packages'] if p['st'] in ('I', 'D')]
+                if not removed:
+                    return None
+                store['packages'] = [p for p in store['packages']
+                                     if p['st'] not in ('I', 'D')]
+                self._ismu_log(state, 'install_remove inactive')
+                return '\n'.join(
+                    ['install_remove: START'] +
+                    [f'  Removing {p["base"]}' for p in removed] +
+                    ['SUCCESS: install_remove'])
+            pkg = self._ismu_find(state, _path(m_rm))
+            if pkg is None:
+                return None
+            if pkg['st'] in ('U', 'C'):
+                return (f'FAILED: install_remove : {pkg["base"]} is active. '
+                        'Deactivate it first.')
+            store['packages'].remove(pkg)
+            self._ismu_log(state, f'install_remove {pkg["base"]}')
+            return f'SUCCESS: install_remove {pkg["base"]}'
+
+        if re.match(r'^install\s+rollback\s+to\s+committed\s*$', c):
+            uncommitted = [p for p in store['packages'] if p['st'] == 'U']
+            if not uncommitted:
+                return None
+            for p in uncommitted:
+                p['st'] = 'I'
+            self._ismu_log(state, 'install_rollback to committed')
+            return '\n'.join(
+                ['install_rollback: START'] +
+                [f'  Rolling back {p["base"]}' for p in uncommitted] +
+                ['SUCCESS: install_rollback to committed'])
+
+        if re.match(r'^install\s+commit\s*$', c):
+            pending = [p for p in store['packages'] if p['st'] == 'U']
+            if not pending:
+                return None                        # IMG側のcommitに任せる
+            for p in pending:
+                p['st'] = 'C'
+            self._ismu_log(state, 'install_commit')
+            return '\n'.join(
+                ['install_commit: START', 'install_commit: Committing DMP'] +
+                [f'  {p["base"]}' for p in pending] +
+                ['Finished Commit operations', 'SUCCESS: install_commit'])
+
+        m_showpkg = re.match(r'^show\s+install\s+package\s+(\S+)\s*$', c)
+        if m_showpkg:
+            pkg = self._ismu_find(state, _path(m_showpkg))
+            if pkg is None:
+                return None
+            import hashlib
+            sha1 = hashlib.sha1(pkg['base'].encode()).hexdigest()
+            return '\n'.join([
+                f'Package: {pkg["base"]}',
+                f'  Size: {180000 + len(pkg["base"]) * 97}',
+                '  Timestamp: 2026-09-11 05:23:00 UTC',
+                f'  Canonical path: /flash/{pkg["base"]}',
+                f'  Raw disk-file SHA1sum: {sha1}',
+                '  Header size: 1000 bytes',
+                '  Package type: DMP',
+                f'  Package released: {pkg["release"]}',
+                f'  Package platform: {pkg["platform"]}',
+                f'  Package DDTS: {pkg["ddts"]}',
+                f'  Package state: {self._ISMU_ST_NAME[pkg["st"]]}',
+            ])
+
+        if re.match(r'^show\s+install\s+log\s*$', c):
+            if not store['log']:
+                return None
+            return '\n'.join(
+                [f'[{i}] install_op: {msg}'
+                 for i, msg in enumerate(store['log'], 1)])
+
+        return None
+
+    _ISMU_ST_NAME = {
+        'I': 'Inactive',
+        'U': 'Activated & Uncommitted',
+        'C': 'Activated & Committed',
+        'D': 'Deactivated & Uncommitted',
+    }
+
     def _cmd_issu(self, cmd, state):
         """
         ISSU（In-Service Software Upgrade）/ ソフトウェアアップグレードを仮想実装。
@@ -4404,20 +5170,25 @@ Configuration Revision            : 5"""
                 return '% Nothing to abort.'
 
             if re.match(r'^show\s+install\s+summary', c):
-                st = issu['state'].upper()
-                imgs = []
-                imgs.append(f'  IMG   C  {issu["current"]}   (committed)')
+                rows = []
+                # ISMUで入れたデータモデル更新パッケージ(DMP)も併記する。
+                # 実機の show install summary は IMG と DMP を同じ表に出す。
+                for p in self._ismu_store(state)['packages']:
+                    rows.append(f'DMP   {p["st"]}    {p["file"]}')
+                rows.append(f'IMG   C    {issu["current"]}')
                 if issu['state'] in ('added', 'activated') and issu['target']:
-                    flag = 'A' if issu['state'] == 'activated' else 'I'
-                    imgs.append(f'  IMG   {flag}  {issu["target"]}   ({issu["state"]})')
+                    flag = 'U' if issu['state'] == 'activated' else 'I'
+                    rows.append(f'IMG   {flag}    {issu["target"]}')
+                sep = '-' * 78
                 return '\n'.join([
                     '[ Switch 1 ] Installed Package(s) Information:',
-                    'State (St): I-Inactive, U-Activated & Uncommitted,',
-                    '            C-Activated & Committed, D-Deactivated & Uncommitted',
-                    '--------------------------------------------------------------',
-                    'Type  St   Version',
-                    '--------------------------------------------------------------',
-                ] + imgs)
+                    'State (St): I - Inactive, U - Activated & Uncommitted,',
+                    '            C - Activated & Committed, '
+                    'D - Deactivated & Uncommitted',
+                    sep,
+                    'Type  St   Filename/Version',
+                    sep,
+                ] + rows + [sep])
 
             if re.match(r'^show\s+issu\s+state', c):
                 return '\n'.join([
@@ -4554,7 +5325,174 @@ Configuration Revision            : 5"""
             if m: p['domain'] = m.group(1); return ""
             m = re.match(r'^lease\s+(.+)', c)
             if m: p['lease'] = m.group(1).strip(); return ""
+            # ── DHCPオプションのサポート ──
+            # option <code> {ascii|hex|ip} <value>
+            m = re.match(r'^option\s+(\d+)\s+(ascii|hex|ip)\s+(.+)$',
+                         cmd.strip(), re.I)
+            if m:
+                p.setdefault('options', {})[int(m.group(1))] = (
+                    m.group(2).lower(), m.group(3).strip())
+                return ""
+            m = re.match(r'^no\s+option\s+(\d+)$', c)
+            if m:
+                p.get('options', {}).pop(int(m.group(1)), None)
+                return ""
             return None
+
+        # ── DHCPリレー（ip helper-address / relay information）──
+        m = re.match(r'^(no\s+)?ip\s+helper-address\s+([\d.]+)$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            helpers = info.setdefault('helper_addresses', [])
+            if m.group(1):
+                if m.group(2) in helpers:
+                    helpers.remove(m.group(2))
+            elif m.group(2) not in helpers:
+                helpers.append(m.group(2))
+            return ""
+        m = re.match(r'^(no\s+)?ip\s+dhcp\s+relay\s+information\s+(\S+)', c)
+        if m:
+            if not hasattr(state, 'dhcp_relay'):
+                state.dhcp_relay = {}
+            if m.group(1):
+                state.dhcp_relay.pop(m.group(2), None)
+            else:
+                state.dhcp_relay[m.group(2)] = True
+            return ""
+
+        # ── DHCPグリーニング ──
+        # ip dhcp snooping glean（グローバル）/ ip dhcp glean（インタフェース）
+        m = re.match(r'^(no\s+)?ip\s+dhcp\s+snooping\s+glean$', c)
+        if m:
+            state.dhcp_snoop['glean'] = not m.group(1)
+            return ""
+        m = re.match(r'^(no\s+)?ip\s+dhcp\s+glean$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('dhcp_glean', None)
+            else:
+                info['dhcp_glean'] = True
+            return ""
+
+        return None
+
+    def _cmd_dhcpv6(self, cmd, state):
+        """DHCPv6（プール / オプション / リレー / リレーソース）"""
+        if state.device_type not in ('cisco', 'catalyst'):
+            return None
+        c = cmd.lower().strip()
+        if not hasattr(state, 'dhcpv6_pools'):
+            state.dhcpv6_pools = {}
+
+        # ipv6 dhcp pool <name> → サブモード
+        m = re.match(r'^ipv6\s+dhcp\s+pool\s+(\S+)$', cmd.strip(), re.I)
+        if m and state.mode == 'config':
+            name = m.group(1)
+            state.dhcpv6_pools.setdefault(
+                name, {'prefix': '', 'dns': '', 'domain': '', 'options': {}})
+            state._dhcpv6_pool = name
+            state.mode = 'config-dhcpv6'
+            return ""
+
+        if state.mode == 'config-dhcpv6':
+            p = state.dhcpv6_pools.get(getattr(state, '_dhcpv6_pool', ''))
+            if p is None:
+                return ""
+            m = re.match(r'^address\s+prefix\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                p['prefix'] = m.group(1)
+                return ""
+            m = re.match(r'^dns-server\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                p['dns'] = m.group(1)
+                return ""
+            m = re.match(r'^domain-name\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                p['domain'] = m.group(1)
+                return ""
+            # DHCPv6オプションのサポート
+            m = re.match(r'^option\s+(\d+)\s+(.+)$', cmd.strip(), re.I)
+            if m:
+                p['options'][int(m.group(1))] = m.group(2).strip()
+                return ""
+            return None
+
+        # ipv6 dhcp relay destination <addr> [<iface>]（インタフェース配下）
+        m = re.match(r'^(no\s+)?ipv6\s+dhcp\s+relay\s+destination\s+(\S+)'
+                     r'(?:\s+(\S+))?$', cmd.strip(), re.I)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            dests = info.setdefault('dhcpv6_relay_dest', [])
+            entry = (m.group(2), m.group(3) or '')
+            if m.group(1):
+                if entry in dests:
+                    dests.remove(entry)
+            elif entry not in dests:
+                dests.append(entry)
+            return ""
+
+        # DHCPv6リレーソース設定
+        #   ipv6 dhcp-relay source-interface <iface>（グローバル）
+        #   ipv6 dhcp relay source-interface <iface>（インタフェース）
+        m = re.match(r'^(no\s+)?ipv6\s+dhcp-relay\s+source-interface\s+(\S+)$',
+                     cmd.strip(), re.I)
+        if m and state.mode == 'config':
+            if m.group(1):
+                state.dhcpv6_relay_source = ''
+            else:
+                state.dhcpv6_relay_source = m.group(2)
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+dhcp\s+relay\s+source-interface\s+(\S+)$',
+                     cmd.strip(), re.I)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('dhcpv6_relay_source', None)
+            else:
+                info['dhcpv6_relay_source'] = m.group(2)
+            return ""
+
+        # ── IPv6 ネイバー探索（拡張NDキャッシュ管理 / NDプロキシ）──
+        m = re.match(r'^(no\s+)?ipv6\s+nd\s+cache\s+expire\s+(\d+)'
+                     r'(\s+refresh)?$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('nd_cache_expire', None)
+            else:
+                info['nd_cache_expire'] = int(m.group(2))
+                info['nd_cache_refresh'] = bool(m.group(3))
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+nd\s+cache\s+interface-limit\s+(\d+)$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('nd_cache_limit', None)
+            else:
+                info['nd_cache_limit'] = int(m.group(2))
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+nd\s+proxy$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('nd_proxy', None)
+            else:
+                info['nd_proxy'] = True
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+nd\s+(ra\s+suppress|dad\s+attempts\s+\d+|'
+                     r'reachable-time\s+\d+|ns-interval\s+\d+)$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            nd = info.setdefault('nd_options', [])
+            val = ' '.join(m.group(2).split())
+            if m.group(1):
+                if val in nd:
+                    nd.remove(val)
+            elif val not in nd:
+                nd.append(val)
+            return ""
+
         return None
 
     # ════════════════════════════════════════════
@@ -4658,15 +5596,65 @@ Configuration Revision            : 5"""
         return '\n'.join(out)
 
     # ════════════════════════════════════════════
-    # EVPN/VXLAN（Nexus: nve1 / evpn / address-family l2vpn evpn）
+    # EVPN/VXLAN（Nexus: nve1 / evpn / address-family l2vpn evpn、
+    # Catalyst 9000: nve1 / l2vpn evpn / vlan configuration。
+    # コマンド文法はNX-OSとIOS-XEで異なるが、装置状態(state.nve /
+    # state.evpn_vnis / state.vlan_vn_segment)は共通で持たせ、
+    # show running-config・/api/nexus/dashboardは両方の装置種別を
+    # 同じデータモデルで扱えるようにしている）
     # ════════════════════════════════════════════
     def _cmd_evpn(self, cmd, state):
-        if state.device_type != 'nexus':
+        if state.device_type not in ('nexus', 'catalyst'):
             return None
         c = cmd.lower().strip()
         if not hasattr(state, 'nve'): state.nve = {}
         if not hasattr(state, 'vlan_vn_segment'): state.vlan_vn_segment = {}
         if not hasattr(state, 'evpn_vnis'): state.evpn_vnis = {}
+
+        # config-l2vpn-evpn サブモード（Catalyst 9000, IOS-XE）:
+        # replication-type / router-id / instance <n> vlan-based
+        if state.mode == 'config-l2vpn-evpn':
+            if not hasattr(state, 'l2vpn_evpn') or not isinstance(state.l2vpn_evpn, dict):
+                state.l2vpn_evpn = {'replication_type': '', 'router_id': ''}
+            m = re.match(r'^replication-type\s+(ingress)$', c)
+            if m:
+                state.l2vpn_evpn['replication_type'] = m.group(1)
+                return ""
+            m = re.match(r'^router-id\s+(\S+)', cmd.strip(), re.I)
+            if m:
+                state.l2vpn_evpn['router_id'] = self._resolve_ifname(m.group(1), state)
+                return ""
+            m = re.match(r'^instance\s+(\d+)\s+vlan-based$', c)
+            if m:
+                vni = int(m.group(1))
+                state.evpn_vnis.setdefault(vni, {
+                    'rd': '', 'rt_import': '', 'rt_export': '', 'encapsulation': ''})
+                state._evpn_vni = vni
+                state.mode = 'config-l2vpn-evpn-instance'
+                return ""
+            return None
+
+        # config-l2vpn-evpn-instance サブモード: encapsulation vxlan
+        if state.mode == 'config-l2vpn-evpn-instance':
+            vni = getattr(state, '_evpn_vni', None)
+            v = state.evpn_vnis.get(vni) if vni is not None else None
+            if v is None:
+                return ""
+            if c == 'encapsulation vxlan':
+                v['encapsulation'] = 'vxlan'
+                return ""
+            return None
+
+        # config-vlan-config サブモード（Catalyst 9000, IOS-XEの
+        # "vlan configuration <n>"）: member evpn-instance <n> vni <n>
+        if state.mode == 'config-vlan-config':
+            m = re.match(r'^member\s+evpn-instance\s+(\d+)\s+vni\s+(\d+)$', c)
+            if m:
+                vid = getattr(state, '_current_vlan', None)
+                if vid is not None:
+                    state.vlan_vn_segment[vid] = int(m.group(2))
+                return ""
+            return None
 
         # config-evpn サブモード: vni <n> l2 → config-evpn-vni へ
         if state.mode == 'config-evpn':
@@ -4701,10 +5689,15 @@ Configuration Revision            : 5"""
         # interface nve<n> 配下: source-interface / member vni
         _cif = getattr(state, 'current_if', '') or ''
         if _cif.lower().startswith('nve'):
-            nve = state.nve.setdefault(_cif, {'source_interface': '', 'members': {}})
+            nve = state.nve.setdefault(_cif, {'source_interface': '',
+                                              'host_reachability_bgp': False,
+                                              'members': {}})
             m = re.match(r'^source-interface\s+(\S+)', cmd.strip(), re.I)
             if m:
                 nve['source_interface'] = self._resolve_ifname(m.group(1), state)
+                return ""
+            if c == 'host-reachability protocol bgp':
+                nve['host_reachability_bgp'] = True
                 return ""
             m = re.match(r'^member\s+vni\s+(\d+)(\s+associate-vrf)?', c)
             if m:
@@ -4724,7 +5717,11 @@ Configuration Revision            : 5"""
             member = nve['members'].get(vni) if nve and vni is not None else None
             if member is None:
                 return ""
-            if re.match(r'^ingress-replication\s+protocol\s+bgp$', c):
+            # NX-OS: "ingress-replication protocol bgp"
+            # IOS-XE(Catalyst 9000): "ingress-replication"だけで
+            # protocol指定が無い（host-reachability protocol bgpの
+            # 方で既にBGPと決まっているため）
+            if re.match(r'^ingress-replication(\s+protocol\s+bgp)?$', c):
                 member['ingress_replication'] = True
                 return ""
             m = re.match(r'^mcast-group\s+([\d.]+)', c)
@@ -4874,6 +5871,8 @@ Configuration Revision            : 5"""
             net = f'{p["network"]} / {p["mask"]}' if p['network'] else '(未設定)'
             out.append(f' Subnet: {net}')
             out.append(f' Default router: {p["router"] or "-"}   DNS: {p["dns"] or "-"}')
+            for code, (kind, val) in sorted(p.get('options', {}).items()):
+                out.append(f' Option {code} ({kind}): {val}')
             out.append('')
         return '\n'.join(out).rstrip()
 
@@ -4965,6 +5964,275 @@ Configuration Revision            : 5"""
     # ════════════════════════════════════════════
     # DAI / IP Source Guard
     # ════════════════════════════════════════════
+    def _format_show_ip_nhrp(self, state):
+        rows = [(ifn, i['nhrp']) for ifn, i in state.interfaces.items()
+                if i.get('nhrp')]
+        if not rows:
+            return ''
+        out = []
+        for ifn, n in rows:
+            for target, nbma in n.get('maps', []):
+                out.append(f'{target}/32 via {target}')
+                out.append(f'   {ifn} created 00:00:10, never expire')
+                out.append(f'   Type: static, NBMA address: {nbma or "-"}')
+                out.append('')
+        if not out:
+            for ifn, n in rows:
+                out.append(f'{ifn}: network-id {n.get("network-id", "-")}, '
+                           f'NHS {", ".join(n.get("nhs", [])) or "none"}')
+        return '\n'.join(out).rstrip()
+
+    def _format_show_ip_wccp(self, state):
+        svcs = getattr(state, 'wccp_services', {}) or {}
+        if not svcs:
+            return ''
+        out = []
+        for name, info in svcs.items():
+            out.append(f'Global WCCP information:')
+            out.append(f'    Router information:')
+            out.append(f'        Service Identifier: {name}')
+            out.append(f'        Number of Service Group Clients: 0')
+            out.append(f'        Number of Service Group Routers: 1')
+            if info.get('group_address'):
+                out.append(f'        Group Address: {info["group_address"]}')
+            if info.get('redirect_list'):
+                out.append(f'        Redirect access-list: {info["redirect_list"]}')
+            out.append('')
+        return '\n'.join(out).rstrip()
+
+    def _cmd_ip_services(self, cmd, state):
+        """IPアドレッシングサービス系（Catalyst 9300 IP Addressing Services
+        Configuration Guide 相当）の設定コマンド。
+
+        - 拡張オブジェクトトラッキング（track <n> ...）
+        - TCP MSS調整（ip tcp adjust-mss）
+        - IPv6基本（ipv6 unicast-routing / ipv6 address / ipv6 enable）
+        該当しなければ None を返す。
+        """
+        dt = state.device_type
+        if dt not in ('cisco', 'catalyst', 'nexus'):
+            return None
+        from engine.protocols import track_engine
+        c = cmd.lower().strip()
+        device_id = getattr(state, '_device_id', None) or state.hostname
+
+        # ── track <n> interface <iface> {line-protocol|ip routing} ──
+        m = re.match(r'^track\s+(\d+)\s+interface\s+(\S+)\s+'
+                     r'(line-protocol|ip\s+routing)$', c)
+        if m and state.mode == 'config':
+            m2 = re.match(r'^track\s+\d+\s+interface\s+(\S+)\s+', cmd.strip(), re.I)
+            iface = self._expand_if_name(m2.group(1)) if m2 else m.group(2)
+            kind = 'ip routing' if 'routing' in m.group(3) else 'line-protocol'
+            track_engine.add_interface_object(device_id, int(m.group(1)),
+                                              iface, kind)
+            track_engine.refresh(device_id, state)
+            state._track_obj = int(m.group(1))
+            state.mode = 'config-track'
+            return ""
+
+        # ── track <n> ip route <prefix>/<len>|<prefix> <mask> reachability ──
+        m = re.match(r'^track\s+(\d+)\s+ip\s+route\s+([\d.]+)(?:/(\d+)|\s+([\d.]+))'
+                     r'\s+reachability$', c)
+        if m and state.mode == 'config':
+            prefix = int(m.group(3)) if m.group(3) else \
+                (sum(bin(int(o)).count('1') for o in m.group(4).split('.'))
+                 if m.group(4) else 24)
+            track_engine.add_route_object(device_id, int(m.group(1)),
+                                          m.group(2), prefix)
+            track_engine.refresh(device_id, state)
+            state._track_obj = int(m.group(1))
+            state.mode = 'config-track'
+            return ""
+
+        # ── track <n> list boolean and|or ──
+        m = re.match(r'^track\s+(\d+)\s+list\s+boolean\s+(and|or)$', c)
+        if m and state.mode == 'config':
+            track_engine.add_list_object(device_id, int(m.group(1)), m.group(2))
+            state._track_obj = int(m.group(1))
+            state.mode = 'config-track'
+            return ""
+
+        # ── no track <n> ──
+        m = re.match(r'^no\s+track\s+(\d+)$', c)
+        if m and state.mode == 'config':
+            track_engine.remove(device_id, int(m.group(1)))
+            return ""
+
+        # ── config-track サブモード: delay / object ──
+        if state.mode == 'config-track':
+            num = getattr(state, '_track_obj', None)
+            obj = track_engine.get(device_id, num) if num is not None else None
+            if obj is None:
+                return ""
+            m = re.match(r'^delay\s+(up|down)\s+(\d+)$', c)
+            if m:
+                obj[f'delay_{m.group(1)}'] = int(m.group(2))
+                return ""
+            m = re.match(r'^object\s+(\d+)$', c)
+            if m and obj['type'] == 'list':
+                child = int(m.group(1))
+                if child not in obj['members']:
+                    obj['members'].append(child)
+                track_engine.refresh(device_id, state)
+                return ""
+            return None
+
+        # ── ip tcp adjust-mss <500-1460>（インタフェース配下）──
+        m = re.match(r'^(no\s+)?ip\s+tcp\s+adjust-mss(?:\s+(\d+))?$', c)
+        if m and state.current_if:
+            if m.group(1):
+                state.interfaces.setdefault(state.current_if, {}).pop('tcp_mss', None)
+                return ""
+            if not m.group(2):
+                return self._incomplete_error(cmd, state)
+            mss = int(m.group(2))
+            if not (500 <= mss <= 1460):
+                return self._range_error(cmd, state, 'MSS', 500, 1460, mss)
+            state.interfaces.setdefault(state.current_if, {})['tcp_mss'] = mss
+            return ""
+
+        # ── GLBP（インタフェース配下）──
+        if state.current_if:
+            from engine.protocols import glbp_engine
+            m = re.match(r'^glbp\s+(\d+)\s+ip\s+([\d.]+)$', c)
+            if m:
+                glbp_engine.set_ip(device_id, int(m.group(1)), m.group(2),
+                                   state.current_if)
+                return ""
+            m = re.match(r'^glbp\s+(\d+)\s+priority\s+(\d+)$', c)
+            if m:
+                pri = int(m.group(2))
+                if not (1 <= pri <= 255):
+                    return self._range_error(cmd, state, 'GLBP priority',
+                                             1, 255, pri)
+                glbp_engine.set_priority(device_id, int(m.group(1)), pri)
+                return ""
+            m = re.match(r'^(no\s+)?glbp\s+(\d+)\s+preempt', c)
+            if m:
+                glbp_engine.set_preempt(device_id, int(m.group(2)),
+                                        not m.group(1))
+                return ""
+            m = re.match(r'^glbp\s+(\d+)\s+weighting\s+(\d+)$', c)
+            if m:
+                glbp_engine.set_weighting(device_id, int(m.group(1)),
+                                          int(m.group(2)))
+                return ""
+            m = re.match(r'^glbp\s+(\d+)\s+load-balancing\s+'
+                         r'(round-robin|weighted|host-dependent)$', c)
+            if m:
+                glbp_engine.set_load_balancing(device_id, int(m.group(1)),
+                                               m.group(2))
+                return ""
+            m = re.match(r'^glbp\s+(\d+)\s+timers\s+(\d+)\s+(\d+)$', c)
+            if m:
+                glbp_engine.set_timers(device_id, int(m.group(1)),
+                                       int(m.group(2)), int(m.group(3)))
+                return ""
+            m = re.match(r'^no\s+glbp\s+(\d+)(\s+ip.*)?$', c)
+            if m:
+                glbp_engine.remove(device_id, int(m.group(1)))
+                return ""
+
+            # ── NHRP（DMVPN等。トンネルインタフェース配下）──
+            m = re.match(r'^(no\s+)?ip\s+nhrp\s+(.+)$', cmd.strip(), re.I)
+            if m:
+                info = state.interfaces.setdefault(state.current_if, {})
+                nhrp = info.setdefault('nhrp', {})
+                arg = ' '.join(m.group(2).split())
+                low = arg.lower()
+                if m.group(1):
+                    if low.startswith('map'):
+                        nhrp.get('maps', []).clear()
+                    else:
+                        nhrp.pop(low.split()[0], None)
+                    return ""
+                m2 = re.match(r'^network-id\s+(\d+)$', low)
+                if m2:
+                    nhrp['network-id'] = int(m2.group(1))
+                    return ""
+                m2 = re.match(r'^nhs\s+([\d.]+)$', low)
+                if m2:
+                    nhrp.setdefault('nhs', []).append(m2.group(1))
+                    return ""
+                m2 = re.match(r'^map\s+(?:multicast\s+)?(\S+)(?:\s+(\S+))?$', arg)
+                if m2:
+                    nhrp.setdefault('maps', []).append(
+                        (m2.group(1), m2.group(2) or ''))
+                    return ""
+                m2 = re.match(r'^(holdtime|authentication|registration)\s+(\S+)$', low)
+                if m2:
+                    nhrp[m2.group(1)] = m2.group(2)
+                    return ""
+                nhrp.setdefault('other', []).append(arg)
+                return ""
+
+            # ── WCCP（インタフェース配下の redirect）──
+            m = re.match(r'^(no\s+)?ip\s+wccp\s+(\S+)\s+redirect\s+(in|out)$', c)
+            if m:
+                info = state.interfaces.setdefault(state.current_if, {})
+                red = info.setdefault('wccp_redirect', {})
+                if m.group(1):
+                    red.pop(m.group(3), None)
+                else:
+                    red[m.group(3)] = m.group(2)
+                return ""
+
+        # ── WCCP（グローバル）──
+        m = re.match(r'^(no\s+)?ip\s+wccp\s+(\d+|web-cache)'
+                     r'(?:\s+group-address\s+([\d.]+))?'
+                     r'(?:\s+redirect-list\s+(\S+))?$', c)
+        if m and state.mode == 'config':
+            if not hasattr(state, 'wccp_services'):
+                state.wccp_services = {}
+            svc = m.group(2)
+            if m.group(1):
+                state.wccp_services.pop(svc, None)
+            else:
+                state.wccp_services[svc] = {
+                    'group_address': m.group(3) or '',
+                    'redirect_list': m.group(4) or '',
+                }
+            return ""
+
+        # ── IPv6 基本 ──
+        if c in ('ipv6 unicast-routing', 'no ipv6 unicast-routing'):
+            state.ipv6_unicast_routing = not c.startswith('no')
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+address\s+([0-9A-Fa-f:]+)/(\d+)$', cmd.strip(), re.I)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            if m.group(1):
+                info.pop('ipv6', None)
+                info.pop('ipv6_prefix', None)
+            else:
+                info['ipv6'] = m.group(2)
+                info['ipv6_prefix'] = int(m.group(3))
+            return ""
+        m = re.match(r'^(no\s+)?ipv6\s+enable$', c)
+        if m and state.current_if:
+            info = state.interfaces.setdefault(state.current_if, {})
+            info['ipv6_enabled'] = not m.group(1)
+            return ""
+
+        return None
+
+    def _expand_if_name(self, name: str) -> str:
+        """Gi1/0/1 のような短縮表記をフル表記へ（既存の展開表と同じ規則）"""
+        table = [('tengigabitethernet', 'TenGigabitEthernet'),
+                 ('gigabitethernet', 'GigabitEthernet'),
+                 ('fastethernet', 'FastEthernet'),
+                 ('port-channel', 'Port-channel'),
+                 ('loopback', 'Loopback'), ('vlan', 'Vlan'),
+                 ('tunnel', 'Tunnel'), ('te', 'TenGigabitEthernet'),
+                 ('gi', 'GigabitEthernet'), ('fa', 'FastEthernet'),
+                 ('po', 'Port-channel'), ('lo', 'Loopback'),
+                 ('vl', 'Vlan'), ('tu', 'Tunnel')]
+        low = name.lower()
+        for pfx, full in table:
+            if low.startswith(pfx):
+                return full + name[len(pfx):]
+        return name
+
     def _cmd_l2security(self, cmd, state):
         if state.device_type not in ('catalyst', 'srs', 'cisco'):
             return None
@@ -5023,6 +6291,22 @@ Configuration Revision            : 5"""
 
     def _cmd_config(self, cmd, state):
         c = cmd.lower().strip()
+
+        # description <text> / no description（インタフェース配下）
+        # 実装がApresia専用ハンドラにしか無く、Cisco/Catalystでは
+        # _cmd_config 末尾の「不明な設定コマンドは静かに受け付け」に
+        # 落ちて黙って捨てられていた（既定の説明のまま残る）。
+        if state.mode == 'config-if' and state.current_if:
+            _if = state.current_if
+            m_desc = re.match(r'^description\s+(.+)$', cmd.strip(), re.I)
+            if m_desc:
+                state.interfaces.setdefault(_if, {})
+                state.interfaces[_if]['desc'] = m_desc.group(1).strip()
+                return ""
+            if re.match(r'^no\s+description\s*$', c):
+                state.interfaces.setdefault(_if, {})
+                state.interfaces[_if]['desc'] = ''
+                return ""
 
         # hostname / sysname / switchname(NX-OS)
         m = re.match(r'^(?:hostname|sysname|switchname)\s+(\S+)', cmd, re.I)
@@ -5109,6 +6393,16 @@ Configuration Revision            : 5"""
         sec_out = self._cmd_l2security(cmd, state)
         if sec_out is not None:
             return sec_out
+
+        # ── DHCPv6 / IPv6 ネイバー探索 ──
+        dhcpv6_out = self._cmd_dhcpv6(cmd, state)
+        if dhcpv6_out is not None:
+            return dhcpv6_out
+
+        # ── 拡張オブジェクトトラッキング / TCP MSS / IPv6基本 ──
+        ipsvc_out = self._cmd_ip_services(cmd, state)
+        if ipsvc_out is not None:
+            return ipsvc_out
 
         # ── VSS / デュアルアクティブ検知（Catalyst）──
         vss_out = self._cmd_vss(cmd, state)
@@ -5257,6 +6551,34 @@ Configuration Revision            : 5"""
                 state.sir_ether_use[(grp, port)] = mode_on
             return ""
 
+        # Si-R: ether <group> <port> mode <auto|1000|100|10>（マニュアル 4.1.4）
+        m_mode = re.match(r'^ether\s+(\d+)\s+([\d,\-]+)\s+mode\s+(auto|1000|100|10)$', c)
+        if m_mode and state.device_type in ('sir', 'srs'):
+            grp = int(m_mode.group(1))
+            speed = m_mode.group(3)
+            for port in _expand_port_list(m_mode.group(2)):
+                if (grp, port) not in getattr(state, 'sir_ether_vlan', {}):
+                    return (f"<ERROR> : 3 : format error\n"
+                            f"  (ether group {grp} port {port} は"
+                            f"この装置に存在しません)")
+                state.sir_ether_mode[(grp, port)] = speed
+            return ""
+
+        # Si-R: ether <group> <port> duplex <full|half>（マニュアル 4.1.5）
+        # mode で 1000 または auto を指定した場合、この設定は無効になる
+        # （実機動作をshow ether/show ether briefでも反映する）。
+        m_duplex = re.match(r'^ether\s+(\d+)\s+([\d,\-]+)\s+duplex\s+(full|half)$', c)
+        if m_duplex and state.device_type in ('sir', 'srs'):
+            grp = int(m_duplex.group(1))
+            duplex = m_duplex.group(3)
+            for port in _expand_port_list(m_duplex.group(2)):
+                if (grp, port) not in getattr(state, 'sir_ether_vlan', {}):
+                    return (f"<ERROR> : 3 : format error\n"
+                            f"  (ether group {grp} port {port} は"
+                            f"この装置に存在しません)")
+                state.sir_ether_duplex[(grp, port)] = duplex
+            return ""
+
         # Si-R: ether <group> <port> snmp trap linkdown|linkup <enable|disable>
         #（マニュアル 4.9.1 / 4.9.2。未設定時はいずれも enable）
         m_trap = re.match(
@@ -5368,10 +6690,14 @@ Configuration Revision            : 5"""
             return ""
 
         # remote 1 ap 0 ipsec ike preshared-key <key>
+        # 事前共有鍵は大文字小文字を区別するため、小文字化済みの c ではなく
+        # 元の大文字小文字を保持した cmd から抽出する。
         m_psk = re.match(r'^remote\s+(\d+)\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key\s+(\S+)', c)
+        m_psk_orig = re.match(r'^remote\s+\d+\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key\s+(\S+)', cmd, re.I)
         if m_psk and state.device_type in ('sir', 'srs'):
             tid = int(m_psk.group(1))
-            state.ipsec_tunnels.setdefault(tid, {})['preshared'] = m_psk.group(2)
+            key = m_psk_orig.group(1) if m_psk_orig else m_psk.group(2)
+            state.ipsec_tunnels.setdefault(tid, {})['preshared'] = key
             state.ipsec_tunnels[tid]['status'] = 'established'  # 鍵設定でNEG開始を模擬
             state.ipsec_tunnels[tid]['phase1'] = 'MATURE'
             state.ipsec_tunnels[tid]['phase2'] = 'MATURE'
@@ -7680,6 +9006,195 @@ Key Version         : A
             return f'{(bcast_int>>24)&0xff}.{(bcast_int>>16)&0xff}.{(bcast_int>>8)&0xff}.{bcast_int&0xff}'
         except Exception:
             return '255.255.255.255'
+
+    # ─── IPCOM EX2 コマンドエンジン（IPCOM EX2シリーズマニュアル準拠）───
+    # 実機のモード階層:
+    #   ipcom>            操作者EXEC
+    #   ipcom#            管理者EXEC（admin コマンドで昇格）
+    #   ipcom(config)#    グローバル構成定義(即時)。load/new でファイル選択のみ
+    #   ipcom(edit)#      グローバル構成定義(編集)。実際の設定はここで行う
+    #   ipcom(edit-if)#   インターフェース構成定義(編集)
+    # 実機は edit モードでの変更を save running-config/save startup-config
+    # で明示的に反映するまでバッファに留めるが、このエミュレータでは他機種
+    # 同様コマンド投入時点で即座に state へ反映する簡略化をしている
+    # （save/commit はACKメッセージのみを返す）。
+    def _ipcom_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """IPCOM EX2のCLIコマンドを処理する"""
+
+        # ── モード遷移・ログイン ──
+        if c == 'admin':
+            state._ipcom_admin = True
+            return ''
+        if c in ('exit', 'quit', 'logout', 'end'):
+            if state.mode in ('edit-if', 'config-router'):
+                state.mode = 'edit'
+            elif state.mode == 'edit':
+                state.mode = 'config'
+            elif state.mode == 'config':
+                state.mode = 'exec'
+            elif state.mode == 'exec' and state._ipcom_admin:
+                state._ipcom_admin = False
+            return ''
+        if c in ('configure terminal', 'conf t', 'configure', 'conf'):
+            if state.mode != 'exec':
+                return '% Unknown command.'
+            if not state._ipcom_admin:
+                return '% Authorization failed.\n  (admin コマンドで管理者EXECに昇格してください)'
+            state.mode = 'config'
+            return ''
+
+        # ── show系はどのモードからでも実行可（実機準拠）──
+        # 注: "show ip route" は app.py の handle_protocol_show が先に
+        # 共有RIBエンジンの出力で応答するため、ここには到達しない
+        # （app.py冒頭のCLIディスパッチ順序の説明を参照）。
+        if re.match(r'^show\s+(interface|interfaces)(\s+\S+)?$', c):
+            return self._ipcom_show_interfaces(state)
+        if re.match(r'^show\s+(running-config|startup-config)$', c):
+            return self._ipcom_show_config(state)
+        if re.match(r'^show\s+ip\s+route$', c):
+            # rib_engineにスタティック/動的ルートが1件もない場合のみここに
+            # 来る(app.py handle_protocol_showがそちらを優先するため)。
+            # 直接接続の経路だけを簡易表示する。
+            lines = []
+            for name, cfg in state.interfaces.items():
+                if cfg.get('ip') and cfg.get('status') == 'up':
+                    lines.append(f'C   {cfg["ip"]}/{cfg["prefix"]} '
+                                f'is directly connected, {name}')
+            return '\n'.join(lines) if lines else '(no routes)'
+        if re.match(r'^show\s+version$', c):
+            return (f'{state.hostname}\n'
+                    f'IPCOM EX2 ソフトウェアシリーズ\n'
+                    f'System uptime: {state.uptime_str()}')
+
+        if state.mode == 'config':
+            if re.match(r'^(load\s+(running-config|startup-config|pppoe-config)|new)$', c):
+                state.mode = 'edit'
+                return ''
+            return '% Unknown command.'
+
+        if state.mode == 'edit':
+            m_if = re.match(r'^interface\s+(\S+)$', c)
+            if m_if:
+                ifname = m_if.group(1)
+                if ifname not in state.interfaces:
+                    state.interfaces[ifname] = {
+                        "ip": "", "prefix": 0, "status": "down", "desc": "",
+                        "auto_negotiation": False, "ip_routing": False,
+                    }
+                state.current_if = ifname
+                state.mode = 'edit-if'
+                return ''
+            m_host = re.match(r'^hostname\s+(\S+)', cmd, re.I)
+            if m_host:
+                state.hostname = m_host.group(1)
+                return ''
+            # "ip route"/"no ip route" は app.py の handle_protocol_config が
+            # 共有RIBエンジン(rib_engine)へ既に反映済み(このrules.py側に来る
+            # 前に実行される二層ディスパッチ、app.py冒頭のコメント参照)。
+            # ここで別途 state 側にも記録すると二重管理になり、
+            # 「show ip route」で見た目だけ整形の異なる重複行が出る不具合が
+            # 実際に起きたため、ここでは受理するだけに留める。
+            if re.match(r'^ip\s+route\s+\S+\s+\S+(\s+distance\s+\d+)?$', c):
+                return ''
+            if re.match(r'^no\s+ip\s+route\s+\S+\s+\S+$', c):
+                return ''
+            # router rip / router ospf / router bgp <asn> — ルータ構成定義
+            # モードへ。"network"/"redistribute"等のサブコマンド自体は
+            # app.py の handle_protocol_config が _routing_mode(側路属性)
+            # だけを見て共有プロトコルエンジン(rip_engine/ospf_engine)へ
+            # 既に反映済み(ip route と同じ二層ディスパッチの仕組み)なので、
+            # ここではモード遷移だけ行う。
+            if c == 'router rip':
+                state.mode = 'config-router'
+                return ''
+            if c == 'router ospf':
+                # IPCOMの実機構文はCisco IOSと違いプロセスID引数を取らない。
+                # app.py側のOSPF検出は "router ospf <数字>" を要求するため、
+                # bare "router ospf" ではhandle_protocol_configが素通りして
+                # _routing_modeが設定されない。ここで同じ属性を直接立てる。
+                state._routing_mode = 'ospf'
+                state._ospf_process = getattr(state, '_ospf_process', 1) or 1
+                state._ospf_networks = getattr(state, '_ospf_networks', [])
+                state._rip_pending = False
+                state._bgp_pending = False
+                state.mode = 'config-router'
+                return ''
+            if re.match(r'^router\s+bgp\s+\d+$', c):
+                state.mode = 'config-router'
+                return ''
+            if c == 'commit':
+                return 'running-config へ反映しました。'
+            m_save = re.match(
+                r'^save\s+(running-config|startup-config)(\s+force-update)?$', c)
+            if m_save:
+                target = m_save.group(1)
+                return f'{target} へ保存しました。'
+            return '% Unknown command.'
+
+        if state.mode == 'config-router':
+            # "network"/"redistribute"/"neighbor"/"router-id"等のサブコマンド
+            # 自体は app.py の handle_protocol_config が _routing_mode を
+            # 見て共有プロトコルエンジンへ既に反映済み。ここでは受理するのみ。
+            return ''
+
+        if state.mode == 'edit-if':
+            iface = state.interfaces.get(state.current_if, {})
+            m_desc = re.match(r'^description\s+(.+)$', cmd)
+            if m_desc:
+                iface['desc'] = m_desc.group(1)
+                return ''
+            m_ip = re.match(r'^ip\s+address\s+(\d+\.\d+\.\d+\.\d+)/(\d+)$', c)
+            if m_ip:
+                iface['ip'] = m_ip.group(1)
+                iface['prefix'] = int(m_ip.group(2))
+                iface['status'] = 'up'
+                return ''
+            if c == 'ip-routing':
+                iface['ip_routing'] = True
+                return ''
+            if c in ('auto-negotiation on', 'auto-negotiation off'):
+                iface['auto_negotiation'] = c.endswith('on')
+                return ''
+            if c in ('shutdown', 'no shutdown'):
+                iface['status'] = 'down' if c == 'shutdown' else 'up'
+                return ''
+            # "ip ospf ..."/"ip rip ..." インターフェースサブコマンドは
+            # app.py の handle_protocol_config が既に反映済み（config-router
+            # モードと同じ仕組み）。ここでは受理するのみ。
+            if re.match(r'^ip\s+(ospf|rip)\s+\S', c):
+                return ''
+            return '% Unknown command.'
+
+        return '% Unknown command.'
+
+    def _ipcom_show_interfaces(self, state: DeviceState) -> str:
+        lines = []
+        for name, cfg in state.interfaces.items():
+            ip = cfg.get('ip') or '(none)'
+            prefix = cfg.get('prefix', 0)
+            status = cfg.get('status', 'down')
+            desc = cfg.get('desc', '')
+            lines.append(f'{name:<12} {ip}/{prefix if ip != "(none)" else ""} '
+                        f'{status:<8} {desc}')
+        return '\n'.join(lines) if lines else '(no interfaces)'
+
+    def _ipcom_show_config(self, state: DeviceState) -> str:
+        # スタティックルートは共有RIBエンジン(rib_engine)が真の情報源
+        # （app.pyのhandle_protocol_configが反映）で、rules.py側からは
+        # 参照できないため、ここではインターフェース設定のみ表示する。
+        lines = [f'hostname {state.hostname}']
+        for name, cfg in state.interfaces.items():
+            lines.append(f'interface {name}')
+            if cfg.get('desc'):
+                lines.append(f'  description {cfg["desc"]}')
+            if cfg.get('auto_negotiation'):
+                lines.append('  auto-negotiation on')
+            if cfg.get('ip'):
+                lines.append(f'  ip address {cfg["ip"]}/{cfg["prefix"]}')
+            if cfg.get('ip_routing'):
+                lines.append('  ip-routing')
+            lines.append('  exit')
+        return '\n'.join(lines)
 
     # ─── APRESIA コマンドエンジン（ApresiaLightGM200マニュアル準拠）─
     def _apresia_process(self, cmd: str, c: str, state: DeviceState) -> str:

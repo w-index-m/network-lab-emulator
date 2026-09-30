@@ -1,0 +1,39 @@
+id = spawnd {
+	background = no
+	listen { port = {{ tacacs_port }} }
+	spawn {
+		instances min = 1
+		instances max = 8
+	}
+}
+
+id = tac_plus-ng {
+	log authorlog {
+		destination = 127.0.0.1:{{ syslog_port }}
+		syslog facility = local5
+	}
+	log acctlog {
+		destination = 127.0.0.1:{{ syslog_port }}
+		syslog facility = local6
+	}
+	authorization log = authorlog
+	accounting log = acctlog
+
+	host world { address = 0.0.0.0/0; key = {{ tacacs_key }} }
+
+	profile admin {
+		enable 15 = login
+		script {
+			if (service == shell) {
+			    if (cmd == "") set priv-lvl = 15
+			    permit
+			}
+		}
+	}
+
+	user {{ tacacs_user }} {
+		password login = clear {{ tacacs_password }}
+		password pap = login
+		profile = admin
+	}
+}

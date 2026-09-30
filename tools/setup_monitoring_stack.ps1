@@ -31,10 +31,13 @@ param(
     [int]$PromPort = 9090,
     [int]$AlertmanagerPort = 9093,
     [int]$GrafanaPort = 3000,
+    [int]$LokiPort = 3100,
+    [int]$SyslogBridgePort = 5514,
 
     [string]$PromVersion = '2.54.1',
     [string]$AlertmanagerVersion = '0.27.0',
     [string]$GrafanaVersion = '11.2.0',
+    [string]$LokiVersion = '3.2.0',
 
     [switch]$WithOllama,
     [string]$OllamaModel = 'qwen2.5:1.5b'
@@ -49,7 +52,12 @@ function Write-Log($msg) {
 
 function Test-Port($port, $path = '/') {
     try {
-        $r = Invoke-WebRequest -Uri "http://localhost:$port$path" -UseBasicParsing -TimeoutSec 2
+        # このスタックはapp.py(235台のエミュレータ)+Loki+Grafana+Prometheus+
+        # Alertmanagerを同時に動かすため負荷が高く、2秒では応答が間に合わず
+        # 実際には正常なサービスを「down」と誤判定することがあった
+        # (ユーザーの実機Windowsテストで確認: 手動curlは成功するのに
+        # Test-Port経由のstatus/setupチェックだけ失敗する事例)。5秒に緩和。
+        $r = Invoke-WebRequest -Uri "http://localhost:$port$path" -UseBasicParsing -TimeoutSec 5
         return $r.StatusCode -eq 200
     } catch {
         return $false
@@ -65,10 +73,16 @@ function Start-App {
     Write-Log "app.py: starting on :$AppPort"
     $venvPython = Join-Path $RepoDir 'venv\Scripts\python.exe'
     $python = if (Test-Path $venvPython) { $venvPython } else { 'python' }
+    # Linux版(.sh)と同様、このスタック用に立てたapp.pyはNETLAB_AUTH_DISABLE=1で
+    # 起動する。付けないとヘルスチェックが401を200と誤判定して「起動失敗」に
+    # なる(実際にはapp.pyは正常に起動しているのに、ログイン必須のため
+    # /api/snmp/dashboardが401を返す)。
+    $env:NETLAB_AUTH_DISABLE = '1'
     Start-Process -FilePath $python -ArgumentList 'app.py' -WorkingDirectory $RepoDir `
         -RedirectStandardOutput "$StackDir\app.log" -RedirectStandardError "$StackDir\app.err.log" `
         -WindowStyle Hidden
-    for ($i = 0; $i -lt 15; $i++) {
+    Remove-Item Env:\NETLAB_AUTH_DISABLE -ErrorAction SilentlyContinue
+    for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Seconds 2
         if (Test-Port $AppPort '/api/snmp/dashboard') { return }
     }
@@ -259,7 +273,182 @@ function Start-Grafana {
     }
 }
 
-# ── 6. Ollama（任意） ─────────────────────────────────────
+# ── 6. Grafana Loki（ログ集約） ───────────────────────────
+function Get-Loki {
+    $exe = "$StackDir\loki-windows-amd64.exe"
+    if (Test-Path $exe) {
+        Write-Log "loki: binary already present"
+        return $exe
+    }
+    Write-Log "loki: downloading v$LokiVersion"
+    $zip = "$StackDir\loki.zip"
+    Invoke-WebRequest -Uri "https://github.com/grafana/loki/releases/download/v$LokiVersion/loki-windows-amd64.exe.zip" -OutFile $zip
+    Expand-Archive -Path $zip -DestinationPath $StackDir -Force
+    return $exe
+}
+
+function Write-LokiConfig {
+    $dataDir = "$StackDir\loki-data" -replace '\\', '/'
+    @"
+auth_enabled: false
+
+server:
+  http_listen_address: 127.0.0.1
+  http_listen_port: $LokiPort
+  grpc_listen_address: 127.0.0.1
+  grpc_listen_port: 9096
+
+common:
+  instance_addr: 127.0.0.1
+  instance_interface_names:
+    - Loopback Pseudo-Interface 1
+  path_prefix: $dataDir
+  storage:
+    filesystem:
+      chunks_directory: $dataDir/chunks
+      rules_directory: $dataDir/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    instance_interface_names:
+      - Loopback Pseudo-Interface 1
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+frontend_worker:
+  frontend_address: 127.0.0.1:9096
+
+ruler:
+  alertmanager_url: http://localhost:$AlertmanagerPort
+"@ | Out-File -Encoding utf8 "$StackDir\loki-config.yml"
+}
+
+function Start-Loki {
+    if (Test-Port $LokiPort '/ready') {
+        Write-Log "loki: already running on :$LokiPort"
+        return
+    }
+    $exe = Get-Loki
+    New-Item -ItemType Directory -Force -Path "$StackDir\loki-data" | Out-Null
+    Write-LokiConfig
+    Write-Log "loki: starting on :$LokiPort"
+    Start-Process -FilePath $exe -ArgumentList "-config.file=`"$StackDir\loki-config.yml`"" `
+        -WorkingDirectory $StackDir `
+        -RedirectStandardOutput "$StackDir\loki.log" -RedirectStandardError "$StackDir\loki.err.log" `
+        -WindowStyle Hidden
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Seconds 3
+        if (Test-Port $LokiPort '/ready') { break }
+    }
+    if (-not (Test-Port $LokiPort '/ready')) {
+        Write-Warning "loki が起動しませんでした。$StackDir\loki.err.log を確認してください。"
+        return
+    }
+
+    if (Test-Port $GrafanaPort '/api/health') {
+        Write-Log "loki: registering Grafana datasource"
+        $body = @{ name = "Loki"; type = "loki"; url = "http://localhost:$LokiPort"; access = "proxy" } | ConvertTo-Json
+        $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("admin:admin"))
+        try {
+            Invoke-RestMethod -Uri "http://localhost:$GrafanaPort/api/datasources" -Method Post `
+                -Body $body -ContentType "application/json" `
+                -Headers @{ Authorization = "Basic $auth" } | Out-Null
+        } catch {
+            # 既に登録済みの場合は409になるので無視してよい
+        }
+    }
+}
+
+# ── 7. syslog -> Loki ブリッジ ────────────────────────────
+function Start-SyslogBridge {
+    $running = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'python3.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'syslog_to_loki\.py' }
+    if ($running) {
+        Write-Log "syslog_to_loki: already running"
+        return
+    }
+    Write-Log "syslog_to_loki: starting on udp:$SyslogBridgePort -> loki:$LokiPort"
+    $venvPython = Join-Path $RepoDir 'venv\Scripts\python.exe'
+    $python = if (Test-Path $venvPython) { $venvPython } else { 'python' }
+    Start-Process -FilePath $python `
+        -ArgumentList "tools\syslog_to_loki.py --syslog-port $SyslogBridgePort --loki-url http://localhost:$LokiPort" `
+        -WorkingDirectory $RepoDir `
+        -RedirectStandardOutput "$StackDir\syslog_to_loki.log" -RedirectStandardError "$StackDir\syslog_to_loki.err.log" `
+        -WindowStyle Hidden
+}
+
+# ── 7.5 Grafanaにnetlab-syslogダッシュボードを登録 ────────
+function Publish-SyslogDashboard {
+    # Grafana/Lokiの起動直後はヘルスチェックにまだ応答しないことがあり、
+    # 即座にスキップすると登録が永久に行われないまま終わってしまう
+    # (高負荷環境で実際に発生を確認)。最大30秒(3秒x10回)リトライする。
+    $ready = $false
+    for ($i = 0; $i -lt 10; $i++) {
+        if ((Test-Port $GrafanaPort '/api/health') -and (Test-Port $LokiPort '/ready')) {
+            $ready = $true
+            break
+        }
+        Start-Sleep -Seconds 3
+    }
+    if (-not $ready) {
+        Write-Log "grafana: Grafana/Lokiの起動待ちがタイムアウトしたためダッシュボード登録をスキップ"
+        return
+    }
+    Write-Log "grafana: netlab-syslogダッシュボードを登録"
+    $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("admin:admin"))
+    try {
+        $ds = Invoke-RestMethod -Uri "http://localhost:$GrafanaPort/api/datasources/name/Loki" `
+            -Headers @{ Authorization = "Basic $auth" }
+    } catch {
+        Write-Warning "grafana: LokiデータソースのUID取得に失敗したためダッシュボード登録をスキップします"
+        return
+    }
+    $lokiUid = $ds.uid
+    # クエリは source_ip で絞らず job=netlab-syslog のみ(全送信元から受信したログを表示)
+    $dashboard = @{
+        dashboard = @{
+            uid      = "netlab-syslog"
+            title    = "Netlab Syslog"
+            timezone = "browser"
+            refresh  = "10s"
+            time     = @{ from = "now-1h"; to = "now" }
+            panels   = @(
+                @{
+                    id         = 1
+                    type       = "logs"
+                    title      = "syslog (全送信元)"
+                    gridPos    = @{ h = 20; w = 24; x = 0; y = 0 }
+                    datasource = @{ type = "loki"; uid = $lokiUid }
+                    targets    = @(
+                        @{ expr = '{job="netlab-syslog"}'; refId = "A"; datasource = @{ type = "loki"; uid = $lokiUid } }
+                    )
+                }
+            )
+        }
+        overwrite = $true
+    } | ConvertTo-Json -Depth 10
+
+    try {
+        Invoke-RestMethod -Uri "http://localhost:$GrafanaPort/api/dashboards/db" -Method Post `
+            -Body $dashboard -ContentType "application/json" `
+            -Headers @{ Authorization = "Basic $auth" } | Out-Null
+        Write-Log "grafana: ダッシュボードURL http://localhost:$GrafanaPort/d/netlab-syslog"
+    } catch {
+        Write-Warning "grafana: ダッシュボード登録に失敗しました"
+    }
+}
+
+# ── 8. Ollama（任意） ─────────────────────────────────────
 function Start-OllamaIfRequested {
     if (-not $WithOllama) { return }
 
@@ -294,6 +483,9 @@ function Invoke-Setup {
     Start-Prometheus
     Start-Alertmanager
     Start-Grafana
+    Start-Loki
+    Start-SyslogBridge
+    Publish-SyslogDashboard
     Start-OllamaIfRequested
     Write-Host ""
     Invoke-Status
@@ -307,12 +499,23 @@ function Invoke-Status {
         @{ Name = 'prometheus';   Port = $PromPort;         Path = '/-/healthy' }
         @{ Name = 'alertmanager'; Port = $AlertmanagerPort; Path = '/' }
         @{ Name = 'grafana';      Port = $GrafanaPort;      Path = '/api/health' }
+        @{ Name = 'loki';         Port = $LokiPort;         Path = '/ready' }
     )
     foreach ($c in $checks) {
         $ok = Test-Port $c.Port $c.Path
         $status = if ($ok) { '200' } else { 'down' }
         Write-Host ("{0,-14} :{1,-6} {2}" -f $c.Name, $c.Port, $status)
     }
+    $bridgeRunning = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'python3.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'syslog_to_loki\.py' }
+    # UDPはTCPと違い接続確認ができないため、プロセスの存在だけでなく実際に
+    # そのポートをLISTENしているかをGet-NetUDPEndpointで確認する。
+    $udpListening = $false
+    try {
+        $udpListening = [bool](Get-NetUDPEndpoint -LocalPort $SyslogBridgePort -ErrorAction SilentlyContinue)
+    } catch { }
+    $bridgeStatus = if ($bridgeRunning -and $udpListening) { 'listening' } else { 'down' }
+    Write-Host ("{0,-14} :{1,-6} {2}" -f 'syslog_bridge', "udp/$SyslogBridgePort", $bridgeStatus)
     if ($WithOllama) {
         $ollamaOk = Test-Port 11434 '/'
         Write-Host ("{0,-14} :{1,-6} {2}" -f 'ollama', 11434, $(if ($ollamaOk) { '200' } else { 'down' }))
@@ -320,12 +523,12 @@ function Invoke-Status {
 }
 
 function Invoke-Stop {
-    Write-Log "stopping app.py / exporter / prometheus / alertmanager / grafana"
+    Write-Log "stopping app.py / exporter / prometheus / alertmanager / grafana / loki / syslog_bridge"
     Get-Process python -ErrorAction SilentlyContinue | Where-Object {
-        $_.Path -and (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").CommandLine -match 'app\.py|prometheus_exporter\.py'
+        $_.Path -and (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").CommandLine -match 'app\.py|prometheus_exporter\.py|syslog_to_loki\.py'
     } | Stop-Process -Force -ErrorAction SilentlyContinue
 
-    foreach ($name in @('prometheus', 'alertmanager', 'grafana-server')) {
+    foreach ($name in @('prometheus', 'alertmanager', 'grafana-server', 'loki-windows-amd64')) {
         Get-Process $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     }
 }

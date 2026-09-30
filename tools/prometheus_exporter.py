@@ -30,9 +30,18 @@ Windowsの場合は tools/run_prometheus_exporter.bat から起動できる。
 import argparse
 import json
 import os
+import sys
 import time
 import urllib.request
 import urllib.error
+
+# Windowsのデフォルトコンソール文字コード(cp932)は em dash(—)等の一部
+# Unicode文字をエンコードできずクラッシュするため、標準出力をUTF-8に固定する。
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _last_payload = {'text': '', 'fetched_at': 0.0, 'error': None}

@@ -1,8 +1,12 @@
 ---
-# network-lab-emulator 監視スタック(Prometheus/Alertmanager/Grafana/FRR)を
-# 1playbookで構築する。tools/setup_monitoring_stack.sh(シェル版)と同じ
-# 手順のAnsible移植版。べき等: 既に起動しているサービス/既に展開済みの
-# バイナリはスキップする。
+# network-lab-emulator 監視スタック(Prometheus/Alertmanager/Grafana/FRR)と
+# TACACS+(tac_plus-ng)->syslog->Loki連携を1playbookで構築する。
+# tools/setup_monitoring_stack.sh(シェル版)と同じ手順のAnsible移植版。
+# べき等: 既に起動しているサービス/既に展開済みのバイナリはスキップする。
+#
+# tacacs_syslogロールはmonitoring_stackロールが立てるLoki+syslogブリッジ
+# (syslog_to_loki.py)へtac_plus-ngのauthorization/accountingログを実syslogで
+# 送るため、必ずmonitoring_stackの後に実行する。
 #
 # 使い方:
 #   ansible-playbook -i ansible/inventory.ini ansible/site.yml
@@ -14,4 +18,7 @@
   hosts: monitoring_hosts
   become: true
   roles:
-    - monitoring_stack
+    - role: monitoring_stack
+      tags: monitoring_stack
+    - role: tacacs_syslog
+      tags: tacacs_syslog
