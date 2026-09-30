@@ -190,6 +190,23 @@ original implementation to revive rather than rebuilding from scratch.
   route entries, device-specific CLI quirks, Windows-only
   `UnicodeEncodeError`s) that code review alone missed.
 
+**`ansible/roles/dify/`**: an independent, unrelated-to-the-emulator
+Ansible role that stands up [Dify](https://github.com/langgenius/dify)
+(an LLM app/RAG platform) via docker compose, added because the user
+asked whether this sandbox could run one. `cr.weaviate.io` (Dify's
+vector-DB image registry) is blocked by this environment's egress
+policy the same way `download.pytorch.org`/`api.groq.com` are — worked
+around by pulling the same image from Docker Hub
+(`semitechnologies/weaviate`) and re-tagging it locally. Not wired into
+the default `ansible/site.yml` run (only via `--tags dify`) since it's
+a heavy, unrelated 16-container stack. Docker/Docker Compose are
+already installed in this sandbox and the daemon starts fine via
+`nohup dockerd &` despite there being no systemd (`systemctl` fails
+with "System has not been booted with systemd as init system") — the
+role handles both cases. See `docs/dify-ansible.md` for the full
+live-verification transcript (cold start with the daemon stopped,
+Web UI + API responding, and a second idempotent run).
+
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 
 PyTorch could not be installed in this sandbox early on (pulled in a
