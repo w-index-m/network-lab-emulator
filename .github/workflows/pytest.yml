@@ -12,7 +12,10 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # coverage計測付きの`pytest tests/`はローカルで~16分だが、CI上では
+    # カバレッジ計装のオーバーヘッドで20分の旧設定を超えて
+    # cancelledになることが実際にあった(run #53参照)。余裕を持たせる。
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
