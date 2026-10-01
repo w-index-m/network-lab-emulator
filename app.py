@@ -4299,7 +4299,7 @@ def _capture_sir_config(state, command: str):
 
 def _build_running_config(device_id: str, state) -> str:
     """プロトコルエンジンの状態を反映したrunning-configを生成"""
-    is_cisco = state.device_type in ('catalyst', 'cisco')
+    is_cisco = state.device_type in ('catalyst', 'cisco', 'arista')
     is_apresia = state.device_type == 'apresia'
     is_nexus = state.device_type == 'nexus'
 
@@ -4455,12 +4455,19 @@ def _build_running_config(device_id: str, state) -> str:
     lines = []
 
     if is_cisco:
-        lines.append('Building configuration...')
-        lines.append('')
-        lines.append('Current configuration : ' + str(random.randint(1500, 4000)) + ' bytes')
-        lines.append('!')
-        lines.append('version 17.3')
-        lines.append('!')
+        if state.device_type == 'arista':
+            # EOSの"show running-config"はIOSの"Building configuration..."
+            # バナーではなく、コマンド実行時刻のコメントヘッダで始まる。
+            lines.append('! Command: show running-config')
+            lines.append('! device: ' + state.hostname + ' (vEOS, EOS-4.32.1F)')
+            lines.append('!')
+        else:
+            lines.append('Building configuration...')
+            lines.append('')
+            lines.append('Current configuration : ' + str(random.randint(1500, 4000)) + ' bytes')
+            lines.append('!')
+            lines.append('version 17.3')
+            lines.append('!')
         lines.append(f'hostname {state.hostname}')
         lines.append('!')
         # enable secret/password（`enable`での昇格に使う。SSH/Telnet

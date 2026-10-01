@@ -11,7 +11,7 @@ NETCONF/SSH-CLI/Telnet-CLI, gNMI over gRPC), so real clients (ncclient,
 gnmic/pygnmi, snmpwalk, an actual ssh/telnet client) can connect to emulated
 devices. See `README.md` for the full feature/protocol matrix and supported
 device types (`device_type`: `catalyst`, `nexus`, `cisco`, `asa`, `sir`,
-`srs`, `apresia`, `bigip`, `pc`).
+`srs`, `apresia`, `bigip`, `arista`, `pc`).
 
 **Publicly deployed** at https://network-lab-emulator.onrender.com/ (Render).
 That deployment doesn't have Ollama available, so its `network_ontology_query.py
@@ -233,6 +233,41 @@ the exact cml-community command sequence against a running instance
 end to end (`show running-config` reflects every line, case preserved);
 `tests/test_aaa_named_method_lists.py` (14 tests) fixes this plus the
 `default`-list backward-compat.
+
+**`arista` device type**: added after confirming via cml-community's
+`node-definitions/arista/` that EOS's `configure`/`configure terminal`,
+`write`/`write memory`/`copy running-config startup-config`, and
+`interface` → config-if mode transitions are essentially identical to
+IOS. Unlike `apresia`/`bigip`, no dedicated `_arista_process` handler
+was needed — `arista` just falls through into the existing shared
+Cisco-style tree in `RuleEngine.process()` (confirmed live: `router
+ospf 1` correctly entered `config-router`, no gNMI/OSPF-engine wiring
+needed). Only 3 things are EOS-specific: interface naming
+(`Ethernet<N>`, not `GigabitEthernet0/0/N`, set in `DeviceState.__init__`'s
+interfaces ternary), `show version` (EOS's short field-list format
+instead of IOS's long banner, in `_show_version`), and the `show
+running-config` header (`! Command: show running-config` / `! device:
+...` instead of IOS's `Building configuration...`, in
+`app.py`'s `is_cisco` block — `is_cisco` now includes `arista`).
+Frontend: `static/index.html`'s `DEVICE_META`, add-device buttons,
+`defPort()`/`portOptions()`, `_inferDeviceType()`, and the bulk-import
+color map all got an `arista` entry.
+
+**Found while live-verifying**: `/api/device`'s body keys are
+`id`/`type`/`hostname` — **not** `device_id`/`device_type` like
+`/api/cli` uses. Posting the wrong keys to `/api/device` silently
+no-ops (the `if dev_id and ...` guard just never fires), and the
+device then gets auto-created as a plain `cisco` default on the first
+`/api/cli` call that touches it (`DEFAULT_DEVICES.get(device_id,
+{"type": "cisco", ...})` fallback) — no error, just the wrong
+device_type. Caught this because an "Arista" test device kept
+rendering as a vanilla Cisco ISR4321 until the request body was fixed
+to use `id`/`type`. Worth remembering next time a live-verification
+curl call "works" but shows unexpected default-looking output — check
+the endpoint's actual body keys before assuming the feature itself is
+broken.
+
+`tests/test_arista_eos.py` (8 tests) covers all of the above.
 
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 

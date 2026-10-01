@@ -219,11 +219,16 @@ class DeviceState:
                 "vlan": "1", "speed": "auto", "duplex": "full",
                 "desc": f"Port-channel{i}",
             } for i in range(1, 5)},
-        }) if device_type in ("catalyst", "srs") else {
+        }) if device_type in ("catalyst", "srs") else ({
+            # Arista EOS: 固定スイッチは Ethernet<N> 形式（スラッシュ無し）
+            "Ethernet1": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
+            "Ethernet2": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
+            "Ethernet3": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
+        } if device_type == "arista" else {
             "GigabitEthernet0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        }
+        })
 
         if device_type == "sir":
             # ether <slot> <port> vlan untag <vid>（実機のfactory-default）
@@ -1683,6 +1688,25 @@ Switch Ports Model              SW Version        SW Image              Mode
 
 
 Configuration register is 0x102 (will be 0x102 at next reload)"""
+        elif state.device_type == "arista":
+            # Arista EOSのshow versionはCiscoのような長いバナーではなく、
+            # モデル/シリアル/MACアドレス/ソフトウェアイメージバージョン/
+            # アーキテクチャ/uptime/メモリの短い項目列挙(EOSユーザーマニュアル
+            # "Switch Administration Commands"章のshow version準拠)。
+            return f"""Arista DCS-7050SX3-48YC8-F
+Hardware version:    01.00
+Serial number:       SSJ{abs(hash(state.hostname)) % 100000:05d}
+System MAC address:  001c.7300.{abs(hash(state.hostname)) % 0xffff:04x}
+
+Software image version: 4.32.1F
+Architecture:           x86_64
+Internal build version: 4.32.1F-1234567.4321F
+Internal build ID:      {abs(hash(state.hostname)):08x}-0000-0000-0000-000000000000
+
+Uptime:                 {state.uptime_str()}
+
+Total memory:           8167848 kB
+Free memory:            4521344 kB"""
         else:
             return f"""Cisco IOS Software [Cupertino], ISR Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 17.9.1
 Technical Support: http://www.cisco.com/techsupport
