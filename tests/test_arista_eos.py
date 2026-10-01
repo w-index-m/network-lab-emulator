@@ -35,8 +35,8 @@ import app as app_module
 client = TestClient(app_module.app)
 
 
-def _dev(id_):
-    client.post('/api/device', json={'id': id_, 'type': 'arista', 'hostname': id_})
+def _dev(id_, type_='arista'):
+    client.post('/api/device', json={'id': id_, 'type': type_, 'hostname': id_})
 
 
 def _cli(id_, cmd):
@@ -116,3 +116,51 @@ class TestAristaHostnameAndPrompt:
                                        'command': 'hostname spine1'})
         rc = _cli('arista-host-1', 'show running-config')
         assert 'hostname spine1' in rc
+
+
+class TestAristaCiscoLldp:
+    """Arista⇔Cisco間でLLDPネイバー探索が実際に機能することの確認。
+
+    ライブ検証中に見つかった副産物のバグ: Cisco系のshow lldp neighbors
+    テーブルは Local Intf 列を固定幅16桁で出力していたが、
+    GigabitEthernet0/0/0 のような20文字のフル長インタフェース名は
+    Hold-time列と連結してしまい列がずれていた(実機Ciscoは
+    Local Intf列を Gi0/0/0 のように短縮表記するため、この問題が起きない)。
+    既存の _abbrev_if ヘルパーを local_if/port_id に適用して修正。
+    """
+
+    def test_lldp_not_enabled_by_default_on_cisco(self):
+        _dev('lldp-cisco-1', type_='cisco')
+        _dev('lldp-arista-1', type_='arista')
+        client.post('/api/link', json={'a': 'lldp-arista-1', 'b': 'lldp-cisco-1'})
+        out = _cli('lldp-cisco-1', 'show lldp neighbors')
+        assert out == '% LLDP is not enabled'
+
+    def test_cisco_sees_arista_neighbor_after_lldp_run(self):
+        _dev('lldp-cisco-2', type_='cisco')
+        _dev('lldp-arista-2', type_='arista')
+        client.post('/api/link', json={'a': 'lldp-arista-2', 'b': 'lldp-cisco-2'})
+        _run('lldp-cisco-2', ['configure terminal', 'lldp run'])
+        out = _cli('lldp-cisco-2', 'show lldp neighbors')
+        assert 'lldp-arista-2' in out  # system_name == hostname == device_id (この固定値)
+        assert 'Total entries displayed: 1' in out
+        assert 'Ethernet1' in out  # 相手(Arista)側インタフェース名
+
+    def test_arista_sees_cisco_neighbor_without_lldp_run(self):
+        """実機のArista EOSはLLDPが既定で有効(Cisco IOSと異なる)。"""
+        _dev('lldp-cisco-3', type_='cisco')
+        _dev('lldp-arista-3', type_='arista')
+        client.post('/api/link', json={'a': 'lldp-arista-3', 'b': 'lldp-cisco-3'})
+        out = _cli('lldp-arista-3', 'show lldp neighbors')
+        assert 'Total entries displayed: 1' in out
+
+    def test_long_interface_name_column_alignment_fixed(self):
+        """GigabitEthernet0/0/0のような長いインタフェース名でも
+        Local IntfとHold-time列がくっつかないことを固定する回帰テスト。"""
+        _dev('lldp-cisco-4', type_='cisco')
+        _dev('lldp-arista-4', type_='arista')
+        client.post('/api/link', json={'a': 'lldp-arista-4', 'b': 'lldp-cisco-4'})
+        _run('lldp-cisco-4', ['configure terminal', 'lldp run'])
+        out = _cli('lldp-cisco-4', 'show lldp neighbors')
+        assert 'Gi0/0/0' in out
+        assert 'Gi0/0/0120' not in out

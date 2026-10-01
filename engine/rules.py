@@ -2891,8 +2891,8 @@ Gi1/0/24            Root FWD 4         128.24   P2p"""
         for n in neighbors:
             cap_map = {'R': 'R', 'B': 'B', 'S': 'B', 'H': 'T'}
             cap = cap_map.get(n.get('cap', 'B'), 'B')
-            local_if = n.get('local_if', n.get('port', ''))
-            port_id = n.get('port_id', n.get('port', ''))
+            local_if = self._abbrev_if(n.get('local_if', n.get('port', '')))
+            port_id = self._abbrev_if(n.get('port_id', n.get('port', '')))
             sysname = n.get('system_name', n.get('device', ''))
             hold = n.get('hold', n.get('ttl', 120))
             lines.append(f"{sysname:<21}{local_if:<16}{hold:<11}{cap:<13}{port_id}")

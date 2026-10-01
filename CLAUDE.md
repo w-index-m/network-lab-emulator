@@ -269,6 +269,35 @@ broken.
 
 `tests/test_arista_eos.py` (8 tests) covers all of the above.
 
+**Live-verified Arista⇔Cisco LLDP** (user request: "Arista⇔Ciscoで実際に
+LLDP試してみて"): `_update_neighbors`/`_rebuild_all_neighbors` in
+`app.py` build `lldp_neighbors` dynamically from `vnet` topology links
+for *all* device types (no per-vendor allowlist), so Arista needed no
+code change to participate — confirmed live by linking an `arista` and
+a `cisco` device via `/api/link` and running `show lldp neighbors` on
+both sides. Two real things found while doing this (not guessed from
+code review):
+1. `_show_lldp`/`_show_lldp_detail` in `engine/rules.py` only gate on
+   `lldp_enabled` (off by default, needs `lldp run`) for
+   `device_type in ('cisco', 'catalyst', 'nexus')` — `arista` isn't in
+   that tuple, so an Arista device shows LLDP neighbors immediately
+   with no `lldp run` needed. Left as-is: this matches real Arista EOS,
+   which runs LLDP on all interfaces by default unlike Cisco IOS.
+2. **Real bug, fixed**: `_show_lldp`'s Cisco-format table hard-pads
+   `Local Intf`/`Port ID` to fixed widths (16/trailing) using the full
+   interface name (`GigabitEthernet0/0/0`, 20 chars) — wider than the
+   column, so it ran into the `Hold-time` column with no separating
+   space (`GigabitEthernet0/0/0120        B`). Real Cisco IOS always
+   abbreviates interface names in this table (`Gi0/0/0`), which is
+   exactly the `_abbrev_if()` static method already used elsewhere in
+   `engine/rules.py` for other show commands — just wasn't applied
+   here. Fixed by routing `local_if`/`port_id` through `_abbrev_if()`
+   in `_show_lldp`. `TestAristaCiscoLldp` in `tests/test_arista_eos.py`
+   (4 new tests) covers the default-disabled-on-Cisco/enabled-by-
+   default-on-Arista asymmetry, the real neighbor discovery both
+   directions, and pins the alignment fix with a long-interface-name
+   regression case.
+
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 
 PyTorch could not be installed in this sandbox early on (pulled in a
