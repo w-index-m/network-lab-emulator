@@ -528,7 +528,7 @@ def _valid_token(token: str) -> bool:
 # パスホワイトリスト（認証不要）
 # ルート "/" と各種静的アセットはHTML/ログインJSを返すため公開し、
 # 認証はAPI（/api/*）とWebSocket側で行う。
-_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico",
+_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico", "/dashboard",
                   "/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
 
 @app.middleware("http")
@@ -670,7 +670,15 @@ async def snmp_dashboard():
     実UDP SNMPパケットではなく、engine.protocols.SnmpAgent が持つ
     MIB-II相当のデータ（sysDescr/sysUptime/ifTable等）を内部的に読む。
     CISCO-PROCESS-MIB相当のCPU使用率（Cisco系機種のみ）も含む。
+
+    gNMI(`gnxi server`で有効化した装置のみ)についても、実gRPCコールは
+    せずに同じstate.interfacesを読んで「gNMIが実際に見ている値」を
+    併記する(gNMIはこのエミュレータではCPU/トラフィックカウンタを
+    公開していないため、SNMP側のCPU%等とは別枠)。
     """
+    from engine.gnmi_agent import active_gnmi_device_ids, gnmi_port_for
+    gnmi_active_ids = set(active_gnmi_device_ids())
+
     now = time.time()
     devices = []
     for device_id, d in snmp_agent.devices.items():
@@ -707,6 +715,20 @@ async def snmp_dashboard():
         history.append({'t': now, 'cpu': cpu_percent, 'bytes': total_bytes,
                         'routes': route_count})
 
+        gnmi_enabled = device_id in gnmi_active_ids
+        gnmi_info = None
+        if gnmi_enabled:
+            state = device_sessions.get(device_id)
+            ifaces = getattr(state, 'interfaces', {}) if state else {}
+            gnmi_info = {
+                'port': gnmi_port_for(device_id),
+                'interfaces_enabled': sum(
+                    1 for i in ifaces.values()
+                    if i.get('status') not in ('down', 'notconnect', 'disabled',
+                                               'administratively down')),
+                'interfaces_total': len(ifaces),
+            }
+
         devices.append({
             'device_id': device_id,
             'type': d.get('type'),
@@ -719,6 +741,7 @@ async def snmp_dashboard():
             'route_count': route_count,
             'interfaces': interfaces,
             'history': list(history),
+            'gnmi': gnmi_info,
         })
     devices.sort(key=lambda x: x['device_id'])
     return {'polled_at': now, 'devices': devices}
@@ -837,6 +860,42 @@ async def cli_command(body: dict):
     if command.lower() in ("cls", "clear screen"):
         return {"output": "\x0c", "mode": state.mode, "hostname": state.hostname}
 
+    # ── Arista EOS: "show version | json"（eAPI相当のJSON出力）──
+    # include/exclude等の汎用アウトプットモディファイアと違い、json は
+    # テキストを後からフィルタするのではなく元々別形式の応答を返す
+    # ものなので、汎用の _split_output_modifier/_apply_output_modifier
+    # には乗せず個別に処理する。ansible(arista.eos系モジュール)・
+    # pyeapiは"show version"等を内部で自動的に"| json"化して送るため、
+    # 対応していないとAnsible連携そのものが成立しない。
+    if state.device_type == 'arista' and re.match(
+            r'^show\s+hostname\s*\|\s*json\s*$', command.strip(), re.I):
+        import json as _json
+        return {"output": _json.dumps({
+            'hostname': state.hostname, 'fqdn': f'{state.hostname}.netlab'}),
+            "mode": state.mode, "hostname": state.hostname}
+
+    if state.device_type == 'arista' and re.match(
+            r'^show\s+version\s*\|\s*json\s*$', command.strip(), re.I):
+        import json as _json
+        payload = {
+            'mfgName': 'Arista',
+            'modelName': 'DCS-7050SX3-48YC8',
+            'hardwareRevision': '01.00',
+            'serialNumber': f'SSJ{abs(hash(state.hostname)) % 100000:05d}',
+            'systemMacAddress': '00:1c:73:00:{:02x}:{:02x}'.format(
+                (abs(hash(state.hostname)) >> 8) % 0xff, abs(hash(state.hostname)) % 0xff),
+            'version': '4.32.1F',
+            'architecture': 'x86_64',
+            'internalVersion': '4.32.1F-1234567.4321F',
+            'internalBuildId': f'{abs(hash(state.hostname)):08x}-0000-0000-0000-000000000000',
+            'imageFormatVersion': '1.0',
+            'uptime': (datetime.now() - state.startup_time).total_seconds(),
+            'memTotal': 8167848,
+            'memFree': 4521344,
+            'isIntlVersion': False,
+        }
+        return {"output": _json.dumps(payload), "mode": state.mode, "hostname": state.hostname}
+
     # ── 出力モディファイア（`show ... | include foo`）──
     # 実装が無く、`|` 以降が無視されて全文が返っていた。
     # 元のコマンドを実行してから、その出力を絞る。
@@ -852,7 +911,21 @@ async def cli_command(body: dict):
     # 状態には影響しない）── unicon等の自動化ツールが接続直後に必ず
     # 送るコマンド群のため、全機種共通で受理する
     c_lower = command.lower().strip()
-    if re.match(r'^(terminal|term)\s+(length|width|monitor|no monitor|no\s+monitor|'
+    # "terminal width <n>" は実機(IOS/EOS共通)が "Width set to N columns."
+    # を返す。netmiko の arista_eos/cisco系ドライバはセッション確立直後に
+    # これを送り、"Width set to" という応答パターンを待ち受けるため、
+    # 空文字のままだと（netmiko 4.8のReadTimeoutがNetmikoTimeoutException
+    # を継承しておらずリトライされない関係で）接続自体がタイムアウトする。
+    m_width = re.match(r'^(?:terminal|term)\s+width\s+(\d+)\s*$', c_lower)
+    if m_width:
+        return {"output": f"Width set to {m_width.group(1)} columns.",
+                "mode": state.mode, "hostname": state.hostname}
+    if state.device_type == 'arista' and c_lower in ('terminal length 0', 'term length 0'):
+        # 実機EOSは"terminal length 0"に対して"Pagination disabled."を返す
+        # (IOSは無言)。netmikoのarista_eosドライバがこの文字列を
+        # 待ち受けるため、ここで応答しないと接続確立自体がタイムアウトする。
+        return {"output": "Pagination disabled.", "mode": state.mode, "hostname": state.hostname}
+    if re.match(r'^(terminal|term)\s+(length|monitor|no monitor|no\s+monitor|'
                 r'pager|editing|no editing)\b', c_lower) or c_lower in (
                     'terminal length 0', 'term length 0', 'terminal no monitor'):
         return {"output": "", "mode": state.mode, "hostname": state.hostname}
@@ -951,6 +1024,18 @@ async def cli_command(body: dict):
         _bigip_health_check(state)
 
     output = rule_engine.process(command, state)
+
+    # ── Juniper: commitで"set system services ssh"が確定した後に実SSH
+    # リスナーを起動する。rule_engine.process()より前(handle_protocol_
+    # config側)でこれをやると、_juniper_processがまだcandidate→
+    # committedの反映(state.interfacesへのIP反映含む)を行う前に
+    # listenerを起動してしまい、変更前の古いIPでbindする不具合になる
+    # ため、ここ(RuleEngine実行後)で行う。
+    if state.device_type == 'juniper' and command.strip().lower() in ('commit', 'commit and-quit') \
+            and getattr(state, 'ssh_rsa_key', False) \
+            and 'system services ssh' in getattr(state, 'junos_committed', []):
+        from engine.ssh_cli_agent import ensure_ssh_cli_agent
+        ensure_ssh_cli_agent(device_id, device_sessions, _run_cli_sync)
 
     # ── Si-R/SR-S: 投入した設定コマンドをキャプチャ（show running-config で忠実再現）──
     if state.device_type in ('sir', 'srs'):
@@ -3324,7 +3409,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ── crypto key generate rsa ── 実機はRSA鍵を作って初めてSSHが
     # 起動する。ここで TCP/22 の実CLIリスナーを立ち上げるので、
     # 本物のSSHクライアントでログインして show コマンドを打てる。
-    if state.device_type in ('cisco', 'catalyst'):
+    if state.device_type in ('cisco', 'catalyst', 'arista'):
         m_key = re.match(r'^crypto\s+key\s+generate\s+rsa'
                          r'(?:\s+(?:general-keys|usage-keys))?'
                          r'(?:\s+modulus\s+(\d+))?\s*$', c)
@@ -7693,6 +7778,16 @@ async def root():
     if index.exists():
         return HTMLResponse(index.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>index.html が見つかりません</h1>")
+
+@app.get("/dashboard")
+async def resource_dashboard():
+    """全装置のCPU/インタフェース/トラフィックをリアルタイム表示するダッシュボード。
+    データは既存の /api/snmp/dashboard をポーリングするだけで、
+    新しい計測の仕組みは追加していない。"""
+    page = static_dir / "dashboard.html"
+    if page.exists():
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>dashboard.html が見つかりません</h1>")
 
 # ══════════════════════════════════════════════════════════
 # Nexpose / InsightVM Console API v3

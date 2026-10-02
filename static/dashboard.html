@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>network-lab-emulator / resource dashboard</title>
+<style>
+  :root{
+    --bg:#000;--bg2:#0a0a0a;--bg3:#0e1410;--panel:#0a0f0a;
+    --green:#00ff66;--green-dim:#0a5a2a;--cyan:#00d8ff;--amber:#ffb000;--red:#ff3b3b;
+    --fg:#c8ffcf;--fg-dim:#5a8a60;--border:#123a1e;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:'Courier New',monospace;min-height:100vh}
+  header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;
+    padding:10px 18px;background:#030603;border-bottom:1px solid var(--border);
+    box-shadow:0 2px 20px rgba(0,255,102,.08)}
+  header h1{font-size:14px;letter-spacing:.08em;color:var(--green);margin:0;font-weight:bold;
+    text-shadow:0 0 8px rgba(0,255,102,.5)}
+  header .sub{color:var(--fg-dim);font-size:11px}
+  #status{margin-left:auto;font-size:11px;color:var(--fg-dim);display:flex;align-items:center;gap:8px}
+  #dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);
+    animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  main{padding:16px;max-width:1500px;margin:0 auto}
+  #summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px}
+  .sumcard{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px 12px}
+  .sumcard .n{font-size:22px;color:var(--green);text-shadow:0 0 6px rgba(0,255,102,.4)}
+  .sumcard .l{font-size:10px;color:var(--fg-dim);letter-spacing:.06em;margin-top:2px}
+  #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px;
+    position:relative;overflow:hidden;transition:border-color .2s}
+  .card:hover{border-color:var(--green-dim)}
+  .card::before{content:'';position:absolute;inset:0;pointer-events:none;
+    background:linear-gradient(180deg,rgba(0,255,102,.04),transparent 40%)}
+  .ctop{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .cname{font-size:13px;color:var(--fg);font-weight:bold}
+  .ctype{font-size:9px;color:#000;background:var(--green-dim);border-radius:3px;padding:2px 6px;
+    letter-spacing:.05em;color:var(--green)}
+  .crow{display:flex;align-items:center;gap:10px;margin:6px 0}
+  .clabel{font-size:10px;color:var(--fg-dim);width:62px;flex-shrink:0}
+  .cbar{flex:1;height:7px;background:#061006;border-radius:4px;overflow:hidden;border:1px solid var(--border)}
+  .cbar>div{height:100%;background:linear-gradient(90deg,var(--green),var(--cyan));
+    box-shadow:0 0 6px rgba(0,255,102,.5);transition:width .4s ease}
+  .cval{font-size:11px;color:var(--fg);width:46px;text-align:right;flex-shrink:0}
+  canvas.spark{display:block;width:100%;height:36px;margin-top:4px}
+  .cfoot{display:flex;justify-content:space-between;font-size:10px;color:var(--fg-dim);margin-top:8px;
+    border-top:1px solid var(--border);padding-top:6px}
+  .warn .cval{color:var(--amber)}
+  .crit .cval{color:var(--red)}
+  .warn .cbar>div{background:linear-gradient(90deg,var(--amber),var(--red))}
+  .crit .cbar>div{background:var(--red);box-shadow:0 0 8px rgba(255,59,59,.7)}
+  .gnmi-row{justify-content:flex-start}
+  .gnmi-badge{font-size:9px;color:var(--cyan);background:#001a22;border:1px solid var(--cyan);
+    border-radius:3px;padding:1px 6px;letter-spacing:.03em}
+  #empty{color:var(--fg-dim);text-align:center;padding:60px 0;font-size:13px}
+  a.back{color:var(--cyan);text-decoration:none;font-size:11px}
+  a.back:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<header>
+  <h1>&#9632; NETWORK-LAB RESOURCE MONITOR</h1>
+  <span class="sub">SNMP MIB-II polling (engine.protocols.SnmpAgent)</span>
+  <div id="status"><span id="dot"></span><span id="status-text">connecting...</span></div>
+  <a class="back" href="/">&larr; back to CLI</a>
+</header>
+<main>
+  <div id="summary"></div>
+  <div id="grid"></div>
+  <div id="empty" style="display:none">装置がありません。CLI画面で装置を追加してください。</div>
+</main>
+<script>
+const POLL_MS = 2000;
+let prevByDevice = {}; // device_id -> last sample for rate calc
+
+// メイン画面(index.html)と同じlocalStorageキーからセッショントークンを読む。
+// NETLAB_AUTH_DISABLE=1で起動している場合はトークン無しでもAPIが通る。
+const SESSION_KEY = 'netlabToken_v1';
+function authFetch(url){
+  const token = localStorage.getItem(SESSION_KEY);
+  const headers = token ? {'X-Session-Token': token} : {};
+  return fetch(url, {headers});
+}
+
+function fmtBytes(n){
+  if(n==null) return '-';
+  const u=['B','KB','MB','GB']; let i=0; let v=n;
+  while(v>=1024 && i<u.length-1){v/=1024;i++;}
+  return v.toFixed(i?1:0)+u[i];
+}
+function fmtRate(bps){
+  if(bps==null || bps<0) return '-';
+  return fmtBytes(bps)+'/s';
+}
+function levelClass(pct){
+  if(pct==null) return '';
+  if(pct>=85) return 'crit';
+  if(pct>=60) return 'warn';
+  return '';
+}
+function drawSpark(canvas, values, color){
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width = canvas.clientWidth * devicePixelRatio;
+  const h = canvas.height = canvas.clientHeight * devicePixelRatio;
+  ctx.clearRect(0,0,w,h);
+  if(!values || values.length<2) return;
+  const max = Math.max(...values, 1);
+  const min = 0;
+  const step = w / (values.length-1);
+  ctx.beginPath();
+  values.forEach((v,i)=>{
+    const x = i*step;
+    const y = h - ((v-min)/(max-min||1))*h*0.9 - h*0.05;
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  });
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5*devicePixelRatio;
+  ctx.shadowColor = color; ctx.shadowBlur = 4;
+  ctx.stroke();
+  // fill under curve
+  ctx.lineTo(w,h); ctx.lineTo(0,h); ctx.closePath();
+  ctx.fillStyle = color.replace(')', ',0.12)').replace('rgb','rgba');
+  ctx.shadowBlur = 0;
+  ctx.fill();
+}
+
+function cardHTML(d){
+  const cpu = d.cpu_percent;
+  const cpuCls = levelClass(cpu);
+  const ifCount = (d.interfaces||[]).length;
+  const upCount = (d.interfaces||[]).filter(i=>i.oper_status===1).length;
+  return `
+  <div class="card" data-id="${d.device_id}">
+    <div class="ctop">
+      <span class="cname">${d.hostname||d.device_id}</span>
+      <span class="ctype">${(d.type||'').toUpperCase()}</span>
+    </div>
+    <div class="crow ${cpuCls}">
+      <span class="clabel">CPU</span>
+      <div class="cbar"><div style="width:${cpu!=null?Math.min(cpu,100):0}%"></div></div>
+      <span class="cval">${cpu!=null?cpu+'%':'-'}</span>
+    </div>
+    <div class="crow">
+      <span class="clabel">IF UP</span>
+      <div class="cbar"><div style="width:${ifCount?upCount/ifCount*100:0}%;background:linear-gradient(90deg,#00d8ff,#0088ff)"></div></div>
+      <span class="cval">${upCount}/${ifCount}</span>
+    </div>
+    <canvas class="spark" data-kind="cpu"></canvas>
+    ${gnmiRowHTML(d)}
+    <div class="cfoot">
+      <span>routes: ${d.route_count ?? '-'}</span>
+      <span id="rate-${d.device_id}">throughput: -</span>
+    </div>
+  </div>`;
+}
+
+function gnmiRowHTML(d){
+  if(!d.gnmi) return '';
+  return `<div class="crow gnmi-row">
+      <span class="clabel" style="color:var(--cyan)">gNMI</span>
+      <span class="gnmi-badge">:${d.gnmi.port} live</span>
+      <span class="cval" style="width:auto;color:var(--cyan)">IF ${d.gnmi.interfaces_enabled}/${d.gnmi.interfaces_total}</span>
+    </div>`;
+}
+
+async function poll(){
+  let data;
+  try{
+    const r = await authFetch('/api/snmp/dashboard');
+    if(r.status === 401){
+      document.getElementById('status-text').textContent = 'ログインが必要です（CLI画面でログインしてから開いてください）';
+      document.getElementById('dot').style.background = 'var(--amber)';
+      setTimeout(poll, POLL_MS);
+      return;
+    }
+    data = await r.json();
+    document.getElementById('status-text').textContent = 'live';
+    document.getElementById('dot').style.background = 'var(--green)';
+  }catch(e){
+    document.getElementById('status-text').textContent = 'disconnected';
+    document.getElementById('dot').style.background = 'var(--red)';
+    setTimeout(poll, POLL_MS);
+    return;
+  }
+  const devices = data.devices || [];
+  const grid = document.getElementById('grid');
+  const empty = document.getElementById('empty');
+  if(!devices.length){
+    grid.innerHTML=''; empty.style.display='block';
+    setTimeout(poll, POLL_MS);
+    return;
+  }
+  empty.style.display='none';
+
+  // summary cards
+  const avgCpu = devices.filter(d=>d.cpu_percent!=null);
+  const avg = avgCpu.length? Math.round(avgCpu.reduce((a,d)=>a+d.cpu_percent,0)/avgCpu.length) : null;
+  const totalIf = devices.reduce((a,d)=>a+(d.interfaces||[]).length,0);
+  const totalUp = devices.reduce((a,d)=>a+(d.interfaces||[]).filter(i=>i.oper_status===1).length,0);
+  const totalRoutes = devices.reduce((a,d)=>a+(d.route_count||0),0);
+  document.getElementById('summary').innerHTML = `
+    <div class="sumcard"><div class="n">${devices.length}</div><div class="l">DEVICES</div></div>
+    <div class="sumcard"><div class="n">${avg!=null?avg+'%':'-'}</div><div class="l">AVG CPU</div></div>
+    <div class="sumcard"><div class="n">${totalUp}/${totalIf}</div><div class="l">INTERFACES UP</div></div>
+    <div class="sumcard"><div class="n">${totalRoutes}</div><div class="l">TOTAL ROUTES</div></div>
+  `;
+
+  // build/update cards (rebuild only if device set changed, else patch in place)
+  const existingIds = new Set([...grid.children].map(c=>c.dataset.id));
+  const newIds = new Set(devices.map(d=>d.device_id));
+  const sameSet = existingIds.size===newIds.size && [...existingIds].every(id=>newIds.has(id));
+  if(!sameSet){
+    grid.innerHTML = devices.map(cardHTML).join('');
+  }
+
+  devices.forEach(d=>{
+    const card = grid.querySelector(`[data-id="${CSS.escape(d.device_id)}"]`);
+    if(!card) return;
+    const cpu = d.cpu_percent;
+    const cpuRow = card.querySelector('.crow');
+    cpuRow.className = 'crow ' + levelClass(cpu);
+    cpuRow.querySelector('.cbar>div').style.width = (cpu!=null?Math.min(cpu,100):0)+'%';
+    cpuRow.querySelector('.cval').textContent = cpu!=null?cpu+'%':'-';
+
+    const ifCount = (d.interfaces||[]).length;
+    const upCount = (d.interfaces||[]).filter(i=>i.oper_status===1).length;
+    const ifRow = card.querySelectorAll('.crow')[1];
+    ifRow.querySelector('.cbar>div').style.width = (ifCount?upCount/ifCount*100:0)+'%';
+    ifRow.querySelector('.cval').textContent = `${upCount}/${ifCount}`;
+
+    const hist = d.history || [];
+    const cpuVals = hist.map(h=>h.cpu||0);
+    drawSpark(card.querySelector('canvas.spark'), cpuVals, 'rgb(0,255,102)');
+
+    card.querySelector('.cfoot span:first-child').textContent = `routes: ${d.route_count ?? '-'}`;
+
+    // gNMI行（有効な装置のみ表示。状態変化（有効化/無効化）にも追従）
+    let gnmiRow = card.querySelector('.gnmi-row');
+    if(d.gnmi){
+      if(!gnmiRow){
+        card.querySelector('.cfoot').insertAdjacentHTML('beforebegin', gnmiRowHTML(d));
+        gnmiRow = card.querySelector('.gnmi-row');
+      }
+      gnmiRow.querySelector('.gnmi-badge').textContent = `:${d.gnmi.port} live`;
+      gnmiRow.querySelector('.cval').textContent = `IF ${d.gnmi.interfaces_enabled}/${d.gnmi.interfaces_total}`;
+    } else if(gnmiRow){
+      gnmiRow.remove();
+    }
+
+    // throughput rate from byte delta between samples
+    const prev = prevByDevice[d.device_id];
+    const rateEl = document.getElementById('rate-'+d.device_id);
+    if(prev && hist.length){
+      const last = hist[hist.length-1];
+      const dt = last.t - prev.t;
+      const db = last.bytes - prev.bytes;
+      if(dt>0 && db>=0 && rateEl) rateEl.textContent = 'throughput: ' + fmtRate(db/dt);
+    }
+    if(hist.length) prevByDevice[d.device_id] = hist[hist.length-1];
+  });
+
+  setTimeout(poll, POLL_MS);
+}
+poll();
+</script>
+</body>
+</html>

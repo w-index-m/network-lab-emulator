@@ -446,6 +446,17 @@ def stop_gnmi_agent(device_id: str):
     return True
 
 
+def active_gnmi_device_ids() -> list:
+    """実gNMIリスナーが起動中の device_id 一覧（ダッシュボード表示用）"""
+    return list(_servers.keys())
+
+
+def gnmi_port_for(device_id: str):
+    """起動中なら実際にbindしているポート番号、未起動ならNone"""
+    srv = _servers.get(device_id)
+    return srv.port if srv else None
+
+
 def format_show_gnxi_state(state, detail: bool = False) -> str:
     """show gnxi state [detail]
 

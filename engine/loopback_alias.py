@@ -13,6 +13,19 @@ SNMPエージェントだけが自前でこの回避をしていて、NETCONF/gN
 という非対称な状態になっていた。共通化してここに置く。
 
 lo に /32 を scope host で足すだけなので、外部には出ない。
+
+GitHub Actions の ubuntu-latest ランナーでCIが"Cannot assign requested
+address"で全滅した件(pytest run #54)で判明した注意点: このsshpassなどを
+使う実ソケット系テストは、開発用サンドボックス(root実行)ではこの
+ensure_loopback_alias が無条件に成功するが、GitHub Actions の既定ユーザ
+"runner"はrootではない(パスワード無しsudoは使える)ため、素の
+`ip addr add ...` がPermission deniedで失敗し、権限エラーを握りつぶす
+仕様(呼び出し側で起動失敗として扱うだけ)のせいでエラーメッセージも
+出ないまま、実際にはエイリアスが足されず後続のbindが
+`OSError: [Errno 99] Cannot assign requested address` で落ちていた。
+root無しでも通るよう、まず素の`ip`を試し、失敗したら
+`sudo -n ip ...`（非対話、パスワード入力待ちで固まらない）に
+フォールバックする。
 """
 
 import subprocess
@@ -21,6 +34,13 @@ import threading
 # 同じIPに対して ip コマンドを何度も叩かないための記録
 _added = set()
 _lock = threading.Lock()
+
+
+def _run_ip_addr_add(ip: str, use_sudo: bool):
+    cmd = ['ip', 'addr', 'add', f'{ip}/32', 'dev', 'lo', 'scope', 'host']
+    if use_sudo:
+        cmd = ['sudo', '-n'] + cmd
+    return subprocess.run(cmd, capture_output=True, timeout=5)
 
 
 def ensure_loopback_alias(ip: str) -> bool:
@@ -36,14 +56,18 @@ def ensure_loopback_alias(ip: str) -> bool:
         if ip in _added:
             return True
         try:
-            r = subprocess.run(
-                ['ip', 'addr', 'add', f'{ip}/32', 'dev', 'lo', 'scope', 'host'],
-                capture_output=True, timeout=5,
-            )
+            r = _run_ip_addr_add(ip, use_sudo=False)
         except Exception:
             return False
         # rc=2 は "File exists"（既に足されている）なので成功扱い
         ok = r.returncode == 0 or b'File exists' in (r.stderr or b'')
+        if not ok and b'Operation not permitted' in (r.stderr or b''):
+            # root権限が無い(CI等)。パスワード無しsudoでリトライする。
+            try:
+                r = _run_ip_addr_add(ip, use_sudo=True)
+                ok = r.returncode == 0 or b'File exists' in (r.stderr or b'')
+            except Exception:
+                ok = False
         if ok:
             _added.add(ip)
         return ok

@@ -11,7 +11,7 @@ NETCONF/SSH-CLI/Telnet-CLI, gNMI over gRPC), so real clients (ncclient,
 gnmic/pygnmi, snmpwalk, an actual ssh/telnet client) can connect to emulated
 devices. See `README.md` for the full feature/protocol matrix and supported
 device types (`device_type`: `catalyst`, `nexus`, `cisco`, `asa`, `sir`,
-`srs`, `apresia`, `bigip`, `arista`, `pc`).
+`srs`, `apresia`, `bigip`, `arista`, `juniper`, `pc`).
 
 **Publicly deployed** at https://network-lab-emulator.onrender.com/ (Render).
 That deployment doesn't have Ollama available, so its `network_ontology_query.py
@@ -297,6 +297,215 @@ code review):
    default-on-Arista asymmetry, the real neighbor discovery both
    directions, and pins the alignment fix with a long-interface-name
    regression case.
+
+**`juniper` device type**: added after cml-community's `node-definitions/
+juniper/` (vSRX, vJunos-Router/Switch/Evolved, QFX, vMX) — the first
+vendor added that does *not* ride the shared Cisco-style tree. Junos's
+CLI paradigm (`set`/`delete`/`commit` against a two-stage candidate/
+active config, rather than Cisco's immediately-applied `interface` →
+config-if submode editing) is different enough that it gets its own
+`_juniper_process(cmd, c, state)` handler in `engine/rules.py`,
+dispatched at the very top of `RuleEngine.process()` (same pattern as
+`apresia`/`bigip`) — it never touches the shared Cisco tree at all.
+
+Implemented scope: `configure`/`exit`/`commit`/`commit and-quit`/
+`rollback` mode transitions; `set interfaces <if> unit <n> family inet
+address <ip>/<prefix>` and `set system host-name <name>` staged into
+`state.junos_candidate` and only applied to `state.interfaces`/
+`state.hostname` on `commit` (real two-stage Junos behavior —
+confirmed live that an address set before `commit` does **not** show
+in `show interfaces terse` until after `commit`); `delete <path>`;
+`show configuration` (rendered as real Junos's brace-hierarchy, built
+by grouping the flat committed `set` lines by path segment) and `show
+configuration | display set` (the flat form); `show version` (Junos-
+style); `show interfaces terse`; `show lldp neighbors` (delegates to
+the existing shared `_show_lldp` Cisco-format table — Junos's real
+neighbor-table format wasn't reimplemented, scoped out). Interface
+naming is `ge-0/0/<N>` (vSRX convention), set in `DeviceState.__init__`'s
+interfaces ternary. Not implemented (scoped out, no concrete need
+yet): `edit <path>` hierarchy descent (only full-path `set`/`delete`
+is supported, no path-stack/`[edit ...]` prompt tracking), and the
+"uncommitted changes, exit anyway?" confirmation real Junos shows.
+
+**Found while implementing**: the shared `_expand_abbreviation()` CLI-
+abbreviation expander (e.g. `sh` → `show`) runs unconditionally before
+device-type dispatch and is Cisco-abbreviation-table-driven, so it
+mangled `show interfaces terse` into
+`show interfaces tengigabitethernetrse` (`te` → `TenGigabitEthernet`)
+for `juniper` devices — same class of problem `apresia` already had
+and already carries a `device_type == 'apresia'` skip for. Fixed by
+adding `juniper` to that skip list rather than inventing a new
+mechanism.
+
+Frontend (`static/index.html`): `DEV_TEMPLATES` (not `DEVICE_META` —
+corrected from an earlier, slightly wrong note in this file) gets a
+`juniper` entry; add-device buttons (launcher + sidebar);
+`defPort()`/`portOptions()` (`ge-0/0/<N>`); `_inferDeviceType()` regex
+(`set interfaces|system|routing-options`/`delete interfaces`/`junos`);
+bulk-import color map; and `getPrompt()` gets a `d.type==='juniper'`
+branch since Junos prompts are `hostname>` (exec)/`hostname#`
+(config) with no `(config-if)`-style parenthesized submode suffix,
+unlike every other device type here.
+
+Live-verified end-to-end via a real running instance: `configure` →
+`set interfaces ge-0/0/1 unit 0 family inet address 172.16.5.1/24` →
+`commit` → `show interfaces terse` shows the new address;
+`show configuration` renders the real brace hierarchy.
+`tests/test_juniper_junos.py` (12 tests) covers all of the above,
+including the not-applied-before-commit / applied-after-commit
+distinction and `delete` removing a committed line.
+
+**`/dashboard`**: a "cool-looking" live resource monitor page, added on
+request ("稼働してるモックのリソース感じもかっこいい画面で見たい").
+`static/dashboard.html` is a standalone dark/neon-green terminal-themed
+page that polls the pre-existing `/api/snmp/dashboard` endpoint (which
+already aggregated per-device CPU%/interface octet counters/route
+count/60-sample history via `engine.protocols.SnmpAgent` — it just had
+no frontend before this) every 2s and renders a card grid: per-device
+CPU bar, interfaces-up fraction, a canvas sparkline of CPU history, and
+a computed throughput rate from the byte-count delta between polls.
+No new metrics/measurement code was added — this is purely a
+visualization on top of data the SNMP agent already collected.
+Served via a new `@app.get("/dashboard")` route in `app.py` (reads
+`static/dashboard.html`, same pattern as the `/` → `index.html` route);
+added `/dashboard` to `_NO_AUTH_PATHS` so the page itself loads without
+a login redirect (its `fetch('/api/snmp/dashboard')` still goes through
+normal token auth — it reads the same `netlabToken_v1` localStorage key
+`index.html` writes on login, so being logged into the main CLI tab is
+enough). Live-verified with Playwright (`/opt/pw-browsers/chromium`):
+screenshotted the page against a real running instance with 20+ real
+devices (Cisco/Catalyst/Arista/APRESIA mix accumulated from this
+session's testing) showing live CPU bars and sparklines.
+`tests/test_resource_dashboard_page.py` (3 tests) pins the route, the
+auth-exempt path list entry, and that `dashboard.html`'s token-storage
+key stays in sync with `index.html`'s (a drift there would silently
+break the dashboard for logged-in users with a 401).
+
+**gNMI on `/dashboard`**: added on follow-up request ("gnmiもお願いします").
+`engine/gnmi_agent.py` only ran its gRPC server for devices that had
+`gnxi server` configured (Cisco/Catalyst only), tracked in a private
+`_servers: {device_id: GnmiServer}` registry with no public accessor —
+added `active_gnmi_device_ids()`/`gnmi_port_for(device_id)` so `app.py`
+doesn't reach into the private dict directly. `/api/snmp/dashboard`
+now adds a `gnmi` field per device (`None` unless gNMI is actually
+active for it) with `port`/`interfaces_enabled`/`interfaces_total` —
+read directly from the same `state.interfaces` gNMI's own `get_value()`
+serves, **not** a real gRPC `Get`/`Subscribe` call (no new RPC traffic
+added, this is just surfacing what gNMI already exposes). Deliberately
+separate from the SNMP-sourced `cpu_percent`/traffic history fields:
+this emulator's gNMI implementation doesn't expose CPU or interface
+octet counters at all (`get_value()` only serves OpenConfig-style
+admin/enabled + IP config), so a gNMI-enabled device shows its own
+small cyan "gNMI :50052 live / IF 2/3" row on the dashboard card
+instead of fabricating CPU/traffic numbers gNMI doesn't actually have.
+`static/dashboard.html` renders it both on initial card build and on
+each poll tick (added/removed live if `gnxi server`/`no gnxi server`
+toggles while the dashboard is open). Live-verified: enabled `gnxi` +
+`gnxi server` on a live Cisco device, confirmed `/api/snmp/dashboard`'s
+`gnmi` field populated, and screenshotted the rendered badge on a real
+running instance. Asked about WMI too (Windows host management, not a
+network-device protocol) — out of scope, this emulator only models
+network-equipment protocols (SNMP/NETCONF/SSH-CLI/Telnet-CLI/gNMI/
+RESTCONF), so declined rather than bolting on an unrelated Windows-host
+emulation feature; noted as a separate, larger ask if ever wanted.
+`TestGnmiOnDashboard` in `tests/test_resource_dashboard_page.py`
+(3 tests) covers the off/on `gnmi` field states and the badge markup.
+
+**netmiko / Ansible real-automation compatibility for Arista & Juniper**:
+on request ("その他ansibleで取得や、netmikoでの運用など柔軟に行きましょう"),
+live-verified (not just unit tests) that real `netmiko.ConnectHandler`
+(`device_type='arista_eos'`/`'juniper_junos'`) and real
+`ansible-playbook` (`arista.eos.eos_command`) can connect to this
+emulator's own real SSH-CLI listener (`engine/ssh_cli_agent.py`) for
+the two device types added earlier this session. Found and fixed real
+gaps along the way, not guessed from reading code:
+
+1. **SSH was never reachable at all for Arista/Juniper.** The real-SSH-
+   listener activation command (`crypto key generate rsa`, in `app.py`'s
+   `handle_protocol_config`) was gated to `device_type in ('cisco',
+   'catalyst')` only. Added `'arista'` to that tuple (EOS doesn't use
+   this exact IOS command for SSH in reality, but it's the same
+   pragmatic "good enough to test against" choice already made for
+   Arista elsewhere in this codebase). Juniper got the *authentic*
+   command instead, since it already has a real set/commit model:
+   `set system services ssh` stages into `junos_candidate`
+   (`_juniper_process` in `engine/rules.py`) and sets
+   `state.ssh_rsa_key = True` on `commit` (`_junos_apply_commit`).
+
+2. **Ordering bug found via live netmiko/Ansible testing, not visible
+   from code review**: the SSH-listener startup for Juniper was
+   initially wired into `app.py`'s `handle_protocol_config`, which (per
+   the two-layer dispatch order) runs **before**
+   `rule_engine.process()` — so it started the listener using
+   `state.interfaces`' *old* IP, before `_juniper_process`'s own commit
+   handling had applied the newly-`set` interface address. A real
+   `set interfaces ge-0/0/0 ... address X` + `set system services ssh`
+   + `commit` sequence would bind the SSH listener to the *default*
+   203.0.113.2 instead of the address just configured, then netmiko/
+   Ansible would time out connecting to the (correct) new address.
+   Fixed by moving the listener-start check to right after
+   `rule_engine.process()` in `app.py`'s `cli_command()`, keyed off
+   `'system services ssh' in state.junos_committed` (i.e., after the
+   real commit has already run).
+
+3. **netmiko's own terminal-setup commands weren't answered.** Both
+   drivers send device-specific "quiet the terminal" commands right
+   after login and hang/timeout waiting for a specific response text
+   (not just any response) — discovered by literally running netmiko
+   against a live instance, not from netmiko's docs:
+   - `arista_eos`: `terminal width <n>` expects `"Width set to N
+     columns."`, `terminal length 0` expects `"Pagination disabled."`
+     (both real EOS behavior; added to `app.py`'s terminal-command
+     handler, the length-0 one scoped to `device_type == 'arista'`
+     since real IOS stays silent for the same command).
+   - `juniper_junos`: `set cli screen-width <n>` /
+     `set cli screen-length <n>` / `set cli complete-on-space off`
+     expect `"Screen width set to N"` / `"Screen length set to N"` /
+     `"Disabling complete-on-space"` respectively — these are real
+     Junos *exec-mode* display preferences (not candidate config, no
+     commit involved, mode-independent), added as their own branch in
+     `_juniper_process` before the `configure`-mode gate.
+
+4. **Ansible's `arista.eos.*` modules don't work at all without `show
+   version | json` and `show hostname | json`** — EOS's cliconf plugin
+   queries both for `get_device_info()` on every single task
+   invocation (confirmed live: even an unrelated `eos_command` task for
+   `show running-config` failed here first). Implemented both as
+   eAPI-shaped JSON (`app.py`, gated to `device_type == 'arista'`,
+   intentionally *not* folded into the generic `include`/`exclude`-
+   style `_split_output_modifier`/`_apply_output_modifier` pipeline
+   since JSON is a different response shape per command, not a filter
+   over existing text). Live-verified end-to-end: a real
+   `ansible-playbook` run with `arista.eos.eos_command` (`network_cli`
+   connection, real SSH, host-key checking off) successfully fetched
+   this emulator's real `show running-config` output over genuine
+   Ansible automation.
+
+**Known gap, not fixed (next step if wanted)**: `junipernetworks.junos`
+Ansible modules default to a NETCONF transport (`ansible_connection:
+netconf`), not `network_cli`/SSH — live-testing hit this directly
+(`junos_command` over `network_cli` failed with an internal
+`'NoneType' object has no attribute 'strip'`, consistent with the
+module expecting NETCONF RPC replies it never got over plain SSH).
+This emulator already has a real NETCONF agent
+(`engine/netconf_agent.py`), but — like SSH was — its activation isn't
+wired up for `juniper` yet (real Junos command is `set system services
+netconf ssh`, which `_juniper_process`'s `set` allowlist doesn't
+recognize yet, confirmed live: `"syntax error: 'system services
+netconf ssh'"`). `netmiko`'s `juniper_junos` SSH driver (verified
+working, see above) is unaffected since it's plain CLI-over-SSH, not
+NETCONF.
+
+`tests/test_netmiko_ansible_compat.py` (14 tests) covers all the fixes
+above (HTTP-API-only, same pattern as the existing
+`tests/test_netmiko_catalyst.py` — no live netmiko/Ansible dependency
+in the regression suite itself, consistent with the project's existing
+approach of keeping real-automation-tool testing as a manual/optional
+live-verification step rather than a CI dependency). `netmiko` (4.8.0)
+and `ansible`/`arista.eos`/`junipernetworks.junos`/`ansible.netcommon`
+collections were already available in this sandbox for the live
+verification; not added to `requirements*.txt` since nothing in the
+actual test suite imports them.
 
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 

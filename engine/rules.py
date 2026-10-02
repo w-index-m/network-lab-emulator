@@ -224,11 +224,16 @@ class DeviceState:
             "Ethernet1": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "Ethernet2": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "Ethernet3": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        } if device_type == "arista" else {
+        } if device_type == "arista" else ({
+            # Juniper vSRX/vJunos: ge-<fpc>/<pic>/<port> 形式
+            "ge-0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
+            "ge-0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
+            "ge-0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
+        } if device_type == "juniper" else {
             "GigabitEthernet0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        })
+        }))
 
         if device_type == "sir":
             # ether <slot> <port> vlan untag <vid>（実機のfactory-default）
@@ -374,6 +379,15 @@ class DeviceState:
             self.f5_virtuals = {}   # name -> {'destination','pool','status','profiles'}
             self.f5_monitors = {}   # name -> {'type', ...}
             self.f5_folder = "/Common"
+
+        # Juniper Junos (vSRX/vJunos) 状態
+        # Junosはcandidate/active二段階コンフィグ(commitするまで反映されない)が
+        # 特徴なので、確定済み(set)行のリストを別管理する。
+        if device_type == "juniper":
+            self.junos_committed = []   # commit済みのset行（順序保持、重複は上書き）
+            self.junos_candidate = []   # configureモードで編集中、未commitのset行
+            self.lldp_neighbors = []
+            self.lldp_enabled = True    # Junosは実機でもLLDPが既定で有効
 
     def uptime_str(self):
         delta = datetime.now() - self.startup_time
@@ -735,7 +749,9 @@ class RuleEngine:
         """
         if not cmd.strip():
             return cmd
-        if device_type == 'apresia':
+        if device_type in ('apresia', 'juniper'):
+            # JuniperもAPRESIA同様、Cisco IOSと無関係な独自コマンド体系
+            # (set/delete/commit、show ... terse 等)を持つため展開をスキップする。
             return cmd
         tokens = cmd.strip().split()
         # Si-R/SR-Sの "ether" は、それ自体で完結する実機のキーワード
@@ -824,6 +840,10 @@ class RuleEngine:
         # F5 BIG-IP は tmsh 体系 → 専用ハンドラへ
         if state.device_type == 'bigip':
             return self._bigip_process(cmd, c, state)
+
+        # Juniper Junos は set/delete/commit の階層型体系 → 専用ハンドラへ
+        if state.device_type == 'juniper':
+            return self._juniper_process(cmd, c, state)
 
         # モード遷移
         # 実機の end は「どの設定モードからでも特権EXECへ一気に戻る」。
@@ -7640,6 +7660,190 @@ Configuration Revision            : 5"""
             st = 'available (green)' if n.get('status', 'up') == 'up' else 'offline (red)'
             out.append(f'  {name}  ({n.get("address", name)})  {st}')
         return '\n'.join(out)
+
+    # ══════════════════════════════════════════
+    # Juniper Junos (vSRX/vJunos) — set/delete/commit 階層型CLI
+    # ══════════════════════════════════════════
+    def _juniper_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """Junos CLIを処理する。
+
+        実機Junosは「candidate configをset/deleteで編集し、commitして初めて
+        activeに反映される」のが最大の特徴(Ciscoの即時反映と対照的)。
+        このエミュレータでも同じ二段階を再現する: configureモード中は
+        state.junos_candidate に行をため込むだけで state.interfaces 等は
+        変更せず、commit時にまとめて反映する。パス階層(edit path)の
+        スタック管理は実装せず、configモードからは常にset/delete/showに
+        フルパスを書く(実機の`edit interfaces ge-0/0/0`降下は非対応)。
+        """
+        orig = cmd.strip()
+
+        # ── モード遷移 ──
+        if c in ('configure', 'configure exclusive', 'configure private'):
+            state.mode = 'config'
+            return 'Entering configuration mode\n\n[edit]'
+        if c in ('exit', 'exit configuration-mode') and state.mode == 'config':
+            state.mode = 'exec'
+            return ''
+        if c in ('quit',) and state.mode == 'exec':
+            return ''
+
+        # ── set cli ...（CLI表示設定。candidate configとは無関係で
+        # commit不要、モードを問わず即座に反映される。netmikoの
+        # juniper_junosドライバがログイン直後に必ず送るコマンド群）──
+        m_width = re.match(r'^set\s+cli\s+screen-width\s+(\d+)$', c)
+        if m_width:
+            return f'Screen width set to {m_width.group(1)}'
+        if c == 'set cli complete-on-space off':
+            return 'Disabling complete-on-space'
+        if c == 'set cli complete-on-space on':
+            return 'Enabling complete-on-space'
+        m_length = re.match(r'^set\s+cli\s+screen-length\s+(\d+)$', c)
+        if m_length:
+            return f'Screen length set to {m_length.group(1)}'
+
+        # ── commit / rollback (configモードのみ) ──
+        if state.mode == 'config':
+            if c in ('commit', 'commit and-quit', 'commit check'):
+                if c == 'commit check':
+                    return 'configuration check succeeds'
+                self._junos_apply_commit(state)
+                if c == 'commit and-quit':
+                    state.mode = 'exec'
+                return 'commit complete'
+            if c in ('rollback', 'rollback 0'):
+                state.junos_candidate = []
+                return 'load complete'
+
+            # ── set ──
+            m_if_addr = re.match(
+                r'^set\s+interfaces\s+(\S+)\s+unit\s+(\d+)\s+family\s+inet\s+address\s+'
+                r'([\d.]+)/(\d+)$', c)
+            if m_if_addr:
+                ifname, unit, ip, prefix = m_if_addr.groups()
+                self._junos_stage(state, f'interfaces {ifname} unit {unit} family inet address {ip}/{prefix}')
+                return ''
+            m_if_disable = re.match(r'^set\s+interfaces\s+(\S+)\s+disable$', c)
+            if m_if_disable:
+                self._junos_stage(state, f'interfaces {m_if_disable.group(1)} disable')
+                return ''
+            m_hostname = re.match(r'^set\s+system\s+host-name\s+(\S+)$', c)
+            if m_hostname:
+                self._junos_stage(state, f'system host-name {m_hostname.group(1)}')
+                return ''
+            if c == 'set system services ssh':
+                self._junos_stage(state, 'system services ssh')
+                return ''
+            m_del = re.match(r'^delete\s+(.+)$', c)
+            if m_del:
+                path = m_del.group(1).strip()
+                state.junos_candidate = [l for l in state.junos_candidate if not l.startswith(path)]
+                state.junos_committed = [l for l in state.junos_committed if not l.startswith(path)]
+                return ''
+            if c.startswith('set '):
+                # 対応していない set パス（モデル上サポート範囲外）
+                return f"syntax error: '{orig.split(None, 1)[1] if ' ' in orig else ''}'"
+
+        # ── show configuration ──
+        if re.match(r'^show\s+configuration\s*\|\s*display\s+set', c):
+            lines = state.junos_committed
+            if not lines:
+                return ''
+            return '\n'.join(f'set {l}' for l in lines)
+        if re.match(r'^show\s+configuration$', c):
+            return self._junos_render_hierarchy(state.junos_committed)
+
+        # ── show version ──
+        if re.match(r'^show\s+version', c):
+            return (f'Hostname: {state.hostname}\n'
+                     f'Model: vSRX\n'
+                     f'Junos: 23.4R1.9\n'
+                     f'JUNOS Software Release [23.4R1.9]')
+
+        # ── show interfaces terse ──
+        if re.match(r'^show\s+interfaces\s+terse', c):
+            lines = ['Interface               Admin Link Proto    Local                 Remote']
+            for name, i in state.interfaces.items():
+                admin = 'up' if i.get('status') != 'admin-down' else 'down'
+                link = 'up' if i.get('status') == 'up' else 'down'
+                if i.get('ip'):
+                    lines.append(f'{name + ".0":<24}{admin:<6}{link:<5}inet     {i["ip"]}/{i["prefix"]}')
+                else:
+                    lines.append(f'{name + ".0":<24}{admin:<6}{link:<5}')
+            return '\n'.join(lines)
+
+        # ── show lldp neighbors（共有のCisco形式テーブルを流用）──
+        if re.match(r'^show\s+lldp\s+neighbors', c):
+            return self._show_lldp(state)
+
+        if c in ('run show version',):
+            return self.process('show version', state)
+
+        return f'\n{orig}\n                 ^\nsyntax error, expecting <command>.'
+
+    def _junos_stage(self, state: DeviceState, line: str):
+        """candidate configに1行追加(同じパスの既存行は上書き)"""
+        key = line.rsplit(' ', 1)[0]  # 値部分を除いた「パス」で一意化
+        state.junos_candidate = [l for l in state.junos_candidate if not l.startswith(key)]
+        state.junos_candidate.append(line)
+
+    def _junos_apply_commit(self, state: DeviceState):
+        """candidateをcommitし、state.interfaces/hostnameに反映する"""
+        for line in state.junos_candidate:
+            key = line.rsplit(' ', 1)[0]
+            state.junos_committed = [l for l in state.junos_committed if not l.startswith(key)]
+            state.junos_committed.append(line)
+
+            m = re.match(r'^interfaces\s+(\S+)\s+unit\s+(\d+)\s+family\s+inet\s+address\s+'
+                         r'([\d.]+)/(\d+)$', line)
+            if m and m.group(1) in state.interfaces:
+                ifname, _unit, ip, prefix = m.groups()
+                state.interfaces[ifname]['ip'] = ip
+                state.interfaces[ifname]['prefix'] = int(prefix)
+                state.interfaces[ifname]['status'] = 'up'
+                continue
+            m = re.match(r'^interfaces\s+(\S+)\s+disable$', line)
+            if m and m.group(1) in state.interfaces:
+                state.interfaces[m.group(1)]['status'] = 'admin-down'
+                continue
+            m = re.match(r'^system\s+host-name\s+(\S+)$', line)
+            if m:
+                state.hostname = m.group(1)
+                continue
+            if line == 'system services ssh':
+                # 実機Junosは"set system services ssh"をcommitして初めて
+                # SSHDが上がる。実リスナーの起動自体はapp.py側
+                # (handle_protocol_config の "commit" ハンドリング、
+                # Cisco系のcrypto key generate rsaと同じ役割)が
+                # state.ssh_rsa_key を見て行う。ここではフラグだけ立てる。
+                state.ssh_rsa_key = True
+        state.junos_candidate = []
+
+    def _junos_render_hierarchy(self, lines) -> str:
+        """set行の平坦なリストを実機風の波括弧階層表示に組み立てる"""
+        if not lines:
+            return ''
+        tree = {}
+        for line in lines:
+            toks = line.split()
+            node = tree
+            for t in toks[:-2]:
+                node = node.setdefault(t, {})
+            leaf_key = ' '.join(toks[-2:])
+            node[leaf_key] = None
+
+        def render(node, depth):
+            out = []
+            ind = '    ' * depth
+            for k, v in node.items():
+                if v is None:
+                    out.append(f'{ind}{k};')
+                else:
+                    out.append(f'{ind}{k} {{')
+                    out.extend(render(v, depth + 1))
+                    out.append(f'{ind}}}')
+            return out
+
+        return '\n'.join(render(tree, 0))
 
     def _asa_process(self, cmd: str, c: str, state: DeviceState) -> str:
         """Cisco ASA シングルコンテキスト CLIコマンドを処理する"""
