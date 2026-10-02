@@ -621,6 +621,63 @@ session, the default-route-via-pp case (the routing-reflected
 requirement, PPPoE edition), `pp disable` teardown, and three failure
 cases (wrong password, no BAS linked, linked to a non-`bas` device).
 
+**Yamaha RTX ⇔ Cisco IOS IPsec over the pseudo-FLET'S PPPoE link**:
+on direct follow-up request ("擬似ふれっつもうを経由して他のCiscoと
+IPsec貼れるか試して欲しい"), extended Yamaha's `tunnel select N` from
+config-acceptance-only to a real, negotiating IPsec tunnel — and
+confirmed live that it actually establishes over the dynamically-
+assigned PPPoE address from the `bas` work above, against a real Cisco
+IOS `crypto map` peer.
+
+`engine/ike_engine.py` already negotiated Si-R↔Si-R/Si-R↔Cisco IOS/ASA/
+Cisco↔Cisco via a `state.ipsec_tunnels` dict format (Si-R's shape:
+`local_ip`/`remote_ip`/`preshared`/`encryption`/`hash`/`dh_group`/
+`ike_mode`/`ike_lifetime`/`protocol`/`phase1`/`phase2`/`status`) — rather
+than inventing a new Yamaha-specific negotiation path, `_yamaha_process`
+populates that exact same dict shape for `tunnel select N` (`ipsec sa
+policy`/`ipsec ike local-address`/`remote-address`/`pre-shared-key`/
+`group`), and every `dt in ('sir', 'srs')`/`pdt in ('sir', 'srs')` check
+throughout `ike_engine.py` (9 occurrences — `_find_peer`'s adjacency
+match, `negotiate_ipsec`'s initiator and peer-info branches, the Phase1/
+Phase2 state mutation branches) became `('sir', 'srs', 'yamaha')`. This
+means Yamaha↔Cisco and Cisco↔Yamaha both just work through the existing
+negotiation logic with zero new matching code — same "extend the
+existing tuple, don't add a parallel code path" pattern already used
+for `is_cisco`/`_expand_abbreviation`'s device-type tuples elsewhere in
+this codebase.
+
+`tunnel enable <N>` is wired the same way Si-R's `ike use on`/`ipsec use
+on` already were: a device-type-agnostic command-text match in `app.py`
+(both the `handle_protocol_config` pre-RuleEngine trigger, and the
+post-`rule_engine.process()` re-trigger for ordering robustness) sets
+`state.ike_enabled`/`state.ipsec_enabled` and calls
+`_trigger_ike_negotiation()`; `tunnel disable <N>` tears the specific
+tunnel's phase1/phase2/status back to `LARVAL`/`wait`. `show status
+tunnel <N>` (new, `_yamaha_show_tunnel_status`) renders the real
+negotiated state — real RTX's actual command name, not invented.
+
+Live-verified end-to-end against real running devices: Cisco with a
+static WAN IP and a standard `crypto isakmp key`/`crypto ipsec
+transform-set`/`crypto map` config; a `bas` device with a pool and
+PPPoE credentials; a `yamaha` device that first ran `pp enable 1` to
+get a real dynamic IP from the pool (confirming the IP actually used
+for `ipsec ike local-address` was the one PPPoE assigned, not a
+hardcoded value), then `tunnel select 1` + the IPsec commands + `tunnel
+enable 1` — `show status tunnel 1` showed `IKE negotiation: MATURE` /
+`IPsec SA: MATURE` / `status: established`. Also verified failure paths
+don't fabricate success: wrong pre-shared-key → `DYING`/`wait`, and no
+PPPoE connection (no valid dynamic local IP) → never reaches
+`established`. `tunnel disable 1` correctly tears the SA back down.
+
+`tests/test_yamaha_cisco_ipsec_over_pppoe.py` (6 tests) covers the
+PPPoE-assigned-IP-feeds-into-IPsec chain, successful establishment (and
+that `tunnel enable` is silent on success, matching real RTX), the
+wrong-PSK failure case, teardown via `tunnel disable`, and the
+no-PPPoE-connection case. Also re-ran `tests/test_ipsec_dpd_timers.py`/
+`tests/test_ipsec_manual_key.py` (the existing Si-R/Cisco IPsec test
+files) to confirm the `ike_engine.py` tuple-widening didn't regress the
+pre-existing Si-R↔Cisco paths — both clean.
+
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 
 PyTorch could not be installed in this sandbox early on (pulled in a

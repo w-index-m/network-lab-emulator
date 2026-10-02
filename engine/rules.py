@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from engine.ike_engine import (
     DEFAULT_DPD_IDLE, DEFAULT_DPD_RETRY_COUNT, DEFAULT_DPD_RETRY_TIME,
     DEFAULT_IKE_RETRY_COUNT, DEFAULT_IKE_RETRY_TIME,
+    DEFAULT_ENCRYPTION, DEFAULT_HASH, DEFAULT_DH, DEFAULT_MODE,
+    DEFAULT_IKE_LT, DEFAULT_PROTOCOL,
     advance_all_sir_dpd,
 )
 
@@ -411,6 +413,15 @@ class DeviceState:
             self.nat_descriptors = {}   # {id: {'type': 'masquerade', 'lan': 'lan2'}}
             self.yamaha_pp = {}         # {pp_id: {'pppoe_lan','auth_user','auth_pass','enabled','connected'}}
             self.yamaha_current_pp = None
+            # IPsecトンネル(tunnel select N配下)。engine/ike_engine.py の
+            # Si-R用 ipsec_tunnels 辞書形式をそのまま再利用し、
+            # ike_engine側の dt in ('sir','srs','yamaha') 判定に相乗りする
+            # (Cisco IOS/ASAとのネゴシエーションも含め、新しいマッチング
+            # ロジックを増やさない)。
+            self.ipsec_tunnels = {}     # {tunnel_id: {local_ip, remote_ip, preshared, ...}}
+            self.yamaha_current_tunnel = None
+            self.ike_enabled = False
+            self.ipsec_enabled = False
             self.lldp_neighbors = []
 
         # 擬似FLETS網BAS(収容局)状態
@@ -7913,13 +7924,17 @@ Configuration Revision            : 5"""
             state.mode = 'admin'
             state.yamaha_current_pp = None
             return ''
+        if c in ('exit', 'logout') and state.mode == 'tunnel':
+            state.mode = 'admin'
+            state.yamaha_current_tunnel = None
+            return ''
         if c == 'exit' and state.mode == 'admin':
             state.mode = 'exec'
             return ''
         if c == 'exit' and state.mode == 'exec':
             return ''
 
-        if state.mode in ('admin', 'pp'):
+        if state.mode in ('admin', 'pp', 'tunnel'):
             # ── pp select <N> ──（PPPoE接続設定サブコンテキスト）
             m_pp = re.match(r'^pp\s+select\s+(\d+)$', c)
             if m_pp:
@@ -7928,6 +7943,50 @@ Configuration Revision            : 5"""
                 state.yamaha_current_pp = pp_id
                 state.mode = 'pp'
                 return ''
+            # ── tunnel select <N> ──（IPsecトンネル設定サブコンテキスト）
+            m_tun = re.match(r'^tunnel\s+select\s+(\d+)$', c)
+            if m_tun:
+                tun_id = int(m_tun.group(1))
+                state.ipsec_tunnels.setdefault(tun_id, {
+                    'local_ip': '', 'remote_ip': '', 'preshared': '',
+                    'encryption': DEFAULT_ENCRYPTION, 'hash': DEFAULT_HASH,
+                    'dh_group': DEFAULT_DH, 'ike_mode': DEFAULT_MODE,
+                    'ike_lifetime': DEFAULT_IKE_LT, 'protocol': DEFAULT_PROTOCOL,
+                    'phase1': 'LARVAL', 'phase2': 'LARVAL', 'status': 'wait',
+                })
+                state.yamaha_current_tunnel = tun_id
+                state.mode = 'tunnel'
+                return ''
+
+        if state.mode == 'tunnel' and state.yamaha_current_tunnel is not None:
+            tun = state.ipsec_tunnels[state.yamaha_current_tunnel]
+            if re.match(r'^ipsec\s+tunnel\s+\d+$', c):
+                return ''  # IPsec SA番号の宣言自体はマッチングに使わない
+            m = re.match(r'^ipsec\s+sa\s+policy\s+\d+\s+\d+\s+esp\s+(\S+)\s+(\S+)$', c)
+            if m:
+                enc, hsh = m.groups()
+                tun['encryption'] = enc
+                tun['hash'] = hsh
+                return ''
+            m = re.match(r'^ipsec\s+ike\s+local-address\s+\d+\s+([\d.]+)$', c)
+            if m:
+                tun['local_ip'] = m.group(1)
+                return ''
+            m = re.match(r'^ipsec\s+ike\s+remote-address\s+\d+\s+([\d.]+)$', c)
+            if m:
+                tun['remote_ip'] = m.group(1)
+                return ''
+            m = re.match(r'^ipsec\s+ike\s+pre-shared-key\s+\d+\s+text\s+(\S+)$', c)
+            if m:
+                tun['preshared'] = m.group(1)
+                return ''
+            m = re.match(r'^ipsec\s+ike\s+group\s+\d+\s+modp(\d+)$', c)
+            if m:
+                # modp768/1024/1536 相当をDH group 1/2/5に大まかに対応させる
+                tun['dh_group'] = {'768': 1, '1024': 2, '1536': 5}.get(m.group(1), DEFAULT_DH)
+                return ''
+            if c.startswith('ipsec '):
+                return ''  # スコープ外の細かいIKEオプションは黙って受理する
 
         if state.mode == 'pp' and state.yamaha_current_pp is not None:
             pp = state.yamaha_pp[state.yamaha_current_pp]
@@ -7991,6 +8050,14 @@ Configuration Revision            : 5"""
                 state.yamaha_pp.setdefault(pp_id, {})['enabled'] = (action == 'enable')
                 return ''
 
+            # ── tunnel enable <N> / tunnel disable <N> ──（tunnel selectの
+            # 外からも実行可。実際のIKE/IPsecネゴシエーションはapp.pyの
+            # handle_protocol_config側がこのコマンドを検知して
+            # _trigger_ike_negotiation()を呼ぶ形で行う — ここでは
+            # 実機同様コマンド自体を無言で受理するだけ）
+            if re.match(r'^tunnel\s+(enable|disable)\s+\d+$', c):
+                return ''
+
             if c == 'save':
                 return ''
 
@@ -8005,6 +8072,9 @@ Configuration Revision            : 5"""
             m_status = re.match(r'^show\s+status\s+(lan\d+)$', c)
             if m_status:
                 return self._yamaha_show_status(state, m_status.group(1))
+            m_tunstat = re.match(r'^show\s+status\s+tunnel\s+(\d+)$', c)
+            if m_tunstat:
+                return self._yamaha_show_tunnel_status(state, int(m_tunstat.group(1)))
             if re.match(r'^show\s+environment$', c):
                 return f'{state.hostname}\nUptime: {state.uptime_str()}'
 
@@ -8016,8 +8086,26 @@ Configuration Revision            : 5"""
             m_status = re.match(r'^show\s+status\s+(lan\d+)$', c)
             if m_status:
                 return self._yamaha_show_status(state, m_status.group(1))
+            m_tunstat = re.match(r'^show\s+status\s+tunnel\s+(\d+)$', c)
+            if m_tunstat:
+                return self._yamaha_show_tunnel_status(state, int(m_tunstat.group(1)))
 
         return f'Unknown command: {orig}'
+
+    def _yamaha_show_tunnel_status(self, state: DeviceState, tun_id: int) -> str:
+        tun = state.ipsec_tunnels.get(tun_id)
+        if not tun:
+            return f'% Unknown tunnel: {tun_id}'
+        lines = [
+            f'TUNNEL[{tun_id}]:',
+            f'  Description     :',
+            f'  Local  ID       : {tun.get("local_ip") or "(未設定)"}',
+            f'  Remote ID       : {tun.get("remote_ip") or "(未設定)"}',
+            f'  IKE negotiation : {tun.get("phase1", "LARVAL")}',
+            f'  IPsec SA        : {tun.get("phase2", "LARVAL")}',
+            f'  status          : {tun.get("status", "wait")}',
+        ]
+        return '\n'.join(lines)
 
     def _yamaha_show_config(self, state: DeviceState) -> str:
         lines = [f'# {state.hostname} RTX1300 Rev.23.00.06 Configuration']
@@ -8041,6 +8129,17 @@ Configuration Revision            : 5"""
                 lines.append(f' pp auth myname {pp["auth_user"]} {pp.get("auth_pass", "")}')
             if pp.get('enabled'):
                 lines.append(f' pp enable {pp_id}')
+        for tun_id, tun in sorted(state.ipsec_tunnels.items()):
+            lines.append(f'tunnel select {tun_id}')
+            lines.append(f' ipsec sa policy {tun_id}01 1 esp {tun["encryption"]} {tun["hash"]}')
+            if tun.get('local_ip'):
+                lines.append(f' ipsec ike local-address 1 {tun["local_ip"]}')
+            if tun.get('remote_ip'):
+                lines.append(f' ipsec ike remote-address 1 {tun["remote_ip"]}')
+            if tun.get('preshared'):
+                lines.append(f' ipsec ike pre-shared-key 1 text {tun["preshared"]}')
+            if state.ike_enabled and state.ipsec_enabled:
+                lines.append(f' tunnel enable {tun_id}')
         return '\n'.join(lines).rstrip()
 
     def _yamaha_routes(self, state: DeviceState):

@@ -1054,6 +1054,7 @@ async def cli_command(body: dict):
     if (re.match(r'^crypto\s+isakmp\s+(enable|key)', c_low) or
             re.match(r'^crypto\s+map\s+\S+\s+interface', c_low) or
             c_low in ('ike use on', 'ipsec use on') or
+            re.match(r'^tunnel\s+enable\s+\d+$', c_low) or
             re.match(r'^remote\s+\d+\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key', c_low) or
             # 手動鍵設定(ipsec type manual)。IKEを介さないため、
             # send/receiveのSPI・protocol・鍵のいずれかが揃うたびに
@@ -1481,6 +1482,21 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             elif c == 'ipsec use on':
                 state.ipsec_enabled = True
             _trigger_ike_negotiation(device_id)
+    # Yamaha RTX: "tunnel enable <N>" で実機同様そのトンネルのIKE/IPsecが
+    # 有効になる(Si-Rの"ike use on"/"ipsec use on"相当)。
+    # engine/ike_engine.py 側は ipsec_tunnels 辞書をSi-Rと同じ形式で
+    # 読むため、新しいネゴシエーションロジックは増やしていない。
+    if state.device_type == 'yamaha' and re.match(r'^tunnel\s+enable\s+\d+$', c):
+        state.ike_enabled = True
+        state.ipsec_enabled = True
+        _trigger_ike_negotiation(device_id)
+    m_tundis = re.match(r'^tunnel\s+disable\s+(\d+)$', c)
+    if state.device_type == 'yamaha' and m_tundis:
+        tun = state.ipsec_tunnels.get(int(m_tundis.group(1)))
+        if tun:
+            tun.update({'phase1': 'LARVAL', 'phase2': 'LARVAL', 'status': 'wait'})
+        state.ike_enabled = False
+        state.ipsec_enabled = False
 
     # ── prefix-list ──
     # Cisco: "ip prefix-list NAME seq 5 permit 10.0.0.0/8 ge 24 le 30"
