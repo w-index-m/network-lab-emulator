@@ -11,7 +11,7 @@ NETCONF/SSH-CLI/Telnet-CLI, gNMI over gRPC), so real clients (ncclient,
 gnmic/pygnmi, snmpwalk, an actual ssh/telnet client) can connect to emulated
 devices. See `README.md` for the full feature/protocol matrix and supported
 device types (`device_type`: `catalyst`, `nexus`, `cisco`, `asa`, `sir`,
-`srs`, `apresia`, `bigip`, `arista`, `juniper`, `pc`).
+`srs`, `apresia`, `bigip`, `arista`, `juniper`, `yamaha`, `pc`).
 
 **Publicly deployed** at https://network-lab-emulator.onrender.com/ (Render).
 That deployment doesn't have Ollama available, so its `network_ontology_query.py
@@ -506,6 +506,51 @@ and `ansible`/`arista.eos`/`junipernetworks.junos`/`ansible.netcommon`
 collections were already available in this sandbox for the live
 verification; not added to `requirements*.txt` since nothing in the
 actual test suite imports them.
+
+**`yamaha` device type (RTX1300)**: added on explicit request
+("Ｙａｍａｈａルータ　ＲＴＸ１３００もコマンド投入試験できますか？" →
+"できればルーティングなど反映してほしいです" — the routing-must-actually-
+work requirement was the priority). RTX's CLI paradigm (`administrator`
+to elevate from user mode straight into a config-accepting mode with no
+separate `configure terminal` submode, `ip lanN address`, `ip route
+<dest> gateway <ip>`, `nat descriptor`, `pp select <N>` for PPPoE) is
+its own grammar, so it gets a dedicated `_yamaha_process` handler in
+`engine/rules.py` (same `apresia`/`bigip`/`juniper` pattern) dispatched
+before the shared Cisco tree. `defPort()`/`_expand_abbreviation()` skip
+list updated the same way Juniper's was.
+
+**Routing is delegated to the shared `rib_engine`, not reimplemented**
+(the explicit ask): `ip route (default|<net>/<prefix>) gateway <ip>`
+got its own regex in `app.py`'s `handle_protocol_config` (alongside the
+existing `cisco_route`/`sir_route` patterns) calling
+`rib_engine.add_static_route()` directly — `_yamaha_process` itself
+just silently acknowledges the command once `handle_protocol_config`
+has already run (two-layer dispatch order). **`show ip route` needed
+zero Yamaha-specific code**: `app.py`'s `handle_protocol_show` already
+renders `rib_engine`'s routes device-type-independently, so a Yamaha
+device's connected/static routes (gateway of last resort included) show
+up for free — confirmed live that `ip route default gateway X` then
+`show ip route` shows a real `S* 0.0.0.0/0 [1/0] via X` line, and that
+`ip lan1 address` immediately produces a real `C`/`L` connected-route
+pair. (An initial draft wrote a separate `_yamaha_show_ip_route`
+renderer before noticing it was unreachable dead code — the shared
+handler always wins per the two-layer dispatch rule; removed it rather
+than leaving dead code around, per the same "check app.py first" advice
+this file already gives for exactly this situation.)
+
+**NAT descriptor (`nat descriptor type N masquerade` / `ip lanN nat
+descriptor N`) and PPPoE (`pp select N` sub-context: `pppoe use lanN`,
+`pp auth myname`, `pp enable N`) are config-acceptance-and-`show
+config`-reflection only** — deliberately scoped out: real packet-level
+NAT translation and real PPPoE session negotiation would each be a
+project on the scale of the real-socket BGP/OSPF agents, not a fit for
+this request's actual ask (which was specifically about routing).
+Interface naming is `lan1`/`lan2`/`lan3` (no `GigabitEthernet0/0/N`).
+`tests/test_yamaha_rtx.py` (16 tests) covers the mode transitions,
+interface config, the NAT/PPPoE config-reflection, and — the priority —
+5 tests specifically asserting routes actually show up in both `show
+ip route` and `show config` after being configured, including a
+connected-route and a `no ip route` removal case.
 
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 

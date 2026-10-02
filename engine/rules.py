@@ -229,11 +229,16 @@ class DeviceState:
             "ge-0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "ge-0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "ge-0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        } if device_type == "juniper" else {
+        } if device_type == "juniper" else ({
+            # Yamaha RTX1300: lan1(LAN)/lan2(WAN想定)/lan3 形式
+            "lan1": {"ip": "192.168.100.1", "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
+            "lan2": {"ip": "203.0.113.2",   "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
+            "lan3": {"ip": "",              "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
+        } if device_type == "yamaha" else {
             "GigabitEthernet0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        }))
+        })))
 
         if device_type == "sir":
             # ether <slot> <port> vlan untag <vid>（実機のfactory-default）
@@ -388,6 +393,17 @@ class DeviceState:
             self.junos_candidate = []   # configureモードで編集中、未commitのset行
             self.lldp_neighbors = []
             self.lldp_enabled = True    # Junosは実機でもLLDPが既定で有効
+
+        # Yamaha RTX1300 状態
+        # ルーティングは他機種同様 rib_engine に委譲する(重複状態を持たない)。
+        # NAT記述子(nat descriptor)とPPPoE(pp select)は実パケット変換/実
+        # PPPoEネゴシエーションまでは再現せず、設定の受理とshow configへの
+        # 反映のみのスコープ(スコープ外であることをCLAUDE.mdに明記)。
+        if device_type == "yamaha":
+            self.nat_descriptors = {}   # {id: {'type': 'masquerade', 'lan': 'lan2'}}
+            self.yamaha_pp = {}         # {pp_id: {'pppoe_lan','auth_user','auth_pass','ip','enabled'}}
+            self.yamaha_current_pp = None
+            self.lldp_neighbors = []
 
     def uptime_str(self):
         delta = datetime.now() - self.startup_time
@@ -749,9 +765,10 @@ class RuleEngine:
         """
         if not cmd.strip():
             return cmd
-        if device_type in ('apresia', 'juniper'):
-            # JuniperもAPRESIA同様、Cisco IOSと無関係な独自コマンド体系
-            # (set/delete/commit、show ... terse 等)を持つため展開をスキップする。
+        if device_type in ('apresia', 'juniper', 'yamaha'):
+            # Juniper/Yamahaも同様、Cisco IOSと無関係な独自コマンド体系
+            # (set/delete/commit、ip lanN address、terminalを使わないshow等)
+            # を持つため展開をスキップする。
             return cmd
         tokens = cmd.strip().split()
         # Si-R/SR-Sの "ether" は、それ自体で完結する実機のキーワード
@@ -844,6 +861,10 @@ class RuleEngine:
         # Juniper Junos は set/delete/commit の階層型体系 → 専用ハンドラへ
         if state.device_type == 'juniper':
             return self._juniper_process(cmd, c, state)
+
+        # Yamaha RTX は独自コマンド体系(ip lanN address等) → 専用ハンドラへ
+        if state.device_type == 'yamaha':
+            return self._yamaha_process(cmd, c, state)
 
         # モード遷移
         # 実機の end は「どの設定モードからでも特権EXECへ一気に戻る」。
@@ -7844,6 +7865,188 @@ Configuration Revision            : 5"""
             return out
 
         return '\n'.join(render(tree, 0))
+
+    # ══════════════════════════════════════════
+    # Yamaha RTX1300 — 独自CLI(ip lanN address / administrator / pp select)
+    # ══════════════════════════════════════════
+    def _yamaha_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """RTXシリーズのCLIを処理する。
+
+        実機はCiscoのような exec→config→config-if のモード階層ではなく、
+        一般ユーザモード(`>`)→administratorコマンドで管理者モード(`#`)に
+        上がったら、その場でインタフェース・ルート設定を直接打ち込む
+        (configure terminal相当の別モードが無い)。ルーティングは
+        rib_engine(app.pyのhandle_protocol_config、このメソッドより前に
+        実行される)に委譲し、ここでは state.interfaces の直接変更と
+        show config/show ip route 等の表示のみを担当する。
+
+        NAT記述子(nat descriptor)・PPPoE(pp select)は設定の受理と
+        show configへの反映のみ(実パケット変換・実PPPoEネゴシエーション
+        はスコープ外)。
+        """
+        orig = cmd.strip()
+
+        # ── モード遷移 ──
+        if c == 'administrator' and state.mode == 'exec':
+            state.mode = 'admin'
+            return ''
+        if c in ('exit', 'logout') and state.mode == 'pp':
+            state.mode = 'admin'
+            state.yamaha_current_pp = None
+            return ''
+        if c == 'exit' and state.mode == 'admin':
+            state.mode = 'exec'
+            return ''
+        if c == 'exit' and state.mode == 'exec':
+            return ''
+
+        if state.mode in ('admin', 'pp'):
+            # ── pp select <N> ──（PPPoE接続設定サブコンテキスト）
+            m_pp = re.match(r'^pp\s+select\s+(\d+)$', c)
+            if m_pp:
+                pp_id = int(m_pp.group(1))
+                state.yamaha_pp.setdefault(pp_id, {})
+                state.yamaha_current_pp = pp_id
+                state.mode = 'pp'
+                return ''
+
+        if state.mode == 'pp' and state.yamaha_current_pp is not None:
+            pp = state.yamaha_pp[state.yamaha_current_pp]
+            m = re.match(r'^pppoe\s+use\s+(lan\d+)$', c)
+            if m:
+                pp['pppoe_lan'] = m.group(1)
+                return ''
+            m = re.match(r'^(?:pp|ppp)\s+auth\s+myname\s+(\S+)\s+(\S+)$', c)
+            if m:
+                pp['auth_user'], pp['auth_pass'] = m.group(1), m.group(2)
+                return ''
+            m = re.match(r'^(?:pp|ppp)\s+auth\s+accept\s+(.+)$', c)
+            if m:
+                pp['auth_accept'] = m.group(1)
+                return ''
+            m = re.match(r'^pp\s+always-on\s+(on|off)$', c)
+            if m:
+                pp['always_on'] = (m.group(1) == 'on')
+                return ''
+            if c.startswith('ppp ') or c.startswith('pppoe ') or c.startswith('pp '):
+                # スコープ外の細かいPPPoEオプション(lcp mru / ipcp等)は
+                # 実機同様エラーにはせず黙って受理する(設定自体は
+                # show configに出さない簡略実装)。
+                return ''
+
+        if state.mode == 'admin':
+            # ── ip lanN address <ip>/<prefix> ──
+            m_if = re.match(r'^ip\s+(lan\d+)\s+address\s+([\d.]+)/(\d+)$', c)
+            if m_if:
+                ifname, ip, prefix = m_if.groups()
+                if ifname in state.interfaces:
+                    state.interfaces[ifname]['ip'] = ip
+                    state.interfaces[ifname]['prefix'] = int(prefix)
+                    state.interfaces[ifname]['status'] = 'up'
+                return ''
+            m_if_dhcp = re.match(r'^ip\s+(lan\d+)\s+address\s+dhcp$', c)
+            if m_if_dhcp:
+                return ''  # DHCP取得のシミュレーションはスコープ外
+
+            # ── ip route ... ──（実際のrib_engine登録はapp.py側で完了済み。
+            # ここでは実機同様コマンド自体を無言で受理する）
+            if re.match(r'^(no\s+)?ip\s+route\s+(default|[\d.]+/\d+)\s*(gateway\s+)?', c):
+                return ''
+
+            # ── nat descriptor type <id> masquerade ──
+            m_nat = re.match(r'^nat\s+descriptor\s+type\s+(\d+)\s+(masquerade|nat)$', c)
+            if m_nat:
+                nat_id, nat_type = m_nat.groups()
+                state.nat_descriptors.setdefault(nat_id, {})['type'] = nat_type
+                return ''
+            m_nat_if = re.match(r'^ip\s+(lan\d+)\s+nat\s+descriptor\s+(\d+)$', c)
+            if m_nat_if:
+                ifname, nat_id = m_nat_if.groups()
+                state.nat_descriptors.setdefault(nat_id, {})['lan'] = ifname
+                return ''
+
+            # ── pp enable <N> / pp disable <N> ──（pp selectの外からも実行可）
+            m_ppen = re.match(r'^pp\s+(enable|disable)\s+(\d+)$', c)
+            if m_ppen:
+                action, pp_id = m_ppen.group(1), int(m_ppen.group(2))
+                state.yamaha_pp.setdefault(pp_id, {})['enabled'] = (action == 'enable')
+                return ''
+
+            if c == 'save':
+                return ''
+
+            # ── show ──
+            # "show ip route" はapp.pyのhandle_protocol_show側が
+            # device_type非依存でrib_engine.format_show_ip_route()を
+            # 返す(これがそのまま実際の経路を反映するので、ここでは
+            # 重複実装しない)。到達するのは show config / show status /
+            # show environment のみ。
+            if re.match(r'^show\s+config$', c):
+                return self._yamaha_show_config(state)
+            m_status = re.match(r'^show\s+status\s+(lan\d+)$', c)
+            if m_status:
+                return self._yamaha_show_status(state, m_status.group(1))
+            if re.match(r'^show\s+environment$', c):
+                return f'{state.hostname}\nUptime: {state.uptime_str()}'
+
+        if c == 'show config' or c.startswith('show status'):
+            # administratorに上がっていない状態でのshow系は一般ユーザでも
+            # 閲覧可能(実機準拠)なので、admin判定を経由せずここでも拾う。
+            if c == 'show config':
+                return self._yamaha_show_config(state)
+            m_status = re.match(r'^show\s+status\s+(lan\d+)$', c)
+            if m_status:
+                return self._yamaha_show_status(state, m_status.group(1))
+
+        return f'Unknown command: {orig}'
+
+    def _yamaha_show_config(self, state: DeviceState) -> str:
+        lines = [f'# {state.hostname} RTX1300 Rev.23.00.06 Configuration']
+        for name in sorted(state.interfaces):
+            info = state.interfaces[name]
+            if info.get('ip'):
+                lines.append(f'ip {name} address {info["ip"]}/{info["prefix"]}')
+        for r in self._yamaha_routes(state):
+            dest = 'default' if r['prefix'] == 0 else f'{r["network"]}/{r["prefix"]}'
+            lines.append(f'ip route {dest} gateway {r["next_hop"]}')
+        for nat_id, nat in sorted(state.nat_descriptors.items()):
+            if nat.get('type'):
+                lines.append(f'nat descriptor type {nat_id} {nat["type"]}')
+            if nat.get('lan'):
+                lines.append(f'ip {nat["lan"]} nat descriptor {nat_id}')
+        for pp_id, pp in sorted(state.yamaha_pp.items()):
+            lines.append(f'pp select {pp_id}')
+            if pp.get('pppoe_lan'):
+                lines.append(f' pppoe use {pp["pppoe_lan"]}')
+            if pp.get('auth_user'):
+                lines.append(f' pp auth myname {pp["auth_user"]} {pp.get("auth_pass", "")}')
+            if pp.get('enabled'):
+                lines.append(f' pp enable {pp_id}')
+        return '\n'.join(lines).rstrip()
+
+    def _yamaha_routes(self, state: DeviceState):
+        """rib_engineから、このYamaha機のstatic経路だけを取り出す。"""
+        try:
+            from engine.protocols import rib_engine
+        except Exception:
+            return []
+        device_id = getattr(state, '_device_id', None)
+        if not device_id:
+            return []
+        return [r for r in rib_engine.get_best_routes(device_id)
+                if r.get('source') == 'static']
+
+    def _yamaha_show_status(self, state: DeviceState, ifname: str) -> str:
+        info = state.interfaces.get(ifname)
+        if not info:
+            return f'% Unknown interface: {ifname}'
+        link = 'Up' if info.get('status') == 'up' else 'Down'
+        lines = [f'{ifname.upper()} の接続状態']
+        lines.append(f'  回線速度: {info.get("speed", "auto")}Mbps')
+        lines.append(f'  Link: {link}')
+        if info.get('ip'):
+            lines.append(f'  IP Address: {info["ip"]}/{info["prefix"]}')
+        return '\n'.join(lines)
 
     def _asa_process(self, cmd: str, c: str, state: DeviceState) -> str:
         """Cisco ASA シングルコンテキスト CLIコマンドを処理する"""

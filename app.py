@@ -1103,6 +1103,7 @@ async def cli_command(body: dict):
     if re.search(r'ip\s+addr(?:ess)?|ip\s+route|remote\s+\d+\s+ip\s+route|'
                  r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address|'
                  r'config\s+ipif|'  # APRESIA: "config ipif System <ip>/<prefix>"
+                 r'ip\s+lan\d+\s+address|'  # Yamaha RTX: "ip lan1 address ..."
                  r'no\s+shutdown|no\s+shut', c_low) or (
             re.search(r'crypto\s+map', c_low) and
             not re.match(r'^no\s+crypto\s+map', c_low)):
@@ -2447,6 +2448,38 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         ad = int(sir_lan_route.group(4)) if sir_lan_route.group(4) else 1
         rib_engine.add_static_route(device_id, hostname, net, prefix, next_hop, ad)
         await _emit_route_log(device_id, net, prefix, next_hop, ad)
+        return
+    # Yamaha RTX: "ip route default gateway 192.168.1.1 [weight N] [hide]"
+    #            "ip route 192.168.2.0/24 gateway 10.0.0.2 [weight N] [hide]"
+    # 実機は同一宛先に複数gatewayを並べたマルチホーミング構文も受けるが
+    # (ip route default gateway pp 1 weight 2 hide gateway pp 2 weight 1 hide)、
+    # ここではrib_engineに登録できる「最初のIPゲートウェイ1本」のみを
+    # 反映する(pp番号を次ホップに使うマルチホーミング/フローティングは
+    # スコープ外。ルーティングが反映されること自体を優先した)。
+    yamaha_route = re.match(
+        r'^ip\s+route\s+(default|[\d.]+/\d+)\s+gateway\s+([\d.]+)', c)
+    if yamaha_route and state.device_type == 'yamaha':
+        dest = yamaha_route.group(1)
+        next_hop = yamaha_route.group(2)
+        if dest == 'default':
+            net, prefix = '0.0.0.0', 0
+        else:
+            net, prefix = dest.split('/')
+            prefix = int(prefix)
+        rib_engine.add_static_route(device_id, hostname, net, prefix, next_hop, 1)
+        await _emit_route_log(device_id, net, prefix, next_hop, 1)
+        return
+    # Yamaha RTX: "no ip route default gateway 192.168.1.1" 等
+    yamaha_no_route = re.match(
+        r'^no\s+ip\s+route\s+(default|[\d.]+/\d+)(?:\s+gateway\s+([\d.]+))?', c)
+    if yamaha_no_route and state.device_type == 'yamaha':
+        dest = yamaha_no_route.group(1)
+        if dest == 'default':
+            net, prefix = '0.0.0.0', 0
+        else:
+            net, prefix = dest.split('/')
+            prefix = int(prefix)
+        rib_engine.remove_static_route(device_id, net, prefix, yamaha_no_route.group(2))
         return
     # ルート削除 "no ip route ..."
     no_route = re.match(r'^no\s+ip\s+route\s+([\d.]+)(?:/(\d+)|\s+([\d.]+))', c)
