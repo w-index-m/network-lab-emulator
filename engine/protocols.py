@@ -4506,6 +4506,85 @@ pppoe_engine = PppoeEngine()
 
 
 # ══════════════════════════════════════════
+# MAP-Eエンジン（v6プラス等のIPoE+MAP-E方式でのIPv4インターネット接続）
+# ══════════════════════════════════════════
+# このエミュレータの共有エンジン(rib_engine/icmp_engine)はIPv4専用で、
+# IPv6アドレッシング/ルーティングの実体を持たない。v6プラスの実際の
+# 流れ(IPv6 IPoEアクセス → DHCPv6-PDでプレフィックス取得 → MAP-Eルールで
+# 共有IPv4+制限ポートレンジ+BR(Border Relay)アドレスを受け取る)のうち、
+# 「IPv6 IPoEアクセス」部分は見た目の設定反映のみ(実際のIPv6到達性判定は
+# しない)。「MAP-Eで実際にIPv4インターネットに出られる」部分だけは、
+# PppoeEngineと同じ方式(vnet経由のソフトウェア的ネゴシエーション)で
+# 実際の状態遷移として再現する — 払い出された共有IPv4アドレスは本物の
+# state.interfaces/rib_engineに乗るので、既存のIPv4 ping/tracerouteが
+# そのまま使える。
+class MapEEngine:
+    def __init__(self):
+        # rule_server_device_id -> {'ipv4_pool':[...], 'br_ipv6':str,
+        #                            'ports_per_user':int, 'rules':{rule_id: {...}}}
+        self.nodes: Dict[str, dict] = {}
+
+    def _server(self, device_id: str) -> dict:
+        return self.nodes.setdefault(device_id, {
+            'ipv4_pool': [], 'br_ipv6': '', 'ports_per_user': 4096, 'rules': {},
+        })
+
+    def set_ipv4_pool(self, device_id: str, start: str, end: str):
+        srv = self._server(device_id)
+        s = int(ipaddress.IPv4Address(start))
+        e = int(ipaddress.IPv4Address(end))
+        srv['ipv4_pool'] = [str(ipaddress.IPv4Address(i)) for i in range(s, e + 1)]
+
+    def set_br_address(self, device_id: str, br_ipv6: str):
+        self._server(device_id)['br_ipv6'] = br_ipv6
+
+    def request_rule(self, rtx_id: str, iface: str, rule_id: str) -> Optional[dict]:
+        """指定インタフェース経由で繋がっているMAP-Eルールサーバーを探し、
+        共有IPv4+ポートレンジ+PSID+BRアドレスを払い出す。"""
+        for peer in vnet.get_neighbors(rtx_id):
+            if vnet.interface_links.get(rtx_id, {}).get(peer) != iface:
+                continue
+            srv = self.nodes.get(peer)
+            if not srv or not srv['ipv4_pool'] or not srv['br_ipv6']:
+                continue
+            ppu = srv['ports_per_user']
+            slots_per_ip = 65536 // ppu
+            # 既存ルール数から次の空きスロット(IPv4, PSID)を決める
+            n = len(srv['rules'])
+            ipv4 = srv['ipv4_pool'][n // slots_per_ip] if n // slots_per_ip < len(srv['ipv4_pool']) else None
+            if ipv4 is None:
+                return None
+            psid = n % slots_per_ip
+            port_lo = psid * ppu
+            port_hi = port_lo + ppu - 1
+            rule = {
+                'rtx_id': rtx_id, 'server_id': peer, 'ipv4': ipv4,
+                'psid': psid, 'port_range': (port_lo, port_hi),
+                'br_ipv6': srv['br_ipv6'],
+            }
+            srv['rules'][rule_id] = rule
+            return rule
+        return None
+
+    def release_rule(self, rtx_id: str, rule_id: str):
+        for srv in self.nodes.values():
+            srv['rules'].pop(rule_id, None)
+
+    def format_show_rules(self, device_id: str) -> str:
+        srv = self.nodes.get(device_id)
+        if not srv or not srv['rules']:
+            return 'No active MAP-E rules.'
+        lines = ['Rule               Hostname         Shared IPv4      Port range       PSID']
+        for rid, r in sorted(srv['rules'].items()):
+            lo, hi = r['port_range']
+            lines.append(f'{rid:<18} {r["rtx_id"]:<16} {r["ipv4"]:<16} {lo}-{hi}        {r["psid"]}')
+        return '\n'.join(lines)
+
+
+map_e_engine = MapEEngine()
+
+
+# ══════════════════════════════════════════
 # ICMP エンジン（ping / traceroute 実到達性判定）
 # ══════════════════════════════════════════
 class IcmpEngine:

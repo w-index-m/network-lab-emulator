@@ -853,3 +853,74 @@ running Loki + a real device generating a real syslog burst — see
 `summarize_logs_via_ollama()`に渡してAI要約もできる（`--summarize`）。
 実際に動いているLoki＋実装置が生成した実syslogバーストで
 エンドツーエンド検証済み。詳細は`docs/syslog-anomaly-detection.md`参照。
+
+**v6プラス(MAP-E)対応**: ユーザー質問「ちなみに CiscoやYAMAHAから
+IPOEでの接続も検証できますか？」→「v6プラスを想定してます」→
+「想定コンフィグを元に接続可能かを試験できるようにしたい。もちろん
+AI側でコンフィグを作って試験もして欲しい」への対応。
+
+**実装前にユーザーへ説明し合意を得た制約**: `engine/protocols.py`は
+IPv6のアドレッシング/ルーティングを一切実装していない
+(`grep -c "ipv6" engine/protocols.py` = 0。`engine/rules.py`の37件の
+"ipv6"言及はすべて見た目だけの固定文字列応答で、実ルーティングでは
+ない)。v6プラスの実際の流れ(IPv6 IPoEアクセス→DHCPv6-PDでプレフィックス
+取得→MAP-Eルールで共有IPv4+制限ポートレンジ+BRアドレスを受け取る)の
+うち、「IPv6 IPoEアクセス」部分は見た目の設定反映のみ
+(`state.yamaha_ipv6_prefix`、実IPv6到達性判定はしない)、「MAP-Eで実際に
+IPv4インターネットに出られる」部分だけは、既存の`PppoeEngine`と同じ
+方式(vnet経由のソフトウェア的ネゴシエーション、実Ethernetフレームでは
+ない)で実際の状態遷移として再現する — 払い出された共有IPv4アドレスは
+本物の`state.interfaces`/`rib_engine`に乗るので、既存のIPv4
+ping/tracerouteがそのまま使える。
+
+実装: `engine/protocols.py`に`MapEEngine`(`map_e_engine`シングルトン)を
+新設。`nodes[rule_server_device_id]`が`ipv4_pool`/`br_ipv6`/
+`ports_per_user`/`rules`を保持。`request_rule(rtx_id, iface, rule_id)`は
+`vnet.get_neighbors()`/`vnet.interface_links`で指定インタフェース越しに
+繋がっているルールサーバーを探し、既存ルール数から次の空きIPv4+PSID
+(ports_per_user=4096固定、65536÷4096=16スロット/IPv4)を割り出して
+払い出す。ポートレンジの実パケットフィルタリングは行わない
+(icmp_engineがポートを一切モデル化していないのに合わせたスコープカット)。
+
+MAP-Eルールサーバー役は新しいdevice_typeを増やさず、既存の擬似FLETS
+`bas`デバイスに相乗りさせた(PPPoE-BASもMAP-Eルールサーバーも「契約者が
+繋ぐISP収容設備」という点で同じ、という判断) — これによりフロントエンド
+(`static/index.html`)の変更は一切不要だった(`bas`/`yamaha`とも既存の
+PPPoE/IPsec対応で装置追加ボタン・`DEV_TEMPLATES`・ポート名・色分け等が
+既に揃っている)。
+
+CLI側: `_bas_process`(`engine/rules.py`)に`map-e ipv4-pool <start> <end>`/
+`map-e br-address <addr>`(config-mode)と`show map-e rules`を追加、
+`_bas_show_config`にプール/BRアドレスの反映を追加。`_yamaha_process`に
+`ipv6 prefix <value>`(見た目のみ)、`map-e use <lanN>`/`no map-e use`
+(実際の払い出し/解放は`app.py`側が担当)、`show map-e`
+(`_yamaha_show_map_e`)を追加、`_yamaha_show_config`に`ipv6 prefix`/
+`map-e use`の反映を追加。実際の払い出しロジックは(PPPoEの`pp enable`/
+IPsecの`tunnel enable`と同じ理由で)`app.py`の`handle_protocol_config`に
+置いた — `map-e use <lanN>`で`map_e_engine.request_rule()`を呼び、成功
+すれば払い出された共有IPv4を`state.interfaces['map0']`
+(prefix 32、`_register_icmp()`呼び出し)に反映する。これは`pp<N>`と同じ
+パターンで、`rib_engine`のconnected-route導出や`show`系コマンドが
+`map0`に対しても追加コードなしでそのまま動く。
+
+Live-verified end-to-end via a real running instance: `bas`に
+`map-e ipv4-pool`/`map-e br-address`を設定、`yamaha`に
+`ipv6 prefix dhcp-prefix@lan2::/64`(見た目)+`map-e use lan2`を投入→
+`show map-e`が実際に払い出されたIPv4/ポートレンジ/PSID/BRアドレスを表示、
+`show config`に`ip map0 address .../32`/`ipv6 prefix ...`/`map-e use
+lan2`が反映、`bas`側`show map-e rules`にもセッションが見える。さらに
+**別装置のCiscoから、RTXの別インタフェース(`lan3`)経由でMAP-E払い出し
+IPv4アドレスへの実際のping/traceroute**を実施(Ciscoに`ip route
+203.0.116.50 255.255.255.255 10.200.0.1`で/32への到達経路を設定)し、
+`ping 203.0.116.50` → `Success rate is 100 percent (5/5)`、
+`traceroute 203.0.116.50` → `1 rtx-v6p-4 (10.200.0.1)` と、実際に
+IPv4パケットがMAP-E払い出しアドレスまで到達することを確認(ルールサーバー
+へのリンクなし/認証相当のプール未設定/非`bas`デバイスへのリンクでは
+一切payされないフェイルケースも確認)。
+
+`tests/test_v6plus_mape.py`(9 tests)が`bas`側のプール/BR設定反映、
+`map-e use`での実IPv4払い出し、`show map-e`/`show map-e rules`の内容、
+`show ip route`/`state.interfaces['map0']`への反映(ping/tracerouteで
+確認した実到達性の裏付け)、`no map-e use`での解放、および3種の失敗
+ケース(ルールサーバー未リンク・非`bas`デバイスへのリンク・プール未設定)
+を固定する。

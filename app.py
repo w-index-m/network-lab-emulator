@@ -40,7 +40,7 @@ from engine.rules import RuleEngine, DeviceState, _expand_port_list
 from engine.protocols import (
     vnet, rip_engine, ospf_engine, bgp_engine, eigrp_engine, stp_engine, rib_engine,
     icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
-    nat_engine, cef_engine, dp_engine, snmp_agent, pppoe_engine,
+    nat_engine, cef_engine, dp_engine, snmp_agent, pppoe_engine, map_e_engine,
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine, mpls_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
@@ -1497,6 +1497,28 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             tun.update({'phase1': 'LARVAL', 'phase2': 'LARVAL', 'status': 'wait'})
         state.ike_enabled = False
         state.ipsec_enabled = False
+
+    # Yamaha RTX: "map-e use <lanN>" — v6プラス等IPoE+MAP-E接続で、実際に
+    # 共有IPv4アドレス/制限ポートレンジ/BRアドレスを払い出す
+    # (PPPoEのpp enable/PppoeEngineと全く同じ考え方。IPv6プレフィックス
+    # 部分の実取得は行わず、MAP-Eの払い出しだけ実際に行う)。
+    m_mape_use = re.match(r'^map-e\s+use\s+(lan\d+)$', c)
+    if state.device_type == 'yamaha' and m_mape_use:
+        iface = m_mape_use.group(1)
+        rule = map_e_engine.request_rule(device_id, iface, device_id)
+        if rule:
+            state.map_e_rule = {**rule, 'iface': iface}
+            state.interfaces['map0'] = {
+                'ip': rule['ipv4'], 'prefix': 32,
+                'status': 'up', 'speed': 'auto', 'duplex': 'full',
+            }
+            _register_icmp(device_id)
+    m_mape_no = re.match(r'^no\s+map-e\s+use(?:\s+lan\d+)?$', c)
+    if state.device_type == 'yamaha' and m_mape_no:
+        map_e_engine.release_rule(device_id, device_id)
+        state.map_e_rule = None
+        state.interfaces.pop('map0', None)
+        _register_icmp(device_id)
 
     # ── prefix-list ──
     # Cisco: "ip prefix-list NAME seq 5 permit 10.0.0.0/8 ge 24 le 30"

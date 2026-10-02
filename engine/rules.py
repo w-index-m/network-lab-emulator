@@ -422,6 +422,12 @@ class DeviceState:
             self.yamaha_current_tunnel = None
             self.ike_enabled = False
             self.ipsec_enabled = False
+            # v6プラス等IPoE+MAP-E。IPv6プレフィックス部分は見た目のみ
+            # (state.yamaha_ipv6_prefix)、MAP-Eの共有IPv4払い出し部分は
+            # engine.protocols.map_e_engine経由で実際に状態遷移させる
+            # (PPPoEのpp enable/PppoeEngineと同じ方式)。
+            self.yamaha_ipv6_prefix = ''   # 見た目のみ。実IPv6到達性判定はしない
+            self.map_e_rule = None         # {'ipv4','psid','port_range','br_ipv6'}
             self.lldp_neighbors = []
 
         # 擬似FLETS網BAS(収容局)状態
@@ -8043,6 +8049,20 @@ Configuration Revision            : 5"""
                 state.nat_descriptors.setdefault(nat_id, {})['lan'] = ifname
                 return ''
 
+            # ── ipv6 prefix ...（v6プラス等IPoEアクセスの見た目のみ。
+            # このエミュレータの共有エンジンはIPv4専用のため、実際の
+            # IPv6到達性判定はしない — show configへの反映のみ）
+            m_v6pfx = re.match(r'^ipv6\s+prefix\s+(\S+)$', c)
+            if m_v6pfx:
+                state.yamaha_ipv6_prefix = m_v6pfx.group(1)
+                return ''
+
+            # ── map-e use <lanN> ──（MAP-Eルール要求。実際の払い出しは
+            # app.py側がPPPoEのpp enableと同じ順序でmap_e_engineを呼ぶ）
+            if re.match(r'^(no\s+)?map-e\s+use(\s+lan\d+)?$', c):
+                # 実際の払い出し/解放はapp.py側(handle_protocol_config)が行う。
+                return ''
+
             # ── pp enable <N> / pp disable <N> ──（pp selectの外からも実行可）
             m_ppen = re.match(r'^pp\s+(enable|disable)\s+(\d+)$', c)
             if m_ppen:
@@ -8075,10 +8095,12 @@ Configuration Revision            : 5"""
             m_tunstat = re.match(r'^show\s+status\s+tunnel\s+(\d+)$', c)
             if m_tunstat:
                 return self._yamaha_show_tunnel_status(state, int(m_tunstat.group(1)))
+            if re.match(r'^show\s+map-e$', c):
+                return self._yamaha_show_map_e(state)
             if re.match(r'^show\s+environment$', c):
                 return f'{state.hostname}\nUptime: {state.uptime_str()}'
 
-        if c == 'show config' or c.startswith('show status'):
+        if c == 'show config' or c.startswith('show status') or c == 'show map-e':
             # administratorに上がっていない状態でのshow系は一般ユーザでも
             # 閲覧可能(実機準拠)なので、admin判定を経由せずここでも拾う。
             if c == 'show config':
@@ -8089,8 +8111,20 @@ Configuration Revision            : 5"""
             m_tunstat = re.match(r'^show\s+status\s+tunnel\s+(\d+)$', c)
             if m_tunstat:
                 return self._yamaha_show_tunnel_status(state, int(m_tunstat.group(1)))
+            if c == 'show map-e':
+                return self._yamaha_show_map_e(state)
 
         return f'Unknown command: {orig}'
+
+    def _yamaha_show_map_e(self, state: DeviceState) -> str:
+        rule = state.map_e_rule
+        if not rule:
+            return 'MAP-E is not connected.'
+        lo, hi = rule['port_range']
+        return (f'IPv4 address     : {rule["ipv4"]}\n'
+                f'Port range        : {lo}-{hi} (PSID={rule["psid"]})\n'
+                f'Border Relay      : {rule["br_ipv6"]}\n'
+                f'IPv6 prefix       : {state.yamaha_ipv6_prefix or "(未設定)"}')
 
     def _yamaha_show_tunnel_status(self, state: DeviceState, tun_id: int) -> str:
         tun = state.ipsec_tunnels.get(tun_id)
@@ -8140,6 +8174,10 @@ Configuration Revision            : 5"""
                 lines.append(f' ipsec ike pre-shared-key 1 text {tun["preshared"]}')
             if state.ike_enabled and state.ipsec_enabled:
                 lines.append(f' tunnel enable {tun_id}')
+        if state.yamaha_ipv6_prefix:
+            lines.append(f'ipv6 prefix {state.yamaha_ipv6_prefix}')
+        if state.map_e_rule:
+            lines.append(f'map-e use {state.map_e_rule.get("iface", "lan2")}')
         return '\n'.join(lines).rstrip()
 
     def _yamaha_routes(self, state: DeviceState):
@@ -8177,7 +8215,7 @@ Configuration Revision            : 5"""
         PppoeEngine.connect()を呼んでここで登録した内容と突き合わせる。
         """
         orig = cmd.strip()
-        from engine.protocols import pppoe_engine
+        from engine.protocols import pppoe_engine, map_e_engine
 
         if c in ('configure terminal', 'conf t', 'configure', 'conf'):
             state.mode = 'config'
@@ -8214,16 +8252,34 @@ Configuration Revision            : 5"""
             if c == 'save':
                 return ''
 
+            # ── MAP-E(v6プラス等)ルールサーバー設定 ──
+            m_mape_pool = re.match(r'^map-e\s+ipv4-pool\s+([\d.]+)\s+([\d.]+)$', c)
+            if m_mape_pool:
+                start, end = m_mape_pool.groups()
+                device_id = getattr(state, '_device_id', None)
+                if device_id:
+                    map_e_engine.set_ipv4_pool(device_id, start, end)
+                return ''
+            m_mape_br = re.match(r'^map-e\s+br-address\s+(\S+)$', c)
+            if m_mape_br:
+                device_id = getattr(state, '_device_id', None)
+                if device_id:
+                    map_e_engine.set_br_address(device_id, m_mape_br.group(1))
+                return ''
+
         if re.match(r'^show\s+pppoe\s+session$', c):
             device_id = getattr(state, '_device_id', None)
             return pppoe_engine.format_show_session(device_id) if device_id else ''
+        if re.match(r'^show\s+map-e\s+rules?$', c):
+            device_id = getattr(state, '_device_id', None)
+            return map_e_engine.format_show_rules(device_id) if device_id else ''
         if re.match(r'^show\s+(running-config|config)$', c):
             return self._bas_show_config(state)
 
         return f'Unknown command: {orig}'
 
     def _bas_show_config(self, state: DeviceState) -> str:
-        from engine.protocols import pppoe_engine
+        from engine.protocols import pppoe_engine, map_e_engine
         device_id = getattr(state, '_device_id', None)
         lines = [f'# {state.hostname} pseudo-FLETS BAS configuration']
         for name in sorted(state.interfaces):
@@ -8236,6 +8292,12 @@ Configuration Revision            : 5"""
                 lines.append(f'ip pool {bas["pool_start"]} {bas["pool_end"]}/{bas["prefix"]}')
             for user in sorted(bas.get('users', {})):
                 lines.append(f'pppoe-user {user} {bas["users"][user]}')
+        mape = map_e_engine.nodes.get(device_id) if device_id else None
+        if mape:
+            if mape.get('ipv4_pool'):
+                lines.append(f'map-e ipv4-pool {mape["ipv4_pool"][0]} {mape["ipv4_pool"][-1]}')
+            if mape.get('br_ipv6'):
+                lines.append(f'map-e br-address {mape["br_ipv6"]}')
         return '\n'.join(lines)
 
     def _asa_process(self, cmd: str, c: str, state: DeviceState) -> str:
