@@ -234,11 +234,15 @@ class DeviceState:
             "lan1": {"ip": "192.168.100.1", "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "lan2": {"ip": "203.0.113.2",   "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "lan3": {"ip": "",              "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        } if device_type == "yamaha" else {
+        } if device_type == "yamaha" else ({
+            # 擬似FLETS網BAS(収容局相当): wan1(加入者収容)/uplink1 形式
+            "wan1": {"ip": "100.64.0.254", "prefix": 16, "status": "up", "speed": "10000", "duplex": "full"},
+            "uplink1": {"ip": "", "prefix": 0, "status": "down", "speed": "auto", "duplex": "auto"},
+        } if device_type == "bas" else {
             "GigabitEthernet0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        })))
+        }))))
 
         if device_type == "sir":
             # ether <slot> <port> vlan untag <vid>（実機のfactory-default）
@@ -396,13 +400,24 @@ class DeviceState:
 
         # Yamaha RTX1300 状態
         # ルーティングは他機種同様 rib_engine に委譲する(重複状態を持たない)。
-        # NAT記述子(nat descriptor)とPPPoE(pp select)は実パケット変換/実
-        # PPPoEネゴシエーションまでは再現せず、設定の受理とshow configへの
-        # 反映のみのスコープ(スコープ外であることをCLAUDE.mdに明記)。
+        # NAT記述子(nat descriptor)は実パケット変換までは再現せず、設定の
+        # 受理とshow configへの反映のみ。PPPoE(pp select)は
+        # engine.protocols.PppoeEngine(擬似FLETS網のBASとのソフトウェア的
+        # ネゴシエーション)に接続され、"pp enable"で実際に認証・IP払い出し
+        # が行われる(本物のEthernetフレームPADI/PADO等は再現していない
+        # — 装置間はループバックIPエイリアスで繋がっているだけで実L2隣接
+        # を持たないため)。
         if device_type == "yamaha":
             self.nat_descriptors = {}   # {id: {'type': 'masquerade', 'lan': 'lan2'}}
-            self.yamaha_pp = {}         # {pp_id: {'pppoe_lan','auth_user','auth_pass','ip','enabled'}}
+            self.yamaha_pp = {}         # {pp_id: {'pppoe_lan','auth_user','auth_pass','enabled','connected'}}
             self.yamaha_current_pp = None
+            self.lldp_neighbors = []
+
+        # 擬似FLETS網BAS(収容局)状態
+        # IPプール・認証ユーザーはengine.protocols.pppoe_engineに直接
+        # 持たせる(ここにも二重に持たない — rib_engineへの経路委譲と
+        # 同じ方針)。
+        if device_type == "bas":
             self.lldp_neighbors = []
 
     def uptime_str(self):
@@ -865,6 +880,10 @@ class RuleEngine:
         # Yamaha RTX は独自コマンド体系(ip lanN address等) → 専用ハンドラへ
         if state.device_type == 'yamaha':
             return self._yamaha_process(cmd, c, state)
+
+        # 擬似FLETS網BAS(収容局) → 専用ハンドラへ
+        if state.device_type == 'bas':
+            return self._bas_process(cmd, c, state)
 
         # モード遷移
         # 実機の end は「どの設定モードからでも特権EXECへ一気に戻る」。
@@ -8046,6 +8065,78 @@ Configuration Revision            : 5"""
         lines.append(f'  Link: {link}')
         if info.get('ip'):
             lines.append(f'  IP Address: {info["ip"]}/{info["prefix"]}')
+        return '\n'.join(lines)
+
+    # ══════════════════════════════════════════
+    # 擬似FLETS網BAS(収容局) — PPPoEアクセスコンセントレータ相当
+    # ══════════════════════════════════════════
+    def _bas_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """このエミュレータ独自の簡易CLI(特定の実製品を模したものではない)。
+
+        IPプール・認証ユーザーの実体は engine.protocols.pppoe_engine に
+        直接持たせ(state側には複製しない)、RTX側の"pp enable"が
+        PppoeEngine.connect()を呼んでここで登録した内容と突き合わせる。
+        """
+        orig = cmd.strip()
+        from engine.protocols import pppoe_engine
+
+        if c in ('configure terminal', 'conf t', 'configure', 'conf'):
+            state.mode = 'config'
+            return ''
+        if c in ('exit', 'end') and state.mode == 'config':
+            state.mode = 'exec'
+            return ''
+        if c in ('exit', 'quit') and state.mode == 'exec':
+            return ''
+
+        if state.mode == 'config':
+            m_pool = re.match(r'^ip\s+pool\s+([\d.]+)\s+([\d.]+)/(\d+)$', c)
+            if m_pool:
+                start, end, prefix = m_pool.groups()
+                device_id = getattr(state, '_device_id', None)
+                if device_id:
+                    pppoe_engine.set_pool(device_id, start, end, int(prefix))
+                return ''
+            m_user = re.match(r'^pppoe-user\s+(\S+)\s+(\S+)$', c)
+            if m_user:
+                user, pw = m_user.groups()
+                device_id = getattr(state, '_device_id', None)
+                if device_id:
+                    pppoe_engine.add_user(device_id, user, pw)
+                return ''
+            m_if = re.match(r'^ip\s+(wan\d+|uplink\d+)\s+address\s+([\d.]+)/(\d+)$', c)
+            if m_if:
+                ifname, ip, prefix = m_if.groups()
+                if ifname in state.interfaces:
+                    state.interfaces[ifname]['ip'] = ip
+                    state.interfaces[ifname]['prefix'] = int(prefix)
+                    state.interfaces[ifname]['status'] = 'up'
+                return ''
+            if c == 'save':
+                return ''
+
+        if re.match(r'^show\s+pppoe\s+session$', c):
+            device_id = getattr(state, '_device_id', None)
+            return pppoe_engine.format_show_session(device_id) if device_id else ''
+        if re.match(r'^show\s+(running-config|config)$', c):
+            return self._bas_show_config(state)
+
+        return f'Unknown command: {orig}'
+
+    def _bas_show_config(self, state: DeviceState) -> str:
+        from engine.protocols import pppoe_engine
+        device_id = getattr(state, '_device_id', None)
+        lines = [f'# {state.hostname} pseudo-FLETS BAS configuration']
+        for name in sorted(state.interfaces):
+            info = state.interfaces[name]
+            if info.get('ip'):
+                lines.append(f'ip {name} address {info["ip"]}/{info["prefix"]}')
+        bas = pppoe_engine.nodes.get(device_id) if device_id else None
+        if bas:
+            if bas.get('pool_start'):
+                lines.append(f'ip pool {bas["pool_start"]} {bas["pool_end"]}/{bas["prefix"]}')
+            for user in sorted(bas.get('users', {})):
+                lines.append(f'pppoe-user {user} {bas["users"][user]}')
         return '\n'.join(lines)
 
     def _asa_process(self, cmd: str, c: str, state: DeviceState) -> str:

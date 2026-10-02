@@ -40,7 +40,7 @@ from engine.rules import RuleEngine, DeviceState, _expand_port_list
 from engine.protocols import (
     vnet, rip_engine, ospf_engine, bgp_engine, eigrp_engine, stp_engine, rib_engine,
     icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
-    nat_engine, cef_engine, dp_engine, snmp_agent,
+    nat_engine, cef_engine, dp_engine, snmp_agent, pppoe_engine,
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine, mpls_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
@@ -2481,6 +2481,63 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             prefix = int(prefix)
         rib_engine.remove_static_route(device_id, net, prefix, yamaha_no_route.group(2))
         return
+    # Yamaha RTX: "ip route default gateway pp <N>"（PPPoE接続経由の
+    # デフォルトルート。実機の典型的なFLETS接続構成）。gatewayは
+    # pp Nが実際にPPPoE接続を確立するまで分からないため、ここでは
+    # 「pp Nが繋がったら既定経路を貼る」という意図だけ記録しておき、
+    # 実際の登録は下の"pp enable"ハンドリングで行う。
+    yamaha_route_via_pp = re.match(
+        r'^ip\s+route\s+default\s+gateway\s+pp\s+(\d+)', c)
+    if yamaha_route_via_pp and state.device_type == 'yamaha':
+        pp_id = int(yamaha_route_via_pp.group(1))
+        state.yamaha_pp.setdefault(pp_id, {})['default_route_pending'] = True
+        return
+    # Yamaha RTX: "pp enable <N>" / "pp disable <N>" — 擬似FLETS網BASとの
+    # PPPoEセッションを実際に張る/切る(engine.protocols.pppoe_engine)。
+    # 本物のEthernetフレームPADI/PADO等は再現していないが、LCP/PAP・CHAP
+    # 認証/IPCPのIP払い出しに相当する処理を実際に行う(装置間は
+    # vnet.links/device_typesで解決、認証はpppoe_engine側の設定ユーザー
+    # と突き合わせる)。
+    yamaha_pp_toggle = re.match(r'^pp\s+(enable|disable)\s+(\d+)$', c)
+    if yamaha_pp_toggle and state.device_type == 'yamaha':
+        action, pp_id = yamaha_pp_toggle.group(1), int(yamaha_pp_toggle.group(2))
+        pp = state.yamaha_pp.get(pp_id, {})
+        if action == 'disable':
+            if pp.get('connected'):
+                pppoe_engine.disconnect(device_id, pp_id)
+                state.interfaces.pop(f'pp{pp_id}', None)
+                gw = pp.pop('gateway', None)
+                if gw:
+                    rib_engine.remove_static_route(device_id, '0.0.0.0', 0, gw)
+                pp['connected'] = False
+                _register_icmp(device_id)
+            return
+        pppoe_lan = pp.get('pppoe_lan')
+        auth_user = pp.get('auth_user')
+        auth_pass = pp.get('auth_pass')
+        if pppoe_lan and auth_user:
+            result = pppoe_engine.connect(
+                device_id, pp_id, pppoe_lan, auth_user, auth_pass or '', hostname)
+            if result:
+                bas_state = device_sessions.get(result['bas_id'])
+                gateway = None
+                if bas_state:
+                    for info in bas_state.interfaces.values():
+                        if info.get('ip'):
+                            gateway = info['ip']
+                            break
+                state.interfaces[f'pp{pp_id}'] = {
+                    'ip': result['ip'], 'prefix': result['prefix'],
+                    'status': 'up', 'speed': 'auto', 'duplex': 'full',
+                }
+                pp['connected'] = True
+                pp['gateway'] = gateway
+                _register_icmp(device_id)
+                if gateway and pp.get('default_route_pending'):
+                    rib_engine.add_static_route(
+                        device_id, hostname, '0.0.0.0', 0, gateway, 1)
+                    await _emit_route_log(device_id, '0.0.0.0', 0, gateway, 1)
+        return
     # ルート削除 "no ip route ..."
     no_route = re.match(r'^no\s+ip\s+route\s+([\d.]+)(?:/(\d+)|\s+([\d.]+))', c)
     if no_route:
@@ -4422,6 +4479,15 @@ def _build_running_config(device_id: str, state) -> str:
     is_nexus = state.device_type == 'nexus'
 
     if is_apresia:
+        return rule_engine.process('show running-config', state)
+
+    # 擬似FLETS網BAS: Si-R/Catalyst等のデフォルト分岐に落ちないよう、
+    # 専用の _bas_process 側(RuleEngine)に明示的に委譲する
+    # (このブロック自体がRuleEngine.process()より先に実行されるため、
+    # 放っておくとSi-Rスタイルのダミー出力になってしまう — Juniperの
+    # "show interfaces terse"や"show ip route"でも起きた、app.py側の
+    # 汎用ハンドラが先に勝ってしまう問題と同じ種類のもの)。
+    if state.device_type == 'bas':
         return rule_engine.process('show running-config', state)
 
     # ── NX-OS (Nexus 9000) running-config ──

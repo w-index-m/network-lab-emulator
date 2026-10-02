@@ -4410,6 +4410,102 @@ rib_engine = RibEngine()
 
 
 # ══════════════════════════════════════════
+# PPPoEエンジン（擬似FLETS網: BAS ⇔ RTX の pp select セッション）
+# ══════════════════════════════════════════
+# 実Ethernetフレーム(PADI/PADO等、Ethertype 0x8863)は、このエミュレータの
+# 装置同士がループバックIPエイリアスで繋がっているだけで本物のL2隣接を
+# 持たないため再現できない。他のプロトコルエンジン(OspfEngine/RipEngine)
+# と同じ「vnet.links/device_typesを見てソフトウェア的にネゴシエーション
+# する」方式で、LCP/PAP・CHAP認証/IPCPのIP払い出しという段階そのものは
+# 忠実に再現する。
+class PppoeEngine:
+    def __init__(self):
+        # bas_device_id -> {'pool_start','pool_end','prefix','users':{name:pw},
+        #                    'leased': set(ip), 'sessions': {session_id: {...}}}
+        self.nodes: Dict[str, dict] = {}
+        # (rtx_device_id, pp_id) -> {'bas_id','ip','gateway','prefix','session_id'}
+        self.pp_sessions: Dict[tuple, dict] = {}
+
+    def _bas(self, device_id: str) -> dict:
+        return self.nodes.setdefault(device_id, {
+            'pool_start': None, 'pool_end': None, 'prefix': 32,
+            'users': {}, 'leased': set(), 'sessions': {},
+        })
+
+    def set_pool(self, device_id: str, start: str, end: str, prefix: int):
+        bas = self._bas(device_id)
+        bas['pool_start'], bas['pool_end'], bas['prefix'] = start, end, prefix
+
+    def add_user(self, device_id: str, username: str, password: str):
+        self._bas(device_id)['users'][username] = password
+
+    def _alloc_ip(self, bas: dict) -> Optional[str]:
+        if not bas['pool_start'] or not bas['pool_end']:
+            return None
+        start = int(ipaddress.IPv4Address(bas['pool_start']))
+        end = int(ipaddress.IPv4Address(bas['pool_end']))
+        for raw in range(start, end + 1):
+            ip = str(ipaddress.IPv4Address(raw))
+            if ip not in bas['leased']:
+                bas['leased'].add(ip)
+                return ip
+        return None
+
+    def connect(self, rtx_id: str, pp_id, pppoe_lan_iface: str,
+                username: str, password: str, rtx_hostname: str) -> Optional[dict]:
+        """PADI/PADO→LCP→PAP/CHAP→IPCPに相当する一連の処理を1回で行う。
+        pppoe_lan_iface経由で繋がっているdevice_type=='bas'のデバイスを
+        探し、認証に成功すればプールからIPを払い出してセッションを張る。
+        """
+        for peer in vnet.get_neighbors(rtx_id):
+            if vnet.interface_links.get(rtx_id, {}).get(peer) != pppoe_lan_iface:
+                continue
+            if vnet.device_types.get(peer) != 'bas':
+                continue
+            bas = self.nodes.get(peer)
+            if not bas or bas['users'].get(username) != password:
+                continue
+            ip = self._alloc_ip(bas)
+            if not ip:
+                continue
+            # ゲートウェイ(BAS自身のIP)はstate.interfacesに依存するため
+            # ここでは解決しない。呼び出し元(app.py)がbas側の
+            # device_sessionsから解決して戻り値に補って使う。
+            session_id = f'{rtx_id}-pp{pp_id}'
+            bas['sessions'][session_id] = {
+                'rtx_id': rtx_id, 'hostname': rtx_hostname,
+                'ip': ip, 'pp_id': pp_id,
+            }
+            result = {'bas_id': peer, 'ip': ip, 'prefix': bas['prefix'],
+                      'session_id': session_id}
+            self.pp_sessions[(rtx_id, pp_id)] = result
+            return result
+        return None
+
+    def disconnect(self, rtx_id: str, pp_id) -> Optional[dict]:
+        sess = self.pp_sessions.pop((rtx_id, pp_id), None)
+        if not sess:
+            return None
+        bas = self.nodes.get(sess['bas_id'])
+        if bas:
+            bas['sessions'].pop(sess['session_id'], None)
+            bas['leased'].discard(sess['ip'])
+        return sess
+
+    def format_show_session(self, device_id: str) -> str:
+        bas = self.nodes.get(device_id)
+        if not bas or not bas['sessions']:
+            return 'No active PPPoE sessions.'
+        lines = ['Session            Hostname         IP Address       PP']
+        for sid, s in sorted(bas['sessions'].items()):
+            lines.append(f'{sid:<18} {s["hostname"]:<16} {s["ip"]:<16} pp{s["pp_id"]}')
+        return '\n'.join(lines)
+
+
+pppoe_engine = PppoeEngine()
+
+
+# ══════════════════════════════════════════
 # ICMP エンジン（ping / traceroute 実到達性判定）
 # ══════════════════════════════════════════
 class IcmpEngine:

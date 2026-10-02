@@ -320,6 +320,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
         <button class="launcher-add-btn" onclick="launcherAddDev('arista')"         style="border-color:#00a8e0;color:#00a8e0">+ Arista 7050SX3</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('juniper')"        style="border-color:#84b135;color:#84b135">+ Juniper vSRX</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('yamaha')"         style="border-color:#e2001a;color:#e2001a">+ Yamaha RTX1300</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('bas')"            style="border-color:#808080;color:#a0a0a0">+ 擬似FLETS BAS</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('generic-router')" style="border-color:#a040c0;color:#a040c0">+ Generic Router</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('generic-switch')" style="border-color:#408040;color:#408040">+ Generic Switch</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('pc')"             style="border-color:#606060;color:#808080">+ PC</button>
@@ -404,6 +405,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
           <button class="dev-add-btn" onclick="addDevice('arista')"   style="border-color:#00a8e0;color:#00a8e0">＋ Arista 7050SX3</button>
           <button class="dev-add-btn" onclick="addDevice('juniper')"  style="border-color:#84b135;color:#84b135">＋ Juniper vSRX</button>
           <button class="dev-add-btn" onclick="addDevice('yamaha')"   style="border-color:#e2001a;color:#e2001a">＋ Yamaha RTX1300</button>
+          <button class="dev-add-btn" onclick="addDevice('bas')"      style="border-color:#808080;color:#a0a0a0">＋ 擬似FLETS BAS</button>
           <button class="dev-add-btn" onclick="addDevice('generic-router')" style="border-color:#a040c0;color:#a040c0">＋ 汎用Router</button>
           <button class="dev-add-btn" onclick="addDevice('generic-switch')" style="border-color:#408040;color:#408040">＋ 汎用Switch</button>
           <button class="dev-add-btn" onclick="addDevice('pc')"       style="border-color:#606060;color:#808080">＋ PC</button>
@@ -683,6 +685,7 @@ const DEV_TEMPLATES = {
   'arista':         {icon:'A', color:'#00a8e0', model:'Arista 7050SX3',      prefix:'Arista', type:'arista'},
   'juniper':        {icon:'J', color:'#84b135', model:'Juniper vSRX',        prefix:'Juniper', type:'juniper'},
   'yamaha':         {icon:'Y', color:'#e2001a', model:'Yamaha RTX1300',      prefix:'RTX',    type:'yamaha'},
+  'bas':            {icon:'B', color:'#a0a0a0', model:'疑似FLETS BAS',       prefix:'BAS',    type:'bas'},
   'generic-router': {icon:'R', color:'#a040c0', model:'Generic Router',      prefix:'Router', type:'cisco'},
   'generic-switch': {icon:'S', color:'#408040', model:'Generic Switch',      prefix:'SW',     type:'srs'},
   'pc':             {icon:'H', color:'#606060', model:'Host PC',             prefix:'PC',     type:'pc'},
@@ -1854,6 +1857,7 @@ function defPort(type,n){
   if(type==='arista')return`Ethernet${n+1}`;
   if(type==='juniper')return`ge-0/0/${n}`;
   if(type==='yamaha')return`lan${n+1}`;
+  if(type==='bas')return n===0?'wan1':`uplink${n}`;
   return`GigabitEthernet0/${n}`;
 }
 // 装置種別ごとの接続インターフェース候補（プルダウン用）
@@ -1887,6 +1891,8 @@ function portOptions(type){
     for(let i=0;i<=2;i++)o.push(`ge-0/0/${i}`);
   } else if(type==='yamaha'){
     for(let i=1;i<=3;i++)o.push(`lan${i}`);
+  } else if(type==='bas'){
+    o.push('wan1','uplink1');
   } else {
     for(let i=0;i<=3;i++)o.push(`GigabitEthernet0/${i}`);
   }
@@ -2274,6 +2280,7 @@ function _inferDeviceType(text){
   if(/interface\s+ethernet\d+(?!\/)|arista|^\s*no\s+aaa\s+root/m.test(t)) return 'arista';
   if(/^\s*set\s+(interfaces|system|routing-options)\b|^\s*delete\s+interfaces\b|junos/m.test(t)) return 'juniper';
   if(/^\s*ip\s+lan\d+\s+address|administrator|nat\s+descriptor|pp\s+select/m.test(t)) return 'yamaha';
+  if(/^\s*ip\s+pool\s+[\d.]+|pppoe-user\s+\S+/m.test(t)) return 'bas';
   if(/ip\s+address\s+[\d.]+\s+[\d.]+|router\s+(ospf|bgp|eigrp)|interface\s+gigabitethernet0\//m.test(t)) return 'cisco';
   return 'cisco';
 }
@@ -2298,7 +2305,7 @@ async function _importMultipleConfigs(files){
     const type=_inferDeviceType(text);
     const id='dev'+Date.now().toString(36)+i;
     const hostname=_inferHostname(text, file.name.replace(/\.[^.]+$/,''));
-    const colors={sir:'#00c840',srs:'#00a0ff',catalyst:'#1e90ff',cisco:'#e05a00',nexus:'#7050d0',apresia:'#c00040',asa:'#cc4400',arista:'#00a8e0',juniper:'#84b135',yamaha:'#e2001a'};
+    const colors={sir:'#00c840',srs:'#00a0ff',catalyst:'#1e90ff',cisco:'#e05a00',nexus:'#7050d0',apresia:'#c00040',asa:'#cc4400',arista:'#00a8e0',juniper:'#84b135',yamaha:'#e2001a',bas:'#a0a0a0'};
     DEVICES[id]={type,hostname,color:colors[type]||'#888'};
     NODE_POS[id]={x:150+(i%3)*220,y:100+Math.floor(i/3)*160};
     TERMS[id]={busy:false,typed:'',cur:0,history:[],histIdx:-1};

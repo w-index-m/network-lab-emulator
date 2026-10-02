@@ -11,7 +11,7 @@ NETCONF/SSH-CLI/Telnet-CLI, gNMI over gRPC), so real clients (ncclient,
 gnmic/pygnmi, snmpwalk, an actual ssh/telnet client) can connect to emulated
 devices. See `README.md` for the full feature/protocol matrix and supported
 device types (`device_type`: `catalyst`, `nexus`, `cisco`, `asa`, `sir`,
-`srs`, `apresia`, `bigip`, `arista`, `juniper`, `yamaha`, `pc`).
+`srs`, `apresia`, `bigip`, `arista`, `juniper`, `yamaha`, `bas`, `pc`).
 
 **Publicly deployed** at https://network-lab-emulator.onrender.com/ (Render).
 That deployment doesn't have Ollama available, so its `network_ontology_query.py
@@ -551,6 +551,75 @@ interface config, the NAT/PPPoE config-reflection, and — the priority —
 5 tests specifically asserting routes actually show up in both `show
 ip route` and `show config` after being configured, including a
 connected-route and a `no ip route` removal case.
+
+**Pseudo-FLET'S network (`bas` device type + `engine.protocols.PppoeEngine`)**:
+on follow-up request ("擬似ふれっつ網も作れますか？" → "擬似ふれっつ網と
+繋ぎたいと言えば繋がる？"), implemented real PPPoE negotiation between a
+new `bas` device type (a pseudo access-concentrator/収容局, representing
+NTT FLET'S-style PPPoE termination) and Yamaha's `pp select` PPPoE client
+config, which was previously config-acceptance-only.
+
+**Explicit architectural constraint discussed with the user before
+building this** (important for any future real-socket protocol work):
+real PPPoE Discovery (PADI/PADO/PADS) runs as raw Ethernet frames
+(Ethertype 0x8863, below IP, needs AF_PACKET on a shared L2 broadcast
+domain) — but this emulator's devices only share loopback-IP-alias
+adjacency, not real L2, so genuine Ethernet-frame PPPoE Discovery isn't
+achievable here. Went with the same pattern `OspfEngine`/`RipEngine`
+already use instead: a software-level engine (`PppoeEngine` in
+`engine/protocols.py`) that resolves adjacency via `vnet.get_neighbors()`/
+`vnet.interface_links`/`vnet.device_types` (same mechanism those engines
+use) and performs the LCP/PAP-CHAP-auth/IPCP-IP-assignment *stages*
+faithfully as real state transitions — just not as literal real Ethernet
+frames. This keeps the "real protocol state machine" part of the
+project's ethos while being honest that it isn't literally
+interoperable with a real OS-level PPPoE client (which needs real L2).
+
+Implementation: `PppoeEngine.nodes[bas_device_id]` holds the configured
+IP pool (`ip pool <start> <end>/<prefix>`) and accepted credentials
+(`pppoe-user <name> <password>`) — set directly by `bas`'s own CLI
+handler (`_bas_process` in `engine/rules.py`, dispatched like
+`apresia`/`juniper`/`yamaha`; a custom non-vendor-specific CLI since
+"pseudo-FLET'S BAS" isn't a real commercial product to emulate
+faithfully). `PppoeEngine.connect(rtx_id, pp_id, pppoe_lan_iface, user,
+password, hostname)` finds a `device_type == 'bas'` neighbor reachable
+via that exact interface, checks credentials, and allocates the next
+free IP from the pool — called from `app.py`'s `handle_protocol_config`
+on `pp enable <N>` (not from `_yamaha_process`, same reasoning as the
+Juniper SSH-listener-ordering fix: this needs to mutate shared state
+`_yamaha_process` doesn't own). On success, the assigned IP becomes a
+real `state.interfaces['pp<N>']` entry (same source of truth
+`_register_icmp()`/`rib_engine`'s connected-route derivation/`show`
+commands already use for every other interface — not a parallel
+tracking structure) and, if `ip route default gateway pp <N>` was
+configured (parsed separately, stored pending until the gateway IP is
+actually known), a real default route is registered via
+`rib_engine.add_static_route()` pointing at the BAS's own interface IP.
+`pp disable <N>` tears both back down. Auth failure or no `bas` device
+linked on that interface leaves everything unchanged (no fabricated
+success).
+
+Live-verified end-to-end via a real running instance: BAS configured
+with a pool + user, RTX's `pp select 1` configured with matching
+credentials and `ip route default gateway pp 1`, linked via `/api/link`
+— `pp enable 1` assigned a real pool IP, `show ip route`/`show config`
+both reflected the new default route via the BAS's real IP, `show
+pppoe session` on the BAS showed the session, and a wrong password /
+no link / linking to a non-`bas` device all correctly assigned nothing.
+**Found via this live run, not guessed**: `show running-config` for
+`bas` devices was being intercepted by `app.py`'s `_build_running_config`
+(same two-layer-dispatch trap as Juniper's `show ip route` earlier this
+session — a generic app.py handler runs before any device-specific
+RuleEngine handler gets a chance) and returned garbled Si-R-style
+output instead of `_bas_process`'s own config rendering; fixed by
+adding `bas` to the explicit device-type delegation list there (same
+pattern already used for `apresia`).
+
+`tests/test_pseudo_flets_pppoe.py` (9 tests) covers the BAS CLI, a
+successful connect assigning a real pool IP, the BAS seeing the
+session, the default-route-via-pp case (the routing-reflected
+requirement, PPPoE edition), `pp disable` teardown, and three failure
+cases (wrong password, no BAS linked, linked to a non-`bas` device).
 
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 
