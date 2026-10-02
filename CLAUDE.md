@@ -924,3 +924,43 @@ IPv4パケットがMAP-E払い出しアドレスまで到達することを確�
 確認した実到達性の裏付け)、`no map-e use`での解放、および3種の失敗
 ケース(ルールサーバー未リンク・非`bas`デバイスへのリンク・プール未設定)
 を固定する。
+
+**Yamaha RTX ⇔ Cisco IOS IPsec over IPoE(v6プラス/MAP-E) — ノウハウ**:
+ユーザー依頼「YAMAHA CiscoでIPOEしてIPsec接続設定作ってノウハウに残して」。
+上記の擬似FLET'S PPPoE経由IPsec(`tests/test_yamaha_cisco_ipsec_over_pppoe.py`)
+のIPoE版。**実装コードは一切追加していない** — `engine/ike_engine.py`の
+IKE/IPsecネゴシエーションは`ipsec ike local-address`に設定された値を
+そのまま使うだけで、そのIPが固定/PPPoE払い出し/MAP-E払い出しのどれで
+得られたものかを一切区別しない設計だったため、MAP-E払い出しの`map0`
+アドレスをそのまま`local-address`に指定するだけで、既存の`pp<N>`
+(PPPoE)のケースと全く同じ経路で確立することをライブ検証で確認できた
+(`dt in ('sir', 'srs', 'yamaha')`判定は既にPPPoE対応時に拡張済みで
+流用できた)。
+
+**手順(ノウハウとして再利用可能な想定コンフィグの骨格)**:
+1. v6プラスのルールサーバー役(`bas`)に `map-e ipv4-pool <start> <end>` /
+   `map-e br-address <ipv6>` を設定。
+2. Yamaha RTXで `administrator` → (見た目の)IPoEアクセス設定として
+   `ipv6 prefix dhcp-prefix@lanN::/64` → ルールサーバーとリンクした
+   インタフェースで `map-e use lanN` を実行し、共有IPv4を取得
+   (`show map-e` で払い出されたIPv4/ポートレンジ/PSID/BRアドレスを確認)。
+3. `tunnel select N` → `ipsec tunnel`/`ipsec sa policy`/
+   `ipsec ike local-address N <map-eで払い出された共有IPv4>` /
+   `ipsec ike remote-address N <Cisco側WAN IP>` /
+   `ipsec ike pre-shared-key N text <psk>` → `exit`。
+4. 対向のCisco IOSは通常の`crypto isakmp key <psk> address <共有IPv4>` /
+   `crypto ipsec transform-set` / `crypto map`一式 — 対向アドレスとして
+   RTXの固定WANではなく、MAP-E払い出しの共有IPv4をそのまま指定する点が
+   唯一の違い(PPPoE版でも同様、動的に払い出されたIPを対向として扱う)。
+5. `tunnel enable N` で実際にネゴシエーションが走る(成功時は実機同様
+   無言)。`show status tunnel N` で `IKE negotiation: MATURE` /
+   `IPsec SA: MATURE` / `status: established` を確認。
+
+ライブ検証: 上記手順をTestClientスクリプトで実行し、Cisco↔RTX間で実際に
+IPsecが確立することを確認(`IKE negotiation : MATURE` / `IPsec SA :
+MATURE` / `status : established`)。`tests/test_yamaha_cisco_ipsec_over_ipoe_mape.py`
+(6 tests)がこの手順を固定する: MAP-E払い出しIPがCisco側peer設定と一致
+すること、確立成功(`tunnel enable`が無言である実機仕様込み)、
+`state.ipsec_tunnels`への直接反映、誤PSKでの`DYING`/`wait`失敗、
+`tunnel disable`でのSA解体、およびMAP-E未接続(共有IPv4が存在しない)
+状態では確立しないケース。
