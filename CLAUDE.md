@@ -1032,3 +1032,107 @@ reflector-client未設定時のsplit-horizon維持(regression防止)/
 不一致時の非インストール/撤回での解除/ICMPエンジンでの実際の不達、
 およびCLI側の新規正規表現3つ(`bgp cluster-id`/
 `route-reflector-client`/`bgp rtbh-community`)の処理を固定する。
+
+**VRRP unicast-peer(keepalivedの`unicast_peer`相当)**:
+[vincentbernat/network-lab](https://github.com/vincentbernat/network-lab)
+の`lab-keepalived-unicast`から持ち込んだ機能(ユーザーが「両方」実装を
+指定した2機能のうち1つ、もう1つはCisco ZTP)。
+
+**実装前の調査で見つかった制約**: 既存の`VrrpEngine`はVRRP
+advertisementを`vnet.broadcast_to_neighbors`(= multicast相当)でしか
+送らず、`app.py`側のVRRP設定コマンド(`vrrp <gid> ip <vip>`等)も選出の
+即時同期を`vnet.get_neighbors(device_id)`(= vnet上の直結隣接)だけに
+頼っていた。つまり**VRRPピア同士がvnet上で直結(同一リンク)でなければ
+advertisementがそもそも届かず、永久にInitのまま選出されない**制約が
+あった。これはkeepalivedの`unicast_peer`が実運用で解決する課題そのもの
+(multicastが届かない/フィルタされる環境、あるいはL3越しの構成で
+VRRPを使うため、相手のIPへ明示的にユニキャストで送る)なので、同じ
+方法でこのエミュレータにも持ち込んだ。
+
+実装: `VrrpGroup`に`unicast_peers: List[str]`を追加、
+`VrrpEngine._vrrp_send_advert`はbroadcast_to_neighborsに加えて
+`unicast_peers`に設定されたIPの装置へ`vnet.send_to()`で直接
+advertisementを送る(`icmp_engine._find_device_owning_ip()`でIPから
+装置を解決。vnetの直結隣接である必要はない — `send_to`は
+`vrrp_advert`を自動的に`vrrp_engine.vrrp_receive_advert`へルーティング
+する既存の仕組みをそのまま使っている)。CLI: `vrrp <gid> unicast-peer
+<ip>`(Cisco/Catalyst形式に相乗り。実際のCisco IOSにこのコマンドは
+無く、unicast VRRPはkeepalived固有の機能だが、このエミュレータに
+keepalived相当の専用device_typeは無いため、既存のpragmatic判断
+(EOSでcrypto key generate rsa流用等)と同じ考え方でCisco形式のVRRP
+配下にそのまま追加した)。設定直後にも既存の直結隣接パターンと同じ
+即時ネゴシエーションを行う。`show vrrp`に`VRRP Unicast Peer(s): ...`
+行、`show running-config`にも反映。
+
+Live-verified: R1 -- MID(中間L3装置) -- R2 の3台構成(R1/R2はvnet上で
+直結しない)で、`vrrp <gid> ip <vip>`だけでは両方Initのまま永久に
+選出されないことを確認し、両側に`vrrp <gid> unicast-peer <相手IP>`を
+設定した途端に正しくMaster/Backupへ選出されることを確認
+(`show vrrp`/`show running-config`への反映も含む)。
+
+`tests/test_vrrp_unicast_peer.py`(5 tests)が、直結しないピアが
+unicast-peer無しでは選出されないこと(regression防止: この制約自体の
+固定)、unicast-peer設定で選出が成立すること、`show running-config`/
+`show vrrp`への反映、priority逆転でのMaster/Backup入れ替わりを固定する。
+
+**Cisco ZTP(AUTOINSTALL) — DHCP option 150/67経由の自動プロビジョニング**:
+同じく[vincentbernat/network-lab](https://github.com/vincentbernat/network-lab)
+の`lab-dhcp-ztp`から持ち込んだ機能。実機のAUTOINSTALLは「起動時に
+startup-configが無ければ自動でDHCP→TFTP経由のconfig取得を試みる」
+という挙動で、CLIで明示的に叩くコマンドではない。このエミュレータには
+「再起動」の概念が無いため、実機でこのシナリオを再現する際の実際の
+手順そのもの(`write erase`でNVRAM/startup-configを空にし、`reload`で
+再起動する)に相乗りした — 新しい疑似コマンドを増やさず、2つの実
+コマンドの組み合わせをトリガーに使っている。
+
+実装: DHCPサーバー役(既存の`ip dhcp pool`機能、`cisco`/`catalyst`)に、
+既存の汎用`option <code> {ascii|hex|ip} <value>`機構で
+`option 150 ip <tftp_ip>`/`option 67 ascii <bootfile>`をそのまま設定
+できた(コード追加不要)。配布する"ファイル"の内容は新設の
+`tftp-server config <bootfile>`サブモード(`CONFIG_SUBMODES`に1行追加)
+でCLI行としてそのままステージする(実機はflash上のファイルを配るが、
+このエミュレータにファイルシステムは無いため、CLIで流し込んだものを
+"ファイル"として保持するpragmaticな方式)。
+
+**実装中に見つかった実バグ(2か所)**:
+1. ステージモード中(`state.mode == 'config-tftp-file'`)はexit/end/quit
+   以外の行を一切解釈せず生テキストとしてキャプチャする必要があるが、
+   `engine/rules.py`側だけにガードを入れても防げなかった —
+   **二層ディスパッチで`app.py`の`handle_protocol_config`が常に
+   `rule_engine.process()`より先に実行される**ため、ステージ中の
+   `interface ...`/`ip address ...`のような行がapp.py層の既存regexに
+   先にマッチし、サーバー自身の設定として実際に適用されてしまっていた
+   (CLAUDE.mdの「app.pyを先に確認する」という既存の教訓そのもの)。
+   `handle_protocol_config`の冒頭にも同じモードガードを追加して解決。
+2. `tftp-server config <bootfile>`のファイル名を小文字化された`c`から
+   取り出していたため(`SE11.txt`→`se11.txt`)、クライアント側が
+   option 67で受け取る大文字小文字区別ありのファイル名と一致せず
+   "file not found"になっていた。元の大文字小文字を保持した`cmd`から
+   再マッチして修正。
+
+クライアント側は`write erase`→`reload`で、直結隣接からDHCP
+option150/67を持つ装置を探し、IP/デフォルトゲートウェイ(pool の
+default-router)を実際に割り当て(`rib_engine.add_static_route`)、
+ステージされたファイルの内容を`configure terminal`で入ってから
+本物の`cli_command()`経由で1行ずつ適用する(= ユーザーが手で打つのと
+同じ経路を再利用。新しい適用ロジックは書いていない)。見つからない/
+未staging の場合は何も変更せず、実機のAUTOINSTALLログ風のエラー行
+だけを返す(フェイクの成功を作らない)。
+
+Live-verified: サーバーにpool+option150/67+ステージ済みファイル
+(hostname変更+新規interface)を設定し、クライアントで`write erase`→
+`reload`を実行→実際にDHCP払い出しIP(`show running-config`に反映)、
+デフォルトゲートウェイ経路、ステージされたhostname変更・新規
+interfaceまで全て適用されることを確認
+(`%AUTOINSTALL-5-ADDR_ASSIGNED`/`Loading <file> from <tftp_ip> (via
+<iface>): !`/`[OK - N bytes]`/`%AUTOINSTALL-5-CONFIG_APPLIED`という
+実機ログ風の出力込み)。ブートファイル未設定/ファイル未staging/
+サーバーリンクなし/`write erase`せずの`reload`、の各ケースで一切
+変更されないことも確認。
+
+`tests/test_cisco_ztp_autoinstall.py`(8 tests)がサーバー側の
+option150/67反映とステージ内容が生テキストとして保持されサーバー
+自身には適用されないこと、クライアント側の実際のDHCP払い出し+
+デフォルトルート+ステージ済みconfigの適用、および4種の失敗ケース
+(サーバー未リンク・ブートファイル未設定・ファイル未staging・
+write eraseせずのreload)を固定する。

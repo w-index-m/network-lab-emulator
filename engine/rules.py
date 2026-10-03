@@ -530,6 +530,7 @@ CONFIG_SUBMODES = {
     "config-vs-domain":        ("config",            ()),
     "config-vpc-domain":       ("config",            ()),
     "config-dhcp":             ("config",            ('_dhcp_pool',)),
+    "config-tftp-file":        ("config",            ('_tftp_file',)),
     "config-dhcpv6":           ("config",            ('_dhcpv6_pool',)),
     "config-bba":              ("config",            ('_bba_group',)),
     "config-evpn":             ("config",            ()),
@@ -912,6 +913,16 @@ class RuleEngine:
             return self._cmd_exit(cmd, state)
         if c == "exit-address-family" and state.mode == "config-bgp-af":
             return self._cmd_exit(cmd, state)
+        # ── tftp-server config <bootfile> サブモード: exit/end/quit以外の
+        # 全行をそのまま(大文字小文字保持で)キャプチャする。他の一般的な
+        # コマンド解釈(interface→config-if遷移等)より前で止めないと、
+        # ステージング中の行がコマンドとして実行されてしまう。
+        if state.mode == "config-tftp-file":
+            name = getattr(state, '_tftp_file', '')
+            if not hasattr(state, 'tftp_files'):
+                state.tftp_files = {}
+            state.tftp_files.setdefault(name, []).append(cmd)
+            return ""
         # Cisco/Catalyst/SR-S: t または terminal が必須
         if state.device_type in ("catalyst", "cisco", "srs"):
             if c in ("configure terminal", "conf t", "conf terminal",
@@ -5346,6 +5357,19 @@ Configuration Revision            : 5"""
         if not hasattr(state, 'dhcp_pools'): state.dhcp_pools = {}
         if not hasattr(state, 'dhcp_excluded'): state.dhcp_excluded = []
         if not hasattr(state, 'dhcp_snoop'): state.dhcp_snoop = {'enabled': False, 'vlans': '', 'trust': []}
+        if not hasattr(state, 'tftp_files'): state.tftp_files = {}
+
+        # tftp-server config <bootfile> → サブモード(ZTP/オートインストール
+        # で配布するコンフィグをそのままキャプチャする。実機はflashの
+        # ファイルを配るが、このエミュレータにファイルシステムは無いため、
+        # CLIでそのまま流し込んで"ファイル"として保持するpragmaticな方式)
+        m = re.match(r'^tftp-server\s+config\s+(\S+)$', c)
+        if m and state.mode == 'config':
+            name = re.match(r'^tftp-server\s+config\s+(\S+)$', cmd.strip(), re.I).group(1)
+            state.tftp_files[name] = []
+            state._tftp_file = name
+            state.mode = 'config-tftp-file'
+            return ""
 
         # ip dhcp excluded-address <lo> [hi]
         m = re.match(r'^ip\s+dhcp\s+excluded-address\s+([\d.]+)(?:\s+([\d.]+))?', c)

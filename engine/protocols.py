@@ -7658,6 +7658,11 @@ class VrrpGroup:
     peer_id: str = ''
     peer_ip: str = ''
     peer_priority: int = 0
+    # unicast VRRP（keepalivedのunicast_peer相当）。設定されていれば
+    # multicast相当のbroadcast_to_neighborsに加えて、ここに列挙した
+    # IPの装置へ直接advertisementを送る。vnetの直結隣接(get_neighbors)
+    # を越えて、L3越しのピアとも同期できるようにするのが目的。
+    unicast_peers: List[str] = field(default_factory=list)
 
 @dataclass
 class HsrpGroup:
@@ -7750,6 +7755,18 @@ class VrrpEngine:
             'state': g.state,
         }
         await vnet.broadcast_to_neighbors(device_id, pkt)
+        # unicast VRRP: 直結隣接(multicast相当)に加えて、明示設定した
+        # unicast_peerへも直接送る。vnetの直結隣接関係を持たない
+        # (= L3越しの)ピアとの同期はこちらだけが頼り。
+        for peer_ip in g.unicast_peers:
+            peer_id = icmp_engine._find_device_owning_ip(peer_ip)
+            if peer_id and peer_id != device_id:
+                await vnet.send_to(peer_id, pkt)
+
+    def add_unicast_peer(self, device_id: str, group_id: int, peer_ip: str):
+        g = self.vrrp.get(device_id, {}).get(group_id)
+        if g and peer_ip not in g.unicast_peers:
+            g.unicast_peers.append(peer_ip)
 
     async def vrrp_receive_advert(self, receiver_id: str, msg: dict):
         group_id = msg.get('group_id')
@@ -8199,6 +8216,8 @@ class VrrpEngine:
             lines.append(f'  Advertisement interval is {g.hello_interval} sec')
             lines.append(f'  Preemption {"enabled" if g.preempt else "disabled"}')
             lines.append(f'  Priority is {g.priority}')
+            if g.unicast_peers:
+                lines.append(f'  VRRP Unicast Peer(s): {", ".join(g.unicast_peers)}')
             if g.state == 'Master':
                 lines.append(f'  Master Router is {device_id} (local), priority is {g.priority}')
                 lines.append(f'  Master Advertisement interval is {g.hello_interval} sec')

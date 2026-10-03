@@ -1297,6 +1297,16 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     orig = command.strip()
     hostname = state.hostname
 
+    # ── ZTP: tftp-server configサブモード中は、exit/end以外の行を
+    # 一切解釈せずそのままキャプチャする(rule_engine側のキャプチャに
+    # 委ねる)。ここでガードしないと、このapp.py層が
+    # handle_protocol_configの各種regex(interface/ip address等)に先に
+    # マッチしてしまい、ステージ中の行がサーバー自身の設定として実際に
+    # 適用されてしまう(= 二層ディスパッチでapp.py層が常に先に実行される
+    # ため)。
+    if state.mode == 'config-tftp-file' and c not in ('exit', 'end', 'quit'):
+        return None
+
     # ── NX-OS: コマンド実行ログ ──
     if state.device_type == 'nexus':
         hn = state.hostname
@@ -1519,6 +1529,22 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         state.map_e_rule = None
         state.interfaces.pop('map0', None)
         _register_icmp(device_id)
+
+    # ── Cisco ZTP(AUTOINSTALL): "write erase" → 次回 "reload" でDHCP
+    # option 150(TFTP server)経由の自動プロビジョニングをトリガーする。
+    # 実機の本来の手順("write erase" でNVRAM(startup-config)を空にし、
+    # "reload" で再起動すると、起動時configが無いためAUTOINSTALLが走る)
+    # をそのまま使う — 新しいコマンドを増やさず、この2つの実コマンドの
+    # 組み合わせに相乗りした。
+    if c == 'write erase' and state.device_type in ('cisco', 'catalyst'):
+        state._ztp_pending = True
+        return ('Erasing the nvram filesystem will remove all configuration files! '
+                'Continue? [confirm]\n[OK]\nErase of nvram: complete')
+    if c in ('reload', 'reset') and getattr(state, '_ztp_pending', False) and \
+            state.device_type in ('cisco', 'catalyst'):
+        state._ztp_pending = False
+        ztp_log = await _run_ztp_autoinstall(device_id, state)
+        return 'Proceed with reload? [confirm] y\n' + ztp_log
 
     # ── prefix-list ──
     # Cisco: "ip prefix-list NAME seq 5 permit 10.0.0.0/8 ge 24 le 30"
@@ -1941,6 +1967,23 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         m = re.match(r'^no\s+vrrp\s+(\d+)\s+preempt', c)
         g = vrrp_engine.vrrp.get(device_id, {}).get(int(m.group(1)))
         if g: g.preempt = False
+        return
+    # ── VRRP unicast(keepalivedのunicast_peer相当)──
+    # "vrrp <gid> unicast-peer <ip>": vnet上の直結隣接(multicast相当)を
+    # 越えて、L3越しのピアとも同期できるようにする。
+    vrrp_ucast = re.match(r'^vrrp\s+(\d+)\s+unicast-peer\s+([\d.]+)', c)
+    if vrrp_ucast:
+        gid, peer_ip = int(vrrp_ucast.group(1)), vrrp_ucast.group(2)
+        vrrp_engine.add_unicast_peer(device_id, gid, peer_ip)
+        # 直結隣接の場合と同じく、設定直後にも即座にネゴシエーションする
+        peer_id = icmp_engine._find_device_owning_ip(peer_ip)
+        peer_g = vrrp_engine.vrrp.get(peer_id, {}).get(gid) if peer_id else None
+        if peer_g:
+            await vrrp_engine.vrrp_receive_advert(device_id, {
+                'type': 'vrrp_advert', 'src_id': peer_id, 'group_id': gid,
+                'vip': peer_g.vip, 'priority': peer_g.priority,
+                'preempt': peer_g.preempt, 'state': peer_g.state,
+            })
         return
 
     # Si-R形式: "vrrp use on" / "lan 0 vrrp group 1 id 1 110 192.168.1.254"
@@ -4448,6 +4491,113 @@ def find_peer_by_link(device_id: str):
     return next(iter(neighbors), None) if neighbors else None
 
 
+def _ztp_allocate_ip(peer_state, pool_name: str, pool: dict):
+    """DHCPプールから次の空きIPを割り出す(簡易版: network内の
+    ホストアドレスを.10から順に試し、router自身のIP/除外アドレス/
+    既にリース済みのIPを避ける)。PppoeEngine/MapEEngineの
+    「既存リース数から次を割る」という考え方のDHCP版。"""
+    network = pool.get('network')
+    mask = pool.get('mask')
+    if not network or not mask:
+        return None
+    try:
+        net_int = _ip_str_to_int(network)
+        prefix = _mask_to_prefix(mask)
+    except Exception:
+        return None
+    host_bits = 32 - prefix
+    if host_bits <= 0:
+        return None
+    leases = peer_state.__dict__.setdefault('dhcp_leases', {}).setdefault(pool_name, set())
+    excluded = {lo for lo, _hi in getattr(peer_state, 'dhcp_excluded', [])} | \
+               {hi for _lo, hi in getattr(peer_state, 'dhcp_excluded', [])}
+    router_ip = pool.get('router')
+    for host in range(10, (1 << host_bits) - 1):
+        candidate = _int_to_ip_str(net_int + host)
+        if candidate == router_ip or candidate in excluded or candidate in leases:
+            continue
+        leases.add(candidate)
+        return candidate
+    return None
+
+
+def _ip_str_to_int(ip: str) -> int:
+    parts = [int(p) for p in ip.split('.')]
+    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
+
+
+def _int_to_ip_str(n: int) -> str:
+    return '.'.join(str((n >> s) & 0xff) for s in (24, 16, 8, 0))
+
+
+async def _run_ztp_autoinstall(device_id: str, state) -> str:
+    """Cisco AUTOINSTALL(ZTP)の簡易再現。
+
+    直結隣接の中からDHCPプールに option 150(TFTP server)が設定されて
+    いる装置を探し、そこからIP/デフォルトゲートウェイ/ブートファイル名
+    (option 67)を取得して自分のインタフェースに反映し、ステージ済みの
+    設定ファイル(`tftp-server config <bootfile>`で captured)を実際に
+    自分のCLIへ1行ずつ流し込んで適用する(= 本物のcli_command()経由。
+    新しい適用ロジックを増やさず、ユーザーが手で打つのと同じ経路を
+    再利用する)。見つからない/未staging の場合は何も変更せず、
+    実機同様のエラーログだけを返す(フェイクの成功を作らない)。
+    """
+    for peer_id in vnet.get_neighbors(device_id):
+        peer_state = device_sessions.get(peer_id)
+        if not peer_state:
+            continue
+        pools = getattr(peer_state, 'dhcp_pools', {}) or {}
+        for pool_name, pool in pools.items():
+            opts = pool.get('options', {}) or {}
+            tftp_ip = opts[150][1] if opts.get(150, (None,))[0] == 'ip' else None
+            if not tftp_ip:
+                continue
+            bootfile = opts[67][1] if opts.get(67, (None,))[0] == 'ascii' else None
+            client_iface = vnet.interface_links.get(device_id, {}).get(peer_id) \
+                or next(iter(state.interfaces.keys()), 'GigabitEthernet0/0/0')
+            assigned_ip = _ztp_allocate_ip(peer_state, pool_name, pool)
+            if not assigned_ip:
+                continue
+            prefix = _mask_to_prefix(pool['mask']) if pool.get('mask') else 24
+            state.interfaces[client_iface] = {
+                'ip': assigned_ip, 'prefix': prefix, 'status': 'up',
+                'speed': 'auto', 'duplex': 'full',
+            }
+            _register_icmp(device_id)
+            if pool.get('router'):
+                rib_engine.add_static_route(device_id, state.hostname, '0.0.0.0', 0,
+                                            pool['router'], ad=1)
+            log_lines = [
+                f'%AUTOINSTALL-5-ADDR_ASSIGNED: Assigned address {assigned_ip} '
+                f'via interface {client_iface}',
+                f'AUTOINSTALL: Obtain tftp server address (opt 150) {tftp_ip}',
+            ]
+            if not bootfile:
+                log_lines.append('%AUTOINSTALL-3-NO_BOOTFILE: no bootfile (option 67) '
+                                  f'configured on DHCP pool {pool_name}')
+                return '\n'.join(log_lines)
+            content = getattr(peer_state, 'tftp_files', {}).get(bootfile)
+            if not content:
+                log_lines.append(f'%AUTOINSTALL-3-FILE_NOT_FOUND: {bootfile} '
+                                  f'not found on tftp server {tftp_ip}')
+                return '\n'.join(log_lines)
+            nbytes = sum(len(line) + 1 for line in content)
+            log_lines.append(f'Loading {bootfile} from {tftp_ip} '
+                             f'(via {client_iface}): !')
+            log_lines.append(f'[OK - {nbytes} bytes]')
+            # ステージされた設定は(実機同様)グローバルコンフィグとして
+            # 丸ごと適用される内容なので、まず configure terminal で
+            # config モードに入ってから1行ずつ流し込む。
+            await cli_command({'device_id': device_id, 'command': 'configure terminal'})
+            for line in content:
+                await cli_command({'device_id': device_id, 'command': line})
+            await cli_command({'device_id': device_id, 'command': 'end'})
+            log_lines.append('%AUTOINSTALL-5-CONFIG_APPLIED: '
+                             'Configuration applied via AUTOINSTALL')
+            return '\n'.join(log_lines)
+    return '%AUTOINSTALL-3-NO_SERVER: no DHCP/TFTP server found'
+
+
 # Si-R running-config に含めない運用/表示系コマンド
 _SIR_NONCONFIG = {
     'show', 'ping', 'traceroute', 'save', 'exit', 'quit', 'end', 'enable',
@@ -5139,6 +5289,8 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append(f' vrrp {gid} priority {g.priority}')
             if g.preempt:
                 lines.append(f' vrrp {gid} preempt')
+            for peer_ip in g.unicast_peers:
+                lines.append(f' vrrp {gid} unicast-peer {peer_ip}')
         # HSRP設定
         hsrp_groups = vrrp_engine.hsrp.get(device_id, {})
         for gid, g in sorted(hsrp_groups.items()):
