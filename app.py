@@ -1023,7 +1023,85 @@ async def cli_command(body: dict):
     if state.device_type == 'bigip' and re.search(r'(show|list)\s+ltm|show\s+running|list\s+running', c_low):
         _bigip_health_check(state)
 
+    # ── FortiGate: rule_engine.process()実行前のモードスタック/edit対象を
+    # 控えておく(next/endで消える前の値が必要。Juniperの
+    # commit→SSHリスナー起動と同じ理由で、state変更の確定後に
+    # トリガーするためここで捕捉する)。
+    _fg_stack_before = list(getattr(state, 'fortigate_mode_stack', []) or [])
+    _fg_edit_before = getattr(state, 'fortigate_edit_ctx', None)
+
     output = rule_engine.process(command, state)
+
+    if state.device_type == 'fortigate':
+        _fg_ctx_before = _fg_stack_before[-1] if _fg_stack_before else ''
+        # PPPoE WAN: "system interface"のedit中にnext/endで抜けた瞬間、
+        # mode pppoe + username/passwordが揃っていれば実際に接続する
+        # (Yamahaの"pp enable"と同じPppoeEngineを使う)。
+        if (_fg_ctx_before == 'system interface' and _fg_edit_before and
+                c_low in ('next', 'end')):
+            pppoe_cfg = getattr(state, 'fortigate_pppoe', {}).get(_fg_edit_before)
+            if pppoe_cfg and pppoe_cfg.get('mode') == 'pppoe' and pppoe_cfg.get('username') \
+                    and not pppoe_cfg.get('connected'):
+                result = pppoe_engine.connect(
+                    device_id, _fg_edit_before, _fg_edit_before,
+                    pppoe_cfg['username'], pppoe_cfg.get('password', ''), state.hostname)
+                if result:
+                    bas_state = device_sessions.get(result['bas_id'])
+                    gateway = None
+                    if bas_state:
+                        for info in bas_state.interfaces.values():
+                            if info.get('ip'):
+                                gateway = info['ip']
+                                break
+                    state.interfaces[_fg_edit_before] = {
+                        'ip': result['ip'], 'prefix': result['prefix'],
+                        'status': 'up', 'speed': 'auto', 'duplex': 'full',
+                    }
+                    pppoe_cfg['connected'] = True
+                    pppoe_cfg['gateway'] = gateway
+                    _register_icmp(device_id)
+        # IPsec(phase1/phase2-interface): rule_engineがlocal_ip解決済みの
+        # 状態でネゴシエーションを再実行する。
+        if _fg_ctx_before in ('vpn ipsec phase1-interface', 'vpn ipsec phase2-interface') \
+                and c_low in ('next', 'end'):
+            _trigger_ike_negotiation(device_id)
+
+    # ── ASA 5505実機のPPPoEクライアント("ip address pppoe [setroute]" +
+    # "vpdn group ... request dialout pppoe"/"localname"/"ppp
+    # authentication" + "vpdn username ... password ...")。コマンド順序に
+    # 依存せず、必要な情報(localname/username/password)が揃うたびに
+    # 未接続のpending interfaceへ接続を試みる(Yamahaの"pp enable"と同じ
+    # PppoeEngineを使い、新しいネゴシエーションロジックは増やさない)。
+    if state.device_type == 'asa':
+        vpdn = getattr(state, 'asa_vpdn', {})
+        if vpdn.get('localname') and vpdn.get('username') and vpdn.get('password'):
+            for iface, pend in list(getattr(state, 'asa_pppoe_pending', {}).items()):
+                asa_pppoe_state = state.asa_pppoe.setdefault(iface, {})
+                if asa_pppoe_state.get('connected'):
+                    continue
+                result = pppoe_engine.connect(
+                    device_id, iface, iface, vpdn['username'], vpdn['password'], state.hostname)
+                if result:
+                    bas_state = device_sessions.get(result['bas_id'])
+                    gateway = None
+                    if bas_state:
+                        for info in bas_state.interfaces.values():
+                            if info.get('ip'):
+                                gateway = info['ip']
+                                break
+                    old_if = state.interfaces.get(iface, {})
+                    state.interfaces[iface] = {
+                        'ip': result['ip'], 'prefix': result['prefix'],
+                        'status': 'up',
+                        'nameif': old_if.get('nameif', ''),
+                        'security_level': old_if.get('security_level', 0),
+                        'speed': old_if.get('speed', 'auto'), 'duplex': old_if.get('duplex', 'full'),
+                    }
+                    asa_pppoe_state['connected'] = True
+                    asa_pppoe_state['gateway'] = gateway
+                    if pend.get('setroute') and gateway:
+                        rib_engine.add_static_route(device_id, state.hostname, '0.0.0.0', 0, gateway, 1)
+                    _register_icmp(device_id)
 
     # ── Juniper: commitで"set system services ssh"が確定した後に実SSH
     # リスナーを起動する。rule_engine.process()より前(handle_protocol_
@@ -4751,6 +4829,11 @@ def _build_running_config(device_id: str, state) -> str:
     # 汎用ハンドラが先に勝ってしまう問題と同じ種類のもの)。
     if state.device_type == 'bas':
         return rule_engine.process('show running-config', state)
+
+    # FortiGate: 同じ理由(app.py側の汎用ハンドラが先に勝ってしまう)で
+    # 専用の _fortigate_process 側に明示的に委譲する。
+    if state.device_type == 'fortigate':
+        return rule_engine.process('show full-configuration', state)
 
     # ── NX-OS (Nexus 9000) running-config ──
     if is_nexus:

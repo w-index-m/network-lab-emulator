@@ -128,3 +128,80 @@ interface GigabitEthernet0/0
    のような形)で固定する。
 
 進めてよければ、まず3-1(Cisco)から着手します。
+
+## 5. 追記: ASA / FortiGateを追加(ユーザー依頼「ASAやFortiGateも
+追加で試験幅を増やして欲しい」)
+
+マトリクスに**ASA**(既存device_type)と**FortiGate**(新規device_type)
+を追加した。
+
+### 5-1. Cisco ASA
+
+**新しいIPsecネゴシエーションロジックは追加していない** —
+`ike_engine.py`は元々`('cisco', 'catalyst', 'asa')`を対向として
+対応済みだったので、実際に繋がるかをライブ検証するのが目的だった。
+その過程で以下の**既存の潜在バグ2件**を発見・修正した
+(`tests/test_asa_ipsec_mesh.py`で固定):
+
+1. `crypto map <name> <seq> match address <acl>`のハンドラ(IOS版・
+   ASA版の両方)が辞書を丸ごと代入していたため、`match address`を
+   `set peer`/`set transform-set`より後に打つ順序で既存設定が
+   消えていた。
+2. ASAの`tunnel-group <peer> ipsec-attributes`サブモードを抜ける
+   `exit`が、`state.mode`を変えない疑似サブモード管理と噛み合わず、
+   configモードごと抜けてしまい`crypto isakmp enable`が無視されて
+   いた。
+
+Live-verified: Yamaha RTX(PPPoE払い出しIP)⇔ASA(固定WAN)でIPsec確立
+(`IKE negotiation: MATURE`/`status: established`)、誤PSKでの失敗
+ケースも確認。
+
+### 5-2. FortiGate(新規device_type)
+
+FortiOSの`config`/`edit`/`set`/`next`/`end`階層型CLIを持つ専用
+ハンドラ(`_fortigate_process`)を新設。インタフェース名は
+`port1`/`port2`/`port3`。スコープ: `config system interface`
+(IP設定/PPPoE WAN化)、`config vpn ipsec phase1-interface`/
+`phase2-interface`。IPsecは既存のSi-R用`ipsec_tunnels`辞書形式に
+乗せ、`ike_engine.py`に`'fortigate'`を追加するだけで新しい
+ネゴシエーションロジックは増やしていない。PPPoE WAN化も既存の
+`PppoeEngine`を使う(Yamahaの"pp enable"と同じ経路)。
+
+Live-verified: `bas`経由のPPPoEで共有IPv4を取得し、そのIPで
+Cisco IOS/Si-Rの双方と実際にIPsecが確立することを確認
+(`get vpn ipsec tunnel summary`で`status: up`)。詳細は
+`tests/test_fortigate.py`(9 tests)とCLAUDE.mdの該当項目を参照。
+
+### 5-3. 更新後のマトリクス
+
+| PPPoE接続元 \\ IPsec対向先 | Cisco | Yamaha RTX | Si-R | ASA | FortiGate |
+|---|---|---|---|---|---|
+| **Yamaha RTX** | ✅ | △ | ❌(Si-R側PPPoE未対応) | ✅(新規検証) | - |
+| **FortiGate** | ✅(新規検証) | - | ✅(新規検証) | - | - |
+| **ASA**(新規検証) | ✅ | - | - | - | - |
+
+残っているギャップはSection 2のまま変わらず: **Cisco自身とSi-R自身の
+PPPoEクライアント機能**。
+
+## 6. 追記: ASAにもPPPoEクライアント機能を追加(ユーザー依頼「PPPoE ASAや
+fortigateもいけると思うのでお願いします」)
+
+調査の結果FortiGateは5-2で既にPPPoE WAN対応済みだったため、本件は
+ASAのみを対象にした。実機ASA 5505の`ip address pppoe [setroute]` +
+`vpdn group`/`vpdn username`構文をそのまま実装し、既存の
+`PppoeEngine`を使ってYamaha/FortiGateと同じ経路で実際に接続する
+(新しいネゴシエーションロジックは追加していない)。
+
+実装中に`RuleEngine._validate_command`の"ip address" Incomplete
+チェックが device_type を問わず常に適用され、"ip address pppoe"
+(3トークン)を誤って"% Incomplete command."として弾いていた既存の
+バグを発見・修正(`_asa_process`側のハンドラへ到達する前に落ちて
+いた)。また、ASAの"show route"がrib_engine経由の経路
+(setrouteで登録される既定路含む)を表示できていなかった既存の
+制約も発見し、他vendorの"show ip route"と同様rib_engineの経路も
+合わせて表示するよう拡張した。詳細はCLAUDE.mdの該当項目を参照。
+
+Live-verified: ASAがPPPoE経由で共有IPv4を取得、"setroute"で実際に
+デフォルトルートが`show route`に反映されること、そのIPを使って
+Cisco IOSと実際にIPsec(IKE Phase1/Phase2)が確立することを確認。
+`tests/test_asa_pppoe.py`(8 tests)で固定。

@@ -1221,3 +1221,149 @@ regression防止、LLGRの無期限保持・非stale代替経路への切替、R
 valid/notfound/invalid(AS不一致・max-length超過)/invalid-drop、
 Confederationの加盟国間eBGP・外部への圧縮・confederation未設定時の
 regression防止、およびCLI側の新規正規表現5つを固定する。
+
+**ASA / FortiGateをPPPoE+IPsecマトリクスに追加**: 「そう互換接続ASAや
+fortigateも追加で試験幅を増やして欲しい」という依頼
+(`docs/pppoe-ipsec-mesh-status.md`参照)への対応。
+
+**Cisco ASA**: 新しいIPsecネゴシエーションロジックは一切追加していない
+— `engine/ike_engine.py`は元々`('cisco', 'catalyst', 'asa')`を対向
+として対応済みなので、実際に繋がるかをライブ検証で確認するのが目的
+だった。その過程で**既存の潜在バグを2件発見・修正**:
+
+1. `crypto map <name> <seq> match address <acl>`のハンドラ(IOS版・
+   ASA版の両方、`engine/rules.py`)が`[seq] = {'acl': acl}`で辞書を
+   丸ごと代入していたため、`match address`を`set peer`/
+   `set transform-set`より**後**に打つ(実機でもよくある順序)と、
+   既存のpeer/transform_setが消えてしまっていた。`match address`を
+   先に打つ設定順なら表面化しないため、これまでのテストでは踏んで
+   いなかった。`setdefault(seq, {})['acl'] = acl`に修正(IOS/ASA
+   両方)。
+2. ASAの`tunnel-group <peer> ipsec-attributes`サブモードは
+   `state.mode`を変えずに`_tg_attr_mode`フラグだけで管理する作り
+   だったが、`_asa_process`冒頭の`exit`/`end`/`quit`ハンドラがこの
+   フラグを見ておらず、`ipsec-attributes`配下から`exit`すると
+   `state.mode=='config'`のまま一般の「config→exec」判定に落ちて
+   1回の`exit`でconfigモードごと抜けてしまっていた(実機は
+   ipsec-attributesだけ抜けてconfigに留まる)。このバグのせいで
+   `crypto isakmp enable outside`が「config モードでない」と誤判定
+   されて無視され、IKEが永久に確立しなかった(ライブ検証で最初に
+   踏んだ不具合)。`_tg_attr_mode`を先にチェックしてクリアするよう
+   修正。
+
+Live-verified: Yamaha RTX(PPPoE払い出しIP)⇔ASA(固定WAN)で実際に
+IPsecが確立(`IKE negotiation : MATURE`/`status : established`)、
+誤PSKでは確立しないことを確認。`tests/test_asa_ipsec_mesh.py`
+(6 tests)がこの2つのバグのregressionテストと、ASA⇔PPPoE払い出し
+Yamahaの成功/誤PSK失敗ケースを固定する。
+
+**FortiGate(FortiOS)device_type(新規)**: FortiOSの`config`/`edit`/
+`set`/`next`/`end`階層型CLIはCiscoのexec→config→config-ifモデルに
+乗らないため、Juniper/Yamaha/APRESIA/BIG-IPと同じパターンで
+`_fortigate_process`を`RuleEngine.process()`の先頭で分岐させた。
+インタフェース名は`port1`/`port2`/`port3`(実機のFortiGate命名)。
+
+スコープ: `config system interface`(IP設定・`set mode pppoe`での
+WAN化)、`config vpn ipsec phase1-interface`/`phase2-interface`
+(IKE/IPsec)。IPsecは既存のSi-R用`ipsec_tunnels`辞書形式にそのまま
+乗せ、`ike_engine.py`の`dt`/`pdt`判定タプルに`'fortigate'`を追加
+しただけ(Yamaha追加時と全く同じパターン)。PPPoE WAN化も既存の
+`PppoeEngine`をそのまま使う(Yamahaの"pp enable"と同じ経路)。
+phase2-interfaceの`set phase1name`は受理のみで、本エンジンは
+phase1単位でトンネルを管理するためphase2側の状態には反映しない
+(スコープ外、コメントで明記)。
+
+**実機にはSi-R/Yamahaの"ike use on"/"ipsec use on"のような明示有効化
+コマンドが無く**、phase1-interfaceを作った時点で常に有効扱いになる
+ため、`_fortigate_process`はphase1の`edit`時点で
+`state.ike_enabled`/`state.ipsec_enabled`を直接Trueにしている
+(ike_engine.py側のゲート条件に合わせるための処置)。
+
+**実装中に見つけた実バグ(2件)**:
+1. 二層ディスパッチで`app.py`の`handle_protocol_config`が常に
+   `rule_engine.process()`より先に実行されるため、FortiGateの
+   PPPoE接続/IKEネゴシエーションの実際のトリガーを
+   `handle_protocol_config`側に書くと、`_fortigate_process`が
+   `state.interfaces`/`state.ipsec_tunnels`/`state.fortigate_pppoe`
+   を確定させる前の古い値を使ってしまう(Juniperのcommit→SSH
+   リスナー起動と全く同じ理由)。`cli_command()`の
+   `rule_engine.process()`実行後にトリガーを置いて解決 — `next`/
+   `end`実行前のモードスタック/edit対象を`_fg_stack_before`/
+   `_fg_edit_before`として先に控えておく必要がある(GRE tunnel確立
+   等でも使われている既存の「直前の値を控えておく」パターンを流用)。
+2. Yamahaの"pp enable"トリガーを複製する際、ローカル変数名を
+   `hostname`と書いたが、`cli_command()`のスコープには存在しない
+   (`state.hostname`が正しい)。`NameError`で即座に発覚(Yamaha側は
+   別の関数`handle_protocol_config`内で実際に`hostname`という
+   ローカル変数が存在するため、同じコードに見えて問題が無かった)。
+
+フロントエンド(`static/index.html`): `DEV_TEMPLATES`・add-deviceボタン・
+`defPort()`/`portOptions()`(`port1`/`port2`/`port3`)・
+`_inferDeviceType()`正規表現(`config system interface`/
+`config vpn ipsec`/`set psksecret`)・色マップに`fortigate`エントリを
+追加。`getPrompt()`はFortiOS実機通り常に`hostname #`固定
+(config/edit階層に関わらずプロンプトが変わらない)。
+
+Live-verified: `bas`経由のPPPoEで実際に共有IPv4を取得
+(`show full-configuration`に反映)、そのIPを使ってCisco IOS/Si-Rの
+双方と実際にIPsecが確立することを確認(`get vpn ipsec tunnel
+summary`で`status: up`)、誤PSKでは`status: down`のままであることも
+確認。`tests/test_fortigate.py`(9 tests)がinterface設定・PPPoE WAN
+(成功/誤パスワード失敗)・Cisco/Si-R双方とのIPsec確立(成功/誤PSK
+失敗)・config/edit/next/endのモード管理そのものを固定する。
+
+**ASA 5505のPPPoEクライアント機能(追加)**: 「PPPoE ASAやfortigateも
+いけると思うのでお願いします」という追加依頼への対応。調査の結果
+FortiGateは上記で既にPPPoE WAN(`set mode pppoe`)対応済みだったため、
+本件は残っていたASA側のみを対象にした。
+
+実機ASA 5505のPPPoEクライアント構文(`interface`配下`ip address
+pppoe [setroute]` + config配下`vpdn group <name> request dialout
+pppoe`/`localname`/`ppp authentication` + `vpdn username <user>
+password <pass>`)をそのまま実装。Yamahaの"pp enable"/FortiGateの
+"set mode pppoe"と同じ`engine.protocols.PppoeEngine`を使い、新しい
+ネゴシエーションロジックは追加していない。コマンド順序に依存せず
+(`vpdn group`→`vpdn username`の順でなくても)、localname/username/
+passwordが揃うたびに未接続のpending interfaceへ接続を試みる
+(`app.py`の`cli_command()`、`rule_engine.process()`実行後 — Juniperの
+SSHリスナー起動と同じ理由)。"setroute"時は実際にPPPoEゲートウェイ
+経由のデフォルトルートを`rib_engine`へ登録する(Yamahaの"ip route
+default gateway pp N"と同じ役割)。
+
+**実装中に見つけた既存の実バグ(ASA固有ではなく汎用の`_validate_command`
+のバグ)**: `RuleEngine._validate_command`の"ip address"
+Incompleteチェック(`c.startswith('ip address') and mode ==
+'config-if'`)が、device_typeを問わず「IPアドレス+マスクが無ければ
+4トークン未満はエラー」という前提で判定していたため、"ip address
+pppoe"(3トークン、実機のASA 5505で有効な構文)が常に"% Incomplete
+command."扱いになり、`_asa_process`の該当ハンドラへ到達する前に
+`process()`の冒頭で弾かれていた(ライブ検証で最初に踏んだ——
+`_asa_process`側にハンドラを書いても一切呼ばれず、CLAUDE.mdの
+「二層ディスパッチで先に処理されると下位が死ぬ」と全く同じ class の
+問題が`_validate_command`という第0層でも起きていた)。"ip address
+pppoe(\s+setroute)?"のパターンをこのチェックの対象外に追加して修正。
+
+**もう1つの既存スコープ上の発見(修正せず・ASA固有ではなくCisco IOS/
+ASA共通)**: ASAの"show route"(`_asa_show_route`)は元々`state.routes`
+(ASAの"route"コマンドでのみ追加される独自リスト)しか見ておらず、
+rib_engine経由で登録された経路(本機能のPPPoE setrouteを含む)を
+表示できなかったため、他vendorの"show ip route"同様rib_engineの
+スタティック経路も合わせて表示するよう拡張した(dedupeはnetwork/
+prefix単位)。さらに調査中、ASA/Cisco間のIPsecで"show crypto ipsec
+sa"(`app.py`の`handle_protocol_show`)が`icmp_engine.ipsec_tunnels`
+という"crypto isakmp keepalive"のDPD機能専用の別トラッキング構造
+しか見ておらず、DPDを設定していない通常のIPsecネゴシエーションでは
+何も登録されないため常に"There are no ipsec sas."を返すことが
+分かった——これは今回のPPPoE追加が露見させたが原因ではない
+pre-existingのスコープ(DPD専用表示)で、修正はスコープ外とした
+(テストは`show crypto isakmp sa`とDPDに依存しない`state.ipsec_peers`
+の直接確認で成立を検証する)。
+
+Live-verified: PPPoE経由でASAが共有IPv4を取得(`show interface ip
+brief`に反映)、"setroute"で実デフォルトルートが`show route`に
+反映されること、そのIPを使ってCisco IOSと実際にIKE Phase1/Phase2が
+確立すること(`state.ipsec_peers`で`status: established`、`show
+crypto isakmp sa`で`MM_ACTIVE`)を確認。`tests/test_asa_pppoe.py`
+(8 tests)がinterface設定(コマンド順序非依存を含む)・誤パスワード/
+BAS未リンク失敗ケース・setroute有無での経路反映差・Cisco相手への
+IPsec確立(成功/誤PSK失敗)を固定する。
