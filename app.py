@@ -3126,6 +3126,57 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     if bgp_rtbh and getattr(state, '_routing_mode', '') == 'bgp':
         bgp_engine.set_rtbh_community(device_id, bgp_rtbh.group(1))
         return
+    # ── bgp hostname-capability（lab-bgp-hostname）──
+    if c == 'bgp hostname-capability' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_hostname_capability(device_id, True)
+        return
+    if c == 'no bgp hostname-capability' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_hostname_capability(device_id, False)
+        return
+    # ── bgp graceful-restart [restart-time <sec>] / bgp long-lived-graceful-restart
+    # （lab-bgp-graceful-restart / lab-bgp-llgr）──
+    bgp_gr_rt = re.match(r'^bgp\s+graceful-restart\s+restart-time\s+(\d+)$', c)
+    if bgp_gr_rt and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_graceful_restart(device_id, True, restart_time=int(bgp_gr_rt.group(1)))
+        return
+    if c == 'bgp graceful-restart' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_graceful_restart(device_id, True)
+        return
+    if c == 'no bgp graceful-restart' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_graceful_restart(device_id, False)
+        return
+    if c == 'bgp long-lived-graceful-restart' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_llgr(device_id, True)
+        return
+    if c == 'no bgp long-lived-graceful-restart' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_llgr(device_id, False)
+        return
+    # ── bgp confederation identifier <as> / bgp confederation peers <as...>
+    # （lab-bgp-confederation）──
+    bgp_confed_id = re.match(r'^bgp\s+confederation\s+identifier\s+(\d+)$', c)
+    if bgp_confed_id and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_confederation_identifier(device_id, int(bgp_confed_id.group(1)))
+        return
+    bgp_confed_peers = re.match(r'^bgp\s+confederation\s+peers\s+(.+)$', c)
+    if bgp_confed_peers and getattr(state, '_routing_mode', '') == 'bgp':
+        for as_str in bgp_confed_peers.group(1).split():
+            if as_str.isdigit():
+                bgp_engine.add_confederation_peer(device_id, int(as_str))
+        return
+    # ── bgp rpki roa <prefix>/<len> max-length <max> origin-as <as> /
+    # bgp rpki invalid-drop（lab-bgp-rpki）──
+    bgp_roa = re.match(
+        r'^bgp\s+rpki\s+roa\s+([\d.]+)/(\d+)\s+max-length\s+(\d+)\s+origin-as\s+(\d+)$', c)
+    if bgp_roa and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.add_roa(device_id, bgp_roa.group(1), int(bgp_roa.group(2)),
+                          int(bgp_roa.group(3)), int(bgp_roa.group(4)))
+        return
+    if c == 'bgp rpki invalid-drop' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_rpki_invalid_drop(device_id, True)
+        return
+    if c == 'no bgp rpki invalid-drop' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_rpki_invalid_drop(device_id, False)
+        return
     # Si-R: "bgp network <ip>/<prefix>" 広告
     sir_bgp_net = re.match(r'^bgp\s+network\s+([\d.]+(?:/\d+)?)', c)
     if sir_bgp_net and getattr(state, '_routing_mode', '') == 'bgp':
@@ -4294,6 +4345,11 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
         n = bgp_engine.nodes.get(device_id)
         if n and n.get('enabled'):
             return bgp_engine.format_show_bfd_neighbors(device_id)
+    # "show bgp rpki table"（lab-bgp-rpki: 登録済みROA一覧）
+    if re.match(r'^show\s+bgp\s+rpki\s+table', c):
+        n = bgp_engine.nodes.get(device_id)
+        if n:
+            return bgp_engine.format_show_bgp_rpki_table(device_id)
 
     # STP
     if re.match(r'^show\s+spanning-tree\s+summary', c):
@@ -4798,6 +4854,24 @@ def _build_running_config(device_id: str, state) -> str:
                 lines.append(f'  bgp cluster-id {bn["cluster_id"]}')
             if bn.get('rtbh_community'):
                 lines.append(f'  bgp rtbh-community {bn["rtbh_community"]}')
+            if bn.get('hostname_capability'):
+                lines.append('  bgp hostname-capability')
+            if bn.get('graceful_restart_default'):
+                lines.append('  bgp graceful-restart')
+                if bn.get('gr_restart_time', 120) != 120:
+                    lines.append(f'  bgp graceful-restart restart-time {bn["gr_restart_time"]}')
+            if bn.get('llgr_default'):
+                lines.append('  bgp long-lived-graceful-restart')
+            if bn.get('confederation_id') is not None:
+                lines.append(f'  bgp confederation identifier {bn["confederation_id"]}')
+            if bn.get('confederation_peers'):
+                peers_str = ' '.join(str(a) for a in sorted(bn['confederation_peers']))
+                lines.append(f'  bgp confederation peers {peers_str}')
+            for roa in bn.get('roas', []):
+                lines.append(f'  bgp rpki roa {roa["prefix"]}/{roa["prefix_len"]} '
+                             f'max-length {roa["max_length"]} origin-as {roa["origin_as"]}')
+            if bn.get('rpki_invalid_drop'):
+                lines.append('  bgp rpki invalid-drop')
             shown_neighbor_ips = set()
             for sid, sess in bn.get('sessions', {}).items():
                 peer_ip = bn.get('_neighbor_ips', {}).get(sid, sess.neighbor_id)
@@ -5217,6 +5291,24 @@ def _build_running_config(device_id: str, state) -> str:
                 lines.append(f' bgp cluster-id {bn["cluster_id"]}')
             if bn.get('rtbh_community'):
                 lines.append(f' bgp rtbh-community {bn["rtbh_community"]}')
+            if bn.get('hostname_capability'):
+                lines.append(' bgp hostname-capability')
+            if bn.get('graceful_restart_default'):
+                lines.append(' bgp graceful-restart')
+                if bn.get('gr_restart_time', 120) != 120:
+                    lines.append(f' bgp graceful-restart restart-time {bn["gr_restart_time"]}')
+            if bn.get('llgr_default'):
+                lines.append(' bgp long-lived-graceful-restart')
+            if bn.get('confederation_id') is not None:
+                lines.append(f' bgp confederation identifier {bn["confederation_id"]}')
+            if bn.get('confederation_peers'):
+                peers_str = ' '.join(str(a) for a in sorted(bn['confederation_peers']))
+                lines.append(f' bgp confederation peers {peers_str}')
+            for roa in bn.get('roas', []):
+                lines.append(f' bgp rpki roa {roa["prefix"]}/{roa["prefix_len"]} '
+                             f'max-length {roa["max_length"]} origin-as {roa["origin_as"]}')
+            if bn.get('rpki_invalid_drop'):
+                lines.append(' bgp rpki invalid-drop')
             shown_neighbor_ips = set()
             for nid, sess in bn['sessions'].items():
                 peer_ip = '10.0.0.2'

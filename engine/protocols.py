@@ -2193,6 +2193,10 @@ class BgpSession:
     prefix_list_out: str = ''     # アウトバウンド prefix-list 名（filter_engine参照）
     send_community: bool = False  # send-community 有効（community 属性を送信）
     reflector_client: bool = False  # neighbor <ip> route-reflector-client（BGP Route Reflector）
+    # Graceful Restart / Long-Lived Graceful Restart（lab-bgp-graceful-restart/llgr）
+    graceful_restart: bool = False  # セッション断時に経路をすぐ消さず stale化
+    llgr: bool = False               # stale化後、タイマーで消さず明示撤回まで保持
+    restart_time: int = 120          # GR: この秒数以内に再確立しなければ本当に撤去
 
 @dataclass
 class BgpRoute:
@@ -2206,6 +2210,8 @@ class BgpRoute:
     learned_from: str = ''
     learned_from_hostname: str = ''
     communities: List[str] = field(default_factory=list)  # ["65000:100", "65001:200"]
+    stale: bool = False      # Graceful Restart/LLGRでセッション断後も保持している経路
+    rpki_state: str = 'notfound'  # 'valid' | 'invalid' | 'notfound'(lab-bgp-rpki)
 
 class BgpEngine:
     def __init__(self):
@@ -2233,6 +2239,14 @@ class BgpEngine:
                 'cluster_id': '',       # bgp cluster-id（Route Reflector）
                 'rtbh_community': '',   # bgp rtbh-community（Remote-Triggered Black-Hole）
                 'rtbh_installed': set(),  # RTBHで自動インストール済みのNull0経路 {(prefix, prefix_len)}
+                'hostname_capability': False,  # bgp hostname-capability
+                'graceful_restart_default': False,  # bgp graceful-restart（新規/既存neighborへ継承）
+                'llgr_default': False,              # bgp long-lived-graceful-restart
+                'gr_restart_time': 120,
+                'confederation_id': None,     # bgp confederation identifier <as>（外部向けに見せるAS）
+                'confederation_peers': set(), # bgp confederation peers <as...>（内部メンバーのsub-AS群）
+                'roas': [],  # bgp rpki roa: [{'prefix','prefix_len','max_length','origin_as'}]
+                'rpki_invalid_drop': False,  # bgp rpki invalid-drop（RPKI invalidを採用しない）
             }
         return self.nodes[device_id]
 
@@ -2319,6 +2333,128 @@ class BgpEngine:
             rib_engine.remove_static_route(device_id, prefix, plen, 'Null0')
         n['rtbh_installed'] = wanted
 
+    # ── BGP Hostname Capability(lab-bgp-hostname) ────────
+    def set_hostname_capability(self, device_id: str, enabled: bool = True):
+        """bgp hostname-capability。実機(FRR/BIRD)は自動ネゴシエーションだが、
+        このエミュレータでは明示的なトグルにしている。双方が有効にして
+        初めて、show ip bgp summaryのNeighbor列に実ホスト名を表示する。"""
+        self._node(device_id)['hostname_capability'] = enabled
+
+    def _hostname_capability_active(self, device_id: str, neighbor_id: str) -> bool:
+        n = self.nodes.get(device_id)
+        nbr = self.nodes.get(neighbor_id)
+        return bool(n and nbr and n.get('hostname_capability') and nbr.get('hostname_capability'))
+
+    # ── Graceful Restart / Long-Lived Graceful Restart(lab-bgp-graceful-restart/llgr) ──
+    def set_graceful_restart(self, device_id: str, enabled: bool = True,
+                             restart_time: Optional[int] = None):
+        """bgp graceful-restart [restart-time <sec>]。既存の全セッションと
+        今後追加されるセッションの両方に適用する(実機のrouter bgp配下の
+        グローバル設定という位置づけに合わせている)。"""
+        n = self._node(device_id)
+        n['graceful_restart_default'] = enabled
+        if restart_time is not None:
+            n['gr_restart_time'] = restart_time
+        for s in n['sessions'].values():
+            s.graceful_restart = enabled
+            if restart_time is not None:
+                s.restart_time = restart_time
+
+    def set_llgr(self, device_id: str, enabled: bool = True):
+        """bgp long-lived-graceful-restart。stale化した経路をタイマーで
+        消さず、明示的な撤回(再接続後に広告され直さない)までそのまま
+        保持する(実機のLLGR_STALEコミュニティに相当する優先度降格は
+        _recalc_best_pathのstale比較で代替している)。"""
+        n = self._node(device_id)
+        n['llgr_default'] = enabled
+        for s in n['sessions'].values():
+            s.llgr = enabled
+
+    def _schedule_gr_expiry(self, device_id: str, neighbor_id: str, restart_time: int):
+        """GR(LLGRではない)での保持期限。この秒数以内に再確立されなければ、
+        stale化していた経路を本当に撤去する。"""
+        async def expire():
+            await asyncio.sleep(restart_time)
+            n = self.nodes.get(device_id)
+            s = n['sessions'].get(neighbor_id) if n else None
+            if not n or not s or s.state == 'Established':
+                return  # 期限内に再確立済み → 何もしない
+            n['rib_in'] = [r for r in n['rib_in'] if r.learned_from != neighbor_id]
+            self._recalc_best_path(device_id)
+            self._apply_rtbh(device_id)
+        _spawn(expire())
+
+    # ── Confederation(lab-bgp-confederation) ─────────────
+    def set_confederation_identifier(self, device_id: str, as_number: int):
+        """bgp confederation identifier <as>。外部(真のeBGP)へ広告する
+        際にはこの番号だけを見せ、内部のsub-AS群は隠す。"""
+        self._node(device_id)['confederation_id'] = as_number
+
+    def add_confederation_peer(self, device_id: str, as_number: int):
+        """bgp confederation peers <as...>。ここに列挙したsub-ASとの
+        eBGPは「Confederation eBGP」(内部メンバー間)として扱い、
+        local-pref/next-hopは通常のiBGPと同じく素通しするが、
+        as_path上には自分のsub-AS番号を積む(実機同様、外に出た経路数の
+        カウントには残るが、confederation外からは1つのpublic ASとして
+        圧縮されて見える)。"""
+        self._node(device_id)['confederation_peers'].add(as_number)
+
+    def _is_confed_peer(self, device_id: str, remote_as: int) -> bool:
+        n = self.nodes.get(device_id)
+        return bool(n and remote_as in n.get('confederation_peers', set()))
+
+    # ── RPKI Origin Validation(lab-bgp-rpki) ─────────────
+    def add_roa(self, device_id: str, prefix: str, prefix_len: int,
+               max_length: int, origin_as: int):
+        """bgp rpki roa <prefix>/<len> max-length <max> origin-as <as>。
+        実機はRPKI cache(rtrlib経由)から取得するが、このエミュレータは
+        ローカルに手で登録したROAテーブルで代替する。"""
+        self._node(device_id)['roas'].append({
+            'prefix': prefix, 'prefix_len': prefix_len,
+            'max_length': max_length, 'origin_as': origin_as,
+        })
+
+    def set_rpki_invalid_drop(self, device_id: str, enabled: bool = True):
+        """bgp rpki invalid-drop。有効にすると、RPKI invalidと判定された
+        経路はインバウンドの時点で受理しない(実機のrpki invalid policyに
+        相当)。"""
+        self._node(device_id)['rpki_invalid_drop'] = enabled
+
+    def _rpki_validate(self, device_id: str, prefix: str, prefix_len: int,
+                       origin_as: int) -> str:
+        """prefix/prefix_len/origin_asをROAテーブルと照合する。
+        - prefixがどのROAにもカバーされない → 'notfound'
+        - prefixをカバーするROAがあり、prefix_len<=max_lengthかつ
+          origin_asが一致 → 'valid'
+        - prefixをカバーするROAはあるが、どれとも一致しない(AS不一致/
+          max-length超過) → 'invalid'
+        """
+        n = self.nodes.get(device_id)
+        if not n or not n.get('roas'):
+            return 'notfound'
+        try:
+            pfx_int = vnet._ip_to_int(prefix)
+        except Exception:
+            return 'notfound'
+        covering = []
+        for roa in n['roas']:
+            try:
+                roa_int = vnet._ip_to_int(roa['prefix'])
+            except Exception:
+                continue
+            roa_len = roa['prefix_len']
+            if roa_len > prefix_len:
+                continue
+            mask = (0xffffffff << (32 - roa_len)) & 0xffffffff if roa_len else 0
+            if (pfx_int & mask) == (roa_int & mask):
+                covering.append(roa)
+        if not covering:
+            return 'notfound'
+        for roa in covering:
+            if prefix_len <= roa['max_length'] and origin_as == roa['origin_as']:
+                return 'valid'
+        return 'invalid'
+
     def add_route_map(self, device_id: str, name: str, prepend=None,
                       local_pref=None, med=None, communities=None,
                       communities_additive=False):
@@ -2395,7 +2531,10 @@ class BgpEngine:
                 session.neighbor_ip = neighbor_ip
         else:
             session = BgpSession(neighbor_id=neighbor_id, hostname=neighbor_hostname,
-                                  remote_as=int(remote_as), neighbor_ip=neighbor_ip)
+                                  remote_as=int(remote_as), neighbor_ip=neighbor_ip,
+                                  graceful_restart=n.get('graceful_restart_default', False),
+                                  llgr=n.get('llgr_default', False),
+                                  restart_time=n.get('gr_restart_time', 120))
         n['sessions'][neighbor_id] = session
         await vnet.send_to(device_id, {
             'type': 'bgp_log',
@@ -2514,14 +2653,25 @@ class BgpEngine:
         if not n or not session:
             return []
         is_ebgp = (session.remote_as != n['local_as'])
+        is_confed_peer = self._is_confed_peer(device_id, session.remote_as)
+        confed_id = n.get('confederation_id')
+        confed_members = {n['local_as']} | n.get('confederation_peers', set())
+
+        def _leaving_confederation():
+            """真の外部eBGP(confederation加盟国向けではない)へ、かつ
+            confederation identifierが設定されている場合のみTrue。
+            この場合だけ内部sub-AS群を隠し、公開AS番号1つに圧縮する。"""
+            return is_ebgp and not is_confed_peer and confed_id is not None
+
         out = []
         # 1) 自分起点のネットワーク
         for net in n['networks']:
+            self_path = [confed_id] if _leaving_confederation() else [n['local_as']]
             out.append(BgpRoute(
                 prefix=net.split('/')[0],
                 prefix_len=int(net.split('/')[1]) if '/' in net else 24,
                 next_hop=device_id,
-                as_path=[n['local_as']], origin='i',
+                as_path=self_path, origin='i',
                 learned_from='', learned_from_hostname=n['hostname']))
         # 2) 学習済みベスト経路（トランジット）
         for lr in n.get('loc_rib', []):
@@ -2543,7 +2693,18 @@ class BgpEngine:
                 )
                 if not is_reflecting:
                     continue
-            new_path = ([n['local_as']] + list(lr['as_path'])) if is_ebgp else list(lr['as_path'])
+            if _leaving_confederation():
+                # confederation外へ出る: 内部で溜まったsub-AS群を全て取り除き、
+                # 公開AS番号を1つだけ付け直す(実機同様、外からは1つのASに
+                # 見える)
+                cleaned = [a for a in lr['as_path'] if a not in confed_members]
+                new_path = [confed_id] + cleaned
+            elif is_ebgp:
+                # 通常のeBGP、またはconfederation加盟国同士のeBGP:
+                # どちらも自分の(sub-)AS番号をそのままprependする
+                new_path = [n['local_as']] + list(lr['as_path'])
+            else:
+                new_path = list(lr['as_path'])
             out.append(BgpRoute(
                 prefix=lr['prefix'], prefix_len=lr['prefix_len'],
                 next_hop=device_id, med=lr.get('med', 0), origin=lr.get('origin', 'i'),
@@ -2622,11 +2783,19 @@ class BgpEngine:
                                 not filter_engine.check_prefix_list(
                                     nid, nbr_session.prefix_list_in, r.prefix, r.prefix_len)):
                             continue
+                        # RPKI Origin Validation: 受信側(nid)に登録されたROAテーブルで
+                        # origin AS(as_pathの末尾 = 発信元)を検証する。
+                        # rpki invalid-drop が有効なら invalid はこの時点で受理しない。
+                        origin_as = r.as_path[-1] if r.as_path else None
+                        rpki_state = (self._rpki_validate(nid, r.prefix, r.prefix_len, origin_as)
+                                     if origin_as is not None else 'notfound')
+                        if rpki_state == 'invalid' and nbr.get('rpki_invalid_drop'):
+                            continue
                         rr = BgpRoute(prefix=r.prefix, prefix_len=r.prefix_len,
                                       next_hop=dev, local_pref=100, med=r.med,
                                       as_path=list(r.as_path), origin=r.origin,
                                       learned_from=dev, learned_from_hostname=n['hostname'],
-                                      communities=list(r.communities))
+                                      communities=list(r.communities), rpki_state=rpki_state)
                         if nbr_session and nbr_session.route_map_in:
                             rr = self._apply_route_map(nid, nbr_session.route_map_in, rr)
                         wanted[(rr.prefix, rr.prefix_len)] = rr
@@ -2645,15 +2814,21 @@ class BgpEngine:
                             nbr['rib_in'].append(rr)
                             changed = True
                         elif (cur.as_path != rr.as_path or cur.local_pref != rr.local_pref
-                              or cur.med != rr.med or cur.communities != rr.communities):
+                              or cur.med != rr.med or cur.communities != rr.communities
+                              or cur.rpki_state != rr.rpki_state or cur.stale):
                             # communitiesの比較/更新が無かったため、route-mapで
                             # community を後から設定/変更しても既存経路には
                             # 反映されなかった（as-path/local-pref/medだけが
-                            # 更新対象になっていた）
+                            # 更新対象になっていた）。cur.staleもここで見る—
+                            # Graceful Restartでstale化していた経路が、
+                            # セッション再確立後に改めて広告されたら
+                            # staleを解除する。
                             cur.as_path = rr.as_path
                             cur.local_pref = rr.local_pref
                             cur.med = rr.med
                             cur.communities = rr.communities
+                            cur.rpki_state = rr.rpki_state
+                            cur.stale = False
                             changed = True
                     nbr['prefixes_received'] = len(nbr['rib_in'])
             # 各ノードのベスト経路を再計算（次の反復の _compute_adverts に反映）
@@ -2669,7 +2844,10 @@ class BgpEngine:
             return
         def _better(r, cur):
             # BGPベストパス選択（簡易・Cisco順序準拠）:
+            # 0) stale(Graceful Restart/LLGR)でない方を常に優先
             # 1) local-preference 大, 2) AS-path 短, 3) MED 小
+            if r.stale != cur.stale:
+                return not r.stale
             if r.local_pref != cur.local_pref:
                 return r.local_pref > cur.local_pref
             if len(r.as_path) != len(cur.as_path):
@@ -2687,7 +2865,8 @@ class BgpEngine:
                           'learned_from_hostname': r.learned_from_hostname,
                           # 以前はここでcommunitiesを落としていたため、route-mapで
                           # 付与したcommunityがベストパス再計算のたびに消えていた
-                          'communities': list(r.communities)}
+                          'communities': list(r.communities),
+                          'stale': r.stale, 'rpki_state': r.rpki_state}
                          for r in best.values()]
 
     async def advertise_network(self, device_id: str, network: str):
@@ -2726,9 +2905,24 @@ class BgpEngine:
             s.uptime = None
             if s.keepalive_task:
                 s.keepalive_task.cancel()
-            # このネイバーから学習した経路を撤去
             before = len(n['rib_in'])
-            n['rib_in'] = [r for r in n['rib_in'] if r.learned_from != b]
+            if s.graceful_restart or s.llgr:
+                # Graceful Restart/LLGR: このネイバーから学習した経路は
+                # すぐには撤去せず stale化して保持する(実機同様、再確立
+                # までの短い断でも転送を止めない)。
+                # - GR: s.restart_time 秒以内に再確立しなければ本当に撤去
+                #   (_schedule_gr_expiry)。
+                # - LLGR: タイマーでは消さず、明示的な再広告(セッション
+                #   再確立後にそのprefixがもう無ければ_propagate_bgp側の
+                #   通常ロジックで撤去される)まで保持し続ける。
+                for r in n['rib_in']:
+                    if r.learned_from == b:
+                        r.stale = True
+                if s.graceful_restart and not s.llgr:
+                    self._schedule_gr_expiry(a, b, s.restart_time)
+            else:
+                # このネイバーから学習した経路を撤去
+                n['rib_in'] = [r for r in n['rib_in'] if r.learned_from != b]
             self._recalc_best_path(a)
             self._apply_rtbh(a)
             pending_notify.append((a, s, bfd_note, before))
@@ -2808,10 +3002,19 @@ class BgpEngine:
             rcvd = sum(1 for r in n.get('rib_in', []) if r.learned_from == nid)
             sent = len(n.get('networks', []))
             rr_line = ['  Route-Reflector Client'] if s.reflector_client else []
+            cap_lines = []
+            if self._hostname_capability_active(device_id, nid):
+                cap_lines.append(f'  Hostname Capability: advertised and received '
+                                 f'(Hostname {s.hostname})')
+            if s.graceful_restart or s.llgr:
+                gr_kind = 'Long-Lived Graceful Restart' if s.llgr else 'Graceful Restart'
+                cap_lines.append(f'  {gr_kind} Capability: advertised and received '
+                                 f'(restart time {s.restart_time} seconds)')
             blocks.append('\n'.join([
                 f'BGP neighbor is {addr},  remote AS {s.remote_as}, {link} link',
                 f'  BGP version 4, remote router ID {addr}',
                 *rr_line,
+                *cap_lines,
                 state_line,
                 '  Last read 00:00:00, last write 00:00:00, hold time is 180, '
                 'keepalive interval is 60 seconds',
@@ -2856,11 +3059,31 @@ class BgpEngine:
             state_or_pfx = str(pfx_count) \
                 if session.state == 'Established' else session.state
             addr = session.neighbor_ip or ('192.168.1.' + str(nid))
+            # Hostname Capability(lab-bgp-hostname): 双方で有効なら、実機
+            # (FRR)の"show bgp summary"同様、Neighbor列にIPではなく
+            # "hostname(ip)"形式でホスト名を表示する
+            if self._hostname_capability_active(device_id, nid):
+                addr = f'{session.hostname}({addr})'
             lines.append(
                 f'{addr:<16}4{str(session.remote_as):>6}'
                 f'{random.randint(10,200):>8}{random.randint(10,200):>8}'
                 f'{1:>9}{0:>5}{0:>5} {uptime:<9} {state_or_pfx}'
             )
+        return '\n'.join(lines)
+
+    def format_show_bgp_rpki_table(self, device_id: str) -> str:
+        """show bgp rpki table。登録済みROAの一覧(実機はRPKI cacheから
+        同期するが、このエミュレータはローカル登録のみ)。"""
+        n = self.nodes.get(device_id)
+        if not n:
+            return '% BGP is not configured.'
+        roas = n.get('roas', [])
+        if not roas:
+            return 'No ROAs configured.'
+        lines = ['Prefix                   Max-Len  Origin-AS']
+        for roa in sorted(roas, key=lambda r: (r['prefix'], r['prefix_len'])):
+            pfx = f'{roa["prefix"]}/{roa["prefix_len"]}'
+            lines.append(f'{pfx:<24} {roa["max_length"]:<8} {roa["origin_as"]}')
         return '\n'.join(lines)
 
     def format_show_bgp_table(self, device_id: str) -> str:
@@ -2887,10 +3110,13 @@ class BgpEngine:
             nh = _nh_ip(lf) if lf else '0.0.0.0'
             # 自分が起点(local origin)なら weight 32768, 学習経路は 0
             weight = 32768 if not lf else 0
+            status = '*s' if r.get('stale') else '*>'
+            rpki_suffix = {'valid': ' (RPKI: Valid)', 'invalid': ' (RPKI: Invalid)'}.get(
+                r.get('rpki_state', 'notfound'), '')
             lines.append(
-                f'*> {key:<18} {nh:<20} '
+                f'{status} {key:<18} {nh:<20} '
                 f'{str(r["med"]):>6} {str(r["local_pref"]):>6} {weight:>6} '
-                f'{" ".join(str(a) for a in r["as_path"])} {r["origin"]}'
+                f'{" ".join(str(a) for a in r["as_path"])} {r["origin"]}{rpki_suffix}'
             )
         # ベスト以外の候補（冗長経路）も表示: 同一prefixで非ベストのもの
         for r in n['rib_in']:

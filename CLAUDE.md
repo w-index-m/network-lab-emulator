@@ -1136,3 +1136,88 @@ option150/67反映とステージ内容が生テキストとして保持され�
 デフォルトルート+ステージ済みconfigの適用、および4種の失敗ケース
 (サーバー未リンク・ブートファイル未設定・ファイル未staging・
 write eraseせずのreload)を固定する。
+
+**BGP: Hostname Capability / Graceful Restart・LLGR / RPKI / Confederation**:
+「lab bgpも実装お願いします」という依頼に対し、
+[vincentbernat/network-lab](https://github.com/vincentbernat/network-lab)
+の`lab-bgp-*`群からユーザーが選んだ4機能
+(`lab-bgp-hostname`/`lab-bgp-graceful-restart`・`lab-bgp-llgr`/
+`lab-bgp-rpki`/`lab-bgp-confederation`)。どれも新しいエンジンは作らず、
+既存の`BgpEngine`(`engine/protocols.py`)に機能を足した。
+
+**Hostname Capability**: 実機(FRR/BIRD)は自動ネゴシエーションだが、
+このエミュレータでは`bgp hostname-capability`で明示的にトグルする
+pragmatic判断。双方で有効な場合のみ`show ip bgp summary`のNeighbor列
+が実機のFRR同様`hostname(ip)`形式になり(`_hostname_capability_active`)、
+`show ip bgp neighbors`にも`Hostname Capability: advertised and
+received`行が出る。
+
+**Graceful Restart / LLGR**: `BgpSession`に`graceful_restart`/`llgr`/
+`restart_time`、`BgpRoute`に`stale: bool`を追加。`session_down`は
+GR/LLGRが有効なセッションの場合、学習経路を即時削除せずstale化する
+だけに変更(`r.stale = True`)。GRは`restart_time`秒以内に再確立
+しなければ`_schedule_gr_expiry`が本当に撤去するが、LLGRはタイマーを
+一切張らず、再確立後に改めて広告されなければ(_propagate_bgpの通常の
+撤回ロジックに委ねる形で)自然に消える、というだけで明示的な撤去
+コードは書いていない。ベストパス選択(`_recalc_best_path`の
+`_better()`)はstale同士でなければ常に非staleを優先するよう1行追加。
+`show ip bgp`のベストパス行は`*s`(stale)マーカーで区別する。
+
+**RPKI**: `bgp rpki roa <prefix>/<len> max-length <max> origin-as <as>`
+で登録したROAテーブル(`n['roas']`)と、学習経路のorigin AS
+(`as_path[-1]` — このエンジンの自己発信経路は常に末尾が発信元という
+既存の内部表現に乗っている)を`_rpki_validate()`で照合し
+valid/invalid/notfoundを判定、`BgpRoute.rpki_state`に記録して
+`_propagate_bgp`のインバウンド処理時点で評価する。
+`bgp rpki invalid-drop`が有効ならinvalidをこの時点で拒否する
+(実機のreject policy相当)。`show ip bgp`に`(RPKI: Valid/Invalid)`
+のサフィックス、`show bgp rpki table`でROA一覧を表示。
+
+**Confederation**: `bgp confederation identifier <as>` /
+`bgp confederation peers <as...>`は実機そのままのCisco IOS構文
+(pragmaticな代替コマンドではない、本物)。実装は`_compute_adverts`の
+as_path構築ロジックに集約: 加盟国(confederation peers)同士のeBGPは
+通常のeBGPと同じく自分の(sub-)AS番号をas_pathにprependするが、
+**真の外部eBGPへ出る瞬間だけ**(`_leaving_confederation()`が
+True、すなわち相手が加盟国でもiBGPでもなく、confederation
+identifierが設定されている場合)、それまでas_pathに積まれた
+内部sub-AS群を`confed_members`で全て取り除き、identifier番号を
+1つだけ付け直す — 実機同様、confederation外からは1つのpublic ASに
+圧縮されて見える。AS-pathループ防止(`is_ebgp_hop`判定)は加盟国同士も
+各自が別のsub-AS番号を持つため、既存のeBGP/iBGP判定をそのまま
+転用でき、特別な分岐は不要だった。
+
+Live-verified(TestClientスクリプト、4機能とも別々に): Hostname
+Capabilityは双方有効時だけNeighbor列がhostname(ip)になり片方のみ
+では素のIPのまま、Graceful Restartはセッション断後すぐに`*s`付きで
+経路が残り、restart_time経過後に本当に消えることを確認、LLGRは
+同条件で何秒経っても消えないことを確認、RPKIはvalid/invalid/
+notfoundの判定とinvalid-dropでの拒否、ConfederationはCA(sub-AS
+65010)⇔CB(sub-AS 65020、どちらもpublic AS 65000)⇔CX(真の外部AS
+65999)の3段構成で、CBから見える経路のas-pathにはCAのsub-AS 65010が
+残るが、CXから見える同じ経路のas-pathは65000だけ(65010/65020は
+一切見えない)ことを確認。
+
+**実装中に見つけた実バグ(2件)**: (1) `show running-config`のBGP
+ブロックは実は2系統(NX-OS/Nexus向けブロックと通常のIOS/Catalyst向け
+ブロック)が同じ関数内に存在し、両方に同じ新規設定行(cluster-id等)を
+追記する必要があったが、片方(IOS向けブロック)にだけ
+`bgp graceful-restart restart-time <sec>`行の追記を書き忘れており、
+`bgp graceful-restart`は出るのにrestart-timeだけ消える不具合があった
+— 両方に追記して解決。(2) この調査中に気づいた**既存の無関係な
+バグ**(今回の変更とは無関係、修正はスコープ外とした): 同じ
+show running-configのIOS向けブロックで、neighbor行のpeer_ipが
+実際の設定IPではなく常に文字列`'10.0.0.2'`のハードコード値になって
+おり、実際のneighbor IPの行と合わせて同じneighborが2行出る
+(`neighbor 10.0.0.2 remote-as X` / `neighbor <実IP> remote-as X`)。
+変更前のコードでも再現することを確認済み(今回のBGP機能追加が
+原因ではない)。
+
+`tests/test_bgp_hostname_gr_llgr_rpki_confederation.py`(20 tests)が
+`tests/test_bgp_advanced.py`と同じ方式(engine.protocolsを
+pytest-asyncioで直接操作)で、Hostname Capabilityの双方有効/片方
+のみのケース、GRのstale化・restart_time経過後の撤去・GR未設定時の
+regression防止、LLGRの無期限保持・非stale代替経路への切替、RPKIの
+valid/notfound/invalid(AS不一致・max-length超過)/invalid-drop、
+Confederationの加盟国間eBGP・外部への圧縮・confederation未設定時の
+regression防止、およびCLI側の新規正規表現5つを固定する。
