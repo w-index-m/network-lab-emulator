@@ -3065,6 +3065,24 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         if peer_id:
             bgp_engine.set_neighbor_send_community(device_id, peer_id, True)
         return
+    # ── neighbor <ip> route-reflector-client（BGP Route Reflector）──
+    bgp_rr_client = re.match(r'^neighbor\s+([\d.]+)\s+route-reflector-client', c)
+    if bgp_rr_client and getattr(state, '_routing_mode', '') == 'bgp':
+        nip = bgp_rr_client.group(1)
+        peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
+        if peer_id:
+            bgp_engine.set_neighbor_route_reflector_client(device_id, peer_id)
+        return
+    # ── bgp cluster-id <id>（Route Reflectorのクラスタ識別子）──
+    bgp_cluster = re.match(r'^bgp\s+cluster-id\s+(\S+)', c)
+    if bgp_cluster and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_cluster_id(device_id, bgp_cluster.group(1))
+        return
+    # ── bgp rtbh-community <AS:NUM>（Remote-Triggered Black-Hole）──
+    bgp_rtbh = re.match(r'^bgp\s+rtbh-community\s+(\d+:\d+)', c)
+    if bgp_rtbh and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_rtbh_community(device_id, bgp_rtbh.group(1))
+        return
     # Si-R: "bgp network <ip>/<prefix>" 広告
     sir_bgp_net = re.match(r'^bgp\s+network\s+([\d.]+(?:/\d+)?)', c)
     if sir_bgp_net and getattr(state, '_routing_mode', '') == 'bgp':
@@ -4626,10 +4644,16 @@ def _build_running_config(device_id: str, state) -> str:
         bn = bgp_engine.nodes.get(device_id)
         if bn and bn.get('local_as'):
             lines.append(f'router bgp {bn["local_as"]}')
+            if bn.get('cluster_id'):
+                lines.append(f'  bgp cluster-id {bn["cluster_id"]}')
+            if bn.get('rtbh_community'):
+                lines.append(f'  bgp rtbh-community {bn["rtbh_community"]}')
             shown_neighbor_ips = set()
             for sid, sess in bn.get('sessions', {}).items():
                 peer_ip = bn.get('_neighbor_ips', {}).get(sid, sess.neighbor_id)
                 lines.append(f'  neighbor {peer_ip} remote-as {sess.remote_as}')
+                if sess.reflector_client:
+                    lines.append(f'  neighbor {peer_ip} route-reflector-client')
                 shown_neighbor_ips.add(peer_ip)
             # トポロジー上ピアが解決できず bgp_engine のセッションには
             # 乗らなかったneighborも、実機同様running-configには反映する
@@ -5039,10 +5063,16 @@ def _build_running_config(device_id: str, state) -> str:
         if bn and bn.get('enabled'):
             lines.append('!')
             lines.append(f'router bgp {bn["local_as"]}')
+            if bn.get('cluster_id'):
+                lines.append(f' bgp cluster-id {bn["cluster_id"]}')
+            if bn.get('rtbh_community'):
+                lines.append(f' bgp rtbh-community {bn["rtbh_community"]}')
             shown_neighbor_ips = set()
             for nid, sess in bn['sessions'].items():
                 peer_ip = '10.0.0.2'
                 lines.append(f' neighbor {peer_ip} remote-as {sess.remote_as}')
+                if sess.reflector_client:
+                    lines.append(f' neighbor {peer_ip} route-reflector-client')
                 shown_neighbor_ips.add(peer_ip)
             for nbr_ip, remote_as in getattr(state, '_bgp_configured_neighbors', {}).items():
                 if nbr_ip not in shown_neighbor_ips:

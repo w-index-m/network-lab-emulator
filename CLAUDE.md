@@ -964,3 +964,71 @@ MATURE` / `status : established`)。`tests/test_yamaha_cisco_ipsec_over_ipoe_map
 `state.ipsec_tunnels`への直接反映、誤PSKでの`DYING`/`wait`失敗、
 `tunnel disable`でのSA解体、およびMAP-E未接続(共有IPv4が存在しない)
 状態では確立しないケース。
+
+**BGP Route Reflector(cluster-id / route-reflector-client)と
+RTBH(Remote-Triggered Black-Hole)**: ユーザーに
+[vincentbernat/network-lab](https://github.com/vincentbernat/network-lab)
+から持ち込めそうな機能を提案し(`lab-routereflector`/`lab-rtbh`含む)、
+この2つを選んで実装した。どちらも新しいエンジンは作らず、既存の
+`engine/protocols.py`の`BgpEngine`に機能を足す形にした。
+
+**Route Reflector**: `_compute_adverts`の既存iBGP split-horizon判定
+(`src_is_ibgp and not is_ebgp: continue`)に、送信先または学習元の
+セッションが`reflector_client`(新設、`BgpSession.reflector_client`)
+なら反射する例外を追加しただけ。CLI: `neighbor <ip>
+route-reflector-client`(`set_neighbor_route_reflector_client`)、
+`bgp cluster-id <id>`(`set_cluster_id`、ループ防止用の
+originator-id/cluster-listまでは実装せず表示保持のみ、とコメントで
+明記)。`show ip bgp neighbors`に`Route-Reflector Client`行、
+`show ip bgp summary`に`RR instance cluster-id is ...`行、
+`show running-config`にも両コマンドを追加。
+
+**実装中に見つけた既存の実バグ(RRを作るまで露見しなかった)**:
+`_propagate_bgp`のAS-pathループ防止(`if nbr['local_as'] in r.as_path:
+continue`)が、eBGP/iBGPを区別せず常に適用されていた。自己発信経路の
+as_pathには常に自ASが入る実装(`_compute_adverts`の1)なので、
+**同一AS内のiBGPピア同士(= RRクライアントを含むiBGP全般)への配布が
+常にこの判定で誤って拒否されてしまう**(受信側の自AS=自分のASなので
+`nbr['local_as'] in r.as_path`が常にTrueになる)。既存テスト
+(`tests/test_bgp_advanced.py`等)は全てeBGP(装置ごとに別AS)だけで
+RRのような同一AS iBGP構成を一度も検証していなかったため今まで露見
+していなかった。修正: このAS-pathループ防止はeBGP越境時のみ適用
+(`is_ebgp_hop = session.remote_as != n['local_as']`で判定)し、iBGPの
+ループ防止はsplit-horizon/反射ルールの方に委ねるようにした。
+
+もう1つ、`session_down`で片側ずつ「Idle化→学習経路撤去→即
+`_propagate_bgp()`」としていたため、まだ相手側がEstablishedのまま
+残っている間に`_propagate_bgp()`が走り、直前に撤去したはずの経路が
+相手から再配布されて復活してしまうタイミング問題も見つけて修正
+(両端をIdle化・撤去してから1回だけ`_propagate_bgp()`を呼ぶように
+ループを再構成)。RTBHの「経路撤回でNull0経路も解除される」テストで
+初めて踏んだ。
+
+**RTBH**: 既存のBGP community機構(`route-map ... set community`/
+`send-community`)はそのまま使い、新設の
+`bgp rtbh-community <AS:NUM>`(`set_rtbh_community`)で指定した
+communityを持つベストパスを、`rib_engine`へ`next_hop='Null0'`の
+静的経路として自動installする(`_apply_rtbh`、`_propagate_bgp`の
+ベストパス再計算後と`session_down`の両方から呼ぶ)。
+`IcmpEngine._resolve_next_hop_detail`に`next_hop == 'Null0'`なら
+どの隣接にも誤って解決せず不達(破棄)として返す分岐を追加。
+
+Live-verified(TestClientスクリプト): RR1(cluster-id設定)+
+2台のRRクライアント(ハブ&スポーク、クライアント同士は未リンク)で、
+RRが無ければ`show ip bgp`に経路が出ない(split-horizon)状態から、
+`route-reflector-client`を設定した途端にクライアント間で経路が反射
+されること、`show ip bgp neighbors`/`show ip bgp summary`/
+`show running-config`への反映を確認。RTBHは`route-map`で
+community付与→`bgp rtbh-community`設定側で実際に`show ip route`に
+`Null0`経路が入り、**実際にpingが失敗する(0% success、ブラックホール
+として破棄される)**ことまで確認。
+
+`tests/test_bgp_route_reflector_and_rtbh.py`(10 tests)が、
+`tests/test_bgp_advanced.py`と同じ方式(`engine.protocols`を
+pytest-asyncioで直接操作。BGPのFSMは実際の`asyncio.sleep`を使うため、
+同期TestClient越しだとタイマーが進まず確立しない)で、RR反射の成立/
+reflector-client未設定時のsplit-horizon維持(regression防止)/
+学習元への広告し返さないガード、RTBHのNull0インストール/community
+不一致時の非インストール/撤回での解除/ICMPエンジンでの実際の不達、
+およびCLI側の新規正規表現3つ(`bgp cluster-id`/
+`route-reflector-client`/`bgp rtbh-community`)の処理を固定する。

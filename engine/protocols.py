@@ -2192,6 +2192,7 @@ class BgpSession:
     prefix_list_in: str = ''      # インバウンド prefix-list 名（filter_engine参照）
     prefix_list_out: str = ''     # アウトバウンド prefix-list 名（filter_engine参照）
     send_community: bool = False  # send-community 有効（community 属性を送信）
+    reflector_client: bool = False  # neighbor <ip> route-reflector-client（BGP Route Reflector）
 
 @dataclass
 class BgpRoute:
@@ -2229,6 +2230,9 @@ class BgpEngine:
                 'keepalive_interval': 30,
                 'route_maps': {},  # name -> {'prepend':[as..],'local_pref':int,'med':int}
                 'bfd': {'interval': 300, 'min_rx': 300, 'multiplier': 3},
+                'cluster_id': '',       # bgp cluster-id（Route Reflector）
+                'rtbh_community': '',   # bgp rtbh-community（Remote-Triggered Black-Hole）
+                'rtbh_installed': set(),  # RTBHで自動インストール済みのNull0経路 {(prefix, prefix_len)}
             }
         return self.nodes[device_id]
 
@@ -2275,6 +2279,45 @@ class BgpEngine:
             s.send_community = enabled
             # route-mapと同様、既存経路への反映には再伝播が要る
             self._propagate_bgp()
+
+    # ── Route Reflector ──────────────────────────────────
+    def set_neighbor_route_reflector_client(self, device_id: str, neighbor_id: str,
+                                            enabled: bool = True):
+        """neighbor <ip> route-reflector-client。このneighborをRRクライアントとして
+        扱い、他のiBGPピア(クライアント/非クライアント問わず)との間で経路を反射する。"""
+        s = self._node(device_id)['sessions'].get(neighbor_id)
+        if s:
+            s.reflector_client = enabled
+            self._propagate_bgp()
+
+    def set_cluster_id(self, device_id: str, cluster_id: str):
+        """bgp cluster-id <id>。複数RRで同一クラスタを構成する際の識別子
+        (このエミュレータではループ防止のoriginator-id/cluster-listまでは
+        実装せず、show running-config/表示上の保持のみ)。"""
+        self._node(device_id)['cluster_id'] = cluster_id
+
+    # ── RTBH (Remote-Triggered Black-Hole) ───────────────
+    def set_rtbh_community(self, device_id: str, community: str):
+        """bgp rtbh-community <AS:NUM>。このcommunityを持つベストパスを
+        実機のRTBHパターン(community一致 → Null0への静的経路)と同じ結果に
+        なるよう、rib_engineへ自動的にNull0経路としてインストールする。"""
+        self._node(device_id)['rtbh_community'] = community
+        self._apply_rtbh(device_id)
+
+    def _apply_rtbh(self, device_id: str):
+        n = self.nodes.get(device_id)
+        if not n or not n.get('rtbh_community'):
+            return
+        comm = n['rtbh_community']
+        wanted = {(r['prefix'], r['prefix_len']) for r in n.get('loc_rib', [])
+                  if comm in r.get('communities', [])}
+        installed = n.get('rtbh_installed', set())
+        for prefix, plen in wanted - installed:
+            rib_engine.add_static_route(device_id, n['hostname'], prefix, plen,
+                                        'Null0', ad=1)
+        for prefix, plen in installed - wanted:
+            rib_engine.remove_static_route(device_id, prefix, plen, 'Null0')
+        n['rtbh_installed'] = wanted
 
     def add_route_map(self, device_id: str, name: str, prepend=None,
                       local_pref=None, med=None, communities=None,
@@ -2489,9 +2532,17 @@ class BgpEngine:
                 continue  # 学習元へは広告し返さない
             src_session = n['sessions'].get(src)
             src_is_ibgp = src_session and src_session.remote_as == n['local_as']
-            # iBGPで学習した経路は他のiBGPピアへ再広告しない（split-horizon）
+            # iBGPで学習した経路は他のiBGPピアへ再広告しない（split-horizon）。
+            # ただしRoute Reflector: 自分が送信先または学習元のいずれかで
+            # reflector-clientを持つ場合は、クライアント⇔非クライアント間
+            # (および他クライアントへ)で反射する。
             if src_is_ibgp and not is_ebgp:
-                continue
+                is_reflecting = (
+                    session.reflector_client
+                    or (src_session and src_session.reflector_client)
+                )
+                if not is_reflecting:
+                    continue
             new_path = ([n['local_as']] + list(lr['as_path'])) if is_ebgp else list(lr['as_path'])
             out.append(BgpRoute(
                 prefix=lr['prefix'], prefix_len=lr['prefix_len'],
@@ -2554,10 +2605,17 @@ class BgpEngine:
                     nbr_session = nbr['sessions'].get(dev)
                     adverts = self._compute_adverts(dev, nid)
                     # 受信側のインバウンド route-map と ループ防止を適用
+                    is_ebgp_hop = session.remote_as != n['local_as']
                     wanted = {}
                     for r in adverts:
-                        # AS-path ループ防止: 受信側の自ASが含まれる経路は拒否（RFC4271）
-                        if nbr['local_as'] in r.as_path:
+                        # AS-path ループ防止（RFC4271）: eBGP越境時のみ適用する。
+                        # iBGP(同一AS内)では自己発信経路のas_pathにも常に
+                        # local_asが入っている(step1の仕様)ため、この判定を
+                        # iBGPにもそのまま適用すると、同一AS内のiBGPピア
+                        # (= Route Reflectorクライアント含む)への配布が
+                        # 常にここで誤って拒否されてしまう。iBGPのループ
+                        # 防止はsplit-horizon/反射ルールの方で担保する。
+                        if is_ebgp_hop and nbr['local_as'] in r.as_path:
                             continue
                         # インバウンド prefix-list 適用（permitされたprefixのみ受理）
                         if (nbr_session and nbr_session.prefix_list_in and
@@ -2603,6 +2661,7 @@ class BgpEngine:
                 self._recalc_best_path(dev)
         for dev in active:
             self._recalc_best_path(dev)
+            self._apply_rtbh(dev)
 
     def _recalc_best_path(self, device_id: str):
         n = self.nodes.get(device_id)
@@ -2645,6 +2704,13 @@ class BgpEngine:
         学習経路を撤去し、ベストパスを再計算 → 冗長構成では別ピア経由へフェイルオーバー。
         両端で対称に処理する。
         """
+        # 先に両端を Idle 化＆学習経路の撤去まで済ませてから _propagate_bgp() を
+        # 呼ぶ。以前は片側ずつ「Idle化→撤去→即 _propagate_bgp()」としていたため、
+        # 片側しかIdleになっていない間に _propagate_bgp() が走ると、まだ
+        # Establishedのままの相手側が「セッションは生きている」と誤認して
+        # 直前に撤去したはずの経路を即座に再配布してしまい、撤回が反映されない
+        # （rib_inに復活する）ことがあった。
+        pending_notify = []
         for a, b in ((device_id, neighbor_id), (neighbor_id, device_id)):
             n = self.nodes.get(a)
             if not n:
@@ -2664,8 +2730,13 @@ class BgpEngine:
             before = len(n['rib_in'])
             n['rib_in'] = [r for r in n['rib_in'] if r.learned_from != b]
             self._recalc_best_path(a)
+            self._apply_rtbh(a)
+            pending_notify.append((a, s, bfd_note, before))
+        if pending_notify:
             # トランジット経由で伝播していた経路も再収束（撤回を波及）
             self._propagate_bgp()
+        for a, s, bfd_note, before in pending_notify:
+            n = self.nodes[a]
             await vnet.send_to(a, {
                 'type': 'bgp_log',
                 'message': (f'%BGP-5-ADJCHANGE: neighbor {s.neighbor_ip or s.hostname} '
@@ -2736,9 +2807,11 @@ class BgpEngine:
                           f'  BGP state = {s.state}')
             rcvd = sum(1 for r in n.get('rib_in', []) if r.learned_from == nid)
             sent = len(n.get('networks', []))
+            rr_line = ['  Route-Reflector Client'] if s.reflector_client else []
             blocks.append('\n'.join([
                 f'BGP neighbor is {addr},  remote AS {s.remote_as}, {link} link',
                 f'  BGP version 4, remote router ID {addr}',
+                *rr_line,
                 state_line,
                 '  Last read 00:00:00, last write 00:00:00, hold time is 180, '
                 'keepalive interval is 60 seconds',
@@ -2765,6 +2838,10 @@ class BgpEngine:
         lines = [
             f'BGP router identifier {n["router_id"]}, local AS number {n["local_as"]}',
             'BGP table version is 1, main routing table version 1',
+        ]
+        if n.get('cluster_id'):
+            lines.append(f'RR instance cluster-id is {n["cluster_id"]}')
+        lines += [
             '',
             'Neighbor        V    AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd',
         ]
@@ -4856,6 +4933,10 @@ class IcmpEngine:
         if not matched:
             return None, None
         next_hop_ip = matched['next_hop']
+        if next_hop_ip == 'Null0':
+            # RTBH等のブラックホール経路: 実機同様、転送せず破棄する
+            # （どの隣接にも誤って解決しないよう、ここで明示的に不達とする）
+            return None, None
         neighbors = list(vnet.get_neighbors(device_id))
 
         def _edge_dead(peer):
