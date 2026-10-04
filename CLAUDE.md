@@ -1419,3 +1419,62 @@ APIキーでの安全なFalseフォールバック(例外を出さないこと)�
 `query_llm()`のバックエンド別ディスパッチ(groq/ollama/rules)、
 `/api/status`のレスポンス形状(3値のmode、groq時のみ`groq_model`が
 値を持ちそれ以外はnull)を固定する。
+
+**「設定生成」タブ: フォーム値が実際には何も反映されていなかった
+バグを修正**: ユーザーが実機(Render本番環境)で「ospf設定有効と
+しているのにospfが有効になっていない」と気づいたのがきっかけ。
+調べたところ、`generateConfig()`(`static/index.html`)はフォームの
+全フィールド(ホスト名/IP/VRRP/「その他」自由記述)を一切バック
+エンドに送らず、選択した装置に対して単に`show running-config`を
+実行しているだけだった——つまりフォームは見た目だけの未接続UIで、
+実際にやっていたのは「現在の設定をただ表示する」ことだけだった。
+
+ユーザーに2方向(A: フォーム値を実際に反映する/B: 表示専用であると
+UIを直す)を提示し、「Aがやりたいことなので」との回答を得て実装。
+
+新設`POST /api/generate_config`(`app.py`)が、構造化フィールド
+(ホスト名/LAN・WAN IP/VRRP)から実際にそのベンダーのCLIコマンド列を
+組み立て、既存の`cli_command()`パイプライン経由で装置へ順次投入
+してから`show running-config`を返す。ベンダー別の組み立て方:
+- `sir`/`srs`: `lan 0 ip address`/`wan 1 ip address`/`lan 0 vrrp
+  group 1 id <vrid> <pri> <vip>`。
+- `catalyst`: このエミュレータではスイッチ(VLAN10 SVIのみ)なので
+  「LAN IP」をVlan10のIPとして扱い、WAN/デフォルトGWは適用せず
+  notesにその旨を返す(スイッチにWANの概念は無いため)。
+- `cisco`: GigabitEthernet0/0/0をLAN、0/0/1をWANとして2インタ
+  フェース構成のルーターとして扱う。
+
+「その他」自由記述欄だけはルールベースでは解釈できないため、
+`query_llm()`(Groq優先/Ollama)に「このベンダーの実コマンドのみを
+1行1コマンドで出力させる」システムプロンプトで変換させ、返って
+きた行をそのまま`cli_command()`へ投入する。`LLM_BACKEND`が
+"rules"(未検出)の場合はその部分だけスキップし、notesに「AI
+バックエンドが利用できないため反映されていない」旨を返す
+(フェイクの成功を作らない)。
+
+**ライブ検証で見つけた既存の実バグ**: Si-Rの`hostname`コマンドは
+`engine/rules.py`の共有Cisco系ツリー内のハンドラが
+`state.mode == 'config'`を要求する一方、Si-Rの`lan/wan ip address`
+系コマンドは`app.py`の`handle_protocol_config`層が現在モードに
+関係なく反映する——2つの層が別々のモード要件を持つため、
+"configure terminal"を挟まずに`hostname`だけ単独で打つと**エラーも
+出さずサイレントに無視される**(最初にこの新エンドポイントを
+作った際、`hostname`だけ反映されず`lan/wan ip address`は反映される
+という非対称な挙動として踏んだ)。`_generate_config_commands`の
+Si-R分岐を`configure terminal`/`end`で挟むことで解消(catalyst/
+cisco分岐は元々挟んでいたため影響なし)。
+
+併せて、「その他」欄が1行分しか見えず書きにくいという指摘
+(「記載する場所がちっちゃい」)を受け、`#cg-extra`を複数行の
+textarea(6行・幅100%)に拡大し、具体的な記入例をplaceholderに
+追加した。
+
+Live-verified: `sir`/`catalyst`/`cisco`の3ベンダーで、フォーム値が
+実際に`show running-config`へ反映されることを確認(上記のSi-R
+hostnameバグもこのライブ検証で発見)。LLMバックエンドが無い状態
+(このサンドボックスのデフォルト)での「その他」欄のグレースフルな
+フォールバックも確認。`tests/test_generate_config_endpoint.py`
+(10 tests)が、sir/catalyst/ciscoそれぞれのフォーム値反映・Si-R
+hostenameの単体反映(regressionガード)・VRRP有効/無効の出し分け・
+catalystでのWAN/GW非適用+notes・「その他」欄のLLM有無での挙動差を
+固定する。
