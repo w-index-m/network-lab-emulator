@@ -1,0 +1,7 @@
+# GitHub Pages (Jekyll) の設定。
+# ansible/ 配下のYAMLは "---" で始まるためJekyllがページとして扱い、
+# 中のJinja式（{{ ... }}）をLiquidとして解釈してビルドが失敗する
+# （pages build and deployment #101〜#103）。サイトとして公開する内容でも
+# ないので、ビルド対象から外す。
+exclude:
+  - ansible/
