@@ -41,11 +41,26 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      # ubuntu-latestランナーではOS標準のsshdが0.0.0.0:22で動いており、
+      # エミュレーターのSSH CLIサーバーが装置IP:22で待ち受けられず、テストの
+      # 接続が本物のsshdに届いて Authentication failed になる。テスト前に止める。
+      - name: Stop the runner's own sshd (frees port 22 for the emulator)
+        run: |
+          sudo systemctl stop ssh.socket ssh.service 2>/dev/null || true
+          if sudo ss -ltnH 'sport = :22' | grep -q .; then
+            echo "port 22 is still in use:"; sudo ss -ltnp 'sport = :22'; exit 1
+          fi
+
+      # SSH/Telnet/NETCONF等のテストは装置IP（例: 10.227.0.1）で待ち受けるため、
+      # engine/loopback_alias.py が `ip addr add <IP>/32 dev lo` でループバックに
+      # IPを足す。これにはroot権限（CAP_NET_ADMIN）が必要で、一般ユーザーで動く
+      # ランナーでは失敗し、bindできずに大量のタイムアウトになっていた（run #54:
+      # 93 failed）。ローカルの実行環境と同じくrootで実行する。
       - name: Run pytest with coverage
         env:
           NETLAB_AUTH_DISABLE: '1'
         run: |
-          pytest tests/ -v \
+          sudo -E env "PATH=$PATH" pytest tests/ -v \
             --cov=engine --cov=app \
             --cov-report=term-missing \
             --cov-report=html \
