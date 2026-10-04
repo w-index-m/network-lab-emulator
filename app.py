@@ -63,6 +63,19 @@ OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 USE_OLLAMA   = False   # 起動時に自動検出
 
+# Groq API（OpenAI互換のChat Completions。ローカルインストール不要で
+# Ollamaより高速・精度が良いことが多いが、インターネット接続とAPIキーが
+# 必要になる点がOllama/ルールベースとのトレードオフ）。
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
+USE_GROQ     = False   # 起動時に自動検出（APIキーが有効か実際に1回叩いて確認）
+
+# 実際に使うLLMバックエンド: "groq" / "ollama" / "rules"（優先順位は
+# Groq > Ollama > ルールベース — Groqはローカルインストールが要らず、
+# キーさえ有効ならOllamaより手軽なため優先する）。
+LLM_BACKEND = "rules"
+
 SAVED_CONFIG_PATH = Path(__file__).parent / "saved_config.json"
 
 rule_engine = RuleEngine()
@@ -115,6 +128,62 @@ async def query_ollama(prompt: str, system: str) -> str:
                 return r.json()["message"]["content"].strip()
     except Exception as e:
         print(f"[Ollama] エラー: {e}")
+    return None
+
+# ══════════════════════════════════════════
+# Groq 自動検出・問い合わせ
+# ══════════════════════════════════════════
+async def detect_groq() -> bool:
+    """GROQ_API_KEYが設定されていて、実際にAPIが応答するかを起動時に
+    1回だけ確認する（キーはあるが無効/失効しているケースを弾くため、
+    存在チェックだけでなく軽量な実リクエストまで行う）。"""
+    if not GROQ_API_KEY:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(GROQ_URL, headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            }, json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            })
+            if r.status_code == 200:
+                print(f"[Groq] 検出: model={GROQ_MODEL}")
+                return True
+            print(f"[Groq] APIキーはあるが応答異常 (status={r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        print(f"[Groq] 検出失敗: {e}")
+    return False
+
+async def query_groq(prompt: str, system: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(GROQ_URL, headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            }, json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": prompt},
+                ],
+                "temperature": 0.1,
+            })
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"].strip()
+            print(f"[Groq] エラー応答 (status={r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        print(f"[Groq] エラー: {e}")
+    return None
+
+async def query_llm(prompt: str, system: str) -> str:
+    """現在のLLM_BACKENDに応じてGroq/Ollamaへ問い合わせる共通入口。"""
+    if LLM_BACKEND == "groq":
+        return await query_groq(prompt, system)
+    if LLM_BACKEND == "ollama":
+        return await query_ollama(prompt, system)
     return None
 
 # ══════════════════════════════════════════
@@ -411,14 +480,26 @@ _MAIN_LOOP = [None]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global USE_OLLAMA
+    global USE_OLLAMA, USE_GROQ, LLM_BACKEND
     # SSH CLIサーバのワーカースレッドからCLIを実行するために、
     # 動いているイベントループを捕まえておく。
     # （このアプリは lifespan を使っているので @app.on_event("startup")
     #   は呼ばれない。そちらに書いてもループは None のままになる）
     _MAIN_LOOP[0] = asyncio.get_running_loop()
-    USE_OLLAMA = await detect_ollama()
-    mode = f"Ollama ({OLLAMA_MODEL})" if USE_OLLAMA else "ルールベース（オフライン）"
+    # 優先順位: Groq(ローカルインストール不要・高速) > Ollama(オフライン
+    # 可だがインストールが要る) > ルールベース(完全オフライン)。
+    USE_GROQ = await detect_groq()
+    if USE_GROQ:
+        LLM_BACKEND = "groq"
+        USE_OLLAMA = False
+    else:
+        USE_OLLAMA = await detect_ollama()
+        LLM_BACKEND = "ollama" if USE_OLLAMA else "rules"
+    mode = {
+        "groq":   f"Groq ({GROQ_MODEL})",
+        "ollama": f"Ollama ({OLLAMA_MODEL})",
+        "rules":  "ルールベース（オフライン）",
+    }[LLM_BACKEND]
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
 ║   ネットワークラボ エミュレーター 起動                   ║
@@ -652,8 +733,9 @@ async def api_complete(req: dict):
 @app.get("/api/status")
 async def get_status():
     return {
-        "mode": "ollama" if USE_OLLAMA else "rules",
-        "ollama_model": OLLAMA_MODEL if USE_OLLAMA else None,
+        "mode": LLM_BACKEND,
+        "ollama_model": OLLAMA_MODEL if LLM_BACKEND == "ollama" else None,
+        "groq_model": GROQ_MODEL if LLM_BACKEND == "groq" else None,
         "devices": list(device_sessions.keys()),
     }
 
@@ -1193,12 +1275,12 @@ async def cli_command(body: dict):
     if nat_out is not None:
         return {"output": nat_out, "mode": state.mode, "hostname": state.hostname}
 
-    # ルールで空応答かつOllamaあり → Ollamaで補完
-    if USE_OLLAMA and output == "" and command.strip():
+    # ルールで空応答かつLLMバックエンドあり → LLMで補完(Groq優先/Ollama)
+    if LLM_BACKEND != "rules" and output == "" and command.strip():
         system = build_system_prompt(state)
-        ollama_out = await query_ollama(command, system)
-        if ollama_out:
-            output = ollama_out
+        llm_out = await query_llm(command, system)
+        if llm_out:
+            output = llm_out
 
     result = {
         "output": output,

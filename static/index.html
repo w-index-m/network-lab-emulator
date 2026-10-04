@@ -29,6 +29,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 #mode-badge{padding:1px 8px;border-radius:2px;font-size:10px;font-weight:bold}
 .badge-rules{background:#1a1a00;color:var(--amber);border:1px solid var(--amber)}
 .badge-ollama{background:#001a00;color:var(--green);border:1px solid var(--green)}
+.badge-groq{background:#001a1a;color:var(--cyan);border:1px solid var(--cyan)}
 .tbtn{width:16px;height:14px;background:#606060;border:1px outset #808080;font-size:9px;display:flex;align-items:center;justify-content:center;color:#000;cursor:pointer}
 
 /* メニューバー */
@@ -292,16 +293,26 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
           </div>
         </div>
         <div style="flex:1;min-width:180px">
+          <div style="color:var(--cyan);font-weight:bold;margin-bottom:4px">Groq mode (not detected)</div>
+          <div style="color:var(--text2)">
+            OK: AI responds to any command<br>
+            OK: Fast (cloud inference, no local install)<br>
+            NOTE: Requires GROQ_API_KEY + internet<br>
+            NOTE: Priority: Groq &gt; Ollama &gt; rule-based
+          </div>
+        </div>
+        <div style="flex:1;min-width:180px">
           <div style="color:var(--green);font-weight:bold;margin-bottom:4px">Ollama mode (not detected)</div>
           <div style="color:var(--text2)">
             OK: AI responds to any command<br>
-            OK: More natural responses<br>
+            OK: Fully local, no API key needed<br>
             NOTE: Ollama must be installed separately<br>
             NOTE: Speed depends on PC specs
           </div>
         </div>
       </div>
       <div style="margin-top:8px;padding:6px 10px;background:#0a1a0a;border:1px solid #1a3a1a;border-radius:3px;color:var(--text2);font-size:10px">
+        Groq: https://console.groq.com then set env GROQ_API_KEY<br>
         Ollama: https://ollama.com then run: ollama pull llama3
       </div>
     </div>
@@ -1090,7 +1101,10 @@ async function initLauncher() {
     const r = await fetch('/api/status', { signal: controller.signal });
     clearTimeout(timer);
     const d = await r.json();
-    if (d.mode === 'ollama') {
+    if (d.mode === 'groq') {
+      badge.textContent = '● Groq (' + d.groq_model + ') ℹ';
+      badge.className = 'badge-groq';
+    } else if (d.mode === 'ollama') {
       badge.textContent = '● Ollama (' + d.ollama_model + ') ℹ';
       badge.className = 'badge-ollama';
     } else {
@@ -1470,27 +1484,31 @@ async function runCmd(id, cmd) {
 }
 
 // ════════════════════════════════════════════
-// ステータス確認 & Ollama
+// ステータス確認 & LLMバックエンド(Groq/Ollama)
 // ════════════════════════════════════════════
-let ollamaEnabled = false;
+let llmBackend = 'rules';
 async function checkStatus() {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
     const badge = document.getElementById('mode-badge');
     const toggle = document.getElementById('ollama-toggle');
-    if(d.mode==='ollama'){
+    llmBackend = d.mode || 'rules';
+    if(d.mode==='groq'){
+      badge.textContent='● Groq ('+d.groq_model+')';
+      badge.className='badge-groq';
+      toggle.textContent='Groq: ON ✓';
+      toggle.style.color='var(--cyan)';
+    } else if(d.mode==='ollama'){
       badge.textContent='● Ollama ('+d.ollama_model+')';
       badge.className='badge-ollama';
       toggle.textContent='Ollama: ON ✓';
       toggle.style.color='var(--green)';
-      ollamaEnabled=true;
     } else {
       badge.textContent='● ルールベース';
       badge.className='badge-rules';
-      toggle.textContent='Ollama: オフライン';
+      toggle.textContent='LLM: オフライン';
       toggle.style.color='var(--text2)';
-      ollamaEnabled=false;
     }
     // ステータスOK→各装置にオンライン表示
     Object.keys(DEVICES).forEach(id=>{
@@ -1503,9 +1521,15 @@ async function checkStatus() {
   }
 }
 function toggleOllama(){
-  alert(ollamaEnabled
-    ? 'Ollama使用中。無効にするにはOllamaを停止してください。'
-    : 'Ollamaが検出されませんでした。\nollama pull llama3 を実行後、python app.py を再起動してください。');
+  if(llmBackend==='groq'){
+    alert('Groq使用中。無効にするにはGROQ_API_KEYを外してサーバーを再起動してください。');
+  } else if(llmBackend==='ollama'){
+    alert('Ollama使用中。無効にするにはOllamaを停止してください。');
+  } else {
+    alert('Groq/Ollamaいずれも検出されませんでした。\n'
+      + 'Groq: 環境変数GROQ_API_KEYを設定して再起動\n'
+      + 'Ollama: ollama pull llama3 実行後、python app.py を再起動してください。');
+  }
 }
 
 // ════════════════════════════════════════════

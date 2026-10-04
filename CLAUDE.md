@@ -1367,3 +1367,55 @@ crypto isakmp sa`で`MM_ACTIVE`)を確認。`tests/test_asa_pppoe.py`
 (8 tests)がinterface設定(コマンド順序非依存を含む)・誤パスワード/
 BAS未リンク失敗ケース・setroute有無での経路反映差・Cisco相手への
 IPsec確立(成功/誤PSK失敗)を固定する。
+
+**Groq APIをLLMバックエンドに追加**: 「groqなどのAPIを使うアプローチ
+で行ってみます」という依頼への対応。元々`app.py`は起動時に1回だけ
+Ollamaを自動検出し(`detect_ollama()`)、ルールエンジンが空応答の
+コマンドをOllamaに投げて補完する(`USE_OLLAMA`フラグ)仕組みだった。
+これと全く同じ構造で`detect_groq()`/`query_groq()`を追加し、
+`GROQ_API_KEY`環境変数(+`GROQ_MODEL`、デフォルト
+`llama-3.3-70b-versatile`)でGroqのOpenAI互換Chat Completions API
+(`https://api.groq.com/openai/v1/chat/completions`)を叩く。新規
+パッケージは不要(`httpx`は既存依存で足りる)。
+
+優先順位は**Groq > Ollama > ルールベース**: Groqはローカルインストール
+不要・高速なためOllamaより優先、どちらも使えなければ従来通り
+ルールベースにフォールバック。`USE_OLLAMA`/`USE_GROQ`という個別の
+boolフラグに加えて、実際にどちらを使うかを表す`LLM_BACKEND`
+("groq"/"ollama"/"rules")を新設し、以降の分岐(`/api/status`、
+ルールエンジンが空応答を返した時の補完呼び出し)は全て
+`LLM_BACKEND`を見るように統一した(`query_ollama`/`query_groq`を
+直接呼び分けていた箇所を`query_llm()`という共通入口に統合)。
+
+**detect_groq()は空応答チェックではなく実際に1回APIを叩いて確認する**
+(`detect_ollama()`が`/api/tags`を叩いて確認しているのと同じ考え方)
+——`GROQ_API_KEY`が設定されていても失効/無効な場合に気づかず
+"Groqが使える"と誤判定してしまうのを防ぐため。
+
+**このサンドボックスからは実際のGroq API疎通は確認できない**:
+CLAUDE.mdの「PyTorch」節に既出の通り`api.groq.com`はこの環境の
+egressポリシーでブロックされている(`download.pytorch.org`と同じ
+扱い)。ライブ検証では、`GROQ_API_KEY`未設定時に`detect_groq()`が
+ネットワーク越しに確認するまでもなく即座に`False`を返すこと、
+および偽のAPIキーを設定した状態で実際にサーバー起動
+(`uvicorn app:app`)してみて、`detect_groq()`が403(このサンドボックス
+のegressブロック)を例外にせず安全に捕捉し、`LLM_BACKEND`が
+正しく`"rules"`へフォールバックし`/api/status`にも反映されること
+を確認した(本番のRender環境は別のegressポリシーのため、実際の
+Groq疎通はそちらでのみ確認可能——このサンドボックスでの検証は
+「キーが無い/繋がらない場合に壊れず安全側に倒れる」ことの確認が
+目的)。
+
+フロントエンド(`static/index.html`): モードバッジに`.badge-groq`
+(シアン系)を追加、ランチャー画面のモードバッジ・メイン画面上部の
+モードバッジ・「ℹ」クリックで開くモード説明パネル・メニューバーの
+LLMトグル(`ollama-toggle`要素、旧`toggleOllama()`)を全て
+"groq"/"ollama"/"rules"の3値に対応させた。`/api/status`のレスポンス
+形状を`mode`(3値)/`ollama_model`/`groq_model`に変更(後方互換:
+`mode`に`"rules"`/`"ollama"`という既存の2値はそのまま含まれる)。
+
+`tests/test_groq_llm_backend.py`(8 tests)が、APIキー無し/無効な
+APIキーでの安全なFalseフォールバック(例外を出さないこと)、
+`query_llm()`のバックエンド別ディスパッチ(groq/ollama/rules)、
+`/api/status`のレスポンス形状(3値のmode、groq時のみ`groq_model`が
+値を持ちそれ以外はnull)を固定する。
