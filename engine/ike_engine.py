@@ -242,7 +242,7 @@ def _find_peer(device_sessions: dict, local_id: str, remote_ip: str):
         if dev_id == local_id:
             continue
         dt = state.device_type
-        if dt in ('sir', 'srs'):
+        if dt in ('sir', 'srs', 'yamaha', 'fortigate'):
             if any(t.get('local_ip') == remote_ip
                    for t in getattr(state, 'ipsec_tunnels', {}).values()):
                 matches.append((dev_id, state))
@@ -376,7 +376,7 @@ def negotiate_manual_ipsec(device_sessions: dict, initiator_id: str) -> Dict[str
     """
     results: Dict[str, NegotiationResult] = {}
     initiator = device_sessions.get(initiator_id)
-    if not initiator or initiator.device_type not in ('sir', 'srs'):
+    if not initiator or initiator.device_type not in ('sir', 'srs', 'yamaha'):
         return results
 
     for tid, t in getattr(initiator, 'ipsec_tunnels', {}).items():
@@ -470,7 +470,7 @@ def negotiate_ipsec(device_sessions: dict, initiator_id: str) -> Dict[str, Negot
     dt = initiator.device_type
 
     # ── Si-R / SR-S ──────────────────────────────────────
-    if dt in ('sir', 'srs'):
+    if dt in ('sir', 'srs', 'yamaha', 'fortigate'):
         tunnels   = getattr(initiator, 'ipsec_tunnels', {})
         ike_ok    = getattr(initiator, 'ike_enabled', False)
         ipsec_ok  = getattr(initiator, 'ipsec_enabled', False)
@@ -508,7 +508,7 @@ def negotiate_ipsec(device_sessions: dict, initiator_id: str) -> Dict[str, Negot
 
             # 対向の tunnel/crypto dict を取得
             pdt = peer_state.device_type
-            if pdt in ('sir', 'srs'):
+            if pdt in ('sir', 'srs', 'yamaha', 'fortigate'):
                 peer_d = _sir_tunnel_info(peer_state, remote_ip, local_ip)
                 peer_ike_ok = getattr(peer_state, 'ike_enabled', False)
                 peer_ipsec_ok = getattr(peer_state, 'ipsec_enabled', False)
@@ -537,7 +537,7 @@ def negotiate_ipsec(device_sessions: dict, initiator_id: str) -> Dict[str, Negot
             ok1, r1 = _phase1_check(local_t, peer_d)
             if not ok1:
                 local_t.update({'status': 'wait', 'phase1': 'DYING'})
-                if pdt in ('sir', 'srs') and peer_d:
+                if pdt in ('sir', 'srs', 'yamaha', 'fortigate') and peer_d:
                     peer_d['phase1'] = 'DYING'
                 logs.append(f"IKE: Phase1 FAILED — {r1}")
                 results[key] = NegotiationResult(False, 1, r1, logs)
@@ -545,7 +545,7 @@ def negotiate_ipsec(device_sessions: dict, initiator_id: str) -> Dict[str, Negot
 
             lt = _get_val(local_t, 'ike_lifetime', DEFAULT_IKE_LT)
             local_t.update({'phase1': 'MATURE', 'ike_lifetime_remaining': lt})
-            if pdt in ('sir', 'srs') and peer_d:
+            if pdt in ('sir', 'srs', 'yamaha', 'fortigate') and peer_d:
                 peer_d.update({'phase1': 'MATURE', 'ike_lifetime_remaining': lt})
             logs.append(f"IKE: Phase1 established (lifetime={lt}s)")
 
@@ -569,7 +569,7 @@ def negotiate_ipsec(device_sessions: dict, initiator_id: str) -> Dict[str, Negot
                 'spi_in': spi_in, 'spi_out': spi_out,
                 'sa_lifetime_remaining': sa_lt, 'neg_time': time.time(),
             })
-            if pdt in ('sir', 'srs') and peer_d:
+            if pdt in ('sir', 'srs', 'yamaha', 'fortigate') and peer_d:
                 peer_d.update({
                     'status': 'established', 'phase2': 'MATURE',
                     'spi_in': spi_out, 'spi_out': spi_in,
@@ -626,7 +626,7 @@ def negotiate_ipsec(device_sessions: dict, initiator_id: str) -> Dict[str, Negot
                 continue
 
             pdt = peer_state.device_type
-            if pdt in ('sir', 'srs'):
+            if pdt in ('sir', 'srs', 'yamaha', 'fortigate'):
                 peer_d = _sir_tunnel_info(peer_state, remote_ip, local_ip)
                 peer_ike_ok = getattr(peer_state, 'ike_enabled', False)
             else:
@@ -666,7 +666,7 @@ def negotiate_ipsec(device_sessions: dict, initiator_id: str) -> Dict[str, Negot
                 'spi_in': spi_in, 'spi_out': spi_out,
                 'sa_lifetime_remaining': sa_lt, 'neg_time': time.time(),
             })
-            if pdt in ('sir', 'srs') and peer_d:
+            if pdt in ('sir', 'srs', 'yamaha', 'fortigate') and peer_d:
                 peer_d.update({
                     'status': 'established', 'phase1': 'MATURE', 'phase2': 'MATURE',
                     'spi_in': spi_out, 'spi_out': spi_in,

@@ -29,6 +29,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 #mode-badge{padding:1px 8px;border-radius:2px;font-size:10px;font-weight:bold}
 .badge-rules{background:#1a1a00;color:var(--amber);border:1px solid var(--amber)}
 .badge-ollama{background:#001a00;color:var(--green);border:1px solid var(--green)}
+.badge-groq{background:#001a1a;color:var(--cyan);border:1px solid var(--cyan)}
 .tbtn{width:16px;height:14px;background:#606060;border:1px outset #808080;font-size:9px;display:flex;align-items:center;justify-content:center;color:#000;cursor:pointer}
 
 /* メニューバー */
@@ -292,16 +293,26 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
           </div>
         </div>
         <div style="flex:1;min-width:180px">
+          <div style="color:var(--cyan);font-weight:bold;margin-bottom:4px">Groq mode (not detected)</div>
+          <div style="color:var(--text2)">
+            OK: AI responds to any command<br>
+            OK: Fast (cloud inference, no local install)<br>
+            NOTE: Requires GROQ_API_KEY + internet<br>
+            NOTE: Priority: Groq &gt; Ollama &gt; rule-based
+          </div>
+        </div>
+        <div style="flex:1;min-width:180px">
           <div style="color:var(--green);font-weight:bold;margin-bottom:4px">Ollama mode (not detected)</div>
           <div style="color:var(--text2)">
             OK: AI responds to any command<br>
-            OK: More natural responses<br>
+            OK: Fully local, no API key needed<br>
             NOTE: Ollama must be installed separately<br>
             NOTE: Speed depends on PC specs
           </div>
         </div>
       </div>
       <div style="margin-top:8px;padding:6px 10px;background:#0a1a0a;border:1px solid #1a3a1a;border-radius:3px;color:var(--text2);font-size:10px">
+        Groq: https://console.groq.com then set env GROQ_API_KEY<br>
         Ollama: https://ollama.com then run: ollama pull llama3
       </div>
     </div>
@@ -317,7 +328,10 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
         <button class="launcher-add-btn" onclick="launcherAddDev('cisco')"          style="border-color:#e05a00;color:#e05a00">+ Cisco ISR4321</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('nexus')"          style="border-color:#ff6a00;color:#ff6a00">+ Nexus 9300</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('apresia')"        style="border-color:#00d4aa;color:#00d4aa">+ APRESIA</button>
-        <button class="launcher-add-btn" onclick="launcherAddDev('ipcom')"          style="border-color:#ffb000;color:#ffb000">+ IPCOM EX2</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('arista')"         style="border-color:#00a8e0;color:#00a8e0">+ Arista 7050SX3</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('juniper')"        style="border-color:#84b135;color:#84b135">+ Juniper vSRX</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('yamaha')"         style="border-color:#e2001a;color:#e2001a">+ Yamaha RTX1300</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('bas')"            style="border-color:#808080;color:#a0a0a0">+ 擬似FLETS BAS</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('generic-router')" style="border-color:#a040c0;color:#a040c0">+ Generic Router</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('generic-switch')" style="border-color:#408040;color:#408040">+ Generic Switch</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('pc')"             style="border-color:#606060;color:#808080">+ PC</button>
@@ -399,7 +413,11 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
           <button class="dev-add-btn" onclick="addDevice('cisco')"    style="border-color:var(--cisco);color:var(--cisco)">＋ Cisco Router</button>
           <button class="dev-add-btn" onclick="addDevice('apresia')"  style="border-color:#00d4aa;color:#00d4aa">＋ APRESIA</button>
           <button class="dev-add-btn" onclick="addDevice('bigip')"    style="border-color:#e4002b;color:#e4002b">＋ F5 BIG-IP</button>
-          <button class="dev-add-btn" onclick="addDevice('ipcom')"    style="border-color:#ffb000;color:#ffb000">＋ IPCOM EX2</button>
+          <button class="dev-add-btn" onclick="addDevice('arista')"   style="border-color:#00a8e0;color:#00a8e0">＋ Arista 7050SX3</button>
+          <button class="dev-add-btn" onclick="addDevice('juniper')"  style="border-color:#84b135;color:#84b135">＋ Juniper vSRX</button>
+          <button class="dev-add-btn" onclick="addDevice('yamaha')"   style="border-color:#e2001a;color:#e2001a">＋ Yamaha RTX1300</button>
+          <button class="dev-add-btn" onclick="addDevice('bas')"      style="border-color:#808080;color:#a0a0a0">＋ 擬似FLETS BAS</button>
+          <button class="dev-add-btn" onclick="addDevice('fortigate')" style="border-color:#ee3124;color:#ee3124">＋ FortiGate</button>
           <button class="dev-add-btn" onclick="addDevice('generic-router')" style="border-color:#a040c0;color:#a040c0">＋ 汎用Router</button>
           <button class="dev-add-btn" onclick="addDevice('generic-switch')" style="border-color:#408040;color:#408040">＋ 汎用Switch</button>
           <button class="dev-add-btn" onclick="addDevice('pc')"       style="border-color:#606060;color:#808080">＋ PC</button>
@@ -676,7 +694,11 @@ const DEV_TEMPLATES = {
   'nexus':          {icon:'N', color:'#ff6a00', model:'Nexus 9300',          prefix:'Nexus',  type:'nexus'},
   'apresia':        {icon:'A', color:'#00d4aa', model:'APRESIA ApresiaLight', prefix:'AP',    type:'apresia'},
   'bigip':          {icon:'F', color:'#e4002b', model:'F5 BIG-IP',           prefix:'BIGIP',  type:'bigip'},
-  'ipcom':          {icon:'I', color:'#ffb000', model:'IPCOM EX2',           prefix:'IPCOM',  type:'ipcom'},
+  'arista':         {icon:'A', color:'#00a8e0', model:'Arista 7050SX3',      prefix:'Arista', type:'arista'},
+  'juniper':        {icon:'J', color:'#84b135', model:'Juniper vSRX',        prefix:'Juniper', type:'juniper'},
+  'yamaha':         {icon:'Y', color:'#e2001a', model:'Yamaha RTX1300',      prefix:'RTX',    type:'yamaha'},
+  'bas':            {icon:'B', color:'#a0a0a0', model:'疑似FLETS BAS',       prefix:'BAS',    type:'bas'},
+  'fortigate':      {icon:'F', color:'#ee3124', model:'FortiGate 100F',      prefix:'Forti',  type:'fortigate'},
   'generic-router': {icon:'R', color:'#a040c0', model:'Generic Router',      prefix:'Router', type:'cisco'},
   'generic-switch': {icon:'S', color:'#408040', model:'Generic Switch',      prefix:'SW',     type:'srs'},
   'pc':             {icon:'H', color:'#606060', model:'Host PC',             prefix:'PC',     type:'pc'},
@@ -1079,7 +1101,10 @@ async function initLauncher() {
     const r = await fetch('/api/status', { signal: controller.signal });
     clearTimeout(timer);
     const d = await r.json();
-    if (d.mode === 'ollama') {
+    if (d.mode === 'groq') {
+      badge.textContent = '● Groq (' + d.groq_model + ') ℹ';
+      badge.className = 'badge-groq';
+    } else if (d.mode === 'ollama') {
       badge.textContent = '● Ollama (' + d.ollama_model + ') ℹ';
       badge.className = 'badge-ollama';
     } else {
@@ -1210,14 +1235,18 @@ function bindKeys(id) {
 function getPrompt(id) {
   const d = DEVICES[id];
   const mode = d.mode||'exec';
-  // IPCOM EX2: 操作者EXEC(>)/管理者EXEC(#)を区別し、config系も(config)/(edit)/(edit-if)。
-  if (d.type==='ipcom') {
-    if (mode==='exec') return `${d.hostname}${d.ipcomAdmin?'#':'>'} `;
-    if (mode==='config') return `${d.hostname}(config)# `;
-    if (mode==='edit') return `${d.hostname}(edit)# `;
-    if (mode==='edit-if') return `${d.hostname}(edit-if)# `;
-    if (mode==='config-router') return `${d.hostname}(edit-router)# `;
-    return `${d.hostname}# `;
+  if(d.type==='juniper'){
+    // Junos: execは "host>"、configureモードは "host#"（サブモード階層なし）
+    return `${d.hostname}${mode==='config'?'#':'>'} `;
+  }
+  if(d.type==='yamaha'){
+    // RTXシリーズ: 一般ユーザは "host>"、administratorモードは "host#"
+    // (pp selectサブコンテキストも"#"のまま、実機通りプロンプトは変わらない)
+    return `${d.hostname}${(mode==='admin'||mode==='pp')?'#':'>'} `;
+  }
+  if(d.type==='fortigate'){
+    // FortiOS: config/edit階層に関わらずプロンプトは常に"host #"のまま
+    return `${d.hostname} # `;
   }
   const suffix = mode==='config'?'(config)':mode==='config-if'?'(config-if)':mode==='config-router'?'(config-router)':mode==='config-vlan'?'(config-vlan)':mode==='config-vpc-domain'?'(config-vpc-domain)':'';
   return `${d.hostname}${suffix}# `;
@@ -1356,7 +1385,6 @@ async function runCmd(id, cmd) {
     // ホスト名・モード更新
     if(data.hostname) DEVICES[id].hostname = data.hostname;
     if(data.mode)     DEVICES[id].mode     = data.mode;
-    if('ipcom_admin' in data) DEVICES[id].ipcomAdmin = data.ipcom_admin;
 
     // ── VRRP コマンド検出 ──
     // lan <n> vrrp group <g> id <vrid> <priority> <vip>
@@ -1456,27 +1484,31 @@ async function runCmd(id, cmd) {
 }
 
 // ════════════════════════════════════════════
-// ステータス確認 & Ollama
+// ステータス確認 & LLMバックエンド(Groq/Ollama)
 // ════════════════════════════════════════════
-let ollamaEnabled = false;
+let llmBackend = 'rules';
 async function checkStatus() {
   try {
     const r = await fetch('/api/status');
     const d = await r.json();
     const badge = document.getElementById('mode-badge');
     const toggle = document.getElementById('ollama-toggle');
-    if(d.mode==='ollama'){
+    llmBackend = d.mode || 'rules';
+    if(d.mode==='groq'){
+      badge.textContent='● Groq ('+d.groq_model+')';
+      badge.className='badge-groq';
+      toggle.textContent='Groq: ON ✓';
+      toggle.style.color='var(--cyan)';
+    } else if(d.mode==='ollama'){
       badge.textContent='● Ollama ('+d.ollama_model+')';
       badge.className='badge-ollama';
       toggle.textContent='Ollama: ON ✓';
       toggle.style.color='var(--green)';
-      ollamaEnabled=true;
     } else {
       badge.textContent='● ルールベース';
       badge.className='badge-rules';
-      toggle.textContent='Ollama: オフライン';
+      toggle.textContent='LLM: オフライン';
       toggle.style.color='var(--text2)';
-      ollamaEnabled=false;
     }
     // ステータスOK→各装置にオンライン表示
     Object.keys(DEVICES).forEach(id=>{
@@ -1489,9 +1521,15 @@ async function checkStatus() {
   }
 }
 function toggleOllama(){
-  alert(ollamaEnabled
-    ? 'Ollama使用中。無効にするにはOllamaを停止してください。'
-    : 'Ollamaが検出されませんでした。\nollama pull llama3 を実行後、python app.py を再起動してください。');
+  if(llmBackend==='groq'){
+    alert('Groq使用中。無効にするにはGROQ_API_KEYを外してサーバーを再起動してください。');
+  } else if(llmBackend==='ollama'){
+    alert('Ollama使用中。無効にするにはOllamaを停止してください。');
+  } else {
+    alert('Groq/Ollamaいずれも検出されませんでした。\n'
+      + 'Groq: 環境変数GROQ_API_KEYを設定して再起動\n'
+      + 'Ollama: ollama pull llama3 実行後、python app.py を再起動してください。');
+  }
 }
 
 // ════════════════════════════════════════════
@@ -1846,7 +1884,11 @@ function defPort(type,n){
   if(type==='cisco')return`GigabitEthernet0/${n%3}`;
   if(type==='asa')return`GigabitEthernet0/${n%3}`;
   if(type==='apresia')return`ge-${n%24}`;
-  if(type==='ipcom')return`lan0.${n}`;
+  if(type==='arista')return`Ethernet${n+1}`;
+  if(type==='juniper')return`ge-0/0/${n}`;
+  if(type==='yamaha')return`lan${n+1}`;
+  if(type==='bas')return n===0?'wan1':`uplink${n}`;
+  if(type==='fortigate')return`port${n+1}`;
   return`GigabitEthernet0/${n}`;
 }
 // 装置種別ごとの接続インターフェース候補（プルダウン用）
@@ -1873,8 +1915,17 @@ function portOptions(type){
     o.push('Management0/0');
   } else if(type==='pc'){
     o.push('eth0');
-  } else if(type==='ipcom'){
-    for(let i=0;i<=3;i++)o.push(`lan0.${i}`);
+  } else if(type==='arista'){
+    for(let i=1;i<=48;i++)o.push(`Ethernet${i}`);
+    for(let i=1;i<=10;i++)o.push(`Port-Channel${i}`);
+  } else if(type==='juniper'){
+    for(let i=0;i<=2;i++)o.push(`ge-0/0/${i}`);
+  } else if(type==='yamaha'){
+    for(let i=1;i<=3;i++)o.push(`lan${i}`);
+  } else if(type==='bas'){
+    o.push('wan1','uplink1');
+  } else if(type==='fortigate'){
+    for(let i=1;i<=3;i++)o.push(`port${i}`);
   } else {
     for(let i=0;i<=3;i++)o.push(`GigabitEthernet0/${i}`);
   }
@@ -2258,8 +2309,12 @@ function _inferDeviceType(text){
   if(/lan\s+\d+\s+ip\s+address|wan\s+\d+\s+|napt\s+use|remote\s+\d+\s+ap/m.test(t)) return 'sir';
   if(/interface\s+gigabitethernet1\/0\/|switch\s+virtual|spanning-tree/m.test(t)) return 'catalyst';
   if(/interface\s+port\s+\d|loopdetect|apresia/m.test(t)) return 'apresia';
-  if(/interface\s+lan\d+\.\d+|save\s+(running|startup)-config|ipcom\(edit/m.test(t)) return 'ipcom';
   if(/nameif|security-level|access-group.*global/m.test(t)) return 'asa';
+  if(/interface\s+ethernet\d+(?!\/)|arista|^\s*no\s+aaa\s+root/m.test(t)) return 'arista';
+  if(/^\s*set\s+(interfaces|system|routing-options)\b|^\s*delete\s+interfaces\b|junos/m.test(t)) return 'juniper';
+  if(/^\s*ip\s+lan\d+\s+address|administrator|nat\s+descriptor|pp\s+select/m.test(t)) return 'yamaha';
+  if(/^\s*ip\s+pool\s+[\d.]+|pppoe-user\s+\S+/m.test(t)) return 'bas';
+  if(/^\s*config\s+(system\s+interface|vpn\s+ipsec)|set\s+psksecret|fortios/m.test(t)) return 'fortigate';
   if(/ip\s+address\s+[\d.]+\s+[\d.]+|router\s+(ospf|bgp|eigrp)|interface\s+gigabitethernet0\//m.test(t)) return 'cisco';
   return 'cisco';
 }
@@ -2284,7 +2339,7 @@ async function _importMultipleConfigs(files){
     const type=_inferDeviceType(text);
     const id='dev'+Date.now().toString(36)+i;
     const hostname=_inferHostname(text, file.name.replace(/\.[^.]+$/,''));
-    const colors={sir:'#00c840',srs:'#00a0ff',catalyst:'#1e90ff',cisco:'#e05a00',nexus:'#7050d0',apresia:'#c00040',asa:'#cc4400',ipcom:'#ffb000'};
+    const colors={sir:'#00c840',srs:'#00a0ff',catalyst:'#1e90ff',cisco:'#e05a00',nexus:'#7050d0',apresia:'#c00040',asa:'#cc4400',arista:'#00a8e0',juniper:'#84b135',yamaha:'#e2001a',bas:'#a0a0a0',fortigate:'#ee3124'};
     DEVICES[id]={type,hostname,color:colors[type]||'#888'};
     NODE_POS[id]={x:150+(i%3)*220,y:100+Math.floor(i/3)*160};
     TERMS[id]={busy:false,typed:'',cur:0,history:[],histIdx:-1};

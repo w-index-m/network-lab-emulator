@@ -40,7 +40,7 @@ from engine.rules import RuleEngine, DeviceState, _expand_port_list
 from engine.protocols import (
     vnet, rip_engine, ospf_engine, bgp_engine, eigrp_engine, stp_engine, rib_engine,
     icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
-    nat_engine, cef_engine, dp_engine, snmp_agent,
+    nat_engine, cef_engine, dp_engine, snmp_agent, pppoe_engine, map_e_engine,
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine, mpls_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
 )
@@ -62,6 +62,19 @@ from engine.config_importer import import_running_config, validate_config_text
 OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 USE_OLLAMA   = False   # 起動時に自動検出
+
+# Groq API（OpenAI互換のChat Completions。ローカルインストール不要で
+# Ollamaより高速・精度が良いことが多いが、インターネット接続とAPIキーが
+# 必要になる点がOllama/ルールベースとのトレードオフ）。
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
+USE_GROQ     = False   # 起動時に自動検出（APIキーが有効か実際に1回叩いて確認）
+
+# 実際に使うLLMバックエンド: "groq" / "ollama" / "rules"（優先順位は
+# Groq > Ollama > ルールベース — Groqはローカルインストールが要らず、
+# キーさえ有効ならOllamaより手軽なため優先する）。
+LLM_BACKEND = "rules"
 
 SAVED_CONFIG_PATH = Path(__file__).parent / "saved_config.json"
 
@@ -115,6 +128,62 @@ async def query_ollama(prompt: str, system: str) -> str:
                 return r.json()["message"]["content"].strip()
     except Exception as e:
         print(f"[Ollama] エラー: {e}")
+    return None
+
+# ══════════════════════════════════════════
+# Groq 自動検出・問い合わせ
+# ══════════════════════════════════════════
+async def detect_groq() -> bool:
+    """GROQ_API_KEYが設定されていて、実際にAPIが応答するかを起動時に
+    1回だけ確認する（キーはあるが無効/失効しているケースを弾くため、
+    存在チェックだけでなく軽量な実リクエストまで行う）。"""
+    if not GROQ_API_KEY:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(GROQ_URL, headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            }, json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            })
+            if r.status_code == 200:
+                print(f"[Groq] 検出: model={GROQ_MODEL}")
+                return True
+            print(f"[Groq] APIキーはあるが応答異常 (status={r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        print(f"[Groq] 検出失敗: {e}")
+    return False
+
+async def query_groq(prompt: str, system: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(GROQ_URL, headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            }, json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": prompt},
+                ],
+                "temperature": 0.1,
+            })
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"].strip()
+            print(f"[Groq] エラー応答 (status={r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        print(f"[Groq] エラー: {e}")
+    return None
+
+async def query_llm(prompt: str, system: str) -> str:
+    """現在のLLM_BACKENDに応じてGroq/Ollamaへ問い合わせる共通入口。"""
+    if LLM_BACKEND == "groq":
+        return await query_groq(prompt, system)
+    if LLM_BACKEND == "ollama":
+        return await query_ollama(prompt, system)
     return None
 
 # ══════════════════════════════════════════
@@ -411,14 +480,26 @@ _MAIN_LOOP = [None]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global USE_OLLAMA
+    global USE_OLLAMA, USE_GROQ, LLM_BACKEND
     # SSH CLIサーバのワーカースレッドからCLIを実行するために、
     # 動いているイベントループを捕まえておく。
     # （このアプリは lifespan を使っているので @app.on_event("startup")
     #   は呼ばれない。そちらに書いてもループは None のままになる）
     _MAIN_LOOP[0] = asyncio.get_running_loop()
-    USE_OLLAMA = await detect_ollama()
-    mode = f"Ollama ({OLLAMA_MODEL})" if USE_OLLAMA else "ルールベース（オフライン）"
+    # 優先順位: Groq(ローカルインストール不要・高速) > Ollama(オフライン
+    # 可だがインストールが要る) > ルールベース(完全オフライン)。
+    USE_GROQ = await detect_groq()
+    if USE_GROQ:
+        LLM_BACKEND = "groq"
+        USE_OLLAMA = False
+    else:
+        USE_OLLAMA = await detect_ollama()
+        LLM_BACKEND = "ollama" if USE_OLLAMA else "rules"
+    mode = {
+        "groq":   f"Groq ({GROQ_MODEL})",
+        "ollama": f"Ollama ({OLLAMA_MODEL})",
+        "rules":  "ルールベース（オフライン）",
+    }[LLM_BACKEND]
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
 ║   ネットワークラボ エミュレーター 起動                   ║
@@ -528,7 +609,7 @@ def _valid_token(token: str) -> bool:
 # パスホワイトリスト（認証不要）
 # ルート "/" と各種静的アセットはHTML/ログインJSを返すため公開し、
 # 認証はAPI（/api/*）とWebSocket側で行う。
-_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico",
+_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico", "/dashboard",
                   "/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
 
 @app.middleware("http")
@@ -652,8 +733,9 @@ async def api_complete(req: dict):
 @app.get("/api/status")
 async def get_status():
     return {
-        "mode": "ollama" if USE_OLLAMA else "rules",
-        "ollama_model": OLLAMA_MODEL if USE_OLLAMA else None,
+        "mode": LLM_BACKEND,
+        "ollama_model": OLLAMA_MODEL if LLM_BACKEND == "ollama" else None,
+        "groq_model": GROQ_MODEL if LLM_BACKEND == "groq" else None,
         "devices": list(device_sessions.keys()),
     }
 
@@ -670,7 +752,15 @@ async def snmp_dashboard():
     実UDP SNMPパケットではなく、engine.protocols.SnmpAgent が持つ
     MIB-II相当のデータ（sysDescr/sysUptime/ifTable等）を内部的に読む。
     CISCO-PROCESS-MIB相当のCPU使用率（Cisco系機種のみ）も含む。
+
+    gNMI(`gnxi server`で有効化した装置のみ)についても、実gRPCコールは
+    せずに同じstate.interfacesを読んで「gNMIが実際に見ている値」を
+    併記する(gNMIはこのエミュレータではCPU/トラフィックカウンタを
+    公開していないため、SNMP側のCPU%等とは別枠)。
     """
+    from engine.gnmi_agent import active_gnmi_device_ids, gnmi_port_for
+    gnmi_active_ids = set(active_gnmi_device_ids())
+
     now = time.time()
     devices = []
     for device_id, d in snmp_agent.devices.items():
@@ -707,6 +797,20 @@ async def snmp_dashboard():
         history.append({'t': now, 'cpu': cpu_percent, 'bytes': total_bytes,
                         'routes': route_count})
 
+        gnmi_enabled = device_id in gnmi_active_ids
+        gnmi_info = None
+        if gnmi_enabled:
+            state = device_sessions.get(device_id)
+            ifaces = getattr(state, 'interfaces', {}) if state else {}
+            gnmi_info = {
+                'port': gnmi_port_for(device_id),
+                'interfaces_enabled': sum(
+                    1 for i in ifaces.values()
+                    if i.get('status') not in ('down', 'notconnect', 'disabled',
+                                               'administratively down')),
+                'interfaces_total': len(ifaces),
+            }
+
         devices.append({
             'device_id': device_id,
             'type': d.get('type'),
@@ -719,6 +823,7 @@ async def snmp_dashboard():
             'route_count': route_count,
             'interfaces': interfaces,
             'history': list(history),
+            'gnmi': gnmi_info,
         })
     devices.sort(key=lambda x: x['device_id'])
     return {'polled_at': now, 'devices': devices}
@@ -837,6 +942,42 @@ async def cli_command(body: dict):
     if command.lower() in ("cls", "clear screen"):
         return {"output": "\x0c", "mode": state.mode, "hostname": state.hostname}
 
+    # ── Arista EOS: "show version | json"（eAPI相当のJSON出力）──
+    # include/exclude等の汎用アウトプットモディファイアと違い、json は
+    # テキストを後からフィルタするのではなく元々別形式の応答を返す
+    # ものなので、汎用の _split_output_modifier/_apply_output_modifier
+    # には乗せず個別に処理する。ansible(arista.eos系モジュール)・
+    # pyeapiは"show version"等を内部で自動的に"| json"化して送るため、
+    # 対応していないとAnsible連携そのものが成立しない。
+    if state.device_type == 'arista' and re.match(
+            r'^show\s+hostname\s*\|\s*json\s*$', command.strip(), re.I):
+        import json as _json
+        return {"output": _json.dumps({
+            'hostname': state.hostname, 'fqdn': f'{state.hostname}.netlab'}),
+            "mode": state.mode, "hostname": state.hostname}
+
+    if state.device_type == 'arista' and re.match(
+            r'^show\s+version\s*\|\s*json\s*$', command.strip(), re.I):
+        import json as _json
+        payload = {
+            'mfgName': 'Arista',
+            'modelName': 'DCS-7050SX3-48YC8',
+            'hardwareRevision': '01.00',
+            'serialNumber': f'SSJ{abs(hash(state.hostname)) % 100000:05d}',
+            'systemMacAddress': '00:1c:73:00:{:02x}:{:02x}'.format(
+                (abs(hash(state.hostname)) >> 8) % 0xff, abs(hash(state.hostname)) % 0xff),
+            'version': '4.32.1F',
+            'architecture': 'x86_64',
+            'internalVersion': '4.32.1F-1234567.4321F',
+            'internalBuildId': f'{abs(hash(state.hostname)):08x}-0000-0000-0000-000000000000',
+            'imageFormatVersion': '1.0',
+            'uptime': (datetime.now() - state.startup_time).total_seconds(),
+            'memTotal': 8167848,
+            'memFree': 4521344,
+            'isIntlVersion': False,
+        }
+        return {"output": _json.dumps(payload), "mode": state.mode, "hostname": state.hostname}
+
     # ── 出力モディファイア（`show ... | include foo`）──
     # 実装が無く、`|` 以降が無視されて全文が返っていた。
     # 元のコマンドを実行してから、その出力を絞る。
@@ -852,7 +993,21 @@ async def cli_command(body: dict):
     # 状態には影響しない）── unicon等の自動化ツールが接続直後に必ず
     # 送るコマンド群のため、全機種共通で受理する
     c_lower = command.lower().strip()
-    if re.match(r'^(terminal|term)\s+(length|width|monitor|no monitor|no\s+monitor|'
+    # "terminal width <n>" は実機(IOS/EOS共通)が "Width set to N columns."
+    # を返す。netmiko の arista_eos/cisco系ドライバはセッション確立直後に
+    # これを送り、"Width set to" という応答パターンを待ち受けるため、
+    # 空文字のままだと（netmiko 4.8のReadTimeoutがNetmikoTimeoutException
+    # を継承しておらずリトライされない関係で）接続自体がタイムアウトする。
+    m_width = re.match(r'^(?:terminal|term)\s+width\s+(\d+)\s*$', c_lower)
+    if m_width:
+        return {"output": f"Width set to {m_width.group(1)} columns.",
+                "mode": state.mode, "hostname": state.hostname}
+    if state.device_type == 'arista' and c_lower in ('terminal length 0', 'term length 0'):
+        # 実機EOSは"terminal length 0"に対して"Pagination disabled."を返す
+        # (IOSは無言)。netmikoのarista_eosドライバがこの文字列を
+        # 待ち受けるため、ここで応答しないと接続確立自体がタイムアウトする。
+        return {"output": "Pagination disabled.", "mode": state.mode, "hostname": state.hostname}
+    if re.match(r'^(terminal|term)\s+(length|monitor|no monitor|no\s+monitor|'
                 r'pager|editing|no editing)\b', c_lower) or c_lower in (
                     'terminal length 0', 'term length 0', 'terminal no monitor'):
         return {"output": "", "mode": state.mode, "hostname": state.hostname}
@@ -950,7 +1105,97 @@ async def cli_command(body: dict):
     if state.device_type == 'bigip' and re.search(r'(show|list)\s+ltm|show\s+running|list\s+running', c_low):
         _bigip_health_check(state)
 
+    # ── FortiGate: rule_engine.process()実行前のモードスタック/edit対象を
+    # 控えておく(next/endで消える前の値が必要。Juniperの
+    # commit→SSHリスナー起動と同じ理由で、state変更の確定後に
+    # トリガーするためここで捕捉する)。
+    _fg_stack_before = list(getattr(state, 'fortigate_mode_stack', []) or [])
+    _fg_edit_before = getattr(state, 'fortigate_edit_ctx', None)
+
     output = rule_engine.process(command, state)
+
+    if state.device_type == 'fortigate':
+        _fg_ctx_before = _fg_stack_before[-1] if _fg_stack_before else ''
+        # PPPoE WAN: "system interface"のedit中にnext/endで抜けた瞬間、
+        # mode pppoe + username/passwordが揃っていれば実際に接続する
+        # (Yamahaの"pp enable"と同じPppoeEngineを使う)。
+        if (_fg_ctx_before == 'system interface' and _fg_edit_before and
+                c_low in ('next', 'end')):
+            pppoe_cfg = getattr(state, 'fortigate_pppoe', {}).get(_fg_edit_before)
+            if pppoe_cfg and pppoe_cfg.get('mode') == 'pppoe' and pppoe_cfg.get('username') \
+                    and not pppoe_cfg.get('connected'):
+                result = pppoe_engine.connect(
+                    device_id, _fg_edit_before, _fg_edit_before,
+                    pppoe_cfg['username'], pppoe_cfg.get('password', ''), state.hostname)
+                if result:
+                    bas_state = device_sessions.get(result['bas_id'])
+                    gateway = None
+                    if bas_state:
+                        for info in bas_state.interfaces.values():
+                            if info.get('ip'):
+                                gateway = info['ip']
+                                break
+                    state.interfaces[_fg_edit_before] = {
+                        'ip': result['ip'], 'prefix': result['prefix'],
+                        'status': 'up', 'speed': 'auto', 'duplex': 'full',
+                    }
+                    pppoe_cfg['connected'] = True
+                    pppoe_cfg['gateway'] = gateway
+                    _register_icmp(device_id)
+        # IPsec(phase1/phase2-interface): rule_engineがlocal_ip解決済みの
+        # 状態でネゴシエーションを再実行する。
+        if _fg_ctx_before in ('vpn ipsec phase1-interface', 'vpn ipsec phase2-interface') \
+                and c_low in ('next', 'end'):
+            _trigger_ike_negotiation(device_id)
+
+    # ── ASA 5505実機のPPPoEクライアント("ip address pppoe [setroute]" +
+    # "vpdn group ... request dialout pppoe"/"localname"/"ppp
+    # authentication" + "vpdn username ... password ...")。コマンド順序に
+    # 依存せず、必要な情報(localname/username/password)が揃うたびに
+    # 未接続のpending interfaceへ接続を試みる(Yamahaの"pp enable"と同じ
+    # PppoeEngineを使い、新しいネゴシエーションロジックは増やさない)。
+    if state.device_type == 'asa':
+        vpdn = getattr(state, 'asa_vpdn', {})
+        if vpdn.get('localname') and vpdn.get('username') and vpdn.get('password'):
+            for iface, pend in list(getattr(state, 'asa_pppoe_pending', {}).items()):
+                asa_pppoe_state = state.asa_pppoe.setdefault(iface, {})
+                if asa_pppoe_state.get('connected'):
+                    continue
+                result = pppoe_engine.connect(
+                    device_id, iface, iface, vpdn['username'], vpdn['password'], state.hostname)
+                if result:
+                    bas_state = device_sessions.get(result['bas_id'])
+                    gateway = None
+                    if bas_state:
+                        for info in bas_state.interfaces.values():
+                            if info.get('ip'):
+                                gateway = info['ip']
+                                break
+                    old_if = state.interfaces.get(iface, {})
+                    state.interfaces[iface] = {
+                        'ip': result['ip'], 'prefix': result['prefix'],
+                        'status': 'up',
+                        'nameif': old_if.get('nameif', ''),
+                        'security_level': old_if.get('security_level', 0),
+                        'speed': old_if.get('speed', 'auto'), 'duplex': old_if.get('duplex', 'full'),
+                    }
+                    asa_pppoe_state['connected'] = True
+                    asa_pppoe_state['gateway'] = gateway
+                    if pend.get('setroute') and gateway:
+                        rib_engine.add_static_route(device_id, state.hostname, '0.0.0.0', 0, gateway, 1)
+                    _register_icmp(device_id)
+
+    # ── Juniper: commitで"set system services ssh"が確定した後に実SSH
+    # リスナーを起動する。rule_engine.process()より前(handle_protocol_
+    # config側)でこれをやると、_juniper_processがまだcandidate→
+    # committedの反映(state.interfacesへのIP反映含む)を行う前に
+    # listenerを起動してしまい、変更前の古いIPでbindする不具合になる
+    # ため、ここ(RuleEngine実行後)で行う。
+    if state.device_type == 'juniper' and command.strip().lower() in ('commit', 'commit and-quit') \
+            and getattr(state, 'ssh_rsa_key', False) \
+            and 'system services ssh' in getattr(state, 'junos_committed', []):
+        from engine.ssh_cli_agent import ensure_ssh_cli_agent
+        ensure_ssh_cli_agent(device_id, device_sessions, _run_cli_sync)
 
     # ── Si-R/SR-S: 投入した設定コマンドをキャプチャ（show running-config で忠実再現）──
     if state.device_type in ('sir', 'srs'):
@@ -969,6 +1214,7 @@ async def cli_command(body: dict):
     if (re.match(r'^crypto\s+isakmp\s+(enable|key)', c_low) or
             re.match(r'^crypto\s+map\s+\S+\s+interface', c_low) or
             c_low in ('ike use on', 'ipsec use on') or
+            re.match(r'^tunnel\s+enable\s+\d+$', c_low) or
             re.match(r'^remote\s+\d+\s+ap\s+\d+\s+ipsec\s+ike\s+preshared-key', c_low) or
             # 手動鍵設定(ipsec type manual)。IKEを介さないため、
             # send/receiveのSPI・protocol・鍵のいずれかが揃うたびに
@@ -1018,6 +1264,7 @@ async def cli_command(body: dict):
     if re.search(r'ip\s+addr(?:ess)?|ip\s+route|remote\s+\d+\s+ip\s+route|'
                  r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address|'
                  r'config\s+ipif|'  # APRESIA: "config ipif System <ip>/<prefix>"
+                 r'ip\s+lan\d+\s+address|'  # Yamaha RTX: "ip lan1 address ..."
                  r'no\s+shutdown|no\s+shut', c_low) or (
             re.search(r'crypto\s+map', c_low) and
             not re.match(r'^no\s+crypto\s+map', c_low)):
@@ -1028,20 +1275,18 @@ async def cli_command(body: dict):
     if nat_out is not None:
         return {"output": nat_out, "mode": state.mode, "hostname": state.hostname}
 
-    # ルールで空応答かつOllamaあり → Ollamaで補完
-    if USE_OLLAMA and output == "" and command.strip():
+    # ルールで空応答かつLLMバックエンドあり → LLMで補完(Groq優先/Ollama)
+    if LLM_BACKEND != "rules" and output == "" and command.strip():
         system = build_system_prompt(state)
-        ollama_out = await query_ollama(command, system)
-        if ollama_out:
-            output = ollama_out
+        llm_out = await query_llm(command, system)
+        if llm_out:
+            output = llm_out
 
     result = {
         "output": output,
         "mode": state.mode,
         "hostname": state.hostname,
     }
-    if state.device_type == 'ipcom':
-        result["ipcom_admin"] = getattr(state, '_ipcom_admin', False)
     return result
 
 
@@ -1211,6 +1456,16 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     c = command.lower().strip()
     orig = command.strip()
     hostname = state.hostname
+
+    # ── ZTP: tftp-server configサブモード中は、exit/end以外の行を
+    # 一切解釈せずそのままキャプチャする(rule_engine側のキャプチャに
+    # 委ねる)。ここでガードしないと、このapp.py層が
+    # handle_protocol_configの各種regex(interface/ip address等)に先に
+    # マッチしてしまい、ステージ中の行がサーバー自身の設定として実際に
+    # 適用されてしまう(= 二層ディスパッチでapp.py層が常に先に実行される
+    # ため)。
+    if state.mode == 'config-tftp-file' and c not in ('exit', 'end', 'quit'):
+        return None
 
     # ── NX-OS: コマンド実行ログ ──
     if state.device_type == 'nexus':
@@ -1397,6 +1652,59 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             elif c == 'ipsec use on':
                 state.ipsec_enabled = True
             _trigger_ike_negotiation(device_id)
+    # Yamaha RTX: "tunnel enable <N>" で実機同様そのトンネルのIKE/IPsecが
+    # 有効になる(Si-Rの"ike use on"/"ipsec use on"相当)。
+    # engine/ike_engine.py 側は ipsec_tunnels 辞書をSi-Rと同じ形式で
+    # 読むため、新しいネゴシエーションロジックは増やしていない。
+    if state.device_type == 'yamaha' and re.match(r'^tunnel\s+enable\s+\d+$', c):
+        state.ike_enabled = True
+        state.ipsec_enabled = True
+        _trigger_ike_negotiation(device_id)
+    m_tundis = re.match(r'^tunnel\s+disable\s+(\d+)$', c)
+    if state.device_type == 'yamaha' and m_tundis:
+        tun = state.ipsec_tunnels.get(int(m_tundis.group(1)))
+        if tun:
+            tun.update({'phase1': 'LARVAL', 'phase2': 'LARVAL', 'status': 'wait'})
+        state.ike_enabled = False
+        state.ipsec_enabled = False
+
+    # Yamaha RTX: "map-e use <lanN>" — v6プラス等IPoE+MAP-E接続で、実際に
+    # 共有IPv4アドレス/制限ポートレンジ/BRアドレスを払い出す
+    # (PPPoEのpp enable/PppoeEngineと全く同じ考え方。IPv6プレフィックス
+    # 部分の実取得は行わず、MAP-Eの払い出しだけ実際に行う)。
+    m_mape_use = re.match(r'^map-e\s+use\s+(lan\d+)$', c)
+    if state.device_type == 'yamaha' and m_mape_use:
+        iface = m_mape_use.group(1)
+        rule = map_e_engine.request_rule(device_id, iface, device_id)
+        if rule:
+            state.map_e_rule = {**rule, 'iface': iface}
+            state.interfaces['map0'] = {
+                'ip': rule['ipv4'], 'prefix': 32,
+                'status': 'up', 'speed': 'auto', 'duplex': 'full',
+            }
+            _register_icmp(device_id)
+    m_mape_no = re.match(r'^no\s+map-e\s+use(?:\s+lan\d+)?$', c)
+    if state.device_type == 'yamaha' and m_mape_no:
+        map_e_engine.release_rule(device_id, device_id)
+        state.map_e_rule = None
+        state.interfaces.pop('map0', None)
+        _register_icmp(device_id)
+
+    # ── Cisco ZTP(AUTOINSTALL): "write erase" → 次回 "reload" でDHCP
+    # option 150(TFTP server)経由の自動プロビジョニングをトリガーする。
+    # 実機の本来の手順("write erase" でNVRAM(startup-config)を空にし、
+    # "reload" で再起動すると、起動時configが無いためAUTOINSTALLが走る)
+    # をそのまま使う — 新しいコマンドを増やさず、この2つの実コマンドの
+    # 組み合わせに相乗りした。
+    if c == 'write erase' and state.device_type in ('cisco', 'catalyst'):
+        state._ztp_pending = True
+        return ('Erasing the nvram filesystem will remove all configuration files! '
+                'Continue? [confirm]\n[OK]\nErase of nvram: complete')
+    if c in ('reload', 'reset') and getattr(state, '_ztp_pending', False) and \
+            state.device_type in ('cisco', 'catalyst'):
+        state._ztp_pending = False
+        ztp_log = await _run_ztp_autoinstall(device_id, state)
+        return 'Proceed with reload? [confirm] y\n' + ztp_log
 
     # ── prefix-list ──
     # Cisco: "ip prefix-list NAME seq 5 permit 10.0.0.0/8 ge 24 le 30"
@@ -1819,6 +2127,23 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         m = re.match(r'^no\s+vrrp\s+(\d+)\s+preempt', c)
         g = vrrp_engine.vrrp.get(device_id, {}).get(int(m.group(1)))
         if g: g.preempt = False
+        return
+    # ── VRRP unicast(keepalivedのunicast_peer相当)──
+    # "vrrp <gid> unicast-peer <ip>": vnet上の直結隣接(multicast相当)を
+    # 越えて、L3越しのピアとも同期できるようにする。
+    vrrp_ucast = re.match(r'^vrrp\s+(\d+)\s+unicast-peer\s+([\d.]+)', c)
+    if vrrp_ucast:
+        gid, peer_ip = int(vrrp_ucast.group(1)), vrrp_ucast.group(2)
+        vrrp_engine.add_unicast_peer(device_id, gid, peer_ip)
+        # 直結隣接の場合と同じく、設定直後にも即座にネゴシエーションする
+        peer_id = icmp_engine._find_device_owning_ip(peer_ip)
+        peer_g = vrrp_engine.vrrp.get(peer_id, {}).get(gid) if peer_id else None
+        if peer_g:
+            await vrrp_engine.vrrp_receive_advert(device_id, {
+                'type': 'vrrp_advert', 'src_id': peer_id, 'group_id': gid,
+                'vip': peer_g.vip, 'priority': peer_g.priority,
+                'preempt': peer_g.preempt, 'state': peer_g.state,
+            })
         return
 
     # Si-R形式: "vrrp use on" / "lan 0 vrrp group 1 id 1 110 192.168.1.254"
@@ -2365,6 +2690,95 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         rib_engine.add_static_route(device_id, hostname, net, prefix, next_hop, ad)
         await _emit_route_log(device_id, net, prefix, next_hop, ad)
         return
+    # Yamaha RTX: "ip route default gateway 192.168.1.1 [weight N] [hide]"
+    #            "ip route 192.168.2.0/24 gateway 10.0.0.2 [weight N] [hide]"
+    # 実機は同一宛先に複数gatewayを並べたマルチホーミング構文も受けるが
+    # (ip route default gateway pp 1 weight 2 hide gateway pp 2 weight 1 hide)、
+    # ここではrib_engineに登録できる「最初のIPゲートウェイ1本」のみを
+    # 反映する(pp番号を次ホップに使うマルチホーミング/フローティングは
+    # スコープ外。ルーティングが反映されること自体を優先した)。
+    yamaha_route = re.match(
+        r'^ip\s+route\s+(default|[\d.]+/\d+)\s+gateway\s+([\d.]+)', c)
+    if yamaha_route and state.device_type == 'yamaha':
+        dest = yamaha_route.group(1)
+        next_hop = yamaha_route.group(2)
+        if dest == 'default':
+            net, prefix = '0.0.0.0', 0
+        else:
+            net, prefix = dest.split('/')
+            prefix = int(prefix)
+        rib_engine.add_static_route(device_id, hostname, net, prefix, next_hop, 1)
+        await _emit_route_log(device_id, net, prefix, next_hop, 1)
+        return
+    # Yamaha RTX: "no ip route default gateway 192.168.1.1" 等
+    yamaha_no_route = re.match(
+        r'^no\s+ip\s+route\s+(default|[\d.]+/\d+)(?:\s+gateway\s+([\d.]+))?', c)
+    if yamaha_no_route and state.device_type == 'yamaha':
+        dest = yamaha_no_route.group(1)
+        if dest == 'default':
+            net, prefix = '0.0.0.0', 0
+        else:
+            net, prefix = dest.split('/')
+            prefix = int(prefix)
+        rib_engine.remove_static_route(device_id, net, prefix, yamaha_no_route.group(2))
+        return
+    # Yamaha RTX: "ip route default gateway pp <N>"（PPPoE接続経由の
+    # デフォルトルート。実機の典型的なFLETS接続構成）。gatewayは
+    # pp Nが実際にPPPoE接続を確立するまで分からないため、ここでは
+    # 「pp Nが繋がったら既定経路を貼る」という意図だけ記録しておき、
+    # 実際の登録は下の"pp enable"ハンドリングで行う。
+    yamaha_route_via_pp = re.match(
+        r'^ip\s+route\s+default\s+gateway\s+pp\s+(\d+)', c)
+    if yamaha_route_via_pp and state.device_type == 'yamaha':
+        pp_id = int(yamaha_route_via_pp.group(1))
+        state.yamaha_pp.setdefault(pp_id, {})['default_route_pending'] = True
+        return
+    # Yamaha RTX: "pp enable <N>" / "pp disable <N>" — 擬似FLETS網BASとの
+    # PPPoEセッションを実際に張る/切る(engine.protocols.pppoe_engine)。
+    # 本物のEthernetフレームPADI/PADO等は再現していないが、LCP/PAP・CHAP
+    # 認証/IPCPのIP払い出しに相当する処理を実際に行う(装置間は
+    # vnet.links/device_typesで解決、認証はpppoe_engine側の設定ユーザー
+    # と突き合わせる)。
+    yamaha_pp_toggle = re.match(r'^pp\s+(enable|disable)\s+(\d+)$', c)
+    if yamaha_pp_toggle and state.device_type == 'yamaha':
+        action, pp_id = yamaha_pp_toggle.group(1), int(yamaha_pp_toggle.group(2))
+        pp = state.yamaha_pp.get(pp_id, {})
+        if action == 'disable':
+            if pp.get('connected'):
+                pppoe_engine.disconnect(device_id, pp_id)
+                state.interfaces.pop(f'pp{pp_id}', None)
+                gw = pp.pop('gateway', None)
+                if gw:
+                    rib_engine.remove_static_route(device_id, '0.0.0.0', 0, gw)
+                pp['connected'] = False
+                _register_icmp(device_id)
+            return
+        pppoe_lan = pp.get('pppoe_lan')
+        auth_user = pp.get('auth_user')
+        auth_pass = pp.get('auth_pass')
+        if pppoe_lan and auth_user:
+            result = pppoe_engine.connect(
+                device_id, pp_id, pppoe_lan, auth_user, auth_pass or '', hostname)
+            if result:
+                bas_state = device_sessions.get(result['bas_id'])
+                gateway = None
+                if bas_state:
+                    for info in bas_state.interfaces.values():
+                        if info.get('ip'):
+                            gateway = info['ip']
+                            break
+                state.interfaces[f'pp{pp_id}'] = {
+                    'ip': result['ip'], 'prefix': result['prefix'],
+                    'status': 'up', 'speed': 'auto', 'duplex': 'full',
+                }
+                pp['connected'] = True
+                pp['gateway'] = gateway
+                _register_icmp(device_id)
+                if gateway and pp.get('default_route_pending'):
+                    rib_engine.add_static_route(
+                        device_id, hostname, '0.0.0.0', 0, gateway, 1)
+                    await _emit_route_log(device_id, '0.0.0.0', 0, gateway, 1)
+        return
     # ルート削除 "no ip route ..."
     no_route = re.match(r'^no\s+ip\s+route\s+([\d.]+)(?:/(\d+)|\s+([\d.]+))', c)
     if no_route:
@@ -2854,6 +3268,75 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         if peer_id:
             bgp_engine.set_neighbor_send_community(device_id, peer_id, True)
         return
+    # ── neighbor <ip> route-reflector-client（BGP Route Reflector）──
+    bgp_rr_client = re.match(r'^neighbor\s+([\d.]+)\s+route-reflector-client', c)
+    if bgp_rr_client and getattr(state, '_routing_mode', '') == 'bgp':
+        nip = bgp_rr_client.group(1)
+        peer_id = getattr(state, '_bgp_nbr_ipmap', {}).get(nip) or _find_peer_by_ip(device_id, nip)
+        if peer_id:
+            bgp_engine.set_neighbor_route_reflector_client(device_id, peer_id)
+        return
+    # ── bgp cluster-id <id>（Route Reflectorのクラスタ識別子）──
+    bgp_cluster = re.match(r'^bgp\s+cluster-id\s+(\S+)', c)
+    if bgp_cluster and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_cluster_id(device_id, bgp_cluster.group(1))
+        return
+    # ── bgp rtbh-community <AS:NUM>（Remote-Triggered Black-Hole）──
+    bgp_rtbh = re.match(r'^bgp\s+rtbh-community\s+(\d+:\d+)', c)
+    if bgp_rtbh and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_rtbh_community(device_id, bgp_rtbh.group(1))
+        return
+    # ── bgp hostname-capability（lab-bgp-hostname）──
+    if c == 'bgp hostname-capability' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_hostname_capability(device_id, True)
+        return
+    if c == 'no bgp hostname-capability' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_hostname_capability(device_id, False)
+        return
+    # ── bgp graceful-restart [restart-time <sec>] / bgp long-lived-graceful-restart
+    # （lab-bgp-graceful-restart / lab-bgp-llgr）──
+    bgp_gr_rt = re.match(r'^bgp\s+graceful-restart\s+restart-time\s+(\d+)$', c)
+    if bgp_gr_rt and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_graceful_restart(device_id, True, restart_time=int(bgp_gr_rt.group(1)))
+        return
+    if c == 'bgp graceful-restart' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_graceful_restart(device_id, True)
+        return
+    if c == 'no bgp graceful-restart' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_graceful_restart(device_id, False)
+        return
+    if c == 'bgp long-lived-graceful-restart' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_llgr(device_id, True)
+        return
+    if c == 'no bgp long-lived-graceful-restart' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_llgr(device_id, False)
+        return
+    # ── bgp confederation identifier <as> / bgp confederation peers <as...>
+    # （lab-bgp-confederation）──
+    bgp_confed_id = re.match(r'^bgp\s+confederation\s+identifier\s+(\d+)$', c)
+    if bgp_confed_id and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_confederation_identifier(device_id, int(bgp_confed_id.group(1)))
+        return
+    bgp_confed_peers = re.match(r'^bgp\s+confederation\s+peers\s+(.+)$', c)
+    if bgp_confed_peers and getattr(state, '_routing_mode', '') == 'bgp':
+        for as_str in bgp_confed_peers.group(1).split():
+            if as_str.isdigit():
+                bgp_engine.add_confederation_peer(device_id, int(as_str))
+        return
+    # ── bgp rpki roa <prefix>/<len> max-length <max> origin-as <as> /
+    # bgp rpki invalid-drop（lab-bgp-rpki）──
+    bgp_roa = re.match(
+        r'^bgp\s+rpki\s+roa\s+([\d.]+)/(\d+)\s+max-length\s+(\d+)\s+origin-as\s+(\d+)$', c)
+    if bgp_roa and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.add_roa(device_id, bgp_roa.group(1), int(bgp_roa.group(2)),
+                          int(bgp_roa.group(3)), int(bgp_roa.group(4)))
+        return
+    if c == 'bgp rpki invalid-drop' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_rpki_invalid_drop(device_id, True)
+        return
+    if c == 'no bgp rpki invalid-drop' and getattr(state, '_routing_mode', '') == 'bgp':
+        bgp_engine.set_rpki_invalid_drop(device_id, False)
+        return
     # Si-R: "bgp network <ip>/<prefix>" 広告
     sir_bgp_net = re.match(r'^bgp\s+network\s+([\d.]+(?:/\d+)?)', c)
     if sir_bgp_net and getattr(state, '_routing_mode', '') == 'bgp':
@@ -2961,6 +3444,16 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ── モデルベースAAA(NACM)の前提となるAAA設定 ──
     # 実機もNETCONF/RESTCONFを使うには aaa new-model と
     # aaa authorization exec が要る。IOSのコマンドなのでIOS系のみ。
+    #
+    # aaa authentication login/authorization exec は"default"だけでなく
+    # 任意の名前付きメソッドリストを許す(IOSの実挙動)。以前は"default"
+    # 固定でしか受理しておらず、"aaa authentication login CONSOLE local"
+    # のような名前付きリスト(console line専用の認証等でよく使われる)が
+    # 黙って無視されていた(何のエラーも出さず状態にも残らない)。
+    # state.aaa_authentication_login_lists / aaa_authorization_exec_lists
+    # に名前ごとに保存しつつ、"default"については既存の単一属性
+    # (aaa_authentication_login / aaa_authorization_exec、show
+    # running-config やテストが直接参照する)も後方互換のため維持する。
     if state.device_type in ('cisco', 'catalyst'):
         if re.match(r'^aaa\s+new-model$', c):
             state.aaa_new_model = True
@@ -2968,21 +3461,61 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         if re.match(r'^no\s+aaa\s+new-model$', c):
             state.aaa_new_model = False
             return ''
+        if re.match(r'^aaa\s+authorization\s+console$', c):
+            state.aaa_authorization_console = True
+            return ''
+        if re.match(r'^no\s+aaa\s+authorization\s+console$', c):
+            state.aaa_authorization_console = False
+            return ''
+        m_aaa_authc = re.match(
+            r'^aaa\s+authentication\s+login\s+(\S+)\s+'
+            r'(?:group\s+(\S+)(\s+local)?|(local))$', c)
+        if m_aaa_authc:
+            m_o = re.match(
+                r'^aaa\s+authentication\s+login\s+(\S+)\s+'
+                r'(?:group\s+(\S+)(\s+local)?|(local))$', orig, re.I)
+            name = (m_o or m_aaa_authc).group(1)
+            entry = {
+                'group': (m_o or m_aaa_authc).group(2) or '',
+                'local_fallback': bool(m_aaa_authc.group(3)
+                                       or m_aaa_authc.group(4)),
+            }
+            if not hasattr(state, 'aaa_authentication_login_lists'):
+                state.aaa_authentication_login_lists = {}
+            state.aaa_authentication_login_lists[name] = entry
+            if name.lower() == 'default':
+                state.aaa_authentication_login = entry
+            return ''
+        m_no_aaa_authc = re.match(
+            r'^no\s+aaa\s+authentication\s+login\s+(\S+)', c)
+        if m_no_aaa_authc:
+            name = m_no_aaa_authc.group(1)
+            getattr(state, 'aaa_authentication_login_lists', {}).pop(name, None)
+            if name.lower() == 'default':
+                state.aaa_authentication_login = None
+            return ''
         m_aaa_exec = re.match(
-            r'^aaa\s+authorization\s+exec\s+default\s+'
+            r'^aaa\s+authorization\s+exec\s+(\S+)\s+'
             r'(?:group\s+(\S+)(\s+local)?|(local))$', c)
         if m_aaa_exec:
-            m_o = re.match(r'^aaa\s+authorization\s+exec\s+default\s+'
+            m_o = re.match(r'^aaa\s+authorization\s+exec\s+(\S+)\s+'
                            r'(?:group\s+(\S+)(\s+local)?|(local))$',
                            orig, re.I)
-            state.aaa_authorization_exec = {
-                'group': (m_o or m_aaa_exec).group(1) or '',
-                'local_fallback': bool(m_aaa_exec.group(2)
-                                       or m_aaa_exec.group(3)),
+            name = (m_o or m_aaa_exec).group(1)
+            entry = {
+                'group': (m_o or m_aaa_exec).group(2) or '',
+                'local_fallback': bool(m_aaa_exec.group(3)
+                                       or m_aaa_exec.group(4)),
             }
+            if not hasattr(state, 'aaa_authorization_exec_lists'):
+                state.aaa_authorization_exec_lists = {}
+            state.aaa_authorization_exec_lists[name] = entry
+            if name.lower() == 'default':
+                state.aaa_authorization_exec = entry
             return ''
         if re.match(r'^no\s+aaa\s+authorization\s+exec\s+default', c):
             state.aaa_authorization_exec = None
+            getattr(state, 'aaa_authorization_exec_lists', {}).pop('default', None)
             return ''
 
         # username <name> [privilege <0-15>] {password|secret} [0|5|7] <pw>
@@ -3221,16 +3754,37 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             state.restconf_service_acl = acls
             return ''
 
-    # ── line vty / transport input ──
+    # ── line con/vty / transport input / login authentication /
+    #    authorization exec ──
     # 以前は running-config に "transport input ssh telnet" が固定で
     # 書かれているだけで、コマンドが未実装だった。つまり telnet を
     # 止める手段が無く、平文管理の所見を直せなかった。
+    # "line con 0" 自体も以前は受理されなかった(config-lineに遷移せず、
+    # 中に入れた login authentication/authorization exec も黙って
+    # 無視されていた)。
     if state.device_type in ('cisco', 'catalyst'):
-        m_line = re.match(r'^line\s+(vty)\s+(\d+)(?:\s+(\d+))?\s*$', c)
+        m_line = re.match(r'^line\s+(con|vty)\s+(\d+)(?:\s+(\d+))?\s*$', c)
         if m_line and state.mode in ('config', 'config-line'):
             state.mode = 'config-line'
+            state._line_type = m_line.group(1)
             state._vty_range = (int(m_line.group(2)),
                                 int(m_line.group(3) or m_line.group(2)))
+            return ''
+        m_login_authc = re.match(r'^login\s+authentication\s+(\S+)$', c)
+        if m_login_authc and state.mode == 'config-line':
+            m_o = re.match(r'^login\s+authentication\s+(\S+)$', orig, re.I)
+            attr = ('line_con_login_authentication'
+                    if getattr(state, '_line_type', 'vty') == 'con'
+                    else 'line_vty_login_authentication')
+            setattr(state, attr, (m_o or m_login_authc).group(1))
+            return ''
+        m_authz_exec = re.match(r'^authorization\s+exec\s+(\S+)$', c)
+        if m_authz_exec and state.mode == 'config-line':
+            m_o = re.match(r'^authorization\s+exec\s+(\S+)$', orig, re.I)
+            attr = ('line_con_authorization_exec'
+                    if getattr(state, '_line_type', 'vty') == 'con'
+                    else 'line_vty_authorization_exec')
+            setattr(state, attr, (m_o or m_authz_exec).group(1))
             return ''
         m_ti = re.match(r'^transport\s+input\s+(.+)$', c)
         if m_ti and state.mode == 'config-line':
@@ -3255,7 +3809,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ── crypto key generate rsa ── 実機はRSA鍵を作って初めてSSHが
     # 起動する。ここで TCP/22 の実CLIリスナーを立ち上げるので、
     # 本物のSSHクライアントでログインして show コマンドを打てる。
-    if state.device_type in ('cisco', 'catalyst'):
+    if state.device_type in ('cisco', 'catalyst', 'arista'):
         m_key = re.match(r'^crypto\s+key\s+generate\s+rsa'
                          r'(?:\s+(?:general-keys|usage-keys))?'
                          r'(?:\s+modulus\s+(\d+))?\s*$', c)
@@ -3951,6 +4505,11 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
         n = bgp_engine.nodes.get(device_id)
         if n and n.get('enabled'):
             return bgp_engine.format_show_bfd_neighbors(device_id)
+    # "show bgp rpki table"（lab-bgp-rpki: 登録済みROA一覧）
+    if re.match(r'^show\s+bgp\s+rpki\s+table', c):
+        n = bgp_engine.nodes.get(device_id)
+        if n:
+            return bgp_engine.format_show_bgp_rpki_table(device_id)
 
     # STP
     if re.match(r'^show\s+spanning-tree\s+summary', c):
@@ -4148,6 +4707,113 @@ def find_peer_by_link(device_id: str):
     return next(iter(neighbors), None) if neighbors else None
 
 
+def _ztp_allocate_ip(peer_state, pool_name: str, pool: dict):
+    """DHCPプールから次の空きIPを割り出す(簡易版: network内の
+    ホストアドレスを.10から順に試し、router自身のIP/除外アドレス/
+    既にリース済みのIPを避ける)。PppoeEngine/MapEEngineの
+    「既存リース数から次を割る」という考え方のDHCP版。"""
+    network = pool.get('network')
+    mask = pool.get('mask')
+    if not network or not mask:
+        return None
+    try:
+        net_int = _ip_str_to_int(network)
+        prefix = _mask_to_prefix(mask)
+    except Exception:
+        return None
+    host_bits = 32 - prefix
+    if host_bits <= 0:
+        return None
+    leases = peer_state.__dict__.setdefault('dhcp_leases', {}).setdefault(pool_name, set())
+    excluded = {lo for lo, _hi in getattr(peer_state, 'dhcp_excluded', [])} | \
+               {hi for _lo, hi in getattr(peer_state, 'dhcp_excluded', [])}
+    router_ip = pool.get('router')
+    for host in range(10, (1 << host_bits) - 1):
+        candidate = _int_to_ip_str(net_int + host)
+        if candidate == router_ip or candidate in excluded or candidate in leases:
+            continue
+        leases.add(candidate)
+        return candidate
+    return None
+
+
+def _ip_str_to_int(ip: str) -> int:
+    parts = [int(p) for p in ip.split('.')]
+    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
+
+
+def _int_to_ip_str(n: int) -> str:
+    return '.'.join(str((n >> s) & 0xff) for s in (24, 16, 8, 0))
+
+
+async def _run_ztp_autoinstall(device_id: str, state) -> str:
+    """Cisco AUTOINSTALL(ZTP)の簡易再現。
+
+    直結隣接の中からDHCPプールに option 150(TFTP server)が設定されて
+    いる装置を探し、そこからIP/デフォルトゲートウェイ/ブートファイル名
+    (option 67)を取得して自分のインタフェースに反映し、ステージ済みの
+    設定ファイル(`tftp-server config <bootfile>`で captured)を実際に
+    自分のCLIへ1行ずつ流し込んで適用する(= 本物のcli_command()経由。
+    新しい適用ロジックを増やさず、ユーザーが手で打つのと同じ経路を
+    再利用する)。見つからない/未staging の場合は何も変更せず、
+    実機同様のエラーログだけを返す(フェイクの成功を作らない)。
+    """
+    for peer_id in vnet.get_neighbors(device_id):
+        peer_state = device_sessions.get(peer_id)
+        if not peer_state:
+            continue
+        pools = getattr(peer_state, 'dhcp_pools', {}) or {}
+        for pool_name, pool in pools.items():
+            opts = pool.get('options', {}) or {}
+            tftp_ip = opts[150][1] if opts.get(150, (None,))[0] == 'ip' else None
+            if not tftp_ip:
+                continue
+            bootfile = opts[67][1] if opts.get(67, (None,))[0] == 'ascii' else None
+            client_iface = vnet.interface_links.get(device_id, {}).get(peer_id) \
+                or next(iter(state.interfaces.keys()), 'GigabitEthernet0/0/0')
+            assigned_ip = _ztp_allocate_ip(peer_state, pool_name, pool)
+            if not assigned_ip:
+                continue
+            prefix = _mask_to_prefix(pool['mask']) if pool.get('mask') else 24
+            state.interfaces[client_iface] = {
+                'ip': assigned_ip, 'prefix': prefix, 'status': 'up',
+                'speed': 'auto', 'duplex': 'full',
+            }
+            _register_icmp(device_id)
+            if pool.get('router'):
+                rib_engine.add_static_route(device_id, state.hostname, '0.0.0.0', 0,
+                                            pool['router'], ad=1)
+            log_lines = [
+                f'%AUTOINSTALL-5-ADDR_ASSIGNED: Assigned address {assigned_ip} '
+                f'via interface {client_iface}',
+                f'AUTOINSTALL: Obtain tftp server address (opt 150) {tftp_ip}',
+            ]
+            if not bootfile:
+                log_lines.append('%AUTOINSTALL-3-NO_BOOTFILE: no bootfile (option 67) '
+                                  f'configured on DHCP pool {pool_name}')
+                return '\n'.join(log_lines)
+            content = getattr(peer_state, 'tftp_files', {}).get(bootfile)
+            if not content:
+                log_lines.append(f'%AUTOINSTALL-3-FILE_NOT_FOUND: {bootfile} '
+                                  f'not found on tftp server {tftp_ip}')
+                return '\n'.join(log_lines)
+            nbytes = sum(len(line) + 1 for line in content)
+            log_lines.append(f'Loading {bootfile} from {tftp_ip} '
+                             f'(via {client_iface}): !')
+            log_lines.append(f'[OK - {nbytes} bytes]')
+            # ステージされた設定は(実機同様)グローバルコンフィグとして
+            # 丸ごと適用される内容なので、まず configure terminal で
+            # config モードに入ってから1行ずつ流し込む。
+            await cli_command({'device_id': device_id, 'command': 'configure terminal'})
+            for line in content:
+                await cli_command({'device_id': device_id, 'command': line})
+            await cli_command({'device_id': device_id, 'command': 'end'})
+            log_lines.append('%AUTOINSTALL-5-CONFIG_APPLIED: '
+                             'Configuration applied via AUTOINSTALL')
+            return '\n'.join(log_lines)
+    return '%AUTOINSTALL-3-NO_SERVER: no DHCP/TFTP server found'
+
+
 # Si-R running-config に含めない運用/表示系コマンド
 _SIR_NONCONFIG = {
     'show', 'ping', 'traceroute', 'save', 'exit', 'quit', 'end', 'enable',
@@ -4230,14 +4896,26 @@ def _capture_sir_config(state, command: str):
 
 def _build_running_config(device_id: str, state) -> str:
     """プロトコルエンジンの状態を反映したrunning-configを生成"""
-    is_cisco = state.device_type in ('catalyst', 'cisco')
+    is_cisco = state.device_type in ('catalyst', 'cisco', 'arista')
     is_apresia = state.device_type == 'apresia'
     is_nexus = state.device_type == 'nexus'
 
     if is_apresia:
         return rule_engine.process('show running-config', state)
-    if state.device_type == 'ipcom':
+
+    # 擬似FLETS網BAS: Si-R/Catalyst等のデフォルト分岐に落ちないよう、
+    # 専用の _bas_process 側(RuleEngine)に明示的に委譲する
+    # (このブロック自体がRuleEngine.process()より先に実行されるため、
+    # 放っておくとSi-Rスタイルのダミー出力になってしまう — Juniperの
+    # "show interfaces terse"や"show ip route"でも起きた、app.py側の
+    # 汎用ハンドラが先に勝ってしまう問題と同じ種類のもの)。
+    if state.device_type == 'bas':
         return rule_engine.process('show running-config', state)
+
+    # FortiGate: 同じ理由(app.py側の汎用ハンドラが先に勝ってしまう)で
+    # 専用の _fortigate_process 側に明示的に委譲する。
+    if state.device_type == 'fortigate':
+        return rule_engine.process('show full-configuration', state)
 
     # ── NX-OS (Nexus 9000) running-config ──
     if is_nexus:
@@ -4337,10 +5015,34 @@ def _build_running_config(device_id: str, state) -> str:
         bn = bgp_engine.nodes.get(device_id)
         if bn and bn.get('local_as'):
             lines.append(f'router bgp {bn["local_as"]}')
+            if bn.get('cluster_id'):
+                lines.append(f'  bgp cluster-id {bn["cluster_id"]}')
+            if bn.get('rtbh_community'):
+                lines.append(f'  bgp rtbh-community {bn["rtbh_community"]}')
+            if bn.get('hostname_capability'):
+                lines.append('  bgp hostname-capability')
+            if bn.get('graceful_restart_default'):
+                lines.append('  bgp graceful-restart')
+                if bn.get('gr_restart_time', 120) != 120:
+                    lines.append(f'  bgp graceful-restart restart-time {bn["gr_restart_time"]}')
+            if bn.get('llgr_default'):
+                lines.append('  bgp long-lived-graceful-restart')
+            if bn.get('confederation_id') is not None:
+                lines.append(f'  bgp confederation identifier {bn["confederation_id"]}')
+            if bn.get('confederation_peers'):
+                peers_str = ' '.join(str(a) for a in sorted(bn['confederation_peers']))
+                lines.append(f'  bgp confederation peers {peers_str}')
+            for roa in bn.get('roas', []):
+                lines.append(f'  bgp rpki roa {roa["prefix"]}/{roa["prefix_len"]} '
+                             f'max-length {roa["max_length"]} origin-as {roa["origin_as"]}')
+            if bn.get('rpki_invalid_drop'):
+                lines.append('  bgp rpki invalid-drop')
             shown_neighbor_ips = set()
             for sid, sess in bn.get('sessions', {}).items():
                 peer_ip = bn.get('_neighbor_ips', {}).get(sid, sess.neighbor_id)
                 lines.append(f'  neighbor {peer_ip} remote-as {sess.remote_as}')
+                if sess.reflector_client:
+                    lines.append(f'  neighbor {peer_ip} route-reflector-client')
                 shown_neighbor_ips.add(peer_ip)
             # トポロジー上ピアが解決できず bgp_engine のセッションには
             # 乗らなかったneighborも、実機同様running-configには反映する
@@ -4388,12 +5090,19 @@ def _build_running_config(device_id: str, state) -> str:
     lines = []
 
     if is_cisco:
-        lines.append('Building configuration...')
-        lines.append('')
-        lines.append('Current configuration : ' + str(random.randint(1500, 4000)) + ' bytes')
-        lines.append('!')
-        lines.append('version 17.3')
-        lines.append('!')
+        if state.device_type == 'arista':
+            # EOSの"show running-config"はIOSの"Building configuration..."
+            # バナーではなく、コマンド実行時刻のコメントヘッダで始まる。
+            lines.append('! Command: show running-config')
+            lines.append('! device: ' + state.hostname + ' (vEOS, EOS-4.32.1F)')
+            lines.append('!')
+        else:
+            lines.append('Building configuration...')
+            lines.append('')
+            lines.append('Current configuration : ' + str(random.randint(1500, 4000)) + ' bytes')
+            lines.append('!')
+            lines.append('version 17.3')
+            lines.append('!')
         lines.append(f'hostname {state.hostname}')
         lines.append('!')
         # enable secret/password（`enable`での昇格に使う。SSH/Telnet
@@ -4432,14 +5141,22 @@ def _build_running_config(device_id: str, state) -> str:
         # AAA（モデルベースAAAの前提。NETCONF/RESTCONFを使うには必要）
         if getattr(state, 'aaa_new_model', False):
             lines.append('aaa new-model')
-            _ax = getattr(state, 'aaa_authorization_exec', None)
-            if _ax:
+            for _name, _al in (getattr(state, 'aaa_authentication_login_lists', None) or {}).items():
+                if _al.get('group'):
+                    _sfx = ' local' if _al.get('local_fallback') else ''
+                    lines.append(f'aaa authentication login {_name} group '
+                                 f'{_al["group"]}{_sfx}')
+                else:
+                    lines.append(f'aaa authentication login {_name} local')
+            if getattr(state, 'aaa_authorization_console', False):
+                lines.append('aaa authorization console')
+            for _name, _ax in (getattr(state, 'aaa_authorization_exec_lists', None) or {}).items():
                 if _ax.get('group'):
                     _sfx = ' local' if _ax.get('local_fallback') else ''
-                    lines.append('aaa authorization exec default group '
+                    lines.append(f'aaa authorization exec {_name} group '
                                  f'{_ax["group"]}{_sfx}')
                 else:
-                    lines.append('aaa authorization exec default local')
+                    lines.append(f'aaa authorization exec {_name} local')
             lines.append('!')
         # RESTCONF/NETCONF
         if getattr(state, 'http_secure_server', False):
@@ -4735,10 +5452,34 @@ def _build_running_config(device_id: str, state) -> str:
         if bn and bn.get('enabled'):
             lines.append('!')
             lines.append(f'router bgp {bn["local_as"]}')
+            if bn.get('cluster_id'):
+                lines.append(f' bgp cluster-id {bn["cluster_id"]}')
+            if bn.get('rtbh_community'):
+                lines.append(f' bgp rtbh-community {bn["rtbh_community"]}')
+            if bn.get('hostname_capability'):
+                lines.append(' bgp hostname-capability')
+            if bn.get('graceful_restart_default'):
+                lines.append(' bgp graceful-restart')
+                if bn.get('gr_restart_time', 120) != 120:
+                    lines.append(f' bgp graceful-restart restart-time {bn["gr_restart_time"]}')
+            if bn.get('llgr_default'):
+                lines.append(' bgp long-lived-graceful-restart')
+            if bn.get('confederation_id') is not None:
+                lines.append(f' bgp confederation identifier {bn["confederation_id"]}')
+            if bn.get('confederation_peers'):
+                peers_str = ' '.join(str(a) for a in sorted(bn['confederation_peers']))
+                lines.append(f' bgp confederation peers {peers_str}')
+            for roa in bn.get('roas', []):
+                lines.append(f' bgp rpki roa {roa["prefix"]}/{roa["prefix_len"]} '
+                             f'max-length {roa["max_length"]} origin-as {roa["origin_as"]}')
+            if bn.get('rpki_invalid_drop'):
+                lines.append(' bgp rpki invalid-drop')
             shown_neighbor_ips = set()
             for nid, sess in bn['sessions'].items():
                 peer_ip = '10.0.0.2'
                 lines.append(f' neighbor {peer_ip} remote-as {sess.remote_as}')
+                if sess.reflector_client:
+                    lines.append(f' neighbor {peer_ip} route-reflector-client')
                 shown_neighbor_ips.add(peer_ip)
             for nbr_ip, remote_as in getattr(state, '_bgp_configured_neighbors', {}).items():
                 if nbr_ip not in shown_neighbor_ips:
@@ -4805,6 +5546,8 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append(f' vrrp {gid} priority {g.priority}')
             if g.preempt:
                 lines.append(f' vrrp {gid} preempt')
+            for peer_ip in g.unicast_peers:
+                lines.append(f' vrrp {gid} unicast-peer {peer_ip}')
         # HSRP設定
         hsrp_groups = vrrp_engine.hsrp.get(device_id, {})
         for gid, g in sorted(hsrp_groups.items()):
@@ -4860,6 +5603,12 @@ def _build_running_config(device_id: str, state) -> str:
         # line con / line vty
         lines.append('!')
         lines.append('line con 0')
+        _con_login_authc = getattr(state, 'line_con_login_authentication', None)
+        if _con_login_authc:
+            lines.append(f' login authentication {_con_login_authc}')
+        _con_authz_exec = getattr(state, 'line_con_authorization_exec', None)
+        if _con_authz_exec:
+            lines.append(f' authorization exec {_con_authz_exec}')
         lines.append(' exec-timeout 0 0')
         lines.append(' logging synchronous')
         lines.append(' transport preferred none')
@@ -4868,12 +5617,17 @@ def _build_running_config(device_id: str, state) -> str:
         # 手段も無かった。実際の設定値を出す。
         _ti = getattr(state, 'vty_transport_input', None)
         _ti_line = ' transport input ' + _format_transport_input(_ti)
-        lines.append('line vty 0 4')
-        lines.append(' login local')
-        lines.append(_ti_line)
-        lines.append('line vty 5 15')
-        lines.append(' login local')
-        lines.append(_ti_line)
+        _vty_login_authc = getattr(state, 'line_vty_login_authentication', None)
+        _vty_authz_exec = getattr(state, 'line_vty_authorization_exec', None)
+        for _vty_range_line in ('line vty 0 4', 'line vty 5 15'):
+            lines.append(_vty_range_line)
+            if _vty_login_authc:
+                lines.append(f' login authentication {_vty_login_authc}')
+            else:
+                lines.append(' login local')
+            if _vty_authz_exec:
+                lines.append(f' authorization exec {_vty_authz_exec}')
+            lines.append(_ti_line)
         # syslog
         syslog = getattr(state, 'syslog_servers', [])
         if syslog:
@@ -7600,6 +8354,16 @@ async def root():
     if index.exists():
         return HTMLResponse(index.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>index.html が見つかりません</h1>")
+
+@app.get("/dashboard")
+async def resource_dashboard():
+    """全装置のCPU/インタフェース/トラフィックをリアルタイム表示するダッシュボード。
+    データは既存の /api/snmp/dashboard をポーリングするだけで、
+    新しい計測の仕組みは追加していない。"""
+    page = static_dir / "dashboard.html"
+    if page.exists():
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>dashboard.html が見つかりません</h1>")
 
 # ══════════════════════════════════════════════════════════
 # Nexpose / InsightVM Console API v3

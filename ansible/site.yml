@@ -8,8 +8,15 @@
 # (syslog_to_loki.py)へtac_plus-ngのauthorization/accountingログを実syslogで
 # 送るため、必ずmonitoring_stackの後に実行する。
 #
+# difyロールは独立したスタック(github.com/langgenius/dify、LLMアプリ開発
+# プラットフォーム)で、network-lab-emulator本体やmonitoring_stack/
+# tacacs_syslogとは依存関係が無い。`tags: dify`で明示的に指定したときだけ
+# 実行されるよう、通常の実行には含めていない(docker composeで16個の
+# コンテナを立ち上げる重量級のスタックのため)。
+#
 # 使い方:
 #   ansible-playbook -i ansible/inventory.ini ansible/site.yml
+#   ansible-playbook -i ansible/inventory.ini ansible/site.yml --tags dify
 #
 # 変数の上書き例:
 #   ansible-playbook -i ansible/inventory.ini ansible/site.yml \
@@ -22,3 +29,5 @@
       tags: monitoring_stack
     - role: tacacs_syslog
       tags: tacacs_syslog
+    - role: dify
+      tags: dify

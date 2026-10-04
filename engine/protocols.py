@@ -2192,6 +2192,11 @@ class BgpSession:
     prefix_list_in: str = ''      # インバウンド prefix-list 名（filter_engine参照）
     prefix_list_out: str = ''     # アウトバウンド prefix-list 名（filter_engine参照）
     send_community: bool = False  # send-community 有効（community 属性を送信）
+    reflector_client: bool = False  # neighbor <ip> route-reflector-client（BGP Route Reflector）
+    # Graceful Restart / Long-Lived Graceful Restart（lab-bgp-graceful-restart/llgr）
+    graceful_restart: bool = False  # セッション断時に経路をすぐ消さず stale化
+    llgr: bool = False               # stale化後、タイマーで消さず明示撤回まで保持
+    restart_time: int = 120          # GR: この秒数以内に再確立しなければ本当に撤去
 
 @dataclass
 class BgpRoute:
@@ -2205,6 +2210,8 @@ class BgpRoute:
     learned_from: str = ''
     learned_from_hostname: str = ''
     communities: List[str] = field(default_factory=list)  # ["65000:100", "65001:200"]
+    stale: bool = False      # Graceful Restart/LLGRでセッション断後も保持している経路
+    rpki_state: str = 'notfound'  # 'valid' | 'invalid' | 'notfound'(lab-bgp-rpki)
 
 class BgpEngine:
     def __init__(self):
@@ -2229,6 +2236,17 @@ class BgpEngine:
                 'keepalive_interval': 30,
                 'route_maps': {},  # name -> {'prepend':[as..],'local_pref':int,'med':int}
                 'bfd': {'interval': 300, 'min_rx': 300, 'multiplier': 3},
+                'cluster_id': '',       # bgp cluster-id（Route Reflector）
+                'rtbh_community': '',   # bgp rtbh-community（Remote-Triggered Black-Hole）
+                'rtbh_installed': set(),  # RTBHで自動インストール済みのNull0経路 {(prefix, prefix_len)}
+                'hostname_capability': False,  # bgp hostname-capability
+                'graceful_restart_default': False,  # bgp graceful-restart（新規/既存neighborへ継承）
+                'llgr_default': False,              # bgp long-lived-graceful-restart
+                'gr_restart_time': 120,
+                'confederation_id': None,     # bgp confederation identifier <as>（外部向けに見せるAS）
+                'confederation_peers': set(), # bgp confederation peers <as...>（内部メンバーのsub-AS群）
+                'roas': [],  # bgp rpki roa: [{'prefix','prefix_len','max_length','origin_as'}]
+                'rpki_invalid_drop': False,  # bgp rpki invalid-drop（RPKI invalidを採用しない）
             }
         return self.nodes[device_id]
 
@@ -2275,6 +2293,167 @@ class BgpEngine:
             s.send_community = enabled
             # route-mapと同様、既存経路への反映には再伝播が要る
             self._propagate_bgp()
+
+    # ── Route Reflector ──────────────────────────────────
+    def set_neighbor_route_reflector_client(self, device_id: str, neighbor_id: str,
+                                            enabled: bool = True):
+        """neighbor <ip> route-reflector-client。このneighborをRRクライアントとして
+        扱い、他のiBGPピア(クライアント/非クライアント問わず)との間で経路を反射する。"""
+        s = self._node(device_id)['sessions'].get(neighbor_id)
+        if s:
+            s.reflector_client = enabled
+            self._propagate_bgp()
+
+    def set_cluster_id(self, device_id: str, cluster_id: str):
+        """bgp cluster-id <id>。複数RRで同一クラスタを構成する際の識別子
+        (このエミュレータではループ防止のoriginator-id/cluster-listまでは
+        実装せず、show running-config/表示上の保持のみ)。"""
+        self._node(device_id)['cluster_id'] = cluster_id
+
+    # ── RTBH (Remote-Triggered Black-Hole) ───────────────
+    def set_rtbh_community(self, device_id: str, community: str):
+        """bgp rtbh-community <AS:NUM>。このcommunityを持つベストパスを
+        実機のRTBHパターン(community一致 → Null0への静的経路)と同じ結果に
+        なるよう、rib_engineへ自動的にNull0経路としてインストールする。"""
+        self._node(device_id)['rtbh_community'] = community
+        self._apply_rtbh(device_id)
+
+    def _apply_rtbh(self, device_id: str):
+        n = self.nodes.get(device_id)
+        if not n or not n.get('rtbh_community'):
+            return
+        comm = n['rtbh_community']
+        wanted = {(r['prefix'], r['prefix_len']) for r in n.get('loc_rib', [])
+                  if comm in r.get('communities', [])}
+        installed = n.get('rtbh_installed', set())
+        for prefix, plen in wanted - installed:
+            rib_engine.add_static_route(device_id, n['hostname'], prefix, plen,
+                                        'Null0', ad=1)
+        for prefix, plen in installed - wanted:
+            rib_engine.remove_static_route(device_id, prefix, plen, 'Null0')
+        n['rtbh_installed'] = wanted
+
+    # ── BGP Hostname Capability(lab-bgp-hostname) ────────
+    def set_hostname_capability(self, device_id: str, enabled: bool = True):
+        """bgp hostname-capability。実機(FRR/BIRD)は自動ネゴシエーションだが、
+        このエミュレータでは明示的なトグルにしている。双方が有効にして
+        初めて、show ip bgp summaryのNeighbor列に実ホスト名を表示する。"""
+        self._node(device_id)['hostname_capability'] = enabled
+
+    def _hostname_capability_active(self, device_id: str, neighbor_id: str) -> bool:
+        n = self.nodes.get(device_id)
+        nbr = self.nodes.get(neighbor_id)
+        return bool(n and nbr and n.get('hostname_capability') and nbr.get('hostname_capability'))
+
+    # ── Graceful Restart / Long-Lived Graceful Restart(lab-bgp-graceful-restart/llgr) ──
+    def set_graceful_restart(self, device_id: str, enabled: bool = True,
+                             restart_time: Optional[int] = None):
+        """bgp graceful-restart [restart-time <sec>]。既存の全セッションと
+        今後追加されるセッションの両方に適用する(実機のrouter bgp配下の
+        グローバル設定という位置づけに合わせている)。"""
+        n = self._node(device_id)
+        n['graceful_restart_default'] = enabled
+        if restart_time is not None:
+            n['gr_restart_time'] = restart_time
+        for s in n['sessions'].values():
+            s.graceful_restart = enabled
+            if restart_time is not None:
+                s.restart_time = restart_time
+
+    def set_llgr(self, device_id: str, enabled: bool = True):
+        """bgp long-lived-graceful-restart。stale化した経路をタイマーで
+        消さず、明示的な撤回(再接続後に広告され直さない)までそのまま
+        保持する(実機のLLGR_STALEコミュニティに相当する優先度降格は
+        _recalc_best_pathのstale比較で代替している)。"""
+        n = self._node(device_id)
+        n['llgr_default'] = enabled
+        for s in n['sessions'].values():
+            s.llgr = enabled
+
+    def _schedule_gr_expiry(self, device_id: str, neighbor_id: str, restart_time: int):
+        """GR(LLGRではない)での保持期限。この秒数以内に再確立されなければ、
+        stale化していた経路を本当に撤去する。"""
+        async def expire():
+            await asyncio.sleep(restart_time)
+            n = self.nodes.get(device_id)
+            s = n['sessions'].get(neighbor_id) if n else None
+            if not n or not s or s.state == 'Established':
+                return  # 期限内に再確立済み → 何もしない
+            n['rib_in'] = [r for r in n['rib_in'] if r.learned_from != neighbor_id]
+            self._recalc_best_path(device_id)
+            self._apply_rtbh(device_id)
+        _spawn(expire())
+
+    # ── Confederation(lab-bgp-confederation) ─────────────
+    def set_confederation_identifier(self, device_id: str, as_number: int):
+        """bgp confederation identifier <as>。外部(真のeBGP)へ広告する
+        際にはこの番号だけを見せ、内部のsub-AS群は隠す。"""
+        self._node(device_id)['confederation_id'] = as_number
+
+    def add_confederation_peer(self, device_id: str, as_number: int):
+        """bgp confederation peers <as...>。ここに列挙したsub-ASとの
+        eBGPは「Confederation eBGP」(内部メンバー間)として扱い、
+        local-pref/next-hopは通常のiBGPと同じく素通しするが、
+        as_path上には自分のsub-AS番号を積む(実機同様、外に出た経路数の
+        カウントには残るが、confederation外からは1つのpublic ASとして
+        圧縮されて見える)。"""
+        self._node(device_id)['confederation_peers'].add(as_number)
+
+    def _is_confed_peer(self, device_id: str, remote_as: int) -> bool:
+        n = self.nodes.get(device_id)
+        return bool(n and remote_as in n.get('confederation_peers', set()))
+
+    # ── RPKI Origin Validation(lab-bgp-rpki) ─────────────
+    def add_roa(self, device_id: str, prefix: str, prefix_len: int,
+               max_length: int, origin_as: int):
+        """bgp rpki roa <prefix>/<len> max-length <max> origin-as <as>。
+        実機はRPKI cache(rtrlib経由)から取得するが、このエミュレータは
+        ローカルに手で登録したROAテーブルで代替する。"""
+        self._node(device_id)['roas'].append({
+            'prefix': prefix, 'prefix_len': prefix_len,
+            'max_length': max_length, 'origin_as': origin_as,
+        })
+
+    def set_rpki_invalid_drop(self, device_id: str, enabled: bool = True):
+        """bgp rpki invalid-drop。有効にすると、RPKI invalidと判定された
+        経路はインバウンドの時点で受理しない(実機のrpki invalid policyに
+        相当)。"""
+        self._node(device_id)['rpki_invalid_drop'] = enabled
+
+    def _rpki_validate(self, device_id: str, prefix: str, prefix_len: int,
+                       origin_as: int) -> str:
+        """prefix/prefix_len/origin_asをROAテーブルと照合する。
+        - prefixがどのROAにもカバーされない → 'notfound'
+        - prefixをカバーするROAがあり、prefix_len<=max_lengthかつ
+          origin_asが一致 → 'valid'
+        - prefixをカバーするROAはあるが、どれとも一致しない(AS不一致/
+          max-length超過) → 'invalid'
+        """
+        n = self.nodes.get(device_id)
+        if not n or not n.get('roas'):
+            return 'notfound'
+        try:
+            pfx_int = vnet._ip_to_int(prefix)
+        except Exception:
+            return 'notfound'
+        covering = []
+        for roa in n['roas']:
+            try:
+                roa_int = vnet._ip_to_int(roa['prefix'])
+            except Exception:
+                continue
+            roa_len = roa['prefix_len']
+            if roa_len > prefix_len:
+                continue
+            mask = (0xffffffff << (32 - roa_len)) & 0xffffffff if roa_len else 0
+            if (pfx_int & mask) == (roa_int & mask):
+                covering.append(roa)
+        if not covering:
+            return 'notfound'
+        for roa in covering:
+            if prefix_len <= roa['max_length'] and origin_as == roa['origin_as']:
+                return 'valid'
+        return 'invalid'
 
     def add_route_map(self, device_id: str, name: str, prepend=None,
                       local_pref=None, med=None, communities=None,
@@ -2352,7 +2531,10 @@ class BgpEngine:
                 session.neighbor_ip = neighbor_ip
         else:
             session = BgpSession(neighbor_id=neighbor_id, hostname=neighbor_hostname,
-                                  remote_as=int(remote_as), neighbor_ip=neighbor_ip)
+                                  remote_as=int(remote_as), neighbor_ip=neighbor_ip,
+                                  graceful_restart=n.get('graceful_restart_default', False),
+                                  llgr=n.get('llgr_default', False),
+                                  restart_time=n.get('gr_restart_time', 120))
         n['sessions'][neighbor_id] = session
         await vnet.send_to(device_id, {
             'type': 'bgp_log',
@@ -2471,14 +2653,25 @@ class BgpEngine:
         if not n or not session:
             return []
         is_ebgp = (session.remote_as != n['local_as'])
+        is_confed_peer = self._is_confed_peer(device_id, session.remote_as)
+        confed_id = n.get('confederation_id')
+        confed_members = {n['local_as']} | n.get('confederation_peers', set())
+
+        def _leaving_confederation():
+            """真の外部eBGP(confederation加盟国向けではない)へ、かつ
+            confederation identifierが設定されている場合のみTrue。
+            この場合だけ内部sub-AS群を隠し、公開AS番号1つに圧縮する。"""
+            return is_ebgp and not is_confed_peer and confed_id is not None
+
         out = []
         # 1) 自分起点のネットワーク
         for net in n['networks']:
+            self_path = [confed_id] if _leaving_confederation() else [n['local_as']]
             out.append(BgpRoute(
                 prefix=net.split('/')[0],
                 prefix_len=int(net.split('/')[1]) if '/' in net else 24,
                 next_hop=device_id,
-                as_path=[n['local_as']], origin='i',
+                as_path=self_path, origin='i',
                 learned_from='', learned_from_hostname=n['hostname']))
         # 2) 学習済みベスト経路（トランジット）
         for lr in n.get('loc_rib', []):
@@ -2489,10 +2682,29 @@ class BgpEngine:
                 continue  # 学習元へは広告し返さない
             src_session = n['sessions'].get(src)
             src_is_ibgp = src_session and src_session.remote_as == n['local_as']
-            # iBGPで学習した経路は他のiBGPピアへ再広告しない（split-horizon）
+            # iBGPで学習した経路は他のiBGPピアへ再広告しない（split-horizon）。
+            # ただしRoute Reflector: 自分が送信先または学習元のいずれかで
+            # reflector-clientを持つ場合は、クライアント⇔非クライアント間
+            # (および他クライアントへ)で反射する。
             if src_is_ibgp and not is_ebgp:
-                continue
-            new_path = ([n['local_as']] + list(lr['as_path'])) if is_ebgp else list(lr['as_path'])
+                is_reflecting = (
+                    session.reflector_client
+                    or (src_session and src_session.reflector_client)
+                )
+                if not is_reflecting:
+                    continue
+            if _leaving_confederation():
+                # confederation外へ出る: 内部で溜まったsub-AS群を全て取り除き、
+                # 公開AS番号を1つだけ付け直す(実機同様、外からは1つのASに
+                # 見える)
+                cleaned = [a for a in lr['as_path'] if a not in confed_members]
+                new_path = [confed_id] + cleaned
+            elif is_ebgp:
+                # 通常のeBGP、またはconfederation加盟国同士のeBGP:
+                # どちらも自分の(sub-)AS番号をそのままprependする
+                new_path = [n['local_as']] + list(lr['as_path'])
+            else:
+                new_path = list(lr['as_path'])
             out.append(BgpRoute(
                 prefix=lr['prefix'], prefix_len=lr['prefix_len'],
                 next_hop=device_id, med=lr.get('med', 0), origin=lr.get('origin', 'i'),
@@ -2554,21 +2766,36 @@ class BgpEngine:
                     nbr_session = nbr['sessions'].get(dev)
                     adverts = self._compute_adverts(dev, nid)
                     # 受信側のインバウンド route-map と ループ防止を適用
+                    is_ebgp_hop = session.remote_as != n['local_as']
                     wanted = {}
                     for r in adverts:
-                        # AS-path ループ防止: 受信側の自ASが含まれる経路は拒否（RFC4271）
-                        if nbr['local_as'] in r.as_path:
+                        # AS-path ループ防止（RFC4271）: eBGP越境時のみ適用する。
+                        # iBGP(同一AS内)では自己発信経路のas_pathにも常に
+                        # local_asが入っている(step1の仕様)ため、この判定を
+                        # iBGPにもそのまま適用すると、同一AS内のiBGPピア
+                        # (= Route Reflectorクライアント含む)への配布が
+                        # 常にここで誤って拒否されてしまう。iBGPのループ
+                        # 防止はsplit-horizon/反射ルールの方で担保する。
+                        if is_ebgp_hop and nbr['local_as'] in r.as_path:
                             continue
                         # インバウンド prefix-list 適用（permitされたprefixのみ受理）
                         if (nbr_session and nbr_session.prefix_list_in and
                                 not filter_engine.check_prefix_list(
                                     nid, nbr_session.prefix_list_in, r.prefix, r.prefix_len)):
                             continue
+                        # RPKI Origin Validation: 受信側(nid)に登録されたROAテーブルで
+                        # origin AS(as_pathの末尾 = 発信元)を検証する。
+                        # rpki invalid-drop が有効なら invalid はこの時点で受理しない。
+                        origin_as = r.as_path[-1] if r.as_path else None
+                        rpki_state = (self._rpki_validate(nid, r.prefix, r.prefix_len, origin_as)
+                                     if origin_as is not None else 'notfound')
+                        if rpki_state == 'invalid' and nbr.get('rpki_invalid_drop'):
+                            continue
                         rr = BgpRoute(prefix=r.prefix, prefix_len=r.prefix_len,
                                       next_hop=dev, local_pref=100, med=r.med,
                                       as_path=list(r.as_path), origin=r.origin,
                                       learned_from=dev, learned_from_hostname=n['hostname'],
-                                      communities=list(r.communities))
+                                      communities=list(r.communities), rpki_state=rpki_state)
                         if nbr_session and nbr_session.route_map_in:
                             rr = self._apply_route_map(nid, nbr_session.route_map_in, rr)
                         wanted[(rr.prefix, rr.prefix_len)] = rr
@@ -2587,15 +2814,21 @@ class BgpEngine:
                             nbr['rib_in'].append(rr)
                             changed = True
                         elif (cur.as_path != rr.as_path or cur.local_pref != rr.local_pref
-                              or cur.med != rr.med or cur.communities != rr.communities):
+                              or cur.med != rr.med or cur.communities != rr.communities
+                              or cur.rpki_state != rr.rpki_state or cur.stale):
                             # communitiesの比較/更新が無かったため、route-mapで
                             # community を後から設定/変更しても既存経路には
                             # 反映されなかった（as-path/local-pref/medだけが
-                            # 更新対象になっていた）
+                            # 更新対象になっていた）。cur.staleもここで見る—
+                            # Graceful Restartでstale化していた経路が、
+                            # セッション再確立後に改めて広告されたら
+                            # staleを解除する。
                             cur.as_path = rr.as_path
                             cur.local_pref = rr.local_pref
                             cur.med = rr.med
                             cur.communities = rr.communities
+                            cur.rpki_state = rr.rpki_state
+                            cur.stale = False
                             changed = True
                     nbr['prefixes_received'] = len(nbr['rib_in'])
             # 各ノードのベスト経路を再計算（次の反復の _compute_adverts に反映）
@@ -2603,6 +2836,7 @@ class BgpEngine:
                 self._recalc_best_path(dev)
         for dev in active:
             self._recalc_best_path(dev)
+            self._apply_rtbh(dev)
 
     def _recalc_best_path(self, device_id: str):
         n = self.nodes.get(device_id)
@@ -2610,7 +2844,10 @@ class BgpEngine:
             return
         def _better(r, cur):
             # BGPベストパス選択（簡易・Cisco順序準拠）:
+            # 0) stale(Graceful Restart/LLGR)でない方を常に優先
             # 1) local-preference 大, 2) AS-path 短, 3) MED 小
+            if r.stale != cur.stale:
+                return not r.stale
             if r.local_pref != cur.local_pref:
                 return r.local_pref > cur.local_pref
             if len(r.as_path) != len(cur.as_path):
@@ -2628,7 +2865,8 @@ class BgpEngine:
                           'learned_from_hostname': r.learned_from_hostname,
                           # 以前はここでcommunitiesを落としていたため、route-mapで
                           # 付与したcommunityがベストパス再計算のたびに消えていた
-                          'communities': list(r.communities)}
+                          'communities': list(r.communities),
+                          'stale': r.stale, 'rpki_state': r.rpki_state}
                          for r in best.values()]
 
     async def advertise_network(self, device_id: str, network: str):
@@ -2645,6 +2883,13 @@ class BgpEngine:
         学習経路を撤去し、ベストパスを再計算 → 冗長構成では別ピア経由へフェイルオーバー。
         両端で対称に処理する。
         """
+        # 先に両端を Idle 化＆学習経路の撤去まで済ませてから _propagate_bgp() を
+        # 呼ぶ。以前は片側ずつ「Idle化→撤去→即 _propagate_bgp()」としていたため、
+        # 片側しかIdleになっていない間に _propagate_bgp() が走ると、まだ
+        # Establishedのままの相手側が「セッションは生きている」と誤認して
+        # 直前に撤去したはずの経路を即座に再配布してしまい、撤回が反映されない
+        # （rib_inに復活する）ことがあった。
+        pending_notify = []
         for a, b in ((device_id, neighbor_id), (neighbor_id, device_id)):
             n = self.nodes.get(a)
             if not n:
@@ -2660,12 +2905,32 @@ class BgpEngine:
             s.uptime = None
             if s.keepalive_task:
                 s.keepalive_task.cancel()
-            # このネイバーから学習した経路を撤去
             before = len(n['rib_in'])
-            n['rib_in'] = [r for r in n['rib_in'] if r.learned_from != b]
+            if s.graceful_restart or s.llgr:
+                # Graceful Restart/LLGR: このネイバーから学習した経路は
+                # すぐには撤去せず stale化して保持する(実機同様、再確立
+                # までの短い断でも転送を止めない)。
+                # - GR: s.restart_time 秒以内に再確立しなければ本当に撤去
+                #   (_schedule_gr_expiry)。
+                # - LLGR: タイマーでは消さず、明示的な再広告(セッション
+                #   再確立後にそのprefixがもう無ければ_propagate_bgp側の
+                #   通常ロジックで撤去される)まで保持し続ける。
+                for r in n['rib_in']:
+                    if r.learned_from == b:
+                        r.stale = True
+                if s.graceful_restart and not s.llgr:
+                    self._schedule_gr_expiry(a, b, s.restart_time)
+            else:
+                # このネイバーから学習した経路を撤去
+                n['rib_in'] = [r for r in n['rib_in'] if r.learned_from != b]
             self._recalc_best_path(a)
+            self._apply_rtbh(a)
+            pending_notify.append((a, s, bfd_note, before))
+        if pending_notify:
             # トランジット経由で伝播していた経路も再収束（撤回を波及）
             self._propagate_bgp()
+        for a, s, bfd_note, before in pending_notify:
+            n = self.nodes[a]
             await vnet.send_to(a, {
                 'type': 'bgp_log',
                 'message': (f'%BGP-5-ADJCHANGE: neighbor {s.neighbor_ip or s.hostname} '
@@ -2736,9 +3001,20 @@ class BgpEngine:
                           f'  BGP state = {s.state}')
             rcvd = sum(1 for r in n.get('rib_in', []) if r.learned_from == nid)
             sent = len(n.get('networks', []))
+            rr_line = ['  Route-Reflector Client'] if s.reflector_client else []
+            cap_lines = []
+            if self._hostname_capability_active(device_id, nid):
+                cap_lines.append(f'  Hostname Capability: advertised and received '
+                                 f'(Hostname {s.hostname})')
+            if s.graceful_restart or s.llgr:
+                gr_kind = 'Long-Lived Graceful Restart' if s.llgr else 'Graceful Restart'
+                cap_lines.append(f'  {gr_kind} Capability: advertised and received '
+                                 f'(restart time {s.restart_time} seconds)')
             blocks.append('\n'.join([
                 f'BGP neighbor is {addr},  remote AS {s.remote_as}, {link} link',
                 f'  BGP version 4, remote router ID {addr}',
+                *rr_line,
+                *cap_lines,
                 state_line,
                 '  Last read 00:00:00, last write 00:00:00, hold time is 180, '
                 'keepalive interval is 60 seconds',
@@ -2765,6 +3041,10 @@ class BgpEngine:
         lines = [
             f'BGP router identifier {n["router_id"]}, local AS number {n["local_as"]}',
             'BGP table version is 1, main routing table version 1',
+        ]
+        if n.get('cluster_id'):
+            lines.append(f'RR instance cluster-id is {n["cluster_id"]}')
+        lines += [
             '',
             'Neighbor        V    AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd',
         ]
@@ -2779,11 +3059,31 @@ class BgpEngine:
             state_or_pfx = str(pfx_count) \
                 if session.state == 'Established' else session.state
             addr = session.neighbor_ip or ('192.168.1.' + str(nid))
+            # Hostname Capability(lab-bgp-hostname): 双方で有効なら、実機
+            # (FRR)の"show bgp summary"同様、Neighbor列にIPではなく
+            # "hostname(ip)"形式でホスト名を表示する
+            if self._hostname_capability_active(device_id, nid):
+                addr = f'{session.hostname}({addr})'
             lines.append(
                 f'{addr:<16}4{str(session.remote_as):>6}'
                 f'{random.randint(10,200):>8}{random.randint(10,200):>8}'
                 f'{1:>9}{0:>5}{0:>5} {uptime:<9} {state_or_pfx}'
             )
+        return '\n'.join(lines)
+
+    def format_show_bgp_rpki_table(self, device_id: str) -> str:
+        """show bgp rpki table。登録済みROAの一覧(実機はRPKI cacheから
+        同期するが、このエミュレータはローカル登録のみ)。"""
+        n = self.nodes.get(device_id)
+        if not n:
+            return '% BGP is not configured.'
+        roas = n.get('roas', [])
+        if not roas:
+            return 'No ROAs configured.'
+        lines = ['Prefix                   Max-Len  Origin-AS']
+        for roa in sorted(roas, key=lambda r: (r['prefix'], r['prefix_len'])):
+            pfx = f'{roa["prefix"]}/{roa["prefix_len"]}'
+            lines.append(f'{pfx:<24} {roa["max_length"]:<8} {roa["origin_as"]}')
         return '\n'.join(lines)
 
     def format_show_bgp_table(self, device_id: str) -> str:
@@ -2810,10 +3110,13 @@ class BgpEngine:
             nh = _nh_ip(lf) if lf else '0.0.0.0'
             # 自分が起点(local origin)なら weight 32768, 学習経路は 0
             weight = 32768 if not lf else 0
+            status = '*s' if r.get('stale') else '*>'
+            rpki_suffix = {'valid': ' (RPKI: Valid)', 'invalid': ' (RPKI: Invalid)'}.get(
+                r.get('rpki_state', 'notfound'), '')
             lines.append(
-                f'*> {key:<18} {nh:<20} '
+                f'{status} {key:<18} {nh:<20} '
                 f'{str(r["med"]):>6} {str(r["local_pref"]):>6} {weight:>6} '
-                f'{" ".join(str(a) for a in r["as_path"])} {r["origin"]}'
+                f'{" ".join(str(a) for a in r["as_path"])} {r["origin"]}{rpki_suffix}'
             )
         # ベスト以外の候補（冗長経路）も表示: 同一prefixで非ベストのもの
         for r in n['rib_in']:
@@ -4410,6 +4713,181 @@ rib_engine = RibEngine()
 
 
 # ══════════════════════════════════════════
+# PPPoEエンジン（擬似FLETS網: BAS ⇔ RTX の pp select セッション）
+# ══════════════════════════════════════════
+# 実Ethernetフレーム(PADI/PADO等、Ethertype 0x8863)は、このエミュレータの
+# 装置同士がループバックIPエイリアスで繋がっているだけで本物のL2隣接を
+# 持たないため再現できない。他のプロトコルエンジン(OspfEngine/RipEngine)
+# と同じ「vnet.links/device_typesを見てソフトウェア的にネゴシエーション
+# する」方式で、LCP/PAP・CHAP認証/IPCPのIP払い出しという段階そのものは
+# 忠実に再現する。
+class PppoeEngine:
+    def __init__(self):
+        # bas_device_id -> {'pool_start','pool_end','prefix','users':{name:pw},
+        #                    'leased': set(ip), 'sessions': {session_id: {...}}}
+        self.nodes: Dict[str, dict] = {}
+        # (rtx_device_id, pp_id) -> {'bas_id','ip','gateway','prefix','session_id'}
+        self.pp_sessions: Dict[tuple, dict] = {}
+
+    def _bas(self, device_id: str) -> dict:
+        return self.nodes.setdefault(device_id, {
+            'pool_start': None, 'pool_end': None, 'prefix': 32,
+            'users': {}, 'leased': set(), 'sessions': {},
+        })
+
+    def set_pool(self, device_id: str, start: str, end: str, prefix: int):
+        bas = self._bas(device_id)
+        bas['pool_start'], bas['pool_end'], bas['prefix'] = start, end, prefix
+
+    def add_user(self, device_id: str, username: str, password: str):
+        self._bas(device_id)['users'][username] = password
+
+    def _alloc_ip(self, bas: dict) -> Optional[str]:
+        if not bas['pool_start'] or not bas['pool_end']:
+            return None
+        start = int(ipaddress.IPv4Address(bas['pool_start']))
+        end = int(ipaddress.IPv4Address(bas['pool_end']))
+        for raw in range(start, end + 1):
+            ip = str(ipaddress.IPv4Address(raw))
+            if ip not in bas['leased']:
+                bas['leased'].add(ip)
+                return ip
+        return None
+
+    def connect(self, rtx_id: str, pp_id, pppoe_lan_iface: str,
+                username: str, password: str, rtx_hostname: str) -> Optional[dict]:
+        """PADI/PADO→LCP→PAP/CHAP→IPCPに相当する一連の処理を1回で行う。
+        pppoe_lan_iface経由で繋がっているdevice_type=='bas'のデバイスを
+        探し、認証に成功すればプールからIPを払い出してセッションを張る。
+        """
+        for peer in vnet.get_neighbors(rtx_id):
+            if vnet.interface_links.get(rtx_id, {}).get(peer) != pppoe_lan_iface:
+                continue
+            if vnet.device_types.get(peer) != 'bas':
+                continue
+            bas = self.nodes.get(peer)
+            if not bas or bas['users'].get(username) != password:
+                continue
+            ip = self._alloc_ip(bas)
+            if not ip:
+                continue
+            # ゲートウェイ(BAS自身のIP)はstate.interfacesに依存するため
+            # ここでは解決しない。呼び出し元(app.py)がbas側の
+            # device_sessionsから解決して戻り値に補って使う。
+            session_id = f'{rtx_id}-pp{pp_id}'
+            bas['sessions'][session_id] = {
+                'rtx_id': rtx_id, 'hostname': rtx_hostname,
+                'ip': ip, 'pp_id': pp_id,
+            }
+            result = {'bas_id': peer, 'ip': ip, 'prefix': bas['prefix'],
+                      'session_id': session_id}
+            self.pp_sessions[(rtx_id, pp_id)] = result
+            return result
+        return None
+
+    def disconnect(self, rtx_id: str, pp_id) -> Optional[dict]:
+        sess = self.pp_sessions.pop((rtx_id, pp_id), None)
+        if not sess:
+            return None
+        bas = self.nodes.get(sess['bas_id'])
+        if bas:
+            bas['sessions'].pop(sess['session_id'], None)
+            bas['leased'].discard(sess['ip'])
+        return sess
+
+    def format_show_session(self, device_id: str) -> str:
+        bas = self.nodes.get(device_id)
+        if not bas or not bas['sessions']:
+            return 'No active PPPoE sessions.'
+        lines = ['Session            Hostname         IP Address       PP']
+        for sid, s in sorted(bas['sessions'].items()):
+            lines.append(f'{sid:<18} {s["hostname"]:<16} {s["ip"]:<16} pp{s["pp_id"]}')
+        return '\n'.join(lines)
+
+
+pppoe_engine = PppoeEngine()
+
+
+# ══════════════════════════════════════════
+# MAP-Eエンジン（v6プラス等のIPoE+MAP-E方式でのIPv4インターネット接続）
+# ══════════════════════════════════════════
+# このエミュレータの共有エンジン(rib_engine/icmp_engine)はIPv4専用で、
+# IPv6アドレッシング/ルーティングの実体を持たない。v6プラスの実際の
+# 流れ(IPv6 IPoEアクセス → DHCPv6-PDでプレフィックス取得 → MAP-Eルールで
+# 共有IPv4+制限ポートレンジ+BR(Border Relay)アドレスを受け取る)のうち、
+# 「IPv6 IPoEアクセス」部分は見た目の設定反映のみ(実際のIPv6到達性判定は
+# しない)。「MAP-Eで実際にIPv4インターネットに出られる」部分だけは、
+# PppoeEngineと同じ方式(vnet経由のソフトウェア的ネゴシエーション)で
+# 実際の状態遷移として再現する — 払い出された共有IPv4アドレスは本物の
+# state.interfaces/rib_engineに乗るので、既存のIPv4 ping/tracerouteが
+# そのまま使える。
+class MapEEngine:
+    def __init__(self):
+        # rule_server_device_id -> {'ipv4_pool':[...], 'br_ipv6':str,
+        #                            'ports_per_user':int, 'rules':{rule_id: {...}}}
+        self.nodes: Dict[str, dict] = {}
+
+    def _server(self, device_id: str) -> dict:
+        return self.nodes.setdefault(device_id, {
+            'ipv4_pool': [], 'br_ipv6': '', 'ports_per_user': 4096, 'rules': {},
+        })
+
+    def set_ipv4_pool(self, device_id: str, start: str, end: str):
+        srv = self._server(device_id)
+        s = int(ipaddress.IPv4Address(start))
+        e = int(ipaddress.IPv4Address(end))
+        srv['ipv4_pool'] = [str(ipaddress.IPv4Address(i)) for i in range(s, e + 1)]
+
+    def set_br_address(self, device_id: str, br_ipv6: str):
+        self._server(device_id)['br_ipv6'] = br_ipv6
+
+    def request_rule(self, rtx_id: str, iface: str, rule_id: str) -> Optional[dict]:
+        """指定インタフェース経由で繋がっているMAP-Eルールサーバーを探し、
+        共有IPv4+ポートレンジ+PSID+BRアドレスを払い出す。"""
+        for peer in vnet.get_neighbors(rtx_id):
+            if vnet.interface_links.get(rtx_id, {}).get(peer) != iface:
+                continue
+            srv = self.nodes.get(peer)
+            if not srv or not srv['ipv4_pool'] or not srv['br_ipv6']:
+                continue
+            ppu = srv['ports_per_user']
+            slots_per_ip = 65536 // ppu
+            # 既存ルール数から次の空きスロット(IPv4, PSID)を決める
+            n = len(srv['rules'])
+            ipv4 = srv['ipv4_pool'][n // slots_per_ip] if n // slots_per_ip < len(srv['ipv4_pool']) else None
+            if ipv4 is None:
+                return None
+            psid = n % slots_per_ip
+            port_lo = psid * ppu
+            port_hi = port_lo + ppu - 1
+            rule = {
+                'rtx_id': rtx_id, 'server_id': peer, 'ipv4': ipv4,
+                'psid': psid, 'port_range': (port_lo, port_hi),
+                'br_ipv6': srv['br_ipv6'],
+            }
+            srv['rules'][rule_id] = rule
+            return rule
+        return None
+
+    def release_rule(self, rtx_id: str, rule_id: str):
+        for srv in self.nodes.values():
+            srv['rules'].pop(rule_id, None)
+
+    def format_show_rules(self, device_id: str) -> str:
+        srv = self.nodes.get(device_id)
+        if not srv or not srv['rules']:
+            return 'No active MAP-E rules.'
+        lines = ['Rule               Hostname         Shared IPv4      Port range       PSID']
+        for rid, r in sorted(srv['rules'].items()):
+            lo, hi = r['port_range']
+            lines.append(f'{rid:<18} {r["rtx_id"]:<16} {r["ipv4"]:<16} {lo}-{hi}        {r["psid"]}')
+        return '\n'.join(lines)
+
+
+map_e_engine = MapEEngine()
+
+
+# ══════════════════════════════════════════
 # ICMP エンジン（ping / traceroute 実到達性判定）
 # ══════════════════════════════════════════
 class IcmpEngine:
@@ -4681,6 +5159,10 @@ class IcmpEngine:
         if not matched:
             return None, None
         next_hop_ip = matched['next_hop']
+        if next_hop_ip == 'Null0':
+            # RTBH等のブラックホール経路: 実機同様、転送せず破棄する
+            # （どの隣接にも誤って解決しないよう、ここで明示的に不達とする）
+            return None, None
         neighbors = list(vnet.get_neighbors(device_id))
 
         def _edge_dead(peer):
@@ -7402,6 +7884,11 @@ class VrrpGroup:
     peer_id: str = ''
     peer_ip: str = ''
     peer_priority: int = 0
+    # unicast VRRP（keepalivedのunicast_peer相当）。設定されていれば
+    # multicast相当のbroadcast_to_neighborsに加えて、ここに列挙した
+    # IPの装置へ直接advertisementを送る。vnetの直結隣接(get_neighbors)
+    # を越えて、L3越しのピアとも同期できるようにするのが目的。
+    unicast_peers: List[str] = field(default_factory=list)
 
 @dataclass
 class HsrpGroup:
@@ -7494,6 +7981,18 @@ class VrrpEngine:
             'state': g.state,
         }
         await vnet.broadcast_to_neighbors(device_id, pkt)
+        # unicast VRRP: 直結隣接(multicast相当)に加えて、明示設定した
+        # unicast_peerへも直接送る。vnetの直結隣接関係を持たない
+        # (= L3越しの)ピアとの同期はこちらだけが頼り。
+        for peer_ip in g.unicast_peers:
+            peer_id = icmp_engine._find_device_owning_ip(peer_ip)
+            if peer_id and peer_id != device_id:
+                await vnet.send_to(peer_id, pkt)
+
+    def add_unicast_peer(self, device_id: str, group_id: int, peer_ip: str):
+        g = self.vrrp.get(device_id, {}).get(group_id)
+        if g and peer_ip not in g.unicast_peers:
+            g.unicast_peers.append(peer_ip)
 
     async def vrrp_receive_advert(self, receiver_id: str, msg: dict):
         group_id = msg.get('group_id')
@@ -7943,6 +8442,8 @@ class VrrpEngine:
             lines.append(f'  Advertisement interval is {g.hello_interval} sec')
             lines.append(f'  Preemption {"enabled" if g.preempt else "disabled"}')
             lines.append(f'  Priority is {g.priority}')
+            if g.unicast_peers:
+                lines.append(f'  VRRP Unicast Peer(s): {", ".join(g.unicast_peers)}')
             if g.state == 'Master':
                 lines.append(f'  Master Router is {device_id} (local), priority is {g.priority}')
                 lines.append(f'  Master Advertisement interval is {g.hello_interval} sec')

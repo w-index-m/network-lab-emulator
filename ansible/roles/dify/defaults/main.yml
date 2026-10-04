@@ -1,0 +1,18 @@
+---
+# Dify(LLMアプリ開発プラットフォーム、github.com/langgenius/dify)を
+# docker composeで構築する。network-lab-emulator本体とは独立した
+# 別スタックで、AI要約/RAG機能を試すための土台という位置づけ。
+dify_dir: /opt/dify
+dify_repo_url: https://github.com/langgenius/dify.git
+# このロールで実際に動作確認したコミット(main、2026-09-30時点)に固定。
+# 追従したい場合は -e dify_repo_version=main などで上書きする。
+dify_repo_version: 5e3065ec7dd5b3401efefe265d9df85ca04fc1d5
+
+# cr.weaviate.io(Weaviate専用イメージレジストリ)がブロックされた
+# ネットワーク向けの回避策。Docker Hub上の同一イメージを取得し、
+# ローカルでcr.weaviate.io宛のタグを付け直す。バージョンは
+# dify_docker_dir配下のdocker-compose.yamlに実際に書かれているタグに
+# 追従させるため、固定値ではなくfactとして検出する(tasks/main.yml参照)。
+dify_weaviate_registry_blocked: true
+
+dify_web_port: 80

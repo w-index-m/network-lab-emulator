@@ -1,0 +1,145 @@
+---
+# Difyをdocker composeで構築する。べき等: 既にクローン済み/既に起動中なら
+# その部分をスキップする(monitoring_stack/tacacs_syslogロールと同じ方針)。
+- name: Check whether the docker CLI is already installed
+  ansible.builtin.command: docker --version
+  register: dify_docker_check
+  changed_when: false
+  failed_when: false
+
+- name: Install Docker Engine + Compose plugin (apt-based hosts only)
+  ansible.builtin.command: >
+    apt-get install -y docker.io docker-compose-v2
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: dify_docker_check.rc != 0
+
+- name: Check whether the Docker daemon is reachable
+  ansible.builtin.command: docker info
+  register: dify_docker_info
+  changed_when: false
+  failed_when: false
+
+# 通常のsystemd管理ホスト向け(失敗しても無視し、次のフォールバックに進む)
+- name: Start Docker via systemd, if available
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+  when: dify_docker_info.rc != 0
+  failed_when: false
+
+- name: Re-check Docker daemon after systemd start attempt
+  ansible.builtin.command: docker info
+  register: dify_docker_info_retry
+  changed_when: false
+  failed_when: false
+  when: dify_docker_info.rc != 0
+
+# systemdが無い/使えないサンドボックス環境向けフォールバック
+# (このロールを実際に検証した環境がまさにこのケース: "System has not
+# been booted with systemd as init system" でsystemctlが使えなかった)
+- name: Start dockerd directly as a background process (no-systemd fallback)
+  ansible.builtin.shell: nohup dockerd > /var/log/dockerd.log 2>&1 &
+  when: >
+    dify_docker_info.rc != 0 and
+    (dify_docker_info_retry.rc | default(1)) != 0
+  async: 1
+  poll: 0
+
+- name: Wait for the Docker daemon to become reachable
+  ansible.builtin.command: docker info
+  register: dify_docker_wait
+  until: dify_docker_wait.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
+
+- name: Ensure the Dify install directory's parent exists
+  ansible.builtin.file:
+    path: "{{ dify_dir | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Check whether Dify is already cloned
+  ansible.builtin.stat:
+    path: "{{ dify_dir }}/.git"
+  register: dify_src
+
+- name: Clone Dify
+  ansible.builtin.git:
+    repo: "{{ dify_repo_url }}"
+    dest: "{{ dify_dir }}"
+    version: "{{ dify_repo_version }}"
+    depth: 1
+  when: not dify_src.stat.exists
+
+- name: Check whether .env already exists
+  ansible.builtin.stat:
+    path: "{{ dify_dir }}/docker/.env"
+  register: dify_env
+
+- name: Copy .env.example to .env
+  ansible.builtin.copy:
+    src: "{{ dify_dir }}/docker/.env.example"
+    dest: "{{ dify_dir }}/docker/.env"
+    remote_src: true
+    mode: "0644"
+  when: not dify_env.stat.exists
+
+- name: Detect the Weaviate image tag pinned in docker-compose.yaml
+  ansible.builtin.shell: >
+    grep -oP 'cr\.weaviate\.io/semitechnologies/weaviate:\K[^\s"]+'
+    {{ dify_dir }}/docker/docker-compose.yaml | head -1
+  register: dify_weaviate_tag
+  changed_when: false
+  when: dify_weaviate_registry_blocked
+
+# cr.weaviate.ioが到達できないネットワーク向けの回避策: 同じイメージを
+# Docker Hub(semitechnologies/weaviate)から取得し、compose定義が参照する
+# cr.weaviate.io宛のタグをローカルに付け直す。既にそのタグのイメージが
+# あれば何もしない。
+- name: Check whether the cr.weaviate.io-tagged image already exists locally
+  ansible.builtin.command: >
+    docker image inspect cr.weaviate.io/semitechnologies/weaviate:{{ dify_weaviate_tag.stdout }}
+  register: dify_weaviate_local
+  changed_when: false
+  failed_when: false
+  when: dify_weaviate_registry_blocked and dify_weaviate_tag.stdout | length > 0
+
+- name: Pull the Weaviate image from Docker Hub (cr.weaviate.io mirror)
+  ansible.builtin.command: >
+    docker pull semitechnologies/weaviate:{{ dify_weaviate_tag.stdout }}
+  when: >
+    dify_weaviate_registry_blocked and dify_weaviate_tag.stdout | length > 0 and
+    dify_weaviate_local.rc != 0
+
+- name: Tag the Docker Hub image as the cr.weaviate.io reference compose expects
+  ansible.builtin.command: >
+    docker tag semitechnologies/weaviate:{{ dify_weaviate_tag.stdout }}
+    cr.weaviate.io/semitechnologies/weaviate:{{ dify_weaviate_tag.stdout }}
+  when: >
+    dify_weaviate_registry_blocked and dify_weaviate_tag.stdout | length > 0 and
+    dify_weaviate_local.rc != 0
+
+- name: Check whether the Dify web UI is already responding
+  ansible.builtin.uri:
+    url: "http://localhost:{{ dify_web_port }}/apps"
+    status_code: 200
+  register: dify_web_check
+  failed_when: false
+
+- name: Start Dify (docker compose up -d)
+  ansible.builtin.command: docker compose up -d
+  args:
+    chdir: "{{ dify_dir }}/docker"
+  when: dify_web_check.status | default(0) != 200
+
+- name: Wait for the Dify web UI to become reachable
+  ansible.builtin.uri:
+    url: "http://localhost:{{ dify_web_port }}/apps"
+    status_code: 200
+  register: dify_web_wait
+  until: dify_web_wait.status | default(0) == 200
+  retries: 60
+  delay: 5
+  when: dify_web_check.status | default(0) != 200

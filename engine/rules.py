@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from engine.ike_engine import (
     DEFAULT_DPD_IDLE, DEFAULT_DPD_RETRY_COUNT, DEFAULT_DPD_RETRY_TIME,
     DEFAULT_IKE_RETRY_COUNT, DEFAULT_IKE_RETRY_TIME,
+    DEFAULT_ENCRYPTION, DEFAULT_HASH, DEFAULT_DH, DEFAULT_MODE,
+    DEFAULT_IKE_LT, DEFAULT_PROTOCOL,
     advance_all_sir_dpd,
 )
 
@@ -97,6 +99,14 @@ class DeviceState:
             self.snmp_contact     = ""
             self.logging_level    = "informational"
             self.banner = ""
+            # ASA 5505実機のPPPoEクライアント機能("ip address pppoe
+            # [setroute]" + "vpdn group ... request dialout pppoe" +
+            # "vpdn username ... password ...")。Yamahaの"pp enable"と
+            # 同じPppoeEngineを使う(新しいネゴシエーションロジックは
+            # 増やさない)。
+            self.asa_vpdn = {}            # {'group','localname','auth','username','password'}
+            self.asa_pppoe_pending = {}   # {iface: {'setroute': bool}} — ip address pppoe 済み・未接続
+            self.asa_pppoe = {}           # {iface: {'connected','gateway'}}
             return
 
         # PC (Linux汎用エンドポイント)
@@ -125,29 +135,6 @@ class DeviceState:
             self.snmp_location = ""
             self.snmp_contact = ""
             self.logging_level = "informational"
-            return
-
-        # IPCOM EX2（富士通/PFU系UTMアプライアンス）
-        # インターフェース名は lan<N>.<VLAN-ID> 形式（マニュアル準拠）。
-        if device_type == "ipcom":
-            self.interfaces = {
-                "lan0.0": {"ip": "192.168.1.1", "prefix": 24, "status": "up",
-                           "desc": "", "mac": "00:0e:0e:f2:51:dc",
-                           "auto_negotiation": True, "ip_routing": True},
-                "lan0.1": {"ip": "192.168.100.1", "prefix": 24, "status": "up",
-                           "desc": "", "mac": "00:0e:0e:f2:51:dd",
-                           "auto_negotiation": True, "ip_routing": True},
-            }
-            self.mode = "exec"
-            self._ipcom_admin = False   # admin コマンドで昇格(ipcom># prompt)
-            self.static_routes = []     # [{"dest","gw","distance"}]
-            self.syslog_servers = []
-            self.logging_level = "informational"
-            self.snmp_community = []
-            self.snmp_hosts = []
-            self.snmp_location = ""
-            self.snmp_contact = ""
-            self.banner = ""
             return
 
         # NX-OS (Nexus 9000)
@@ -242,11 +229,35 @@ class DeviceState:
                 "vlan": "1", "speed": "auto", "duplex": "full",
                 "desc": f"Port-channel{i}",
             } for i in range(1, 5)},
-        }) if device_type in ("catalyst", "srs") else {
+        }) if device_type in ("catalyst", "srs") else ({
+            # Arista EOS: 固定スイッチは Ethernet<N> 形式（スラッシュ無し）
+            "Ethernet1": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
+            "Ethernet2": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
+            "Ethernet3": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
+        } if device_type == "arista" else ({
+            # Juniper vSRX/vJunos: ge-<fpc>/<pic>/<port> 形式
+            "ge-0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
+            "ge-0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
+            "ge-0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
+        } if device_type == "juniper" else ({
+            # Yamaha RTX1300: lan1(LAN)/lan2(WAN想定)/lan3 形式
+            "lan1": {"ip": "192.168.100.1", "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
+            "lan2": {"ip": "203.0.113.2",   "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
+            "lan3": {"ip": "",              "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
+        } if device_type == "yamaha" else ({
+            # 擬似FLETS網BAS(収容局相当): wan1(加入者収容)/uplink1 形式
+            "wan1": {"ip": "100.64.0.254", "prefix": 16, "status": "up", "speed": "10000", "duplex": "full"},
+            "uplink1": {"ip": "", "prefix": 0, "status": "down", "speed": "auto", "duplex": "auto"},
+        } if device_type == "bas" else ({
+            # FortiGate(FortiOS): port1(WAN想定)/port2(LAN)/port3 形式
+            "port1": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
+            "port2": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
+            "port3": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
+        } if device_type == "fortigate" else {
             "GigabitEthernet0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        }
+        })))))
 
         if device_type == "sir":
             # ether <slot> <port> vlan untag <vid>（実機のfactory-default）
@@ -393,6 +404,69 @@ class DeviceState:
             self.f5_monitors = {}   # name -> {'type', ...}
             self.f5_folder = "/Common"
 
+        # Juniper Junos (vSRX/vJunos) 状態
+        # Junosはcandidate/active二段階コンフィグ(commitするまで反映されない)が
+        # 特徴なので、確定済み(set)行のリストを別管理する。
+        if device_type == "juniper":
+            self.junos_committed = []   # commit済みのset行（順序保持、重複は上書き）
+            self.junos_candidate = []   # configureモードで編集中、未commitのset行
+            self.lldp_neighbors = []
+            self.lldp_enabled = True    # Junosは実機でもLLDPが既定で有効
+
+        # Yamaha RTX1300 状態
+        # ルーティングは他機種同様 rib_engine に委譲する(重複状態を持たない)。
+        # NAT記述子(nat descriptor)は実パケット変換までは再現せず、設定の
+        # 受理とshow configへの反映のみ。PPPoE(pp select)は
+        # engine.protocols.PppoeEngine(擬似FLETS網のBASとのソフトウェア的
+        # ネゴシエーション)に接続され、"pp enable"で実際に認証・IP払い出し
+        # が行われる(本物のEthernetフレームPADI/PADO等は再現していない
+        # — 装置間はループバックIPエイリアスで繋がっているだけで実L2隣接
+        # を持たないため)。
+        if device_type == "yamaha":
+            self.nat_descriptors = {}   # {id: {'type': 'masquerade', 'lan': 'lan2'}}
+            self.yamaha_pp = {}         # {pp_id: {'pppoe_lan','auth_user','auth_pass','enabled','connected'}}
+            self.yamaha_current_pp = None
+            # IPsecトンネル(tunnel select N配下)。engine/ike_engine.py の
+            # Si-R用 ipsec_tunnels 辞書形式をそのまま再利用し、
+            # ike_engine側の dt in ('sir','srs','yamaha') 判定に相乗りする
+            # (Cisco IOS/ASAとのネゴシエーションも含め、新しいマッチング
+            # ロジックを増やさない)。
+            self.ipsec_tunnels = {}     # {tunnel_id: {local_ip, remote_ip, preshared, ...}}
+            self.yamaha_current_tunnel = None
+            self.ike_enabled = False
+            self.ipsec_enabled = False
+            # v6プラス等IPoE+MAP-E。IPv6プレフィックス部分は見た目のみ
+            # (state.yamaha_ipv6_prefix)、MAP-Eの共有IPv4払い出し部分は
+            # engine.protocols.map_e_engine経由で実際に状態遷移させる
+            # (PPPoEのpp enable/PppoeEngineと同じ方式)。
+            self.yamaha_ipv6_prefix = ''   # 見た目のみ。実IPv6到達性判定はしない
+            self.map_e_rule = None         # {'ipv4','psid','port_range','br_ipv6'}
+            self.lldp_neighbors = []
+
+        # 擬似FLETS網BAS(収容局)状態
+        # IPプール・認証ユーザーはengine.protocols.pppoe_engineに直接
+        # 持たせる(ここにも二重に持たない — rib_engineへの経路委譲と
+        # 同じ方針)。
+        if device_type == "bas":
+            self.lldp_neighbors = []
+
+        # FortiGate(FortiOS) 状態
+        # IPsec(phase1-interface/phase2-interface)はYamahaと同じ考え方で
+        # Si-R用ipsec_tunnels辞書形式に乗せ、ike_engine.pyのdt判定に
+        # 'fortigate'を追加するだけで新しいネゴシエーションロジックを
+        # 増やさない。PPPoE WAN(set mode pppoe)もYamahaの"pp enable"と
+        # 同じくengine.protocols.PppoeEngineを使う。
+        if device_type == "fortigate":
+            self.fortigate_mode_stack = []  # config階層のスタック(["system interface", ...])
+            self.fortigate_edit_ctx = None  # 現在editしているオブジェクト名
+            self.fortigate_interfaces_pending = {}  # 編集中のinterface設定バッファ
+            self.ipsec_tunnels = {}     # {phase1_name: {local_ip, remote_ip, preshared, ...}}
+            self.fortigate_phase1_pending = None  # 編集中のphase1名
+            self.fortigate_pppoe = {}   # {port_name: {'username','password','enabled','connected'}}
+            self.ike_enabled = False
+            self.ipsec_enabled = False
+            self.lldp_neighbors = []
+
     def uptime_str(self):
         delta = datetime.now() - self.startup_time
         h = int(delta.total_seconds() // 3600)
@@ -486,6 +560,7 @@ CONFIG_SUBMODES = {
     "config-vs-domain":        ("config",            ()),
     "config-vpc-domain":       ("config",            ()),
     "config-dhcp":             ("config",            ('_dhcp_pool',)),
+    "config-tftp-file":        ("config",            ('_tftp_file',)),
     "config-dhcpv6":           ("config",            ('_dhcpv6_pool',)),
     "config-bba":              ("config",            ('_bba_group',)),
     "config-evpn":             ("config",            ()),
@@ -753,7 +828,10 @@ class RuleEngine:
         """
         if not cmd.strip():
             return cmd
-        if device_type == 'apresia':
+        if device_type in ('apresia', 'juniper', 'yamaha', 'fortigate'):
+            # Juniper/Yamaha/FortiGateも同様、Cisco IOSと無関係な独自
+            # コマンド体系(set/delete/commit、ip lanN address、
+            # config/edit/next/end等)を持つため展開をスキップする。
             return cmd
         tokens = cmd.strip().split()
         # Si-R/SR-Sの "ether" は、それ自体で完結する実機のキーワード
@@ -839,13 +917,27 @@ class RuleEngine:
         if state.device_type == 'apresia':
             return self._apresia_process(cmd, c, state)
 
-        # IPCOM EX2は「即時/編集モード」+ load/new/save の独自体系 → 専用ハンドラへ
-        if state.device_type == 'ipcom':
-            return self._ipcom_process(cmd, c, state)
-
         # F5 BIG-IP は tmsh 体系 → 専用ハンドラへ
         if state.device_type == 'bigip':
             return self._bigip_process(cmd, c, state)
+
+        # Juniper Junos は set/delete/commit の階層型体系 → 専用ハンドラへ
+        if state.device_type == 'juniper':
+            return self._juniper_process(cmd, c, state)
+
+        # Yamaha RTX は独自コマンド体系(ip lanN address等) → 専用ハンドラへ
+        if state.device_type == 'yamaha':
+            return self._yamaha_process(cmd, c, state)
+
+        # 擬似FLETS網BAS(収容局) → 専用ハンドラへ
+        if state.device_type == 'bas':
+            return self._bas_process(cmd, c, state)
+
+        # FortiGate(FortiOS)は config/edit/set/next/end の階層型体系
+        # → 専用ハンドラへ(Junosのset/delete/commitと同じ理由で、
+        # Ciscoのexec→config→config-ifモードモデルに乗らない)
+        if state.device_type == 'fortigate':
+            return self._fortigate_process(cmd, c, state)
 
         # モード遷移
         # 実機の end は「どの設定モードからでも特権EXECへ一気に戻る」。
@@ -857,6 +949,16 @@ class RuleEngine:
             return self._cmd_exit(cmd, state)
         if c == "exit-address-family" and state.mode == "config-bgp-af":
             return self._cmd_exit(cmd, state)
+        # ── tftp-server config <bootfile> サブモード: exit/end/quit以外の
+        # 全行をそのまま(大文字小文字保持で)キャプチャする。他の一般的な
+        # コマンド解釈(interface→config-if遷移等)より前で止めないと、
+        # ステージング中の行がコマンドとして実行されてしまう。
+        if state.mode == "config-tftp-file":
+            name = getattr(state, '_tftp_file', '')
+            if not hasattr(state, 'tftp_files'):
+                state.tftp_files = {}
+            state.tftp_files.setdefault(name, []).append(cmd)
+            return ""
         # Cisco/Catalyst/SR-S: t または terminal が必須
         if state.device_type in ("catalyst", "cisco", "srs"):
             if c in ("configure terminal", "conf t", "conf terminal",
@@ -1710,6 +1812,25 @@ Switch Ports Model              SW Version        SW Image              Mode
 
 
 Configuration register is 0x102 (will be 0x102 at next reload)"""
+        elif state.device_type == "arista":
+            # Arista EOSのshow versionはCiscoのような長いバナーではなく、
+            # モデル/シリアル/MACアドレス/ソフトウェアイメージバージョン/
+            # アーキテクチャ/uptime/メモリの短い項目列挙(EOSユーザーマニュアル
+            # "Switch Administration Commands"章のshow version準拠)。
+            return f"""Arista DCS-7050SX3-48YC8-F
+Hardware version:    01.00
+Serial number:       SSJ{abs(hash(state.hostname)) % 100000:05d}
+System MAC address:  001c.7300.{abs(hash(state.hostname)) % 0xffff:04x}
+
+Software image version: 4.32.1F
+Architecture:           x86_64
+Internal build version: 4.32.1F-1234567.4321F
+Internal build ID:      {abs(hash(state.hostname)):08x}-0000-0000-0000-000000000000
+
+Uptime:                 {state.uptime_str()}
+
+Total memory:           8167848 kB
+Free memory:            4521344 kB"""
         else:
             return f"""Cisco IOS Software [Cupertino], ISR Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 17.9.1
 Technical Support: http://www.cisco.com/techsupport
@@ -2894,8 +3015,8 @@ Gi1/0/24            Root FWD 4         128.24   P2p"""
         for n in neighbors:
             cap_map = {'R': 'R', 'B': 'B', 'S': 'B', 'H': 'T'}
             cap = cap_map.get(n.get('cap', 'B'), 'B')
-            local_if = n.get('local_if', n.get('port', ''))
-            port_id = n.get('port_id', n.get('port', ''))
+            local_if = self._abbrev_if(n.get('local_if', n.get('port', '')))
+            port_id = self._abbrev_if(n.get('port_id', n.get('port', '')))
             sysname = n.get('system_name', n.get('device', ''))
             hold = n.get('hold', n.get('ttl', 120))
             lines.append(f"{sysname:<21}{local_if:<16}{hold:<11}{cap:<13}{port_id}")
@@ -5272,6 +5393,19 @@ Configuration Revision            : 5"""
         if not hasattr(state, 'dhcp_pools'): state.dhcp_pools = {}
         if not hasattr(state, 'dhcp_excluded'): state.dhcp_excluded = []
         if not hasattr(state, 'dhcp_snoop'): state.dhcp_snoop = {'enabled': False, 'vlans': '', 'trust': []}
+        if not hasattr(state, 'tftp_files'): state.tftp_files = {}
+
+        # tftp-server config <bootfile> → サブモード(ZTP/オートインストール
+        # で配布するコンフィグをそのままキャプチャする。実機はflashの
+        # ファイルを配るが、このエミュレータにファイルシステムは無いため、
+        # CLIでそのまま流し込んで"ファイル"として保持するpragmaticな方式)
+        m = re.match(r'^tftp-server\s+config\s+(\S+)$', c)
+        if m and state.mode == 'config':
+            name = re.match(r'^tftp-server\s+config\s+(\S+)$', cmd.strip(), re.I).group(1)
+            state.tftp_files[name] = []
+            state._tftp_file = name
+            state.mode = 'config-tftp-file'
+            return ""
 
         # ip dhcp excluded-address <lo> [hi]
         m = re.match(r'^ip\s+dhcp\s+excluded-address\s+([\d.]+)(?:\s+([\d.]+))?', c)
@@ -7157,7 +7291,11 @@ Configuration Revision            : 5"""
             m_cmap_match = re.match(r'^crypto\s+map\s+(\S+)\s+(\d+)\s+match\s+address\s+(\S+)', c)
             if m_cmap_match:
                 mapname, seq, acl = m_cmap_match.group(1), int(m_cmap_match.group(2)), m_cmap_match.group(3)
-                state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {})[seq] = {'acl': acl}
+                # setdefault(seq, {})['acl']=acl でないと、matchが先に来るか
+                # 後に来るかで既存のpeer/transform_setを消してしまう
+                # (match addressを後から打つ実機の典型的な順序で踏む不具合)
+                state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(
+                    mapname, {}).setdefault(seq, {})['acl'] = acl
                 return ''
 
             # crypto map <name> <seq> set peer <ip>
@@ -7644,11 +7782,742 @@ Configuration Revision            : 5"""
             out.append(f'  {name}  ({n.get("address", name)})  {st}')
         return '\n'.join(out)
 
+    # ══════════════════════════════════════════
+    # Juniper Junos (vSRX/vJunos) — set/delete/commit 階層型CLI
+    # ══════════════════════════════════════════
+    def _juniper_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """Junos CLIを処理する。
+
+        実機Junosは「candidate configをset/deleteで編集し、commitして初めて
+        activeに反映される」のが最大の特徴(Ciscoの即時反映と対照的)。
+        このエミュレータでも同じ二段階を再現する: configureモード中は
+        state.junos_candidate に行をため込むだけで state.interfaces 等は
+        変更せず、commit時にまとめて反映する。パス階層(edit path)の
+        スタック管理は実装せず、configモードからは常にset/delete/showに
+        フルパスを書く(実機の`edit interfaces ge-0/0/0`降下は非対応)。
+        """
+        orig = cmd.strip()
+
+        # ── モード遷移 ──
+        if c in ('configure', 'configure exclusive', 'configure private'):
+            state.mode = 'config'
+            return 'Entering configuration mode\n\n[edit]'
+        if c in ('exit', 'exit configuration-mode') and state.mode == 'config':
+            state.mode = 'exec'
+            return ''
+        if c in ('quit',) and state.mode == 'exec':
+            return ''
+
+        # ── set cli ...（CLI表示設定。candidate configとは無関係で
+        # commit不要、モードを問わず即座に反映される。netmikoの
+        # juniper_junosドライバがログイン直後に必ず送るコマンド群）──
+        m_width = re.match(r'^set\s+cli\s+screen-width\s+(\d+)$', c)
+        if m_width:
+            return f'Screen width set to {m_width.group(1)}'
+        if c == 'set cli complete-on-space off':
+            return 'Disabling complete-on-space'
+        if c == 'set cli complete-on-space on':
+            return 'Enabling complete-on-space'
+        m_length = re.match(r'^set\s+cli\s+screen-length\s+(\d+)$', c)
+        if m_length:
+            return f'Screen length set to {m_length.group(1)}'
+
+        # ── commit / rollback (configモードのみ) ──
+        if state.mode == 'config':
+            if c in ('commit', 'commit and-quit', 'commit check'):
+                if c == 'commit check':
+                    return 'configuration check succeeds'
+                self._junos_apply_commit(state)
+                if c == 'commit and-quit':
+                    state.mode = 'exec'
+                return 'commit complete'
+            if c in ('rollback', 'rollback 0'):
+                state.junos_candidate = []
+                return 'load complete'
+
+            # ── set ──
+            m_if_addr = re.match(
+                r'^set\s+interfaces\s+(\S+)\s+unit\s+(\d+)\s+family\s+inet\s+address\s+'
+                r'([\d.]+)/(\d+)$', c)
+            if m_if_addr:
+                ifname, unit, ip, prefix = m_if_addr.groups()
+                self._junos_stage(state, f'interfaces {ifname} unit {unit} family inet address {ip}/{prefix}')
+                return ''
+            m_if_disable = re.match(r'^set\s+interfaces\s+(\S+)\s+disable$', c)
+            if m_if_disable:
+                self._junos_stage(state, f'interfaces {m_if_disable.group(1)} disable')
+                return ''
+            m_hostname = re.match(r'^set\s+system\s+host-name\s+(\S+)$', c)
+            if m_hostname:
+                self._junos_stage(state, f'system host-name {m_hostname.group(1)}')
+                return ''
+            if c == 'set system services ssh':
+                self._junos_stage(state, 'system services ssh')
+                return ''
+            m_del = re.match(r'^delete\s+(.+)$', c)
+            if m_del:
+                path = m_del.group(1).strip()
+                state.junos_candidate = [l for l in state.junos_candidate if not l.startswith(path)]
+                state.junos_committed = [l for l in state.junos_committed if not l.startswith(path)]
+                return ''
+            if c.startswith('set '):
+                # 対応していない set パス（モデル上サポート範囲外）
+                return f"syntax error: '{orig.split(None, 1)[1] if ' ' in orig else ''}'"
+
+        # ── show configuration ──
+        if re.match(r'^show\s+configuration\s*\|\s*display\s+set', c):
+            lines = state.junos_committed
+            if not lines:
+                return ''
+            return '\n'.join(f'set {l}' for l in lines)
+        if re.match(r'^show\s+configuration$', c):
+            return self._junos_render_hierarchy(state.junos_committed)
+
+        # ── show version ──
+        if re.match(r'^show\s+version', c):
+            return (f'Hostname: {state.hostname}\n'
+                     f'Model: vSRX\n'
+                     f'Junos: 23.4R1.9\n'
+                     f'JUNOS Software Release [23.4R1.9]')
+
+        # ── show interfaces terse ──
+        if re.match(r'^show\s+interfaces\s+terse', c):
+            lines = ['Interface               Admin Link Proto    Local                 Remote']
+            for name, i in state.interfaces.items():
+                admin = 'up' if i.get('status') != 'admin-down' else 'down'
+                link = 'up' if i.get('status') == 'up' else 'down'
+                if i.get('ip'):
+                    lines.append(f'{name + ".0":<24}{admin:<6}{link:<5}inet     {i["ip"]}/{i["prefix"]}')
+                else:
+                    lines.append(f'{name + ".0":<24}{admin:<6}{link:<5}')
+            return '\n'.join(lines)
+
+        # ── show lldp neighbors（共有のCisco形式テーブルを流用）──
+        if re.match(r'^show\s+lldp\s+neighbors', c):
+            return self._show_lldp(state)
+
+        if c in ('run show version',):
+            return self.process('show version', state)
+
+        return f'\n{orig}\n                 ^\nsyntax error, expecting <command>.'
+
+    def _junos_stage(self, state: DeviceState, line: str):
+        """candidate configに1行追加(同じパスの既存行は上書き)"""
+        key = line.rsplit(' ', 1)[0]  # 値部分を除いた「パス」で一意化
+        state.junos_candidate = [l for l in state.junos_candidate if not l.startswith(key)]
+        state.junos_candidate.append(line)
+
+    def _junos_apply_commit(self, state: DeviceState):
+        """candidateをcommitし、state.interfaces/hostnameに反映する"""
+        for line in state.junos_candidate:
+            key = line.rsplit(' ', 1)[0]
+            state.junos_committed = [l for l in state.junos_committed if not l.startswith(key)]
+            state.junos_committed.append(line)
+
+            m = re.match(r'^interfaces\s+(\S+)\s+unit\s+(\d+)\s+family\s+inet\s+address\s+'
+                         r'([\d.]+)/(\d+)$', line)
+            if m and m.group(1) in state.interfaces:
+                ifname, _unit, ip, prefix = m.groups()
+                state.interfaces[ifname]['ip'] = ip
+                state.interfaces[ifname]['prefix'] = int(prefix)
+                state.interfaces[ifname]['status'] = 'up'
+                continue
+            m = re.match(r'^interfaces\s+(\S+)\s+disable$', line)
+            if m and m.group(1) in state.interfaces:
+                state.interfaces[m.group(1)]['status'] = 'admin-down'
+                continue
+            m = re.match(r'^system\s+host-name\s+(\S+)$', line)
+            if m:
+                state.hostname = m.group(1)
+                continue
+            if line == 'system services ssh':
+                # 実機Junosは"set system services ssh"をcommitして初めて
+                # SSHDが上がる。実リスナーの起動自体はapp.py側
+                # (handle_protocol_config の "commit" ハンドリング、
+                # Cisco系のcrypto key generate rsaと同じ役割)が
+                # state.ssh_rsa_key を見て行う。ここではフラグだけ立てる。
+                state.ssh_rsa_key = True
+        state.junos_candidate = []
+
+    def _junos_render_hierarchy(self, lines) -> str:
+        """set行の平坦なリストを実機風の波括弧階層表示に組み立てる"""
+        if not lines:
+            return ''
+        tree = {}
+        for line in lines:
+            toks = line.split()
+            node = tree
+            for t in toks[:-2]:
+                node = node.setdefault(t, {})
+            leaf_key = ' '.join(toks[-2:])
+            node[leaf_key] = None
+
+        def render(node, depth):
+            out = []
+            ind = '    ' * depth
+            for k, v in node.items():
+                if v is None:
+                    out.append(f'{ind}{k};')
+                else:
+                    out.append(f'{ind}{k} {{')
+                    out.extend(render(v, depth + 1))
+                    out.append(f'{ind}}}')
+            return out
+
+        return '\n'.join(render(tree, 0))
+
+    # ══════════════════════════════════════════
+    # Yamaha RTX1300 — 独自CLI(ip lanN address / administrator / pp select)
+    # ══════════════════════════════════════════
+    def _yamaha_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """RTXシリーズのCLIを処理する。
+
+        実機はCiscoのような exec→config→config-if のモード階層ではなく、
+        一般ユーザモード(`>`)→administratorコマンドで管理者モード(`#`)に
+        上がったら、その場でインタフェース・ルート設定を直接打ち込む
+        (configure terminal相当の別モードが無い)。ルーティングは
+        rib_engine(app.pyのhandle_protocol_config、このメソッドより前に
+        実行される)に委譲し、ここでは state.interfaces の直接変更と
+        show config/show ip route 等の表示のみを担当する。
+
+        NAT記述子(nat descriptor)・PPPoE(pp select)は設定の受理と
+        show configへの反映のみ(実パケット変換・実PPPoEネゴシエーション
+        はスコープ外)。
+        """
+        orig = cmd.strip()
+
+        # ── モード遷移 ──
+        if c == 'administrator' and state.mode == 'exec':
+            state.mode = 'admin'
+            return ''
+        if c in ('exit', 'logout') and state.mode == 'pp':
+            state.mode = 'admin'
+            state.yamaha_current_pp = None
+            return ''
+        if c in ('exit', 'logout') and state.mode == 'tunnel':
+            state.mode = 'admin'
+            state.yamaha_current_tunnel = None
+            return ''
+        if c == 'exit' and state.mode == 'admin':
+            state.mode = 'exec'
+            return ''
+        if c == 'exit' and state.mode == 'exec':
+            return ''
+
+        if state.mode in ('admin', 'pp', 'tunnel'):
+            # ── pp select <N> ──（PPPoE接続設定サブコンテキスト）
+            m_pp = re.match(r'^pp\s+select\s+(\d+)$', c)
+            if m_pp:
+                pp_id = int(m_pp.group(1))
+                state.yamaha_pp.setdefault(pp_id, {})
+                state.yamaha_current_pp = pp_id
+                state.mode = 'pp'
+                return ''
+            # ── tunnel select <N> ──（IPsecトンネル設定サブコンテキスト）
+            m_tun = re.match(r'^tunnel\s+select\s+(\d+)$', c)
+            if m_tun:
+                tun_id = int(m_tun.group(1))
+                state.ipsec_tunnels.setdefault(tun_id, {
+                    'local_ip': '', 'remote_ip': '', 'preshared': '',
+                    'encryption': DEFAULT_ENCRYPTION, 'hash': DEFAULT_HASH,
+                    'dh_group': DEFAULT_DH, 'ike_mode': DEFAULT_MODE,
+                    'ike_lifetime': DEFAULT_IKE_LT, 'protocol': DEFAULT_PROTOCOL,
+                    'phase1': 'LARVAL', 'phase2': 'LARVAL', 'status': 'wait',
+                })
+                state.yamaha_current_tunnel = tun_id
+                state.mode = 'tunnel'
+                return ''
+
+        if state.mode == 'tunnel' and state.yamaha_current_tunnel is not None:
+            tun = state.ipsec_tunnels[state.yamaha_current_tunnel]
+            if re.match(r'^ipsec\s+tunnel\s+\d+$', c):
+                return ''  # IPsec SA番号の宣言自体はマッチングに使わない
+            m = re.match(r'^ipsec\s+sa\s+policy\s+\d+\s+\d+\s+esp\s+(\S+)\s+(\S+)$', c)
+            if m:
+                enc, hsh = m.groups()
+                tun['encryption'] = enc
+                tun['hash'] = hsh
+                return ''
+            m = re.match(r'^ipsec\s+ike\s+local-address\s+\d+\s+([\d.]+)$', c)
+            if m:
+                tun['local_ip'] = m.group(1)
+                return ''
+            m = re.match(r'^ipsec\s+ike\s+remote-address\s+\d+\s+([\d.]+)$', c)
+            if m:
+                tun['remote_ip'] = m.group(1)
+                return ''
+            m = re.match(r'^ipsec\s+ike\s+pre-shared-key\s+\d+\s+text\s+(\S+)$', c)
+            if m:
+                tun['preshared'] = m.group(1)
+                return ''
+            m = re.match(r'^ipsec\s+ike\s+group\s+\d+\s+modp(\d+)$', c)
+            if m:
+                # modp768/1024/1536 相当をDH group 1/2/5に大まかに対応させる
+                tun['dh_group'] = {'768': 1, '1024': 2, '1536': 5}.get(m.group(1), DEFAULT_DH)
+                return ''
+            if c.startswith('ipsec '):
+                return ''  # スコープ外の細かいIKEオプションは黙って受理する
+
+        if state.mode == 'pp' and state.yamaha_current_pp is not None:
+            pp = state.yamaha_pp[state.yamaha_current_pp]
+            m = re.match(r'^pppoe\s+use\s+(lan\d+)$', c)
+            if m:
+                pp['pppoe_lan'] = m.group(1)
+                return ''
+            m = re.match(r'^(?:pp|ppp)\s+auth\s+myname\s+(\S+)\s+(\S+)$', c)
+            if m:
+                pp['auth_user'], pp['auth_pass'] = m.group(1), m.group(2)
+                return ''
+            m = re.match(r'^(?:pp|ppp)\s+auth\s+accept\s+(.+)$', c)
+            if m:
+                pp['auth_accept'] = m.group(1)
+                return ''
+            m = re.match(r'^pp\s+always-on\s+(on|off)$', c)
+            if m:
+                pp['always_on'] = (m.group(1) == 'on')
+                return ''
+            if c.startswith('ppp ') or c.startswith('pppoe ') or c.startswith('pp '):
+                # スコープ外の細かいPPPoEオプション(lcp mru / ipcp等)は
+                # 実機同様エラーにはせず黙って受理する(設定自体は
+                # show configに出さない簡略実装)。
+                return ''
+
+        if state.mode == 'admin':
+            # ── ip lanN address <ip>/<prefix> ──
+            m_if = re.match(r'^ip\s+(lan\d+)\s+address\s+([\d.]+)/(\d+)$', c)
+            if m_if:
+                ifname, ip, prefix = m_if.groups()
+                if ifname in state.interfaces:
+                    state.interfaces[ifname]['ip'] = ip
+                    state.interfaces[ifname]['prefix'] = int(prefix)
+                    state.interfaces[ifname]['status'] = 'up'
+                return ''
+            m_if_dhcp = re.match(r'^ip\s+(lan\d+)\s+address\s+dhcp$', c)
+            if m_if_dhcp:
+                return ''  # DHCP取得のシミュレーションはスコープ外
+
+            # ── ip route ... ──（実際のrib_engine登録はapp.py側で完了済み。
+            # ここでは実機同様コマンド自体を無言で受理する）
+            if re.match(r'^(no\s+)?ip\s+route\s+(default|[\d.]+/\d+)\s*(gateway\s+)?', c):
+                return ''
+
+            # ── nat descriptor type <id> masquerade ──
+            m_nat = re.match(r'^nat\s+descriptor\s+type\s+(\d+)\s+(masquerade|nat)$', c)
+            if m_nat:
+                nat_id, nat_type = m_nat.groups()
+                state.nat_descriptors.setdefault(nat_id, {})['type'] = nat_type
+                return ''
+            m_nat_if = re.match(r'^ip\s+(lan\d+)\s+nat\s+descriptor\s+(\d+)$', c)
+            if m_nat_if:
+                ifname, nat_id = m_nat_if.groups()
+                state.nat_descriptors.setdefault(nat_id, {})['lan'] = ifname
+                return ''
+
+            # ── ipv6 prefix ...（v6プラス等IPoEアクセスの見た目のみ。
+            # このエミュレータの共有エンジンはIPv4専用のため、実際の
+            # IPv6到達性判定はしない — show configへの反映のみ）
+            m_v6pfx = re.match(r'^ipv6\s+prefix\s+(\S+)$', c)
+            if m_v6pfx:
+                state.yamaha_ipv6_prefix = m_v6pfx.group(1)
+                return ''
+
+            # ── map-e use <lanN> ──（MAP-Eルール要求。実際の払い出しは
+            # app.py側がPPPoEのpp enableと同じ順序でmap_e_engineを呼ぶ）
+            if re.match(r'^(no\s+)?map-e\s+use(\s+lan\d+)?$', c):
+                # 実際の払い出し/解放はapp.py側(handle_protocol_config)が行う。
+                return ''
+
+            # ── pp enable <N> / pp disable <N> ──（pp selectの外からも実行可）
+            m_ppen = re.match(r'^pp\s+(enable|disable)\s+(\d+)$', c)
+            if m_ppen:
+                action, pp_id = m_ppen.group(1), int(m_ppen.group(2))
+                state.yamaha_pp.setdefault(pp_id, {})['enabled'] = (action == 'enable')
+                return ''
+
+            # ── tunnel enable <N> / tunnel disable <N> ──（tunnel selectの
+            # 外からも実行可。実際のIKE/IPsecネゴシエーションはapp.pyの
+            # handle_protocol_config側がこのコマンドを検知して
+            # _trigger_ike_negotiation()を呼ぶ形で行う — ここでは
+            # 実機同様コマンド自体を無言で受理するだけ）
+            if re.match(r'^tunnel\s+(enable|disable)\s+\d+$', c):
+                return ''
+
+            if c == 'save':
+                return ''
+
+            # ── show ──
+            # "show ip route" はapp.pyのhandle_protocol_show側が
+            # device_type非依存でrib_engine.format_show_ip_route()を
+            # 返す(これがそのまま実際の経路を反映するので、ここでは
+            # 重複実装しない)。到達するのは show config / show status /
+            # show environment のみ。
+            if re.match(r'^show\s+config$', c):
+                return self._yamaha_show_config(state)
+            m_status = re.match(r'^show\s+status\s+(lan\d+)$', c)
+            if m_status:
+                return self._yamaha_show_status(state, m_status.group(1))
+            m_tunstat = re.match(r'^show\s+status\s+tunnel\s+(\d+)$', c)
+            if m_tunstat:
+                return self._yamaha_show_tunnel_status(state, int(m_tunstat.group(1)))
+            if re.match(r'^show\s+map-e$', c):
+                return self._yamaha_show_map_e(state)
+            if re.match(r'^show\s+environment$', c):
+                return f'{state.hostname}\nUptime: {state.uptime_str()}'
+
+        if c == 'show config' or c.startswith('show status') or c == 'show map-e':
+            # administratorに上がっていない状態でのshow系は一般ユーザでも
+            # 閲覧可能(実機準拠)なので、admin判定を経由せずここでも拾う。
+            if c == 'show config':
+                return self._yamaha_show_config(state)
+            m_status = re.match(r'^show\s+status\s+(lan\d+)$', c)
+            if m_status:
+                return self._yamaha_show_status(state, m_status.group(1))
+            m_tunstat = re.match(r'^show\s+status\s+tunnel\s+(\d+)$', c)
+            if m_tunstat:
+                return self._yamaha_show_tunnel_status(state, int(m_tunstat.group(1)))
+            if c == 'show map-e':
+                return self._yamaha_show_map_e(state)
+
+        return f'Unknown command: {orig}'
+
+    def _yamaha_show_map_e(self, state: DeviceState) -> str:
+        rule = state.map_e_rule
+        if not rule:
+            return 'MAP-E is not connected.'
+        lo, hi = rule['port_range']
+        return (f'IPv4 address     : {rule["ipv4"]}\n'
+                f'Port range        : {lo}-{hi} (PSID={rule["psid"]})\n'
+                f'Border Relay      : {rule["br_ipv6"]}\n'
+                f'IPv6 prefix       : {state.yamaha_ipv6_prefix or "(未設定)"}')
+
+    def _yamaha_show_tunnel_status(self, state: DeviceState, tun_id: int) -> str:
+        tun = state.ipsec_tunnels.get(tun_id)
+        if not tun:
+            return f'% Unknown tunnel: {tun_id}'
+        lines = [
+            f'TUNNEL[{tun_id}]:',
+            f'  Description     :',
+            f'  Local  ID       : {tun.get("local_ip") or "(未設定)"}',
+            f'  Remote ID       : {tun.get("remote_ip") or "(未設定)"}',
+            f'  IKE negotiation : {tun.get("phase1", "LARVAL")}',
+            f'  IPsec SA        : {tun.get("phase2", "LARVAL")}',
+            f'  status          : {tun.get("status", "wait")}',
+        ]
+        return '\n'.join(lines)
+
+    def _yamaha_show_config(self, state: DeviceState) -> str:
+        lines = [f'# {state.hostname} RTX1300 Rev.23.00.06 Configuration']
+        for name in sorted(state.interfaces):
+            info = state.interfaces[name]
+            if info.get('ip'):
+                lines.append(f'ip {name} address {info["ip"]}/{info["prefix"]}')
+        for r in self._yamaha_routes(state):
+            dest = 'default' if r['prefix'] == 0 else f'{r["network"]}/{r["prefix"]}'
+            lines.append(f'ip route {dest} gateway {r["next_hop"]}')
+        for nat_id, nat in sorted(state.nat_descriptors.items()):
+            if nat.get('type'):
+                lines.append(f'nat descriptor type {nat_id} {nat["type"]}')
+            if nat.get('lan'):
+                lines.append(f'ip {nat["lan"]} nat descriptor {nat_id}')
+        for pp_id, pp in sorted(state.yamaha_pp.items()):
+            lines.append(f'pp select {pp_id}')
+            if pp.get('pppoe_lan'):
+                lines.append(f' pppoe use {pp["pppoe_lan"]}')
+            if pp.get('auth_user'):
+                lines.append(f' pp auth myname {pp["auth_user"]} {pp.get("auth_pass", "")}')
+            if pp.get('enabled'):
+                lines.append(f' pp enable {pp_id}')
+        for tun_id, tun in sorted(state.ipsec_tunnels.items()):
+            lines.append(f'tunnel select {tun_id}')
+            lines.append(f' ipsec sa policy {tun_id}01 1 esp {tun["encryption"]} {tun["hash"]}')
+            if tun.get('local_ip'):
+                lines.append(f' ipsec ike local-address 1 {tun["local_ip"]}')
+            if tun.get('remote_ip'):
+                lines.append(f' ipsec ike remote-address 1 {tun["remote_ip"]}')
+            if tun.get('preshared'):
+                lines.append(f' ipsec ike pre-shared-key 1 text {tun["preshared"]}')
+            if state.ike_enabled and state.ipsec_enabled:
+                lines.append(f' tunnel enable {tun_id}')
+        if state.yamaha_ipv6_prefix:
+            lines.append(f'ipv6 prefix {state.yamaha_ipv6_prefix}')
+        if state.map_e_rule:
+            lines.append(f'map-e use {state.map_e_rule.get("iface", "lan2")}')
+        return '\n'.join(lines).rstrip()
+
+    def _yamaha_routes(self, state: DeviceState):
+        """rib_engineから、このYamaha機のstatic経路だけを取り出す。"""
+        try:
+            from engine.protocols import rib_engine
+        except Exception:
+            return []
+        device_id = getattr(state, '_device_id', None)
+        if not device_id:
+            return []
+        return [r for r in rib_engine.get_best_routes(device_id)
+                if r.get('source') == 'static']
+
+    def _yamaha_show_status(self, state: DeviceState, ifname: str) -> str:
+        info = state.interfaces.get(ifname)
+        if not info:
+            return f'% Unknown interface: {ifname}'
+        link = 'Up' if info.get('status') == 'up' else 'Down'
+        lines = [f'{ifname.upper()} の接続状態']
+        lines.append(f'  回線速度: {info.get("speed", "auto")}Mbps')
+        lines.append(f'  Link: {link}')
+        if info.get('ip'):
+            lines.append(f'  IP Address: {info["ip"]}/{info["prefix"]}')
+        return '\n'.join(lines)
+
+    # ══════════════════════════════════════════
+    # 擬似FLETS網BAS(収容局) — PPPoEアクセスコンセントレータ相当
+    # ══════════════════════════════════════════
+    def _fortigate_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """FortiOSの config/edit/set/next/end 階層型CLI。
+
+        スコープ: `config system interface`(IP設定・PPPoE WAN化)、
+        `config vpn ipsec phase1-interface`/`phase2-interface`
+        (IKE/IPsec、Si-R用ipsec_tunnels辞書形式にそのまま乗せる)。
+        PPPoE接続/IKEネゴシエーションの実際のトリガーはapp.py側
+        (cli_command()、rule_engine.process()実行後)で行う
+        — Juniperのcommit→SSHリスナー起動と同じ理由で、このメソッド
+        がstateを確定させた後でないと古い値を使ってしまうため。
+        """
+        orig = cmd.strip()
+
+        # exec-level（config階層の外）
+        if not state.fortigate_mode_stack:
+            m_cfg = re.match(r'^config\s+(.+)$', orig, re.I)
+            if m_cfg:
+                state.fortigate_mode_stack = [m_cfg.group(1).strip().lower()]
+                return ''
+            if c in ('exit', 'quit'):
+                return ''
+            m_getvpn = re.match(r'^get\s+vpn\s+ipsec\s+tunnel\s+summary', c)
+            if m_getvpn:
+                return self._fortigate_show_vpn_summary(state)
+            if c in ('show', 'show full-configuration', 'show full-configuration | grep .'):
+                return self._fortigate_show_config(state)
+            if c.startswith('show') or c.startswith('get') or c.startswith('diagnose'):
+                return ''
+            return "Command fail. Return code -61"
+
+        ctx = state.fortigate_mode_stack[-1]
+
+        if c == 'end':
+            state.fortigate_mode_stack.pop()
+            state.fortigate_edit_ctx = None
+            return ''
+
+        m_edit = re.match(r'^edit\s+"?([^"]+)"?$', orig, re.I)
+        if m_edit:
+            name = m_edit.group(1)
+            state.fortigate_edit_ctx = name
+            if ctx == 'system interface':
+                state.interfaces.setdefault(name, {
+                    'ip': '', 'prefix': 0, 'status': 'down',
+                    'speed': 'auto', 'duplex': 'full',
+                })
+            elif ctx == 'vpn ipsec phase1-interface':
+                state.ipsec_tunnels.setdefault(name, {
+                    'local_ip': '', 'remote_ip': '', 'preshared': '',
+                    'encryption': 'aes256', 'hash': 'sha256', 'dh_group': '14',
+                    'ike_mode': 'main', 'ike_lifetime': 28800, 'protocol': 'esp',
+                    'phase1': 'LARVAL', 'phase2': 'wait', 'status': 'wait',
+                })
+                # 実機FortiOSにはSi-Rの"ike use on"/"ipsec use on"のような
+                # 明示有効化コマンドが無く、phase1を作った時点で常に
+                # 有効扱い(ike_engine.py側のike_enabled/ipsec_enabled
+                # ゲートに合わせて立てる)。
+                state.ike_enabled = True
+                state.ipsec_enabled = True
+            return ''
+
+        if c == 'next':
+            if ctx == 'vpn ipsec phase1-interface' and state.fortigate_edit_ctx:
+                tun = state.ipsec_tunnels.get(state.fortigate_edit_ctx, {})
+                iface = tun.get('_iface')
+                if iface:
+                    tun['local_ip'] = state.interfaces.get(iface, {}).get('ip', '')
+            state.fortigate_edit_ctx = None
+            return ''
+
+        m_set = re.match(r'^set\s+(\S+)\s+(.+)$', orig, re.I)
+        if m_set and state.fortigate_edit_ctx:
+            key, val = m_set.group(1).lower(), m_set.group(2).strip().strip('"')
+            name = state.fortigate_edit_ctx
+            if ctx == 'system interface':
+                info = state.interfaces[name]
+                if key == 'ip':
+                    parts = val.split()
+                    if len(parts) == 2:
+                        info['ip'] = parts[0]
+                        bits = sum(bin(int(o)).count('1') for o in parts[1].split('.'))
+                        info['prefix'] = bits
+                elif key == 'mode':
+                    state.fortigate_pppoe.setdefault(name, {})['mode'] = val.lower()
+                elif key == 'username':
+                    state.fortigate_pppoe.setdefault(name, {})['username'] = val
+                elif key == 'password':
+                    state.fortigate_pppoe.setdefault(name, {})['password'] = val
+                elif key == 'status':
+                    info['status'] = 'up' if val.lower() == 'up' else 'down'
+            elif ctx == 'vpn ipsec phase1-interface':
+                tun = state.ipsec_tunnels.setdefault(name, {})
+                if key == 'interface':
+                    tun['_iface'] = val
+                    tun['local_ip'] = state.interfaces.get(val, {}).get('ip', '')
+                elif key == 'remote-gw':
+                    tun['remote_ip'] = val
+                elif key == 'psksecret':
+                    tun['preshared'] = val
+            # phase2-interfaceのset phase1name等は本エンジンがphase1単位で
+            # トンネルを管理しているため、受理のみ(見た目の整合性チェックは
+            # スコープ外)。
+            return ''
+        return ''
+
+    def _fortigate_show_config(self, state: DeviceState) -> str:
+        lines = ['#config-version=FGVM64-7.4.1-FW-build2367', 'config system interface']
+        for name, info in state.interfaces.items():
+            lines.append(f'    edit "{name}"')
+            if info.get('ip'):
+                mask = _prefix_to_mask(info.get('prefix', 24))
+                lines.append(f'        set ip {info["ip"]} {mask}')
+            pppoe = state.fortigate_pppoe.get(name)
+            if pppoe and pppoe.get('mode') == 'pppoe':
+                lines.append('        set mode pppoe')
+                if pppoe.get('username'):
+                    lines.append(f'        set username "{pppoe["username"]}"')
+            lines.append('    next')
+        lines.append('end')
+        if state.ipsec_tunnels:
+            lines.append('config vpn ipsec phase1-interface')
+            for name, tun in state.ipsec_tunnels.items():
+                lines.append(f'    edit "{name}"')
+                if tun.get('_iface'):
+                    lines.append(f'        set interface "{tun["_iface"]}"')
+                if tun.get('remote_ip'):
+                    lines.append(f'        set remote-gw {tun["remote_ip"]}')
+                lines.append('    next')
+            lines.append('end')
+        return '\n'.join(lines)
+
+    def _fortigate_show_vpn_summary(self, state: DeviceState) -> str:
+        if not state.ipsec_tunnels:
+            return '------------------------------------------------------'
+        lines = []
+        for name, tun in state.ipsec_tunnels.items():
+            lines.append(f"'{name}' {tun.get('remote_ip', '')} selectors(total,up): "
+                         f"1,{'1' if tun.get('status') == 'established' else '0'} "
+                         f"status: {'up' if tun.get('status') == 'established' else 'down'}")
+        return '\n'.join(lines)
+
+    def _bas_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """このエミュレータ独自の簡易CLI(特定の実製品を模したものではない)。
+
+        IPプール・認証ユーザーの実体は engine.protocols.pppoe_engine に
+        直接持たせ(state側には複製しない)、RTX側の"pp enable"が
+        PppoeEngine.connect()を呼んでここで登録した内容と突き合わせる。
+        """
+        orig = cmd.strip()
+        from engine.protocols import pppoe_engine, map_e_engine
+
+        if c in ('configure terminal', 'conf t', 'configure', 'conf'):
+            state.mode = 'config'
+            return ''
+        if c in ('exit', 'end') and state.mode == 'config':
+            state.mode = 'exec'
+            return ''
+        if c in ('exit', 'quit') and state.mode == 'exec':
+            return ''
+
+        if state.mode == 'config':
+            m_pool = re.match(r'^ip\s+pool\s+([\d.]+)\s+([\d.]+)/(\d+)$', c)
+            if m_pool:
+                start, end, prefix = m_pool.groups()
+                device_id = getattr(state, '_device_id', None)
+                if device_id:
+                    pppoe_engine.set_pool(device_id, start, end, int(prefix))
+                return ''
+            m_user = re.match(r'^pppoe-user\s+(\S+)\s+(\S+)$', c)
+            if m_user:
+                user, pw = m_user.groups()
+                device_id = getattr(state, '_device_id', None)
+                if device_id:
+                    pppoe_engine.add_user(device_id, user, pw)
+                return ''
+            m_if = re.match(r'^ip\s+(wan\d+|uplink\d+)\s+address\s+([\d.]+)/(\d+)$', c)
+            if m_if:
+                ifname, ip, prefix = m_if.groups()
+                if ifname in state.interfaces:
+                    state.interfaces[ifname]['ip'] = ip
+                    state.interfaces[ifname]['prefix'] = int(prefix)
+                    state.interfaces[ifname]['status'] = 'up'
+                return ''
+            if c == 'save':
+                return ''
+
+            # ── MAP-E(v6プラス等)ルールサーバー設定 ──
+            m_mape_pool = re.match(r'^map-e\s+ipv4-pool\s+([\d.]+)\s+([\d.]+)$', c)
+            if m_mape_pool:
+                start, end = m_mape_pool.groups()
+                device_id = getattr(state, '_device_id', None)
+                if device_id:
+                    map_e_engine.set_ipv4_pool(device_id, start, end)
+                return ''
+            m_mape_br = re.match(r'^map-e\s+br-address\s+(\S+)$', c)
+            if m_mape_br:
+                device_id = getattr(state, '_device_id', None)
+                if device_id:
+                    map_e_engine.set_br_address(device_id, m_mape_br.group(1))
+                return ''
+
+        if re.match(r'^show\s+pppoe\s+session$', c):
+            device_id = getattr(state, '_device_id', None)
+            return pppoe_engine.format_show_session(device_id) if device_id else ''
+        if re.match(r'^show\s+map-e\s+rules?$', c):
+            device_id = getattr(state, '_device_id', None)
+            return map_e_engine.format_show_rules(device_id) if device_id else ''
+        if re.match(r'^show\s+(running-config|config)$', c):
+            return self._bas_show_config(state)
+
+        return f'Unknown command: {orig}'
+
+    def _bas_show_config(self, state: DeviceState) -> str:
+        from engine.protocols import pppoe_engine, map_e_engine
+        device_id = getattr(state, '_device_id', None)
+        lines = [f'# {state.hostname} pseudo-FLETS BAS configuration']
+        for name in sorted(state.interfaces):
+            info = state.interfaces[name]
+            if info.get('ip'):
+                lines.append(f'ip {name} address {info["ip"]}/{info["prefix"]}')
+        bas = pppoe_engine.nodes.get(device_id) if device_id else None
+        if bas:
+            if bas.get('pool_start'):
+                lines.append(f'ip pool {bas["pool_start"]} {bas["pool_end"]}/{bas["prefix"]}')
+            for user in sorted(bas.get('users', {})):
+                lines.append(f'pppoe-user {user} {bas["users"][user]}')
+        mape = map_e_engine.nodes.get(device_id) if device_id else None
+        if mape:
+            if mape.get('ipv4_pool'):
+                lines.append(f'map-e ipv4-pool {mape["ipv4_pool"][0]} {mape["ipv4_pool"][-1]}')
+            if mape.get('br_ipv6'):
+                lines.append(f'map-e br-address {mape["br_ipv6"]}')
+        return '\n'.join(lines)
+
     def _asa_process(self, cmd: str, c: str, state: DeviceState) -> str:
         """Cisco ASA シングルコンテキスト CLIコマンドを処理する"""
 
         # ── モード遷移 ──
         if c in ('exit', 'end', 'quit'):
+            # tunnel-group ... ipsec-attributes は state.mode を変えない
+            # 疑似サブモード(_tg_attr_modeフラグのみ)なので、ここで先に
+            # チェックしないと下のconfig→exec判定に落ちてしまい、
+            # "exit"1回でconfigモードごと抜けてしまう(実機は
+            # ipsec-attributes配下から抜けてconfigに留まるだけ)。
+            if getattr(state, '_tg_attr_mode', False):
+                state._tg_attr_mode = False
+                return ''
             if state.mode == 'config-if':
                 state.mode = 'config'
                 return ''
@@ -7833,6 +8702,13 @@ Configuration Revision            : 5"""
                 state.interfaces[iface]['prefix'] = prefix
                 return ''
 
+            # ASA 5505実機のPPPoEクライアント: "ip address pppoe [setroute]"
+            m_pppoe_if = re.match(r'^ip\s+address\s+pppoe(\s+setroute)?', c)
+            if m_pppoe_if:
+                state.interfaces.setdefault(iface, {})
+                state.asa_pppoe_pending[iface] = {'setroute': bool(m_pppoe_if.group(1))}
+                return ''
+
             m_nameif = re.match(r'^nameif\s+(\S+)', c)
             if m_nameif:
                 state.interfaces.setdefault(iface, {})
@@ -7853,6 +8729,28 @@ Configuration Revision            : 5"""
                 state.interfaces.setdefault(iface, {})
                 state.interfaces[iface]['status'] = 'down'
                 return ''
+
+        # ── PPPoE (vpdn group / vpdn username、ASA 5505実機構文) ──
+        m_vpdn_req = re.match(r'^vpdn\s+group\s+(\S+)\s+request\s+dialout\s+pppoe', c)
+        if m_vpdn_req and state.mode == 'config':
+            state.asa_vpdn['group'] = m_vpdn_req.group(1)
+            return ''
+
+        m_vpdn_local = re.match(r'^vpdn\s+group\s+(\S+)\s+localname\s+(\S+)', c)
+        if m_vpdn_local and state.mode == 'config':
+            state.asa_vpdn['localname'] = m_vpdn_local.group(2)
+            return ''
+
+        m_vpdn_auth = re.match(r'^vpdn\s+group\s+(\S+)\s+ppp\s+authentication\s+(\S+)', c)
+        if m_vpdn_auth and state.mode == 'config':
+            state.asa_vpdn['auth'] = m_vpdn_auth.group(2).lower()
+            return ''
+
+        m_vpdn_user = re.match(r'^vpdn\s+username\s+(\S+)\s+password\s+(\S+)', c)
+        if m_vpdn_user and state.mode == 'config':
+            state.asa_vpdn['username'] = m_vpdn_user.group(1)
+            state.asa_vpdn['password'] = m_vpdn_user.group(2)
+            return ''
 
         # ── ACL設定 ──
         # access-list OUTSIDE_IN extended permit tcp any host 192.168.1.10 eq 80
@@ -8029,7 +8927,10 @@ Configuration Revision            : 5"""
             mapname = m_cmap_match.group(1)
             seq = int(m_cmap_match.group(2))
             acl = m_cmap_match.group(3)
-            state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(mapname, {})[seq] = {'acl': acl}
+            # setdefault(seq, {})['acl']=acl でないと、matchが後から来た場合に
+            # 既存のpeer/transform_setを消してしまう(IOS版と同じ不具合)
+            state.ipsec_crypto.setdefault('crypto_maps', {}).setdefault(
+                mapname, {}).setdefault(seq, {})['acl'] = acl
             return ''
 
         # crypto map OUTSIDE_MAP 10 set peer X.X.X.X
@@ -8216,6 +9117,7 @@ Key Version         : A
                 lines.append(f'C        {net}/{prefix} is directly connected, {info.get("nameif","?")}')
             except Exception:
                 pass
+        seen_static = set()
         for r in state.routes:
             net = r.get('network', '')
             mask_str = r.get('mask', '255.255.255.0')
@@ -8223,7 +9125,23 @@ Key Version         : A
             nh = r.get('nexthop', '0.0.0.0')
             iface = r.get('iface', '')
             metric = r.get('metric', 1)
+            seen_static.add((net, prefix))
             lines.append(f'S        {net}/{prefix} [1/{metric}] via {nh}, {iface}')
+        # ASAの"route"コマンドはrib_engineと別管理(state.routes)だが、
+        # PPPoEクライアント("ip address pppoe setroute")のような動的に
+        # 払い出された経路はrib_engine側にのみ登録される。他vendorの
+        # "show ip route"同様、ここでも反映する(dedupeはnetwork/prefixで)。
+        device_id = getattr(state, '_device_id', None)
+        if device_id:
+            from engine.protocols import rib_engine
+            for r in rib_engine.get_best_routes(device_id):
+                if r['source'] != 'static' or (r['network'], r['prefix']) in seen_static:
+                    continue
+                flag = '*' if r['network'] == '0.0.0.0' and r['prefix'] == 0 else ' '
+                lines.append(f"S{flag}       {r['network']}/{r['prefix']} "
+                              f"[{r['ad']}/{r['metric']}] via {r['next_hop']}")
+                if r['network'] == '0.0.0.0' and r['prefix'] == 0:
+                    lines[7] = f"Gateway of last resort is {r['next_hop']} to network 0.0.0.0"
         return '\n'.join(lines)
 
     def _asa_show_access_list(self, state: DeviceState) -> str:
@@ -9006,195 +9924,6 @@ Key Version         : A
             return f'{(bcast_int>>24)&0xff}.{(bcast_int>>16)&0xff}.{(bcast_int>>8)&0xff}.{bcast_int&0xff}'
         except Exception:
             return '255.255.255.255'
-
-    # ─── IPCOM EX2 コマンドエンジン（IPCOM EX2シリーズマニュアル準拠）───
-    # 実機のモード階層:
-    #   ipcom>            操作者EXEC
-    #   ipcom#            管理者EXEC（admin コマンドで昇格）
-    #   ipcom(config)#    グローバル構成定義(即時)。load/new でファイル選択のみ
-    #   ipcom(edit)#      グローバル構成定義(編集)。実際の設定はここで行う
-    #   ipcom(edit-if)#   インターフェース構成定義(編集)
-    # 実機は edit モードでの変更を save running-config/save startup-config
-    # で明示的に反映するまでバッファに留めるが、このエミュレータでは他機種
-    # 同様コマンド投入時点で即座に state へ反映する簡略化をしている
-    # （save/commit はACKメッセージのみを返す）。
-    def _ipcom_process(self, cmd: str, c: str, state: DeviceState) -> str:
-        """IPCOM EX2のCLIコマンドを処理する"""
-
-        # ── モード遷移・ログイン ──
-        if c == 'admin':
-            state._ipcom_admin = True
-            return ''
-        if c in ('exit', 'quit', 'logout', 'end'):
-            if state.mode in ('edit-if', 'config-router'):
-                state.mode = 'edit'
-            elif state.mode == 'edit':
-                state.mode = 'config'
-            elif state.mode == 'config':
-                state.mode = 'exec'
-            elif state.mode == 'exec' and state._ipcom_admin:
-                state._ipcom_admin = False
-            return ''
-        if c in ('configure terminal', 'conf t', 'configure', 'conf'):
-            if state.mode != 'exec':
-                return '% Unknown command.'
-            if not state._ipcom_admin:
-                return '% Authorization failed.\n  (admin コマンドで管理者EXECに昇格してください)'
-            state.mode = 'config'
-            return ''
-
-        # ── show系はどのモードからでも実行可（実機準拠）──
-        # 注: "show ip route" は app.py の handle_protocol_show が先に
-        # 共有RIBエンジンの出力で応答するため、ここには到達しない
-        # （app.py冒頭のCLIディスパッチ順序の説明を参照）。
-        if re.match(r'^show\s+(interface|interfaces)(\s+\S+)?$', c):
-            return self._ipcom_show_interfaces(state)
-        if re.match(r'^show\s+(running-config|startup-config)$', c):
-            return self._ipcom_show_config(state)
-        if re.match(r'^show\s+ip\s+route$', c):
-            # rib_engineにスタティック/動的ルートが1件もない場合のみここに
-            # 来る(app.py handle_protocol_showがそちらを優先するため)。
-            # 直接接続の経路だけを簡易表示する。
-            lines = []
-            for name, cfg in state.interfaces.items():
-                if cfg.get('ip') and cfg.get('status') == 'up':
-                    lines.append(f'C   {cfg["ip"]}/{cfg["prefix"]} '
-                                f'is directly connected, {name}')
-            return '\n'.join(lines) if lines else '(no routes)'
-        if re.match(r'^show\s+version$', c):
-            return (f'{state.hostname}\n'
-                    f'IPCOM EX2 ソフトウェアシリーズ\n'
-                    f'System uptime: {state.uptime_str()}')
-
-        if state.mode == 'config':
-            if re.match(r'^(load\s+(running-config|startup-config|pppoe-config)|new)$', c):
-                state.mode = 'edit'
-                return ''
-            return '% Unknown command.'
-
-        if state.mode == 'edit':
-            m_if = re.match(r'^interface\s+(\S+)$', c)
-            if m_if:
-                ifname = m_if.group(1)
-                if ifname not in state.interfaces:
-                    state.interfaces[ifname] = {
-                        "ip": "", "prefix": 0, "status": "down", "desc": "",
-                        "auto_negotiation": False, "ip_routing": False,
-                    }
-                state.current_if = ifname
-                state.mode = 'edit-if'
-                return ''
-            m_host = re.match(r'^hostname\s+(\S+)', cmd, re.I)
-            if m_host:
-                state.hostname = m_host.group(1)
-                return ''
-            # "ip route"/"no ip route" は app.py の handle_protocol_config が
-            # 共有RIBエンジン(rib_engine)へ既に反映済み(このrules.py側に来る
-            # 前に実行される二層ディスパッチ、app.py冒頭のコメント参照)。
-            # ここで別途 state 側にも記録すると二重管理になり、
-            # 「show ip route」で見た目だけ整形の異なる重複行が出る不具合が
-            # 実際に起きたため、ここでは受理するだけに留める。
-            if re.match(r'^ip\s+route\s+\S+\s+\S+(\s+distance\s+\d+)?$', c):
-                return ''
-            if re.match(r'^no\s+ip\s+route\s+\S+\s+\S+$', c):
-                return ''
-            # router rip / router ospf / router bgp <asn> — ルータ構成定義
-            # モードへ。"network"/"redistribute"等のサブコマンド自体は
-            # app.py の handle_protocol_config が _routing_mode(側路属性)
-            # だけを見て共有プロトコルエンジン(rip_engine/ospf_engine)へ
-            # 既に反映済み(ip route と同じ二層ディスパッチの仕組み)なので、
-            # ここではモード遷移だけ行う。
-            if c == 'router rip':
-                state.mode = 'config-router'
-                return ''
-            if c == 'router ospf':
-                # IPCOMの実機構文はCisco IOSと違いプロセスID引数を取らない。
-                # app.py側のOSPF検出は "router ospf <数字>" を要求するため、
-                # bare "router ospf" ではhandle_protocol_configが素通りして
-                # _routing_modeが設定されない。ここで同じ属性を直接立てる。
-                state._routing_mode = 'ospf'
-                state._ospf_process = getattr(state, '_ospf_process', 1) or 1
-                state._ospf_networks = getattr(state, '_ospf_networks', [])
-                state._rip_pending = False
-                state._bgp_pending = False
-                state.mode = 'config-router'
-                return ''
-            if re.match(r'^router\s+bgp\s+\d+$', c):
-                state.mode = 'config-router'
-                return ''
-            if c == 'commit':
-                return 'running-config へ反映しました。'
-            m_save = re.match(
-                r'^save\s+(running-config|startup-config)(\s+force-update)?$', c)
-            if m_save:
-                target = m_save.group(1)
-                return f'{target} へ保存しました。'
-            return '% Unknown command.'
-
-        if state.mode == 'config-router':
-            # "network"/"redistribute"/"neighbor"/"router-id"等のサブコマンド
-            # 自体は app.py の handle_protocol_config が _routing_mode を
-            # 見て共有プロトコルエンジンへ既に反映済み。ここでは受理するのみ。
-            return ''
-
-        if state.mode == 'edit-if':
-            iface = state.interfaces.get(state.current_if, {})
-            m_desc = re.match(r'^description\s+(.+)$', cmd)
-            if m_desc:
-                iface['desc'] = m_desc.group(1)
-                return ''
-            m_ip = re.match(r'^ip\s+address\s+(\d+\.\d+\.\d+\.\d+)/(\d+)$', c)
-            if m_ip:
-                iface['ip'] = m_ip.group(1)
-                iface['prefix'] = int(m_ip.group(2))
-                iface['status'] = 'up'
-                return ''
-            if c == 'ip-routing':
-                iface['ip_routing'] = True
-                return ''
-            if c in ('auto-negotiation on', 'auto-negotiation off'):
-                iface['auto_negotiation'] = c.endswith('on')
-                return ''
-            if c in ('shutdown', 'no shutdown'):
-                iface['status'] = 'down' if c == 'shutdown' else 'up'
-                return ''
-            # "ip ospf ..."/"ip rip ..." インターフェースサブコマンドは
-            # app.py の handle_protocol_config が既に反映済み（config-router
-            # モードと同じ仕組み）。ここでは受理するのみ。
-            if re.match(r'^ip\s+(ospf|rip)\s+\S', c):
-                return ''
-            return '% Unknown command.'
-
-        return '% Unknown command.'
-
-    def _ipcom_show_interfaces(self, state: DeviceState) -> str:
-        lines = []
-        for name, cfg in state.interfaces.items():
-            ip = cfg.get('ip') or '(none)'
-            prefix = cfg.get('prefix', 0)
-            status = cfg.get('status', 'down')
-            desc = cfg.get('desc', '')
-            lines.append(f'{name:<12} {ip}/{prefix if ip != "(none)" else ""} '
-                        f'{status:<8} {desc}')
-        return '\n'.join(lines) if lines else '(no interfaces)'
-
-    def _ipcom_show_config(self, state: DeviceState) -> str:
-        # スタティックルートは共有RIBエンジン(rib_engine)が真の情報源
-        # （app.pyのhandle_protocol_configが反映）で、rules.py側からは
-        # 参照できないため、ここではインターフェース設定のみ表示する。
-        lines = [f'hostname {state.hostname}']
-        for name, cfg in state.interfaces.items():
-            lines.append(f'interface {name}')
-            if cfg.get('desc'):
-                lines.append(f'  description {cfg["desc"]}')
-            if cfg.get('auto_negotiation'):
-                lines.append('  auto-negotiation on')
-            if cfg.get('ip'):
-                lines.append(f'  ip address {cfg["ip"]}/{cfg["prefix"]}')
-            if cfg.get('ip_routing'):
-                lines.append('  ip-routing')
-            lines.append('  exit')
-        return '\n'.join(lines)
 
     # ─── APRESIA コマンドエンジン（ApresiaLightGM200マニュアル準拠）─
     def _apresia_process(self, cmd: str, c: str, state: DeviceState) -> str:
@@ -10107,9 +10836,13 @@ Key Version         : A
                 return self._incomplete_error(cmd, state)
 
         # ip address: needs either "ip address X.X.X.X mask" (4 tokens) or "ip address X.X.X.X/prefix" (3 tokens w/ slash)
+        # ASA 5505実機のPPPoEクライアント構文"ip address pppoe [setroute]"
+        # (3〜4トークン、IPアドレスを含まない)はこのIncompleteチェックの
+        # 対象外とする。
         if c.startswith('ip address') and mode == 'config-if':
             import re as _re
-            if not _re.match(r'^ip\s+address\s+([\d.]+)/(\d+)', c) and len(tokens) < 4:
+            if not _re.match(r'^ip\s+address\s+pppoe(\s+setroute)?\s*$', c) and \
+               not _re.match(r'^ip\s+address\s+([\d.]+)/(\d+)', c) and len(tokens) < 4:
                 return self._incomplete_error(cmd, state)
 
         # ── Mode チェック（execモードでconfig専用コマンドを打った場合） ──
