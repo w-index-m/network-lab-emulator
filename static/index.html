@@ -144,6 +144,9 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
 .gf input,.gf select,.gf textarea{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 5px;font-size:10px;font-family:'Courier New',monospace;outline:none;border-radius:2px}
 .gf input:focus,.gf select:focus{border-color:var(--cyan)}
 .gf textarea{resize:vertical;min-height:40px}
+.gf-extra{display:block}
+.gf-extra label{display:block;text-align:left;width:auto;margin-bottom:4px}
+#cg-extra{width:100%;min-height:120px;box-sizing:border-box}
 
 /* リンクリスト */
 .link-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border:1px solid var(--border);border-radius:3px;margin-bottom:4px;font-size:10px;background:var(--bg3)}
@@ -541,7 +544,7 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
         <div class="gf"><label>仮想IP</label><input id="cg-vip" value="192.168.1.254"></div>
       </div></div>
       <div class="gbox"><div class="gbox-hdr">追加要件</div><div class="gbox-body">
-        <div class="gf"><label>その他</label><textarea id="cg-extra" placeholder="OSPF有効、VLAN10追加..."></textarea></div>
+        <div class="gf gf-extra"><label>その他</label><textarea id="cg-extra" rows="6" placeholder="自然文で要件を書いてください。例:&#10;OSPF有効化(エリア0、LAN側ネットワークを含める)&#10;VLAN10を追加してLAN側ポートに割り当て&#10;ACLで192.168.2.0/24からのtelnetを拒否"></textarea></div>
       </div></div>
       <div style="display:flex;gap:6px;margin-top:4px">
         <button class="lab-btn prim" onclick="generateConfig()">▶ 設定生成</button>
@@ -2448,20 +2451,33 @@ function addFlowLog(text,color){const el=document.getElementById('flow-log');con
 function updateFlowDevSel(){const sel=document.getElementById('flow-dev-sel');const prev=sel?.value;if(!sel)return;sel.innerHTML=Object.entries(DEVICES).map(([id,d])=>`<option value="${id}"${id===prev?' selected':''}>${d.hostname} (${d.model})</option>`).join('');}
 
 // ════════════════════════════════════════════
-// 設定生成（ルールベース）
+// 設定生成（フォーム値を実際に装置へ投入 → show running-config を表示）
 // ════════════════════════════════════════════
 async function generateConfig(){
   const target=document.getElementById('cfg-target').value;
   const out=document.getElementById('config-out');
   out.style.color='var(--cyan)';out.style.fontStyle='normal';out.textContent='設定生成中...';
   const params={
-    device_id:target,
-    command:'show running-config',
+    device_id: target,
+    hostname: document.getElementById('cg-host').value,
+    password: document.getElementById('cg-pass').value,
+    lan_ip: document.getElementById('cg-lan').value,
+    wan_ip: document.getElementById('cg-wan').value,
+    gw: document.getElementById('cg-gw').value,
+    vrrp_enabled: document.getElementById('cg-vrrp').value === 'on',
+    vrid: document.getElementById('cg-vrid').value,
+    vpri: document.getElementById('cg-vpri').value,
+    vip: document.getElementById('cg-vip').value,
+    extra_text: document.getElementById('cg-extra').value,
   };
   try{
-    const res=await fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(params)});
+    const res=await fetch('/api/generate_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(params)});
     const data=await res.json();
-    out.textContent=data.output||'生成できませんでした';
+    let text = data.output || '生成できませんでした';
+    if(data.notes && data.notes.length){
+      text += '\n\n--- 注記 ---\n' + data.notes.map(n=>'※ '+n).join('\n');
+    }
+    out.textContent = text;
     out.style.color='var(--green)';
   }catch(e){out.textContent='エラー: サーバーに接続できません';out.style.color='var(--red)';}
 }

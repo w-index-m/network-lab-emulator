@@ -739,6 +739,169 @@ async def get_status():
         "devices": list(device_sessions.keys()),
     }
 
+
+def _prefix_to_mask(prefix: int) -> str:
+    bits = (0xffffffff << (32 - prefix)) & 0xffffffff if prefix else 0
+    return f'{(bits>>24)&0xff}.{(bits>>16)&0xff}.{(bits>>8)&0xff}.{bits&0xff}'
+
+
+def _split_ip_prefix(value: str, default_prefix: int = 24):
+    """"192.168.1.1/24" → ("192.168.1.1", 24)。"/"が無ければdefault_prefix。"""
+    value = (value or '').strip()
+    if not value:
+        return None, None
+    if '/' in value:
+        ip, p = value.split('/', 1)
+        try:
+            return ip.strip(), int(p)
+        except ValueError:
+            return ip.strip(), default_prefix
+    return value, default_prefix
+
+
+async def _generate_config_commands(device_id: str, dt: str, body: dict) -> list:
+    """「設定生成」タブのフォーム値から、実際にそのベンダーのCLIで通る
+    コマンド列を組み立てる。「その他」自由記述欄だけはルールベースでは
+    解釈できないため、LLM(Groq優先)に"このベンダーの実コマンドのみを
+    1行1コマンドで出力させる"形で変換させる(LLM_BACKENDが無ければ
+    その部分だけスキップし、構造化フィールドの反映は維持する)。"""
+    hostname = (body.get('hostname') or '').strip()
+    password = (body.get('password') or '').strip()
+    lan_ip, lan_prefix = _split_ip_prefix(body.get('lan_ip'))
+    wan_ip, wan_prefix = _split_ip_prefix(body.get('wan_ip'), 30)
+    gw = (body.get('gw') or '').strip()
+    vrrp_enabled = bool(body.get('vrrp_enabled'))
+    vrid = str(body.get('vrid') or '10')
+    vpri = str(body.get('vpri') or '100')
+    vip = (body.get('vip') or '').strip()
+    extra_text = (body.get('extra_text') or '').strip()
+
+    cmds = []
+    notes = []
+
+    if dt in ('sir', 'srs'):
+        # hostname等の一部コマンドはrule_engine側でstate.mode=='config'を
+        # 要求する(共有Cisco系ツリーの仕様)一方、lan/wan ip address等は
+        # app.py層が現在モードに関係なく反映する——両方を確実に通すため
+        # configure terminal で挟む。
+        cmds.append('configure terminal')
+        if hostname:
+            cmds.append(f'hostname {hostname}')
+        if lan_ip:
+            cmds.append(f'lan 0 ip address {lan_ip}/{lan_prefix}')
+        if wan_ip:
+            cmds.append(f'wan 1 ip address {wan_ip}/{wan_prefix}')
+        if gw:
+            cmds.append(f'ip route default gateway {gw}')
+        if vrrp_enabled and vip:
+            cmds.append(f'lan 0 vrrp group 1 id {vrid} {vpri} {vip}')
+        cmds.append('end')
+    elif dt == 'catalyst':
+        # Catalystはこのエミュレータではスイッチ(VLAN10 SVIのみ)なので、
+        # "LAN IP"をVlan10のIPとして扱う。WAN/デフォルトGWはスイッチの
+        # 役割に合わないため適用しない(その旨をnotesに残す)。
+        cmds.append('configure terminal')
+        if hostname:
+            cmds.append(f'hostname {hostname}')
+        if lan_ip:
+            cmds.append('interface Vlan10')
+            cmds.append(f'ip address {lan_ip} {_prefix_to_mask(lan_prefix)}')
+            cmds.append('no shutdown')
+            if vrrp_enabled and vip:
+                cmds.append(f'vrrp {vrid} ip {vip}')
+                cmds.append(f'vrrp {vrid} priority {vpri}')
+            cmds.append('exit')
+        if wan_ip or gw:
+            notes.append('Catalyst(スイッチ)にはWAN/デフォルトGWの概念が'
+                          'ないため、LAN(Vlan10)のみ反映しました。')
+        cmds.append('end')
+    else:  # cisco / 他のCisco-styleルーター
+        cmds.append('configure terminal')
+        if hostname:
+            cmds.append(f'hostname {hostname}')
+        if password:
+            cmds.append(f'enable secret {password}')
+        if lan_ip:
+            cmds.append('interface GigabitEthernet0/0/0')
+            cmds.append(f'ip address {lan_ip} {_prefix_to_mask(lan_prefix)}')
+            cmds.append('no shutdown')
+            if vrrp_enabled and vip:
+                cmds.append(f'vrrp {vrid} ip {vip}')
+                cmds.append(f'vrrp {vrid} priority {vpri}')
+            cmds.append('exit')
+        if wan_ip:
+            cmds.append('interface GigabitEthernet0/0/1')
+            cmds.append(f'ip address {wan_ip} {_prefix_to_mask(wan_prefix)}')
+            cmds.append('no shutdown')
+            cmds.append('exit')
+        if gw:
+            cmds.append(f'ip route 0.0.0.0 0.0.0.0 {gw}')
+        cmds.append('end')
+
+    extra_cmds = []
+    if extra_text:
+        if LLM_BACKEND == 'rules':
+            notes.append('「その他」の内容はAIバックエンド(Groq/Ollama)が'
+                          '利用できないため反映されていません。')
+        else:
+            device_map = {
+                'sir': 'Si-R G120（富士通/エフサステクノロジーズ）',
+                'srs': 'SR-S324TR1（富士通/エフサステクノロジーズ）',
+                'catalyst': 'Cisco Catalyst 9300 IOS-XE',
+                'cisco': 'Cisco ISR4321 IOS',
+            }
+            model = device_map.get(dt, dt)
+            sys_prompt = (
+                f'あなたは{model}のネットワーク設定の専門家です。'
+                'ユーザーが日本語の自然文で書いた要件を、実機のCLIで'
+                'そのまま入力できるコマンド列に変換してください。'
+                '出力は1行1コマンドのプレーンテキストのみ。'
+                'マークダウンのコードブロックや説明文、番号付けは'
+                '一切付けないでください。configure terminal等モード'
+                '遷移が必要な場合はそれも含めてください。'
+            )
+            llm_out = await query_llm(extra_text, sys_prompt)
+            if llm_out:
+                for line in llm_out.splitlines():
+                    line = line.strip().strip('`')
+                    if line and not line.startswith('#'):
+                        extra_cmds.append(line)
+            else:
+                notes.append('「その他」の内容はAI応答が得られなかったため'
+                              '反映されていません。')
+
+    return cmds, extra_cmds, notes
+
+
+@app.post("/api/generate_config")
+async def generate_config(body: dict):
+    """「設定生成」タブ: フォーム値(+「その他」自由記述)を実際にその
+    装置のCLIへ投入してから show running-config を返す。元々は
+    device_idだけ見てshow running-configを返すだけで、フォーム値は
+    一切使われていなかった(ユーザー指摘で発覚した既存の不具合)。"""
+    device_id = body.get('device_id', 'sir-a')
+    if device_id not in device_sessions:
+        dev = DEFAULT_DEVICES.get(device_id, {"type": "cisco", "hostname": device_id})
+        device_sessions[device_id] = DeviceState(dev["type"], dev["hostname"])
+        _register_icmp(device_id)
+        vnet.device_types[device_id] = device_sessions[device_id].device_type
+    dt = device_sessions[device_id].device_type
+
+    cmds, extra_cmds, notes = await _generate_config_commands(device_id, dt, body)
+
+    applied = []
+    for line in cmds + extra_cmds:
+        result = await cli_command({'device_id': device_id, 'command': line})
+        out = (result.get('output') or '').strip()
+        applied.append({'command': line, 'output': out})
+
+    show_result = await cli_command({'device_id': device_id, 'command': 'show running-config'})
+    return {
+        "output": show_result.get('output', ''),
+        "applied_commands": applied,
+        "notes": notes,
+    }
+
 # device_id -> 直近60件の {t, cpu, total_bytes} サンプル（CPU/トラフィック遷移表示用）。
 # /api/snmp/dashboard がポーリングされるたびに1件追記する（別スレッドでのサンプリングはしない）。
 _metrics_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=60))
