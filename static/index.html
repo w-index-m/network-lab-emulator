@@ -1107,6 +1107,9 @@ async function initLauncher() {
     if (d.mode === 'groq') {
       badge.textContent = '● Groq (' + d.groq_model + ') ℹ';
       badge.className = 'badge-groq';
+    } else if (d.mode === 'mistral') {
+      badge.textContent = '● Mistral (' + d.mistral_model + ') ℹ';
+      badge.className = 'badge-groq';
     } else if (d.mode === 'ollama') {
       badge.textContent = '● Ollama (' + d.ollama_model + ') ℹ';
       badge.className = 'badge-ollama';
@@ -1500,7 +1503,12 @@ async function checkStatus() {
     if(d.mode==='groq'){
       badge.textContent='● Groq ('+d.groq_model+')';
       badge.className='badge-groq';
-      toggle.textContent='Groq: ON ✓';
+      toggle.textContent='Groq: ON ✓'+(d.fallback_chain&&d.fallback_chain.length>1?' (+フォールバック)':'');
+      toggle.style.color='var(--cyan)';
+    } else if(d.mode==='mistral'){
+      badge.textContent='● Mistral ('+d.mistral_model+')';
+      badge.className='badge-groq';
+      toggle.textContent='Mistral: ON ✓';
       toggle.style.color='var(--cyan)';
     } else if(d.mode==='ollama'){
       badge.textContent='● Ollama ('+d.ollama_model+')';
@@ -1526,11 +1534,14 @@ async function checkStatus() {
 function toggleOllama(){
   if(llmBackend==='groq'){
     alert('Groq使用中。無効にするにはGROQ_API_KEYを外してサーバーを再起動してください。');
+  } else if(llmBackend==='mistral'){
+    alert('Mistral使用中(Groqがクォータ超過/未検出のためフォールバック)。');
   } else if(llmBackend==='ollama'){
     alert('Ollama使用中。無効にするにはOllamaを停止してください。');
   } else {
-    alert('Groq/Ollamaいずれも検出されませんでした。\n'
+    alert('Groq/Mistral/Ollamaいずれも検出されませんでした。\n'
       + 'Groq: 環境変数GROQ_API_KEYを設定して再起動\n'
+      + 'Mistral: 環境変数MISTRAL_API_KEYを設定して再起動\n'
       + 'Ollama: ollama pull llama3 実行後、python app.py を再起動してください。');
   }
 }

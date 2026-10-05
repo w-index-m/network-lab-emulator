@@ -67,13 +67,28 @@ USE_OLLAMA   = False   # 起動時に自動検出
 # Ollamaより高速・精度が良いことが多いが、インターネット接続とAPIキーが
 # 必要になる点がOllama/ルールベースとのトレードオフ）。
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 USE_GROQ     = False   # 起動時に自動検出（APIキーが有効か実際に1回叩いて確認）
 
-# 実際に使うLLMバックエンド: "groq" / "ollama" / "rules"（優先順位は
-# Groq > Ollama > ルールベース — Groqはローカルインストールが要らず、
-# キーさえ有効ならOllamaより手軽なため優先する）。
+# Mistral API（Groqと同じくOpenAI互換のChat Completions）。Groqの
+# クォータが尽きた/一時的に応答しない場合のフォールバック先として
+# 使う(ユーザー依頼「GROQ_API_KEYがいっぱいの時にmistralに
+# フォールバックする仕様にできる？」)。
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+MISTRAL_MODEL   = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
+MISTRAL_URL     = "https://api.mistral.ai/v1/chat/completions"
+USE_MISTRAL     = False   # 起動時に自動検出
+
+# 起動時に検出できたバックエンドを優先順位(Groq > Mistral > Ollama)の
+# まま並べたリスト。query_llm()はここを先頭から試し、1つが失敗
+# (クォータ超過・一時的なエラー等で戻り値None)しても次を試す——
+# "GROQ_API_KEYがいっぱいの時にmistralにフォールバック"を、起動時の
+# 固定選択ではなくリクエストごとのフォールバックとして実現する。
+_LLM_CHAIN = []  # [("groq", query_groq), ...] のように起動時に組み立てる
+
+# 表示用の「現在の主バックエンド」: "groq" / "mistral" / "ollama" / "rules"
+# (優先順位の中で最初に検出できたもの)。
 LLM_BACKEND = "rules"
 
 SAVED_CONFIG_PATH = Path(__file__).parent / "saved_config.json"
@@ -178,12 +193,61 @@ async def query_groq(prompt: str, system: str) -> str:
         print(f"[Groq] エラー: {e}")
     return None
 
+async def detect_mistral() -> bool:
+    """MISTRAL_API_KEYが設定されていて実際にAPIが応答するかを起動時に
+    1回だけ確認する(detect_groqと同じ考え方)。"""
+    if not MISTRAL_API_KEY:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(MISTRAL_URL, headers={
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json",
+            }, json={
+                "model": MISTRAL_MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            })
+            if r.status_code == 200:
+                print(f"[Mistral] 検出: model={MISTRAL_MODEL}")
+                return True
+            print(f"[Mistral] APIキーはあるが応答異常 (status={r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        print(f"[Mistral] 検出失敗: {e}")
+    return False
+
+async def query_mistral(prompt: str, system: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(MISTRAL_URL, headers={
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json",
+            }, json={
+                "model": MISTRAL_MODEL,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": prompt},
+                ],
+                "temperature": 0.1,
+            })
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"].strip()
+            print(f"[Mistral] エラー応答 (status={r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        print(f"[Mistral] エラー: {e}")
+    return None
+
 async def query_llm(prompt: str, system: str) -> str:
-    """現在のLLM_BACKENDに応じてGroq/Ollamaへ問い合わせる共通入口。"""
-    if LLM_BACKEND == "groq":
-        return await query_groq(prompt, system)
-    if LLM_BACKEND == "ollama":
-        return await query_ollama(prompt, system)
+    """_LLM_CHAIN(起動時に検出できたバックエンドを優先順位順に並べた
+    リスト)を先頭から試し、最初に空でない応答を返したものを採用する。
+    Groqがクォータ超過等で失敗しても、そこで諦めずMistral/Ollamaへ
+    フォールバックする(1回のリクエスト内で完結させる——起動時に
+    1つのバックエンドへ固定してしまうと、後からGroqのクォータが
+    尽きた場合に毎回失敗するだけになってしまうため)。"""
+    for _name, _fn in _LLM_CHAIN:
+        result = await _fn(prompt, system)
+        if result:
+            return result
     return None
 
 # ══════════════════════════════════════════
@@ -480,26 +544,38 @@ _MAIN_LOOP = [None]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global USE_OLLAMA, USE_GROQ, LLM_BACKEND
+    global USE_OLLAMA, USE_GROQ, USE_MISTRAL, LLM_BACKEND, _LLM_CHAIN
     # SSH CLIサーバのワーカースレッドからCLIを実行するために、
     # 動いているイベントループを捕まえておく。
     # （このアプリは lifespan を使っているので @app.on_event("startup")
     #   は呼ばれない。そちらに書いてもループは None のままになる）
     _MAIN_LOOP[0] = asyncio.get_running_loop()
-    # 優先順位: Groq(ローカルインストール不要・高速) > Ollama(オフライン
-    # 可だがインストールが要る) > ルールベース(完全オフライン)。
+    # 優先順位: Groq(ローカルインストール不要・高速) > Mistral(Groqの
+    # クォータ超過時のフォールバック) > Ollama(オフライン可だが
+    # インストールが要る) > ルールベース(完全オフライン)。
+    # 3つとも起動時に検出しておき(1つ見つかった時点で打ち切らない)、
+    # query_llm()がリクエストごとにこの優先順位でフォールバックできる
+    # ようにする——Groqがクォータ超過等で失敗しても、起動時に
+    # Groq固定にしてしまうと毎回失敗するだけになるため。
     USE_GROQ = await detect_groq()
+    USE_MISTRAL = await detect_mistral()
+    USE_OLLAMA = await detect_ollama()
+    _LLM_CHAIN = []
     if USE_GROQ:
-        LLM_BACKEND = "groq"
-        USE_OLLAMA = False
-    else:
-        USE_OLLAMA = await detect_ollama()
-        LLM_BACKEND = "ollama" if USE_OLLAMA else "rules"
+        _LLM_CHAIN.append(("groq", query_groq))
+    if USE_MISTRAL:
+        _LLM_CHAIN.append(("mistral", query_mistral))
+    if USE_OLLAMA:
+        _LLM_CHAIN.append(("ollama", query_ollama))
+    LLM_BACKEND = _LLM_CHAIN[0][0] if _LLM_CHAIN else "rules"
     mode = {
-        "groq":   f"Groq ({GROQ_MODEL})",
-        "ollama": f"Ollama ({OLLAMA_MODEL})",
-        "rules":  "ルールベース（オフライン）",
+        "groq":    f"Groq ({GROQ_MODEL})",
+        "mistral": f"Mistral ({MISTRAL_MODEL})",
+        "ollama":  f"Ollama ({OLLAMA_MODEL})",
+        "rules":   "ルールベース（オフライン）",
     }[LLM_BACKEND]
+    if len(_LLM_CHAIN) > 1:
+        mode += f" (フォールバック: {' → '.join(n for n, _ in _LLM_CHAIN[1:])})"
     print(f"""
 ╔══════════════════════════════════════════════════════════╗
 ║   ネットワークラボ エミュレーター 起動                   ║
@@ -736,6 +812,8 @@ async def get_status():
         "mode": LLM_BACKEND,
         "ollama_model": OLLAMA_MODEL if LLM_BACKEND == "ollama" else None,
         "groq_model": GROQ_MODEL if LLM_BACKEND == "groq" else None,
+        "mistral_model": MISTRAL_MODEL if LLM_BACKEND == "mistral" else None,
+        "fallback_chain": [n for n, _ in _LLM_CHAIN],
         "devices": list(device_sessions.keys()),
     }
 

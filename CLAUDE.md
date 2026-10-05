@@ -1374,7 +1374,7 @@ Ollamaを自動検出し(`detect_ollama()`)、ルールエンジンが空応答�
 コマンドをOllamaに投げて補完する(`USE_OLLAMA`フラグ)仕組みだった。
 これと全く同じ構造で`detect_groq()`/`query_groq()`を追加し、
 `GROQ_API_KEY`環境変数(+`GROQ_MODEL`、デフォルト
-`llama-3.3-70b-versatile`)でGroqのOpenAI互換Chat Completions API
+`llama-3.1-8b-instant`)でGroqのOpenAI互換Chat Completions API
 (`https://api.groq.com/openai/v1/chat/completions`)を叩く。新規
 パッケージは不要(`httpx`は既存依存で足りる)。
 
@@ -1478,3 +1478,23 @@ hostnameバグもこのライブ検証で発見)。LLMバックエンドが無�
 hostenameの単体反映(regressionガード)・VRRP有効/無効の出し分け・
 catalystでのWAN/GW非適用+notes・「その他」欄のLLM有無での挙動差を
 固定する。
+
+**本番(Render)でGroqがAPIキー設定後も検出されなかった実際の原因**:
+ユーザーがRenderに`GROQ_API_KEY`を設定・サービスにリンクした後も
+`/api/status`が`"mode":"rules"`のままだったため、Renderの起動ログを
+一緒に確認したところ、`[Groq] APIキーはあるが応答異常 (status=404)`:
+```
+{"error":{"message":"The model `llama-3.3-70b-versatile` does not
+exist or you do not have access to it.","type":"invalid_request_error",
+"code":"model_not_found"}}
+```
+という**本物のGroq APIからのエラー応答**だった(このサンドボックスの
+egressブロックによる403とは別物——つまりAPIキー自体・Render側の
+ネットワーク到達性は問題なく、デフォルトで指定していた
+`llama-3.3-70b-versatile`というモデル名がこのAPIキーでは存在しない/
+アクセスできない状態だった)。Groqはモデルのリネーム・廃止が比較的
+頻繁にあるため、デフォルトを`llama-3.1-8b-instant`(より広く使える
+安定版)に変更。もし将来また`model_not_found`になった場合は、
+console.groq.comで現在使えるモデル名を確認し、Render側の環境変数
+`GROQ_MODEL`を直接上書きすれば(コード変更・再デプロイ不要)即座に
+切り替えられる。
