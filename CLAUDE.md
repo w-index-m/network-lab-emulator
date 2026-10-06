@@ -1498,3 +1498,36 @@ egressブロックによる403とは別物——つまりAPIキー自体・Rende
 console.groq.comで現在使えるモデル名を確認し、Render側の環境変数
 `GROQ_MODEL`を直接上書きすれば(コード変更・再デプロイ不要)即座に
 切り替えられる。
+
+**Strix(AIペンテストエージェント)をGitHub Actionsで組み込み**:
+「[usestrix/strix](https://github.com/usestrix/strix)(★66k、AIベースの
+自律ペンテストツール)を試したい」という依頼への対応。標的は
+「エミュレータ自身のWebアプリ」をユーザーと合意し、後に「SSHリスナー
+(Catalyst)も」「GitHubから実行できないか」という追加要望で
+`target: web/ssh/both`を選べるGitHub Actionsワークフロー
+(`.github/workflows/strix-pentest.yml`)として実装した。
+
+**作業用サンドボックスからはstrix.ai/Groq/OpenAI/OpenRouter/Ollamaの
+いずれにも通信できない**(組織の通信ポリシーで403ブロック、実際に
+`curl`で確認済み——`api.groq.com`がブロックされているのは「PyTorch」
+節の`download.pytorch.org`と同じ扱い)ことが分かり、このセッション内
+でのStrixのインストール・実行・ライブ検証が不可能だったため、GitHub
+Actionsランナー(通常のインターネットに出られる)上で動かす形にした。
+**CLAUDE.mdの「必ずライブ検証する」という方針の数少ない例外**として、
+このワークフロー自体はこのセッションでは一度もDispatchして動作確認
+できていない——詳細と検証手順は`docs/strix-pentest-integration.md`
+参照、実際に動作確認でき次第そちらと本項目を更新すること。
+
+`target=web`はWebアプリ本体(ログイン画面・`/api/*`)のXSS/認証不備を
+Strixに診断させる(SQLiはこのアプリのDBがJSONファイルのため非該当)。
+`target=ssh`はCatalystデバイスを自動プロビジョニングし
+(`tests/test_nexpose_real_scan.py`の既存パターンを踏襲した
+`configure terminal` → `crypto key generate rsa modulus 2048` →
+`end`)、実SSHリスナー(`engine/ssh_cli_agent.py`、管理IPは
+`_management_ip()`が選ぶVlan10 SVIの`192.168.10.1`)への
+デフォルト資格情報(`admin`/`admin`)耐性等「認証不備」寄りの診断を
+行う(SQLi/XSSはCatalyst CLIに概念として存在しないため非該当)。
+`GROQ_API_KEY`はリポジトリSecretsに登録する想定(本番Render環境の
+Groq統合で使っているキーと共用可)。自動トリガー(push/PR)はAPI
+クォータ消費を避けるためあえて設定せず、`workflow_dispatch`の
+手動実行のみ。
