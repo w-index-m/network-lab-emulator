@@ -251,6 +251,69 @@ async def query_llm(prompt: str, system: str) -> str:
     return None
 
 # ══════════════════════════════════════════
+# Strixペンテスト操作パネル(/pentest)バックエンド
+#   ユーザー依頼「コマンドベースでしか利用できないとかマニュアルを見ないと
+#   実行できないのであればClaude側で操作インターフェースを作っても」
+#   への対応。.github/workflows/strix-pentest.yml のDispatch/状態確認を
+#   GitHub Actions REST APIで直接叩く薄いラッパー。トークンはこのアプリの
+#   バックエンド(Render環境変数)だけが保持し、フロントエンドには一切渡さない
+#   (GROQ_API_KEY等と同じ扱い)。
+# ══════════════════════════════════════════
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "w-index-m/network-lab-emulator")
+GITHUB_WORKFLOW_FILE = "strix-pentest.yml"
+GITHUB_API_BASE = "https://api.github.com"
+
+def _github_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+async def github_dispatch_pentest(target: str, strix_llm: str) -> dict:
+    """strix-pentest.yml を workflow_dispatch する。
+    成功時はGitHub API自体が本文を返さない(204)ため、呼び出し側で
+    少し待ってから一覧取得して対応するrunを特定する想定。"""
+    if not GITHUB_TOKEN:
+        return {"ok": False, "error": "GITHUB_TOKENが設定されていません(Render環境変数で設定してください)"}
+    url = f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/actions/workflows/{GITHUB_WORKFLOW_FILE}/dispatches"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(url, headers=_github_headers(),
+                                   json={"ref": "main",
+                                         "inputs": {"target": target, "strix_llm": strix_llm}})
+        if r.status_code == 204:
+            return {"ok": True}
+        return {"ok": False, "error": f"GitHub API応答異常 (status={r.status_code}): {r.text[:300]}"}
+    except Exception as e:
+        return {"ok": False, "error": f"GitHub APIへの接続に失敗しました: {e}"}
+
+async def github_list_pentest_runs(limit: int = 5) -> dict:
+    if not GITHUB_TOKEN:
+        return {"ok": False, "error": "GITHUB_TOKENが設定されていません(Render環境変数で設定してください)"}
+    url = (f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/actions/workflows/"
+           f"{GITHUB_WORKFLOW_FILE}/runs?per_page={limit}")
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(url, headers=_github_headers())
+        if r.status_code != 200:
+            return {"ok": False, "error": f"GitHub API応答異常 (status={r.status_code}): {r.text[:300]}"}
+        data = r.json()
+        runs = [{
+            "id": run["id"],
+            "status": run["status"],          # queued/in_progress/completed
+            "conclusion": run.get("conclusion"),  # success/failure/None
+            "html_url": run["html_url"],
+            "created_at": run["created_at"],
+            "display_title": run.get("display_title"),
+        } for run in data.get("workflow_runs", [])]
+        return {"ok": True, "runs": runs}
+    except Exception as e:
+        return {"ok": False, "error": f"GitHub APIへの接続に失敗しました: {e}"}
+
+
+# ══════════════════════════════════════════
 # アプリ起動
 # ══════════════════════════════════════════
 def _trigger_ike_negotiation(device_id: str, _cascade: bool = True):
@@ -685,7 +748,7 @@ def _valid_token(token: str) -> bool:
 # パスホワイトリスト（認証不要）
 # ルート "/" と各種静的アセットはHTML/ログインJSを返すため公開し、
 # 認証はAPI（/api/*）とWebSocket側で行う。
-_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico", "/dashboard",
+_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico", "/dashboard", "/pentest",
                   "/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
 
 @app.middleware("http")
@@ -767,6 +830,26 @@ async def session_refresh(token: str = ""):
     if _valid_token(token):
         return {"ok": True, "remaining": _SESSION_TTL}
     return JSONResponse(status_code=401, content={"ok": False})
+
+
+@app.post("/api/pentest/dispatch")
+async def api_pentest_dispatch(body: dict):
+    target = body.get("target", "web")
+    if target not in ("web", "ssh", "both"):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "targetはweb/ssh/bothのいずれかです"})
+    strix_llm = (body.get("strix_llm") or "groq/llama-3.1-8b-instant").strip()
+    result = await github_dispatch_pentest(target, strix_llm)
+    if not result.get("ok"):
+        return JSONResponse(status_code=502, content=result)
+    return result
+
+
+@app.get("/api/pentest/runs")
+async def api_pentest_runs(limit: int = 5):
+    result = await github_list_pentest_runs(limit)
+    if not result.get("ok"):
+        return JSONResponse(status_code=502, content=result)
+    return result
 
 
 @app.get("/api/health")
@@ -8605,6 +8688,16 @@ async def resource_dashboard():
     if page.exists():
         return HTMLResponse(page.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>dashboard.html が見つかりません</h1>")
+
+@app.get("/pentest")
+async def pentest_control_panel():
+    """Strix(AIペンテストエージェント)をGitHub Actions経由で実行する操作パネル。
+    手動でActionsタブのフォームを開く・CLIフラグを覚える必要をなくし、
+    ログイン済みのこのアプリ上からtarget選択→実行→結果確認までできる。"""
+    page = static_dir / "pentest.html"
+    if page.exists():
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>pentest.html が見つかりません</h1>")
 
 # ══════════════════════════════════════════════════════════
 # Nexpose / InsightVM Console API v3

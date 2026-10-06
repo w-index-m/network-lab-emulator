@@ -1531,3 +1531,44 @@ Strixに診断させる(SQLiはこのアプリのDBがJSONファイルのため�
 Groq統合で使っているキーと共用可)。自動トリガー(push/PR)はAPI
 クォータ消費を避けるためあえて設定せず、`workflow_dispatch`の
 手動実行のみ。
+
+**`/pentest`: Strix実行をこのアプリ内から操作する専用パネル**:
+ユーザーから「コマンドベースでしか利用できないとかマニュアルを見ないと
+実行できないのであればClaude側で操作インターフェースを作っても」との
+依頼。それまではGitHub Actionsのタブを開いてフォームに入力する必要が
+あったが、ログイン済みのこのアプリ上(本番Render含む)から直接
+target(web/ssh/both)とLLMモデル名を選んで実行・直近5件の実行履歴
+(成功/失敗/実行中とGitHubへのリンク)を見られるようにした。
+
+配置は`/dashboard`と同じ単独ページパターン(`static/pentest.html`、
+`app.py`の`@app.get("/pentest")`)で、`_NO_AUTH_PATHS`に追加しページ
+自体はログイン画面を経由せず開けるが、ページ内の`fetch`は既存の
+`X-Session-Token`(localStorageの`netlabToken_v1`)で通常通り認証される
+——つまりこのアプリにログインできる人だけが実質使える(ユーザーが
+選んだ「既存のログイン認証でOK」のスコープ)。
+
+バックエンドは新設`GITHUB_TOKEN`環境変数(Renderで`GROQ_API_KEY`と
+同じ要領で設定する、Actions:write権限のfine-grained PAT)を使い、
+GitHub Actions REST API(`.../actions/workflows/strix-pentest.yml/
+dispatches`・`.../runs`)を`app.py`から直接叩く薄いラッパー
+(`github_dispatch_pentest`/`github_list_pentest_runs`、エンドポイントは
+`POST /api/pentest/dispatch`/`GET /api/pentest/runs`)——トークンは
+フロントエンドに一切渡らない。GitHub Actions自体にワークフロー結果
+ページへのリンクを張るだけで、アーティファクト(`strix_runs/`)の
+ダウンロード機能はこのパネルには実装していない(GitHub側の認証が
+別途必要になるため、v1はスコープ外として明記)。
+
+**この機能自体はライブ検証済み**(このセッションのサンドボックスに
+既に`GITHUB_TOKEN`が環境変数として入っていたため、他のLLM系バック
+エンドとは違い実際に動作確認できた——偶然ではなく、このセッションの
+GitHub MCP連携用に既に設定されていたトークンを`app.py`がそのまま
+読めた): `NETLAB_AUTH_DISABLE=1`でローカル起動し、`/pentest`の表示、
+`/api/pentest/runs`が実在するworkflow runの履歴(過去の失敗2件)を
+正しい形で返すこと、`/api/pentest/dispatch`への不正な`target`値での
+400応答、そして`{"target":"web"}`での実際のDispatch成功(`{"ok":true}`)
+と、その直後に`/api/pentest/runs`で新しいrun(`status: in_progress`)が
+現れることまで確認した。`tests/test_pentest_control_panel.py`
+(9 tests)はGitHub API呼び出し自体をモックし、`GITHUB_TOKEN`未設定時の
+安全なフォールバック・不正な`target`の400・正常系のレスポンス整形を
+固定する(実際のGitHub APIへの到達性はこのサンドボックスから毎回
+保証されるものではないため、回帰テスト自体はネットワーク非依存)。
