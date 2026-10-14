@@ -5296,6 +5296,14 @@ def _build_running_config(device_id: str, state) -> str:
     if is_apresia:
         return rule_engine.process('show running-config', state)
 
+    # ASA: 同じ理由(app.py側の汎用ハンドラが先に勝ってしまい、分岐の
+    # どこにも一致しないとSi-Rスタイルのダミー出力になってしまう)で
+    # 専用の _asa_process 側(_asa_show_running)に明示的に委譲する。
+    # これまでASAの"show running-config"を直接呼ぶテストが無く見つから
+    # なかった既存の実バグ(threat-detection機能のテスト追加時に発見)。
+    if state.device_type == 'asa':
+        return rule_engine.process('show running-config', state)
+
     # 擬似FLETS網BAS: Si-R/Catalyst等のデフォルト分岐に落ちないよう、
     # 専用の _bas_process 側(RuleEngine)に明示的に委譲する
     # (このブロック自体がRuleEngine.process()より先に実行されるため、

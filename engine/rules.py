@@ -14,6 +14,7 @@ from engine.ike_engine import (
     DEFAULT_IKE_LT, DEFAULT_PROTOCOL,
     advance_all_sir_dpd,
 )
+from engine.threat_detection import threat_detection_engine, default_config as _default_threat_detection_config
 
 def _prefix_to_mask(prefix: int) -> str:
     bits = (0xffffffff >> (32 - prefix)) << (32 - prefix)
@@ -106,6 +107,10 @@ class DeviceState:
             # 増やさない)。
             self.asa_vpdn = {}            # {'group','localname','auth','username','password'}
             self.asa_pppoe_pending = {}   # {iface: {'setroute': bool}} — ip address pppoe 済み・未接続
+            # threat-detection scanning-threat: 設定値のみここに置く
+            # (接続試行カウンタ/シャン済みIPはengine.threat_detectionが
+            # 別途保持——詳細は engine/threat_detection.py の docstring)
+            self.threat_detection = _default_threat_detection_config()
             self.asa_pppoe = {}           # {iface: {'connected','gateway'}}
             return
 
@@ -8602,6 +8607,18 @@ Configuration Revision            : 5"""
         if re.match(r'^show\s+crypto\s+ipsec\s+sa', c):
             return self._asa_show_crypto_ipsec_sa(state)
 
+        if re.match(r'^show\s+threat-detection\s+rate', c):
+            return self._asa_show_threat_detection_rate(state)
+
+        if re.match(r'^show\s+threat-detection\s+shun', c):
+            return self._asa_show_threat_detection_shun(state)
+
+        m_td_clear = re.match(r'^clear\s+threat-detection\s+shun'
+                              r'(?:\s+ip-address\s+([\d.]+))?\s*$', c)
+        if m_td_clear:
+            threat_detection_engine.clear_shun(id(state), m_td_clear.group(1))
+            return ''
+
         if re.match(r'^show\s+ospf\s+neighbor', c):
             if hasattr(state, 'ospf'):
                 return self._show_ospf_neighbor(state)
@@ -8742,6 +8759,46 @@ Configuration Revision            : 5"""
             if c == 'shutdown':
                 state.interfaces.setdefault(iface, {})
                 state.interfaces[iface]['status'] = 'down'
+                return ''
+
+        # ── threat-detection scanning-threat (スキャン検知/自動シャン) ──
+        if state.mode == 'config':
+            if re.match(r'^no\s+threat-detection\s+scanning-threat\s*$', c):
+                state.threat_detection['enabled'] = False
+                state.threat_detection['shun'] = False
+                return ''
+
+            m_td_except = re.match(
+                r'^threat-detection\s+scanning-threat\s+shun\s+except\s+'
+                r'ip-address\s+([\d.]+)\s+([\d.]+)\s*$', c)
+            if m_td_except:
+                state.threat_detection['enabled'] = True
+                state.threat_detection['shun'] = True
+                state.threat_detection['shun_except'].append(
+                    (m_td_except.group(1), m_td_except.group(2)))
+                return ''
+
+            if re.match(r'^threat-detection\s+scanning-threat\s+shun\s*$', c):
+                state.threat_detection['enabled'] = True
+                state.threat_detection['shun'] = True
+                return ''
+
+            if re.match(r'^threat-detection\s+scanning-threat\s*$', c):
+                state.threat_detection['enabled'] = True
+                return ''
+
+            m_td_dur = re.match(r'^threat-detection\s+shun\s+duration\s+(\d+)\s*$', c)
+            if m_td_dur:
+                state.threat_detection['shun_duration'] = int(m_td_dur.group(1))
+                return ''
+
+            m_td_rate = re.match(
+                r'^threat-detection\s+rate\s+scanning-threat\s+'
+                r'rate-interval\s+(\d+)\s+average-rate\s+(\d+)\s+burst-rate\s+(\d+)\s*$', c)
+            if m_td_rate:
+                state.threat_detection['rate_interval'] = int(m_td_rate.group(1))
+                state.threat_detection['average_rate'] = int(m_td_rate.group(2))
+                state.threat_detection['burst_rate'] = int(m_td_rate.group(3))
                 return ''
 
         # ── PPPoE (vpdn group / vpdn username、ASA 5505実機構文) ──
@@ -9280,6 +9337,36 @@ Key Version         : A
             ]
         return '\n'.join(lines)
 
+    def _asa_show_threat_detection_rate(self, state: DeviceState) -> str:
+        cfg = state.threat_detection
+        if not cfg.get('enabled'):
+            return '% Scanning threat detection is not enabled.'
+        rates = threat_detection_engine.get_rates(id(state), cfg)
+        lines = [
+            '                      Average(eps)    Current(eps)   Trigger     Total Events',
+        ]
+        if not rates:
+            lines.append('  No scanning attempts observed yet.')
+            return '\n'.join(lines)
+        for src_ip, r in sorted(rates.items()):
+            triggered = 'Yes' if (r['average_rate'] >= cfg['average_rate']
+                                   or r['burst_rate'] >= cfg['burst_rate']) else 'No'
+            lines.append(
+                f"  scanning-threat ({src_ip}):  {r['average_rate']:.2f}"
+                f"            {r['burst_rate']:.2f}          {triggered}"
+                f"         {r['total_attempts']}")
+        return '\n'.join(lines)
+
+    def _asa_show_threat_detection_shun(self, state: DeviceState) -> str:
+        cfg = state.threat_detection
+        shunned = threat_detection_engine.get_shun_list(id(state), cfg)
+        if not shunned:
+            return 'No shunned hosts.'
+        lines = ['Shunned Hosts  -  Duration     Remaining (secs)']
+        for s in sorted(shunned, key=lambda x: x['ip']):
+            lines.append(f"  {s['ip']:<15}{cfg['shun_duration']:>10}{s['remaining']:>18}")
+        return '\n'.join(lines)
+
     def _asa_show_service_policy(self, state: DeviceState) -> str:
         lines = ['Global policy:',
                  '  Service-policy: global_policy',
@@ -9376,6 +9463,21 @@ Key Version         : A
             lines.append(f'  inspect {proto}')
         for sp in state.service_policies:
             lines.append(f'service-policy {sp["policy"]} {sp["scope"]}')
+        # threat-detection scanning-threat
+        td = state.threat_detection
+        if td.get('enabled'):
+            if td.get('rate_interval') != 600 or td.get('average_rate') != 5 or td.get('burst_rate') != 10:
+                lines.append(f"threat-detection rate scanning-threat rate-interval "
+                             f"{td['rate_interval']} average-rate {td['average_rate']} "
+                             f"burst-rate {td['burst_rate']}")
+            if td.get('shun_duration', 3600) != 3600:
+                lines.append(f"threat-detection shun duration {td['shun_duration']}")
+            if td.get('shun'):
+                lines.append('threat-detection scanning-threat shun')
+                for exc_ip, exc_mask in td.get('shun_except', []):
+                    lines.append(f'threat-detection scanning-threat shun except ip-address {exc_ip} {exc_mask}')
+            else:
+                lines.append('threat-detection scanning-threat')
         # syslog
         for s in state.syslog_servers:
             lines.append(f'logging host {s["host"]}')
@@ -9424,6 +9526,13 @@ Key Version         : A
             '  tunnel-group <peer-ip> type ipsec-l2l\n'
             '  tunnel-group <peer-ip> ipsec-attributes\n'
             '    ikev1 pre-shared-key <key>\n'
+            '\n[スキャン検知/自動シャン]\n'
+            '  threat-detection scanning-threat [shun [except ip-address <ip> <mask>]]\n'
+            '  threat-detection rate scanning-threat rate-interval <sec> average-rate <n> burst-rate <n>\n'
+            '  threat-detection shun duration <sec>\n'
+            '  show threat-detection rate\n'
+            '  show threat-detection shun\n'
+            '  clear threat-detection shun [ip-address <ip>]\n'
             '\n[確認]\n'
             '  show version\n'
             '  show interface\n'

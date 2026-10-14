@@ -44,6 +44,7 @@ import socket
 import threading
 
 from engine.loopback_alias import ensure_loopback_alias
+from engine.threat_detection import threat_detection_engine
 
 try:
     import paramiko
@@ -251,9 +252,22 @@ class SshCliServer:
     def _loop(self):
         while not self._stop.is_set():
             try:
-                client, _addr = self._sock.accept()
+                client, addr = self._sock.accept()
             except OSError:
                 return
+            # ASAの"threat-detection scanning-threat": 実際のTCP接続
+            # 試行をスキャン検知の観測対象にする(ZGrab2/nmapのような
+            # 短時間多数接続を、ここで実際に遮断する——フェイクの検知
+            # ではない)。ASA以外は state.threat_detection['enabled']が
+            # 常にFalse(既定値)なのでno-op。
+            cfg = getattr(self.state, 'threat_detection', None)
+            if cfg is not None and addr and threat_detection_engine.record_connection_attempt(
+                    id(self.state), addr[0], cfg):
+                try:
+                    client.close()
+                except OSError:
+                    pass
+                continue
             # ポートスキャンは開けてすぐ閉じる。paramikoに渡すと
             # 毎回トレースバックを吐くので、静かに落とす
             # （NETCONFサーバと同じ扱い）

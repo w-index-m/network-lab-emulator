@@ -1766,3 +1766,71 @@ scanning-threat`(ZGrab2のような短時間多数接続の検知)、「設定�
 含め、実`ansible-playbook`実行はnetmiko/ansibleの既存テストと同じ
 手動ライブ検証に留める)、LLM-as-judge型の試験自動化(既存のshow
 出力ベース検証テストにLLM判定を足す薄いラッパー)。
+
+**ASA `threat-detection scanning-threat`(スキャン検知/自動シャン)**:
+ZGrab2統合の「今後の展開」として提案した3項目のうち、「④今ある中なら
+ASAの方が面白い？」というユーザーの反応を受けて選んだ1件。実機Cisco
+ASAの正式機能(`threat-detection scanning-threat [shun [except
+ip-address <ip> <mask>]]` / `threat-detection rate scanning-threat
+rate-interval <sec> average-rate <n> burst-rate <n>` / `show
+threat-detection rate` / `show threat-detection shun` / `clear
+threat-detection shun [ip-address <ip>]`)を、フェイクの検知ではなく
+実SSHリスナー(`engine/ssh_cli_agent.py`)への実際のTCP接続試行回数
+から再現した——ZGrab2/nmapのような短時間多数接続は、このエミュレータ
+の実ソケットリスナーに対してまさにそのまま実際の接続試行として
+現れるため、新しいネゴシエーションロジックは要らず「実際に数える」
+だけで足りた。
+
+**実機確認について**: このサンドボックスの egress ポリシーで
+`cisco.com`/`fujitsu.com`への到達がブロックされており(PyTorchの
+`download.pytorch.org`等と同じ扱い)、Cisco公式のcommand referenceを
+直接fetchできなかった。WebSearchのスニペット(コミュニティ投稿の
+実コンフィグ例`threat-detection scanning-threat shun duration 3600`
+を含む)で構文を裏取りした上で実装——他の「実機確認してから実装」
+系タスク(後述のSi-R SCPサーバー)とは異なり、この機能はCisco ASAの
+長年変わっていない基本機能で一定の確信があったため、ユーザーに
+確認を取った上で(Si-Rは要確認のため一旦スキップ、ASAはこちらを
+先に進める、という回答)実装を進めた。
+
+実装: 新設`engine/threat_detection.py`の`ThreatDetectionEngine`が、
+rate-interval秒のスライディングウィンドウとバーストウィンドウ(実機
+通りrate-interval/30、最低10秒)の両方でレートを計算し、
+average-rate/burst-rateいずれかを超えたらそのソースIPをシャンする。
+設定値(`state.threat_detection`)とランタイムの接続試行カウンタ/
+シャン済みIPを分離するパターンは`PppoeEngine`等の既存engineと同じ
+(DeviceStateは自分のdevice_idを知らないため`id(state)`をキーに使う)。
+`engine/ssh_cli_agent.py`の`SshCliServer._loop()`(実際にTCP接続を
+acceptする箇所)で判定し、シャン対象ならSSHハンドシェイクを始める
+前に即座に切断する——ASA以外は`state.threat_detection['enabled']`
+既定False でno-op。
+
+**実装中に見つけた既存の実バグ**: `app.py`の`_build_running_config`
+(二層ディスパッチの`app.py`側、`rule_engine.process()`より先に
+評価される)が`apresia`/`bas`/`fortigate`/`nexus`/Cisco系は個別に
+委譲していたが、`asa`だけ抜けており、`show running-config`が常に
+Si-Rスタイルのダミー出力にフォールバックしていた——これまでASAの
+`show running-config`を直接呼ぶテストが一つも無かったため気づかれて
+いなかった(threat-detectionのrunning-config反映テストを書いて初めて
+踏んだ)。`apresia`/`bas`/`fortigate`と同じ `if state.device_type ==
+'asa': return rule_engine.process('show running-config', state)` を
+追加して解決。
+
+ライブ検証: `rate-interval 5 average-rate 3 burst-rate 3` + `shun`を
+設定し、実際にZGrab2で連続SSHスキャンを実行——最初は通常通り
+`"status":"success"`が返るが、閾値超過後は実際に
+`"status":"handshake-error"`(`ssh: handshake failed: EOF`、SSH
+ハンドシェイクが始まる前に切断されたことを示す)に変わり、`show
+threat-detection shun`/`show threat-detection rate`/`show
+running-config`いずれも実際にシャン状態を反映することを確認した。
+詳細と生のZGrab2出力は`docs/asa-threat-detection-scanning.md`参照。
+`tests/test_asa_threat_detection_scanning.py`(20 tests)がCLI設定・
+`ThreatDetectionEngine`そのもの(閾値判定/shun除外/期限切れ/clear)・
+実SSHリスナーへの実際の接続試行によるエンドツーエンドのシャン(本物の
+uvicornサーバ+生ソケット、外部バイナリ非依存)を固定する。
+
+**次に合意した拡張(このセッションではまだ未着手)**: Si-RのSCP
+サーバー機能(実機コマンド確認が先——`fujitsu.com`がこのサンドボックス
+のegressポリシーでブロックされており未確認のまま一旦スキップ中)、
+「設定生成」タブ拡張によるLLM→Ansible Playbook生成(構成投入/事実
+取得・差分検知/検証/ロールバックの4パターン)、LLM-as-judge型の試験
+自動化。
