@@ -148,6 +148,68 @@ class TestJuniperRealSshEnablement:
             stop_ssh_cli_agent(dev_id)
 
 
+class TestJuniperRealNetconfEnablement:
+    """CLAUDE.mdの既知ギャップ(junipernetworks.junos Ansibleモジュールが
+    既定で使うNETCONFトランスポートが未配線で、netmikoのSSH-over-CLIは
+    繋がるのにAnsibleのjunos_command等は繋がらなかった)への対応。
+    SSH有効化(TestJuniperRealSshEnablement)と全く同じパターン:
+    "set system services netconf ssh" を commit後にstate.netconf_enabled
+    へ反映し、rule_engine.process()の後でensure_netconf_agent()を呼ぶ。"""
+
+    def _enable_netconf_with_address(self, dev_id, addr):
+        _dev(dev_id, 'juniper')
+        _cli(dev_id, 'configure')
+        _cli(dev_id, f'set interfaces ge-0/0/0 unit 0 family inet address {addr}/30')
+        _cli(dev_id, 'set system services netconf ssh')
+        return _cli(dev_id, 'commit')
+
+    def test_commit_with_netconf_service_sets_netconf_enabled_flag(self):
+        self._enable_netconf_with_address('nm-jnpr-netconf-1', '198.51.100.41')
+        state = app_module.device_sessions['nm-jnpr-netconf-1']
+        assert state.netconf_enabled is True
+
+    def test_netconf_not_enabled_before_commit(self):
+        _dev('nm-jnpr-netconf-2', 'juniper')
+        _cli('nm-jnpr-netconf-2', 'configure')
+        _cli('nm-jnpr-netconf-2', 'set system services netconf ssh')
+        state = app_module.device_sessions['nm-jnpr-netconf-2']
+        assert not getattr(state, 'netconf_enabled', False)
+
+    def test_committed_config_reflects_the_netconf_service_line(self):
+        self._enable_netconf_with_address('nm-jnpr-netconf-3', '198.51.100.42')
+        rc = _cli('nm-jnpr-netconf-3', 'show configuration | display set')['output']
+        assert 'set system services netconf ssh' in rc
+
+    def test_netconf_listener_binds_to_the_committed_interface_ip(self):
+        from engine.netconf_agent import _servers as netconf_servers
+        dev_id = 'nm-jnpr-netconf-4'
+        addr = '198.51.100.43'
+        try:
+            self._enable_netconf_with_address(dev_id, addr)
+            srv = netconf_servers.get(dev_id)
+            assert srv is not None, 'NETCONFリスナーが起動していない'
+            assert srv.ip == addr
+        finally:
+            from engine.netconf_agent import stop_netconf_agent
+            stop_netconf_agent(dev_id)
+
+    def test_ssh_only_device_has_no_netconf_listener(self):
+        """SSHだけ有効化したJuniperではNETCONFリスナーが勝手に起動しない
+        ことの固定(2つの別々のトリガーであることの確認)。"""
+        from engine.netconf_agent import _servers as netconf_servers
+        dev_id = 'nm-jnpr-netconf-5'
+        try:
+            _dev(dev_id, 'juniper')
+            _cli(dev_id, 'configure')
+            _cli(dev_id, 'set interfaces ge-0/0/0 unit 0 family inet address 198.51.100.44/30')
+            _cli(dev_id, 'set system services ssh')
+            _cli(dev_id, 'commit')
+            assert dev_id not in netconf_servers
+        finally:
+            from engine.ssh_cli_agent import stop_ssh_cli_agent
+            stop_ssh_cli_agent(dev_id)
+
+
 class TestJuniperCliDisplayCommands:
     """netmikoのjuniper_junosドライバがログイン直後に送るset cli系コマンド。"""
 

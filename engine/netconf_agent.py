@@ -809,7 +809,7 @@ def ensure_netconf_agent(device_id: str, device_sessions: dict,
     state = device_sessions.get(device_id)
     if state is None or not getattr(state, 'netconf_enabled', False):
         return None
-    if state.device_type not in ('cisco', 'catalyst'):
+    if state.device_type not in ('cisco', 'catalyst', 'juniper'):
         return None
     ip = None
     for _ifname, info in state.interfaces.items():

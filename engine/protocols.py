@@ -5356,6 +5356,140 @@ icmp_engine = IcmpEngine()
 
 
 # ══════════════════════════════════════════
+# IPv6 アドレッシング / ルーティング（v1: 接続性確認が主眼）
+#   「ネットワークラボの改善点」としてユーザーに提案し実装を依頼された
+#   項目の一つ。engine/rules.pyの"ipv6 address"/"ipv6 unicast-routing"
+#   等は既にstate.interfaces[if]['ipv6']/['ipv6_prefix']へ反映され
+#   show running-config/show ipv6 interface briefにも出ていたが、
+#   そこから先(ルーティングテーブル・スタティック経路・実際の到達性
+#   判定)が無かった。IPv4のIcmpEngine/RibEngineが持つACL/NAT/VRF/
+#   ICMP Redirect等はスコープ外(v6プラス/MAP-E実装時と同じ、現実的な
+#   カット) — 直結経路・スタティック経路によるマルチホップ到達性判定
+#   (実vnetトポロジーのBFS)までを実装する。
+# ══════════════════════════════════════════
+class Ipv6Engine:
+    def __init__(self):
+        self.device_addrs: Dict[str, dict] = {}       # device_id -> {addr: prefix}
+        self.device_hostnames: Dict[str, str] = {}
+        self.connected: Dict[str, list] = defaultdict(list)       # device_id -> [{'network','prefix','interface'}]
+        self.static_routes: Dict[str, list] = defaultdict(list)   # device_id -> [{'dest','prefix','next_hop'}]
+
+    def register_device(self, device_id: str, hostname: str, interfaces: dict):
+        """interfaces: {ifname: {'ip': <ipv6アドレス>, 'prefix': <int>}}"""
+        self.device_hostnames[device_id] = hostname
+        addrs = {}
+        connected = []
+        for ifname, info in interfaces.items():
+            addr = info.get('ip')
+            prefix = info.get('prefix', 64)
+            if not addr:
+                continue
+            addrs[addr] = prefix
+            try:
+                net = ipaddress.ip_network(f'{addr}/{prefix}', strict=False)
+                connected.append({'network': str(net.network_address), 'prefix': prefix,
+                                   'interface': ifname})
+            except ValueError:
+                continue
+        self.device_addrs[device_id] = addrs
+        self.connected[device_id] = connected
+
+    def add_static_route(self, device_id: str, dest: str, prefix: int, next_hop: str):
+        self.static_routes[device_id] = [
+            r for r in self.static_routes[device_id]
+            if not (r['dest'] == dest and r['prefix'] == prefix)]
+        self.static_routes[device_id].append({'dest': dest, 'prefix': prefix, 'next_hop': next_hop})
+
+    def remove_static_route(self, device_id: str, dest: str, prefix: int):
+        self.static_routes[device_id] = [
+            r for r in self.static_routes[device_id]
+            if not (r['dest'] == dest and r['prefix'] == prefix)]
+
+    @staticmethod
+    def _addr_in_cidr(addr: str, network: str, prefix: int) -> bool:
+        try:
+            return ipaddress.ip_address(addr) in ipaddress.ip_network(f'{network}/{prefix}', strict=False)
+        except ValueError:
+            return False
+
+    def _find_device_owning_addr(self, addr: str) -> Optional[str]:
+        for did, addrs in self.device_addrs.items():
+            if addr in addrs:
+                return did
+        return None
+
+    def _resolve_next_hop(self, device_id: str, dest_addr: str):
+        """destに向けた次ホップを返す。(device_id, None)なら自分が最終ホップ、
+        (next_device_id, next_hop_ip)なら転送先、(None, None)なら経路なし。"""
+        for entry in self.connected.get(device_id, []):
+            if self._addr_in_cidr(dest_addr, entry['network'], entry['prefix']):
+                return device_id, None
+        best = None
+        for r in self.static_routes.get(device_id, []):
+            if self._addr_in_cidr(dest_addr, r['dest'], r['prefix']):
+                if best is None or r['prefix'] > best['prefix']:
+                    best = r
+        if not best:
+            return None, None
+        next_hop_ip = best['next_hop']
+        next_device = self._find_device_owning_addr(next_hop_ip)
+        return next_device, next_hop_ip
+
+    def trace_path(self, src_id: str, dest_addr: str, max_hops: int = 15) -> dict:
+        hops: list = []
+        current = src_id
+        visited = set()
+        for _ in range(max_hops):
+            if current in visited:
+                return {'reachable': False, 'reason': 'routing loop detected', 'hops': hops}
+            visited.add(current)
+            hostname = self.device_hostnames.get(current, current)
+            next_device, next_hop_ip = self._resolve_next_hop(current, dest_addr)
+            if next_device is None:
+                hops.append({'device': current, 'hostname': hostname, 'timeout': True})
+                return {'reachable': False, 'reason': 'no route to host', 'hops': hops}
+            if next_hop_ip is None:
+                # 直結ネットワーク内(同一サブネット)に宛先がある = 到達。
+                # current自身が宛先アドレスを持つ場合と、同一サブネット上の
+                # 別デバイスが持つ場合の両方がここに来るため、表示ホスト名は
+                # 宛先アドレスを実際に持つデバイスを引き直す(currentのまま
+                # だと、宛先が別デバイスの場合にtracerouteの最終ホップが
+                # 送信元自身の名前になってしまう不具合があった)。
+                dest_device = self._find_device_owning_addr(dest_addr) or current
+                dest_hostname = self.device_hostnames.get(dest_device, dest_device)
+                hops.append({'device': dest_device, 'hostname': dest_hostname, 'ip': dest_addr})
+                return {'reachable': True, 'reason': '', 'hops': hops}
+            if next_device not in vnet.get_neighbors(current):
+                hops.append({'device': current, 'hostname': hostname, 'timeout': True})
+                return {'reachable': False, 'reason': 'next-hop unreachable', 'hops': hops}
+            hops.append({'device': current, 'hostname': hostname, 'ip': next_hop_ip})
+            current = next_device
+        return {'reachable': False, 'reason': 'hop limit exceeded', 'hops': hops}
+
+    def ping(self, src_id: str, dest_addr: str, count: int = 5) -> dict:
+        result = self.trace_path(src_id, dest_addr)
+        reachable = result['reachable']
+        rtts = []
+        ttl = 64
+        if reachable:
+            hop_count = max(1, len(result['hops']))
+            ttl = max(1, 64 - (hop_count - 1))
+            base = hop_count * random.uniform(0.2, 0.8)
+            for _ in range(count):
+                rtts.append(round(base + random.uniform(0, 1.5), 3))
+        return {'reachable': reachable, 'reason': result.get('reason', ''),
+                'ttl': ttl, 'rtts': rtts, 'count': count, 'hops': result['hops']}
+
+    def traceroute(self, src_id: str, dest_addr: str) -> dict:
+        result = self.trace_path(src_id, dest_addr)
+        return {'reachable': result['reachable'],
+                'reason': result.get('reason', ''), 'hops': result['hops']}
+
+
+ipv6_engine = Ipv6Engine()
+
+
+# ══════════════════════════════════════════
 # NAT / NAPT エンジン（Si-R / Cisco ルーター）
 # ══════════════════════════════════════════
 @dataclass

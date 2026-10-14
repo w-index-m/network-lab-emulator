@@ -14,7 +14,7 @@ try:
 except Exception:
     pass
 
-import os, asyncio, json, re, httpx, time, random
+import os, asyncio, json, re, httpx, time, random, ipaddress
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional
@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from engine.rules import RuleEngine, DeviceState, _expand_port_list
 from engine.protocols import (
     vnet, rip_engine, ospf_engine, bgp_engine, eigrp_engine, stp_engine, rib_engine,
-    icmp_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
+    icmp_engine, ipv6_engine, redistribute, filter_engine, arp_engine, ipfilter_engine,
     nat_engine, cef_engine, dp_engine, snmp_agent, pppoe_engine, map_e_engine,
     genie_engine, lacp_engine, vrrp_engine, vlan_engine, vpc_engine, mpls_engine,
     sir_msg, cisco_msg, nxos_msg, apresia_msg,
@@ -271,10 +271,12 @@ def _github_headers() -> dict:
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
-async def github_dispatch_pentest(target: str, strix_llm: str) -> dict:
+async def github_dispatch_pentest(target: str, strix_llm_candidates: str) -> dict:
     """strix-pentest.yml を workflow_dispatch する。
     成功時はGitHub API自体が本文を返さない(204)ため、呼び出し側で
-    少し待ってから一覧取得して対応するrunを特定する想定。"""
+    少し待ってから一覧取得して対応するrunを特定する想定。
+    strix_llm_candidatesはカンマ区切りのモデル候補(ワークフロー側の
+    run_strix_with_fallback.shが先頭から順に試す)。"""
     if not GITHUB_TOKEN:
         return {"ok": False, "error": "GITHUB_TOKENが設定されていません(Render環境変数で設定してください)"}
     url = f"{GITHUB_API_BASE}/repos/{GITHUB_REPO}/actions/workflows/{GITHUB_WORKFLOW_FILE}/dispatches"
@@ -282,7 +284,8 @@ async def github_dispatch_pentest(target: str, strix_llm: str) -> dict:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(url, headers=_github_headers(),
                                    json={"ref": "main",
-                                         "inputs": {"target": target, "strix_llm": strix_llm}})
+                                         "inputs": {"target": target,
+                                                    "strix_llm_candidates": strix_llm_candidates}})
         if r.status_code == 204:
             return {"ok": True}
         return {"ok": False, "error": f"GitHub API応答異常 (status={r.status_code}): {r.text[:300]}"}
@@ -306,6 +309,12 @@ async def github_list_pentest_runs(limit: int = 5) -> dict:
             "conclusion": run.get("conclusion"),  # success/failure/None
             "html_url": run["html_url"],
             "created_at": run["created_at"],
+            # completedになった時点でも更新される(createdはDispatch時刻の
+            # ままなので、staleness計算(経過時間)にはこちらを使う必要が
+            # ある——tools/prometheus_exporter.pyの
+            # netlab_strix_last_success_age_secondsがcreated_atを誤って
+            # 使っていたのを修正した際に追加)
+            "updated_at": run.get("updated_at"),
             "display_title": run.get("display_title"),
         } for run in data.get("workflow_runs", [])]
         return {"ok": True, "runs": runs}
@@ -837,8 +846,9 @@ async def api_pentest_dispatch(body: dict):
     target = body.get("target", "web")
     if target not in ("web", "ssh", "both"):
         return JSONResponse(status_code=400, content={"ok": False, "error": "targetはweb/ssh/bothのいずれかです"})
-    strix_llm = (body.get("strix_llm") or "groq/llama-3.1-8b-instant").strip()
-    result = await github_dispatch_pentest(target, strix_llm)
+    strix_llm_candidates = (body.get("strix_llm_candidates")
+                            or "groq/llama-3.1-8b-instant,groq/llama-3.3-70b-versatile,mistral/mistral-small-latest").strip()
+    result = await github_dispatch_pentest(target, strix_llm_candidates)
     if not result.get("ok"):
         return JSONResponse(status_code=502, content=result)
     return result
@@ -1521,6 +1531,20 @@ async def cli_command(body: dict):
         from engine.ssh_cli_agent import ensure_ssh_cli_agent
         ensure_ssh_cli_agent(device_id, device_sessions, _run_cli_sync)
 
+    # ── Juniper: commitで"set system services netconf ssh"が確定した後に
+    # 実NETCONFリスナーを起動する(上のSSHトリガーと全く同じ理由・同じ
+    # タイミングで行う必要がある)。これが無いと(CLAUDE.mdの既知ギャップ
+    # だった)netmikoのSSH-over-CLIドライバは繋がるがjunipernetworks.junos
+    # Ansibleモジュール(既定でansible_connection: netconf)は接続できな
+    # かった。Cisco/Catalystの"netconf-yang"と同じ ensure_netconf_agent
+    # を使い、state.netconf_enabledを見る。
+    if state.device_type == 'juniper' and command.strip().lower() in ('commit', 'commit and-quit') \
+            and getattr(state, 'netconf_enabled', False) \
+            and 'system services netconf ssh' in getattr(state, 'junos_committed', []):
+        from engine.netconf_agent import ensure_netconf_agent
+        ensure_netconf_agent(device_id, device_sessions,
+                             on_change=lambda: _register_icmp(device_id))
+
     # ── Si-R/SR-S: 投入した設定コマンドをキャプチャ（show running-config で忠実再現）──
     if state.device_type in ('sir', 'srs'):
         _capture_sir_config(state, command)
@@ -1586,6 +1610,7 @@ async def cli_command(body: dict):
             await _flap_interface_up(device_id, state, iface_for_flap)
 
     if re.search(r'ip\s+addr(?:ess)?|ip\s+route|remote\s+\d+\s+ip\s+route|'
+                 r'ipv6\s+addr(?:ess)?|ipv6\s+route|'  # IPv6アドレス/スタティック経路
                  r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address|'
                  r'config\s+ipif|'  # APRESIA: "config ipif System <ip>/<prefix>"
                  r'ip\s+lan\d+\s+address|'  # Yamaha RTX: "ip lan1 address ..."
@@ -2976,6 +3001,25 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             buf.append({'type': 'redist_log',
                         'message': f'再配信: {source} → {target} '
                                    f'({count}経路を{target.upper()}に注入)'})
+        return
+
+    # ── IPv6スタティックルート ──
+    # "ipv6 route 2001:db8:2::/64 2001:db8::2" (実機Cisco IOS構文のまま)
+    ipv6_route = re.match(
+        r'^(no\s+)?ipv6\s+route\s+([0-9A-Fa-f:]+)/(\d+)\s+([0-9A-Fa-f:]+)', c)
+    if ipv6_route:
+        is_no = bool(ipv6_route.group(1))
+        dest = ipv6_route.group(2)
+        prefix = int(ipv6_route.group(3))
+        next_hop = ipv6_route.group(4)
+        try:
+            dest = str(ipaddress.ip_network(f'{dest}/{prefix}', strict=False).network_address)
+        except ValueError:
+            pass
+        if is_no:
+            ipv6_engine.remove_static_route(device_id, dest, prefix)
+        else:
+            ipv6_engine.add_static_route(device_id, dest, prefix, next_hop)
         return
 
     # ── スタティックルート / フローティングスタティック ──
@@ -4530,10 +4574,18 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
         return _format_show_snmp(state)
 
     # ── show crypto ipsec sa (DPD状態対応) ──
+    # DPD(crypto isakmp keepalive)専用のicmp_engine.ipsec_tunnelsに何も
+    # 無い場合、以前はここで無条件に「There are no ipsec sas.」を返して
+    # いた——DPDを設定していない通常のIPsecネゴシエーション
+    # (state.ipsec_peers、engine/rules.pyの_ios_show_crypto/
+    # _asa_show_crypto_ipsec_saが実際のSAをレンダリングできる)がある
+    # 場合でも握りつぶしていたバグ(ASA PPPoE機能追加時に発見、当時は
+    # スコープ外として記録)。sa_listが空のときはNoneを返してRuleEngine
+    # 側のハンドラに処理を委ねる。
     if re.match(r'^show\s+crypto\s+ipsec\s+sa', c) and state.device_type in ('cisco', 'catalyst', 'asa'):
         sa_list = icmp_engine.get_ipsec_sa_status(device_id)
         if not sa_list:
-            return 'There are no ipsec sas.'
+            return None
         import random as _rand
         lines = []
         cmap_if = getattr(state, 'ipsec_crypto', {}).get('crypto_map_interface', {})
@@ -4725,6 +4777,23 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     # ── ACL / パケットフィルタ表示 ──
     if re.match(r'^show\s+(ip\s+)?access-list', c) or re.match(r'^show\s+acl', c):
         return ipfilter_engine.format_show_acl(device_id, state.device_type)
+
+    # ── IPv6ルーティングテーブル（直結+スタティックのみ。v1スコープ）──
+    if re.match(r'^show\s+ipv6\s+route', c):
+        connected = ipv6_engine.connected.get(device_id, [])
+        statics = ipv6_engine.static_routes.get(device_id, [])
+        total = len(connected) + len(statics)
+        lines = [f'IPv6 Routing Table - default - {total} entries',
+                 'Codes: C - Connected, L - Local, S - Static']
+        for entry in connected:
+            lines.append(f'C   {entry["network"]}/{entry["prefix"]} [0/0]')
+            lines.append(f'     via {entry["interface"]}, directly connected')
+        for r in statics:
+            lines.append(f'S   {r["dest"]}/{r["prefix"]} [1/0]')
+            lines.append(f'     via {r["next_hop"]}')
+        if total == 0:
+            return 'IPv6 Routing Table - default - 0 entries'
+        return '\n'.join(lines)
 
     # ── 統合ルーティングテーブル（スタティック+動的、AD比較済み）──
     # スタティックルートか動的ルートがあればRIBエンジンの出力を使う
@@ -5363,7 +5432,7 @@ def _build_running_config(device_id: str, state) -> str:
                 lines.append('  bgp rpki invalid-drop')
             shown_neighbor_ips = set()
             for sid, sess in bn.get('sessions', {}).items():
-                peer_ip = bn.get('_neighbor_ips', {}).get(sid, sess.neighbor_id)
+                peer_ip = sess.neighbor_ip or sess.neighbor_id
                 lines.append(f'  neighbor {peer_ip} remote-as {sess.remote_as}')
                 if sess.reflector_client:
                     lines.append(f'  neighbor {peer_ip} route-reflector-client')
@@ -5800,7 +5869,7 @@ def _build_running_config(device_id: str, state) -> str:
                 lines.append(' bgp rpki invalid-drop')
             shown_neighbor_ips = set()
             for nid, sess in bn['sessions'].items():
-                peer_ip = '10.0.0.2'
+                peer_ip = sess.neighbor_ip or nid
                 lines.append(f' neighbor {peer_ip} remote-as {sess.remote_as}')
                 if sess.reflector_client:
                     lines.append(f' neighbor {peer_ip} route-reflector-client')
@@ -6026,10 +6095,9 @@ def _build_running_config(device_id: str, state) -> str:
             bn = bgp_engine.nodes.get(device_id)
             if bn and bn.get('local_as'):
                 lines.append(f'router bgp {bn["local_as"]}')
-                neighbor_ips = bn.get('_neighbor_ips', {})
                 shown_neighbor_ips = set()
                 for sid, sess in bn.get('sessions', {}).items():
-                    peer_ip = neighbor_ips.get(sid, sess.neighbor_id)
+                    peer_ip = sess.neighbor_ip or sess.neighbor_id
                     lines.append(f' neighbor {peer_ip} remote-as {sess.remote_as}')
                     shown_neighbor_ips.add(peer_ip)
                 for nbr_ip, remote_as in getattr(state, '_bgp_configured_neighbors', {}).items():
@@ -6480,6 +6548,14 @@ async def handle_icmp(device_id: str, command: str, state: DeviceState):
     """ping / traceroute を実到達性判定で処理"""
     c = command.lower().strip()
 
+    # ping (IPv6)。IPv4のARP/NAT/データプレーン学習は非対象(v1スコープ外)。
+    m6 = re.match(r'^ping\s+(?:ipv6\s+)?([0-9A-Fa-f:]+:[0-9A-Fa-f:]*)', c)
+    if m6:
+        dest = m6.group(1)
+        _register_icmp(device_id)
+        result = ipv6_engine.ping(device_id, dest, count=5)
+        return _format_ping(dest, result, state.device_type)
+
     # ping
     m = re.match(r'^ping\s+([\d.]+)', c)
     if m:
@@ -6493,6 +6569,14 @@ async def handle_icmp(device_id: str, command: str, state: DeviceState):
         # データプレーン: MAC学習 + カウンタ更新
         _learn_dataplane(device_id, dest, result)
         return _format_ping(dest, result, state.device_type)
+
+    # traceroute / tracert (IPv6)
+    m6t = re.match(r'^(?:traceroute|tracert)\s+(?:ipv6\s+)?([0-9A-Fa-f:]+:[0-9A-Fa-f:]*)', c)
+    if m6t:
+        dest = m6t.group(1)
+        _register_icmp(device_id)
+        result = ipv6_engine.traceroute(device_id, dest)
+        return _format_traceroute(dest, result)
 
     # traceroute / tracert
     m = re.match(r'^(?:traceroute|tracert)\s+([\d.]+)', c)
@@ -6976,11 +7060,16 @@ def _register_icmp(device_id: str):
     if not state:
         return
     interfaces = {}
+    ipv6_interfaces = {}
     for ifname, info in state.interfaces.items():
         if info.get('ip'):
             interfaces[ifname] = {'ip': info['ip'],
                                   'prefix': info.get('prefix', 24)}
+        if info.get('ipv6'):
+            ipv6_interfaces[ifname] = {'ip': info['ipv6'],
+                                       'prefix': info.get('ipv6_prefix', 64)}
     icmp_engine.register_device(device_id, state.hostname, interfaces)
+    ipv6_engine.register_device(device_id, state.hostname, ipv6_interfaces)
     # サブインタフェースの802.1Qタグを登録。両端のタグが食い違っていれば
     # 同一セグメントとみなさない（実機ではフレームが素通りしないため）
     vnet.register_subif_vlans(device_id, {

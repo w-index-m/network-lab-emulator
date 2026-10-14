@@ -7854,6 +7854,9 @@ Configuration Revision            : 5"""
             if c == 'set system services ssh':
                 self._junos_stage(state, 'system services ssh')
                 return ''
+            if c == 'set system services netconf ssh':
+                self._junos_stage(state, 'system services netconf ssh')
+                return ''
             m_del = re.match(r'^delete\s+(.+)$', c)
             if m_del:
                 path = m_del.group(1).strip()
@@ -7937,6 +7940,17 @@ Configuration Revision            : 5"""
                 # Cisco系のcrypto key generate rsaと同じ役割)が
                 # state.ssh_rsa_key を見て行う。ここではフラグだけ立てる。
                 state.ssh_rsa_key = True
+                continue
+            if line == 'system services netconf ssh':
+                # netmikoのjuniper_junosドライバ(SSH-over-CLI)はこれで
+                # 動くが、junipernetworks.junos Ansibleモジュールは
+                # NETCONFトランスポートを前提にしており、このコマンド
+                # ("set system services netconf ssh")が無いと接続できない
+                # (CLAUDE.mdの既知ギャップ)。Cisco側のnetconf-yangと同じ
+                # state.netconf_enabledフラグを立て、実リスナー起動は
+                # SSHと同じ理由でapp.py側(commit後)に任せる。
+                state.netconf_enabled = True
+                continue
         state.junos_candidate = []
 
     def _junos_render_hierarchy(self, lines) -> str:
@@ -9208,48 +9222,62 @@ Key Version         : A
         return '\n'.join(lines)
 
     def _asa_show_crypto_ipsec_sa(self, state: DeviceState) -> str:
-        if not state.ipsec_peers:
+        # 元は state.ipsec_peers に何か1件でもあれば(ネゴシエーション中/
+        # 失敗済みでも)先頭のpeerを無条件に"確立済み"として表示していた。
+        # phase2 == 'MATURE'(実際に確立したタイミングでike_engine.pyが
+        # 立てるフラグ、IOS側のshow crypto isakmp/ipsec saと同じ判定)の
+        # peerだけをESTABLISHEDとして出すよう修正。
+        peers = getattr(state, 'ipsec_peers', {})
+        estab = {ip: p for ip, p in peers.items() if p.get('phase2') == 'MATURE'}
+        if not estab:
             return 'There are no ipsec sas.'
-        peer = list(state.ipsec_peers.keys())[0]
-        lines = [
-            'interface: outside',
-            '    Crypto map tag: OUTSIDE_MAP, seq num: 10, local addr: 203.0.113.1',
-            '',
-            '      local  ident  (addr/mask/prot/port): (192.168.1.0/255.255.255.0/0/0)',
-            '      remote ident (addr/mask/prot/port): (10.1.1.0/255.255.255.0/0/0)',
-            f'      current_peer: {peer}',
-            '',
-            '      #pkts encaps: 12345, #pkts encrypt: 12345, #pkts digest: 12345',
-            '      #pkts decaps: 12200, #pkts decrypt: 12200, #pkts verify: 12200',
-            '      #pkts compressed: 0, #pkts decompressed: 0',
-            '      #pkts not compressed: 12345, #pkts comp failed: 0, #pkts decomp failed: 0',
-            '      #pre-frag successes: 0, #pre-frag failures: 0, #fragments created: 0',
-            '      #PMTUs sent: 0, #PMTUs rcvd: 0, #decapsulated frgs needing reassembly: 0',
-            '      #TFC rcvd: 0, #TFC sent: 0',
-            '      #Valid ICMP Errors rcvd: 0, #Invalid ICMP Errors rcvd: 0',
-            '      #send errors: 0, #recv errors: 0',
-            '',
-            f'      local crypto endpt.: 203.0.113.1/0, remote crypto endpt.: {peer}/0',
-            '      path mtu 1500, ipsec overhead 74(44), media mtu 1500',
-            '      PMTU time remaining (sec): 0, DF policy: copy-df',
-            '      ICMP error validation: disabled, TFC packets: disabled',
-            '      current outbound spi: 0xA1B2C3D4',
-            '      current inbound spi : 0xD4C3B2A1',
-            '',
-            '    inbound esp sas:',
-            '      spi: 0xD4C3B2A1 (3569939105)',
-            '        transform: esp-aes-256 esp-sha-hmac no compression',
-            '        in use settings =={Tunnel, TFC pessimize}',
-            '        slot: 0, conn_id: 12288, crypto-map: OUTSIDE_MAP',
-            '        sa timing: remaining key lifetime (kB/sec): (4374000/28799)',
-            '',
-            '    outbound esp sas:',
-            '      spi: 0xA1B2C3D4 (2712847316)',
-            '        transform: esp-aes-256 esp-sha-hmac no compression',
-            '        in use settings =={Tunnel, TFC pessimize}',
-            '        slot: 0, conn_id: 12288, crypto-map: OUTSIDE_MAP',
-            '        sa timing: remaining key lifetime (kB/sec): (4374000/28799)',
-        ]
+        local_ip = next((i.get('ip', '') for i in state.interfaces.values()
+                          if i.get('ip') and i.get('ip') != '127.0.0.1'), '203.0.113.1')
+        lines = []
+        for peer, p in estab.items():
+            spi_in  = p.get('spi_in',  f'0x{random.randint(0,0xffffffff):08x}')
+            spi_out = p.get('spi_out', f'0x{random.randint(0,0xffffffff):08x}')
+            sa_rem  = p.get('sa_lifetime_remaining', 28799)
+            lines += [
+                'interface: outside',
+                f'    Crypto map tag: OUTSIDE_MAP, seq num: 10, local addr: {local_ip}',
+                '',
+                '      local  ident  (addr/mask/prot/port): (192.168.1.0/255.255.255.0/0/0)',
+                '      remote ident (addr/mask/prot/port): (10.1.1.0/255.255.255.0/0/0)',
+                f'      current_peer: {peer}',
+                '',
+                '      #pkts encaps: 12345, #pkts encrypt: 12345, #pkts digest: 12345',
+                '      #pkts decaps: 12200, #pkts decrypt: 12200, #pkts verify: 12200',
+                '      #pkts compressed: 0, #pkts decompressed: 0',
+                '      #pkts not compressed: 12345, #pkts comp failed: 0, #pkts decomp failed: 0',
+                '      #pre-frag successes: 0, #pre-frag failures: 0, #fragments created: 0',
+                '      #PMTUs sent: 0, #PMTUs rcvd: 0, #decapsulated frgs needing reassembly: 0',
+                '      #TFC rcvd: 0, #TFC sent: 0',
+                '      #Valid ICMP Errors rcvd: 0, #Invalid ICMP Errors rcvd: 0',
+                '      #send errors: 0, #recv errors: 0',
+                '',
+                f'      local crypto endpt.: {local_ip}/0, remote crypto endpt.: {peer}/0',
+                '      path mtu 1500, ipsec overhead 74(44), media mtu 1500',
+                '      PMTU time remaining (sec): 0, DF policy: copy-df',
+                '      ICMP error validation: disabled, TFC packets: disabled',
+                f'      current outbound spi: {spi_out}',
+                f'      current inbound spi : {spi_in}',
+                '',
+                '    inbound esp sas:',
+                f'      spi: {spi_in} ({int(spi_in, 16)})',
+                '        transform: esp-aes-256 esp-sha-hmac no compression',
+                '        in use settings =={Tunnel, TFC pessimize}',
+                '        slot: 0, conn_id: 12288, crypto-map: OUTSIDE_MAP',
+                f'        sa timing: remaining key lifetime (kB/sec): (4374000/{sa_rem})',
+                '',
+                '    outbound esp sas:',
+                f'      spi: {spi_out} ({int(spi_out, 16)})',
+                '        transform: esp-aes-256 esp-sha-hmac no compression',
+                '        in use settings =={Tunnel, TFC pessimize}',
+                '        slot: 0, conn_id: 12288, crypto-map: OUTSIDE_MAP',
+                f'        sa timing: remaining key lifetime (kB/sec): (4374000/{sa_rem})',
+                '',
+            ]
         return '\n'.join(lines)
 
     def _asa_show_service_policy(self, state: DeviceState) -> str:
