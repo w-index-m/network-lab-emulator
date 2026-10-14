@@ -13,7 +13,7 @@ import json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
-from tools.prometheus_exporter import build_metrics_text, _load_watchlist
+from tools.prometheus_exporter import build_metrics_text, _load_watchlist, build_strix_metrics_text
 
 
 def _sample_dashboard():
@@ -130,6 +130,112 @@ def test_load_watchlist_malformed_json_returns_empty_set(tmp_path):
     p = tmp_path / 'broken.json'
     p.write_text('{not valid json', encoding='utf-8')
     assert _load_watchlist(str(p)) == set()
+
+
+# ── build_strix_metrics_text() ──
+# ユーザー提案「それを、GrafanaやPrometheusでステータスを取ったらどうなるかな」
+# への対応。/pentest操作パネルと同じ/api/pentest/runsのレスポンス形状を
+# Prometheusメトリクスにする。GITHUB_TOKEN未設定等でエンドポイント自体が
+# 失敗している場合は空文字列を返し(SNMP側のメトリクス公開は止めない)、
+# 回帰テストはネットワーク非依存のまま成立する。
+
+def test_ok_false_returns_empty_string():
+    assert build_strix_metrics_text({'ok': False, 'error': 'GITHUB_TOKENが設定されていません'}) == ''
+
+
+def test_no_runs_yet_produces_zero_counts_no_crash():
+    text = build_strix_metrics_text({'ok': True, 'runs': []})
+    assert 'netlab_strix_last_run_success 0' in text
+    assert 'netlab_strix_last_run_in_progress 0' in text
+    assert 'netlab_strix_recent_runs_total{conclusion="success"} 0' in text
+    assert 'netlab_strix_recent_runs_total{conclusion="failure"} 0' in text
+
+
+def test_latest_run_success_is_reflected():
+    data = {'ok': True, 'runs': [
+        {'id': 2, 'status': 'completed', 'conclusion': 'success'},
+        {'id': 1, 'status': 'completed', 'conclusion': 'failure'},
+    ]}
+    text = build_strix_metrics_text(data)
+    assert 'netlab_strix_last_run_success 1' in text
+    assert 'netlab_strix_last_run_in_progress 0' in text
+    assert 'netlab_strix_recent_runs_total{conclusion="success"} 1' in text
+    assert 'netlab_strix_recent_runs_total{conclusion="failure"} 1' in text
+    assert 'netlab_strix_run_info{run_id="2",status="completed",conclusion="success"} 1' in text
+    assert 'netlab_strix_run_info{run_id="1",status="completed",conclusion="failure"} 1' in text
+
+
+def test_in_progress_run_is_reflected():
+    data = {'ok': True, 'runs': [{'id': 3, 'status': 'in_progress', 'conclusion': None}]}
+    text = build_strix_metrics_text(data)
+    assert 'netlab_strix_last_run_in_progress 1' in text
+    assert 'netlab_strix_last_run_success 0' in text
+    assert 'netlab_strix_run_info{run_id="3",status="in_progress",conclusion="none"} 1' in text
+
+
+# ── netlab_strix_last_success_age_seconds ──
+# 「それを、GrafanaやPrometheusでステータスを取ったらどうなるかな」への
+# 回答として提案した「失敗だけでなく長期停滞にも気づけるstalenessメトリ
+# クス」。成功run無し = -1、成功runあり = 実際の経過秒数、を固定する。
+
+def test_no_successful_run_ever_reports_minus_one():
+    data = {'ok': True, 'runs': [{'id': 1, 'status': 'completed', 'conclusion': 'failure'}]}
+    text = build_strix_metrics_text(data)
+    assert 'netlab_strix_last_success_age_seconds -1' in text
+
+
+def test_no_runs_at_all_reports_minus_one():
+    text = build_strix_metrics_text({'ok': True, 'runs': []})
+    assert 'netlab_strix_last_success_age_seconds -1' in text
+
+
+def test_recent_success_reports_a_small_positive_age():
+    import datetime
+    recent = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(seconds=30)).isoformat().replace('+00:00', 'Z')
+    data = {'ok': True, 'runs': [
+        {'id': 2, 'status': 'completed', 'conclusion': 'success', 'created_at': recent},
+    ]}
+    text = build_strix_metrics_text(data)
+    for line in text.splitlines():
+        if line.startswith('netlab_strix_last_success_age_seconds '):
+            age = int(line.split()[1])
+            assert 25 <= age <= 60
+            break
+    else:
+        pytest.fail('netlab_strix_last_success_age_seconds 行が見つからない')
+
+
+def test_malformed_created_at_falls_back_to_minus_one():
+    data = {'ok': True, 'runs': [
+        {'id': 2, 'status': 'completed', 'conclusion': 'success', 'created_at': 'not-a-date'},
+    ]}
+    text = build_strix_metrics_text(data)
+    assert 'netlab_strix_last_success_age_seconds -1' in text
+
+
+def test_updated_at_is_preferred_over_created_at():
+    """createdはDispatch時刻のまま変わらないため、completedになった時点
+    でも更新されるupdated_atを優先して使うことの固定(実行時間が長い
+    workflowだとcreated_at基準では経過秒数を実際より長く見積もって
+    しまうバグを修正した際に追加)。"""
+    import datetime
+    old_created = (datetime.datetime.now(datetime.timezone.utc)
+                   - datetime.timedelta(hours=1)).isoformat().replace('+00:00', 'Z')
+    recent_updated = (datetime.datetime.now(datetime.timezone.utc)
+                      - datetime.timedelta(seconds=30)).isoformat().replace('+00:00', 'Z')
+    data = {'ok': True, 'runs': [
+        {'id': 2, 'status': 'completed', 'conclusion': 'success',
+         'created_at': old_created, 'updated_at': recent_updated},
+    ]}
+    text = build_strix_metrics_text(data)
+    for line in text.splitlines():
+        if line.startswith('netlab_strix_last_success_age_seconds '):
+            age = int(line.split()[1])
+            assert 25 <= age <= 60, f'created_atが使われている(age={age})'
+            break
+    else:
+        pytest.fail('netlab_strix_last_success_age_seconds 行が見つからない')
 
 
 if __name__ == '__main__':

@@ -7,3 +7,24 @@ groups:
           severity: warning
         annotations:
           summary: "linkDown trapを受信しました"
+
+  # Strix(strix-pentest.yml)ペンテストの実行状況。
+  # ユーザー提案「GrafanaアラートやGrafana Lokiと連携してほしい」への対応。
+  # tools/prometheus_exporter.py が /api/pentest/runs をポーリングして
+  # 公開する netlab_strix_* メトリクスを評価する。
+  - name: strix-pentest
+    rules:
+      - alert: StrixPentestRunFailed
+        # has_runs==0(一度もDispatchされていない)の時にlast_run_success==0
+        # だけで誤発火しないよう、実際にrunがあることをゲートする。
+        expr: netlab_strix_has_runs == 1 and netlab_strix_last_run_success == 0 and netlab_strix_last_run_in_progress == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "直近のStrixペンテスト実行が失敗しました"
+      - alert: StrixPentestStale
+        expr: netlab_strix_last_success_age_seconds > 604800 or netlab_strix_last_success_age_seconds < 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Strixペンテストが7日間(または一度も)成功していません"

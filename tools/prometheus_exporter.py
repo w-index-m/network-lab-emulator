@@ -28,6 +28,7 @@ Windowsの場合は tools/run_prometheus_exporter.bat から起動できる。
 """
 
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -72,6 +73,76 @@ def _fetch_dashboard(emulator_url: str, token: str) -> dict:
         req.add_header('X-Session-Token', token)
     with urllib.request.urlopen(req, timeout=5) as r:
         return json.loads(r.read().decode('utf-8'))
+
+
+def _fetch_pentest_runs(emulator_url: str, token: str) -> dict:
+    """/pentest操作パネルが使っているのと同じ /api/pentest/runs を叩き、
+    Strix(strix-pentest.yml)の直近の実行状況を取得する。"""
+    req = urllib.request.Request(f'{emulator_url}/api/pentest/runs')
+    if token:
+        req.add_header('X-Session-Token', token)
+    with urllib.request.urlopen(req, timeout=5) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+
+def build_strix_metrics_text(runs_data: dict) -> str:
+    """StrixペンテストのGitHub Actions実行状況をPrometheusメトリクスにする。
+    「それを、GrafanaやPrometheusでステータスを取ったらどうなるかな」という
+    ユーザー提案への対応——まずは既存の/pentestパネルが表示している情報
+    (直近runの成功/失敗/実行中)をそのままメトリクス化するところから。
+    GITHUB_TOKEN未設定等で/api/pentest/runsが失敗する場合は空文字列を返し、
+    SNMP側のメトリクスには影響させない(ベストエフォート)。"""
+    if not runs_data.get('ok'):
+        return ''
+    runs = runs_data.get('runs', [])
+    lines = []
+    lines.append('# HELP netlab_strix_has_runs Whether at least one Strix workflow run has ever been observed (1) or not (0, e.g. never dispatched yet)')
+    lines.append('# TYPE netlab_strix_has_runs gauge')
+    lines.append(f'netlab_strix_has_runs {1 if runs else 0}')
+
+    lines.append('# HELP netlab_strix_run_info Most recent Strix pentest workflow runs (info-style metric, value is always 1)')
+    lines.append('# TYPE netlab_strix_run_info gauge')
+    for run in runs:
+        status = _escape_label(run.get('status', ''))
+        conclusion = _escape_label(run.get('conclusion') or 'none')
+        lines.append(f'netlab_strix_run_info{{run_id="{run["id"]}",status="{status}",conclusion="{conclusion}"}} 1')
+
+    lines.append('# HELP netlab_strix_last_run_success Whether the most recent completed Strix run succeeded (1) or not (0)')
+    lines.append('# TYPE netlab_strix_last_run_success gauge')
+    lines.append(f'netlab_strix_last_run_success {1 if runs and runs[0].get("conclusion") == "success" else 0}')
+
+    lines.append('# HELP netlab_strix_last_run_in_progress Whether the most recent Strix run is still queued/running (1) or finished (0)')
+    lines.append('# TYPE netlab_strix_last_run_in_progress gauge')
+    lines.append(f'netlab_strix_last_run_in_progress {1 if runs and runs[0].get("status") != "completed" else 0}')
+
+    success_count = sum(1 for r in runs if r.get('conclusion') == 'success')
+    failure_count = sum(1 for r in runs if r.get('conclusion') == 'failure')
+    lines.append('# HELP netlab_strix_recent_runs_total Count of recent Strix runs by conclusion (sliding window of the last few runs returned by /api/pentest/runs, not a true cumulative counter)')
+    lines.append('# TYPE netlab_strix_recent_runs_total gauge')
+    lines.append(f'netlab_strix_recent_runs_total{{conclusion="success"}} {success_count}')
+    lines.append(f'netlab_strix_recent_runs_total{{conclusion="failure"}} {failure_count}')
+
+    # 「失敗した」だけでなく「そもそも長期間実行されていない」にも気づける
+    # ように、最後に成功したrunからの経過秒数を公開する(Grafanaの
+    # 「成功が無い/停滞している」アラート向け)。成功runが1件も無い場合は
+    # -1を返す(「0」は紛らわしい——たった今成功した場合と区別できない)。
+    success_runs = [r for r in runs if r.get('conclusion') == 'success']
+    lines.append('# HELP netlab_strix_last_success_age_seconds Seconds since the most recent successful Strix run completed (-1 if there has never been a successful run)')
+    lines.append('# TYPE netlab_strix_last_success_age_seconds gauge')
+    age = -1
+    if success_runs:
+        try:
+            # created_at(Dispatch時刻)ではなくupdated_at(completedに
+            # なった時点でも更新される)を使う——createdのままだと、
+            # 実行時間の分だけ経過秒数が実際より長く出てしまう。
+            ts = success_runs[0].get('updated_at') or success_runs[0]['created_at']
+            completed = datetime.datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            age = int((datetime.datetime.now(datetime.timezone.utc) - completed).total_seconds())
+        except (KeyError, ValueError):
+            age = -1
+    lines.append(f'netlab_strix_last_success_age_seconds {age}')
+
+    return '\n'.join(lines) + '\n'
 
 
 def build_metrics_text(data: dict, watchlist: set = frozenset()) -> str:
@@ -181,12 +252,22 @@ class MetricsHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def poll_loop(emulator_url: str, token: str, interval: int, watchlist_path: str):
+def poll_loop(emulator_url: str, token: str, interval: int, watchlist_path: str, include_strix: bool = True):
     while True:
         try:
             data = _fetch_dashboard(emulator_url, token)
             watchlist = _load_watchlist(watchlist_path)
-            _last_payload['text'] = build_metrics_text(data, watchlist)
+            text = build_metrics_text(data, watchlist)
+            # Strixの実行状況はベストエフォート: GITHUB_TOKEN未設定等で
+            # /api/pentest/runsが失敗しても、SNMP側のメトリクスは
+            # 正常に公開し続ける(片方の失敗でexporter全体を止めない)。
+            if include_strix:
+                try:
+                    strix_data = _fetch_pentest_runs(emulator_url, token)
+                    text += build_strix_metrics_text(strix_data)
+                except Exception as e:
+                    print(f'[exporter] Strix実行状況の取得失敗(SNMP側には影響なし): {e}')
+            _last_payload['text'] = text
             _last_payload['error'] = None
             _last_payload['fetched_at'] = time.time()
         except urllib.error.HTTPError as e:
@@ -210,6 +291,8 @@ def main():
     parser.add_argument('--watchlist', default=_DEFAULT_WATCHLIST,
                         help='tools/nl_monitor_control.py の監視対象リストJSON'
                              f'(既定: {_DEFAULT_WATCHLIST})')
+    parser.add_argument('--no-strix', action='store_true',
+                        help='/api/pentest/runs(Strixペンテストの実行状況)のポーリングを無効化する')
     args = parser.parse_args()
 
     print('\n' + '=' * 70)
@@ -222,7 +305,8 @@ def main():
 
     import threading
     t = threading.Thread(target=poll_loop,
-                         args=(args.emulator_url, args.token, args.interval, args.watchlist),
+                         args=(args.emulator_url, args.token, args.interval, args.watchlist,
+                               not args.no_strix),
                          daemon=True)
     t.start()
 

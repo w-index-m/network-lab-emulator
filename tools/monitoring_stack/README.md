@@ -84,6 +84,53 @@ curl -X POST http://localhost:8000/api/cli -H 'Content-Type: application/json' \
 | エミュレーター(app.py) | 8000 |
 | snmp_trap_receiver（trap受信） | UDP 1162 |
 | snmp_trap_receiver（/metrics） | 9162 |
+| prometheus_exporter（/metrics、Strixステータス含む） | 9877 |
 | Prometheus | 9090 |
 | Alertmanager | 9093 |
 | webhook_catcher | 9199 |
+
+## Strix(strix-pentest.yml)ペンテスト結果の監視
+
+ユーザー提案「GrafanaアラートやGrafana Lokiと連携してほしい」への対応。
+`/pentest`操作パネル・`tools/prometheus_exporter.py`が使っているのと
+同じ`/api/pentest/runs`(GitHub Actions経由のStrix実行状況)を、
+Prometheusメトリクスとアラート、Lokiログの両方に流せるようにした。
+
+```
+GitHub Actions(strix-pentest.yml)
+   │  GET /api/pentest/runs (app.pyがGitHub Actions REST APIを代理)
+   ▼
+tools/prometheus_exporter.py ── /metrics (netlab_strix_*) ──▶ Prometheus
+                             └─ (本ディレクトリのalert_rules.yml: strix-pentest グループ) ──▶ Alertmanager
+tools/strix_status_to_loki.py ── 新規completed runのみ ──▶ Loki
+```
+
+### メトリクス(`netlab_strix_*`、exporter起動には`GITHUB_TOKEN`が必要)
+
+| メトリクス | 意味 |
+|---|---|
+| `netlab_strix_has_runs` | 一度でもrunが観測されたか(1/0) |
+| `netlab_strix_last_run_success` | 直近runが成功したか(1/0) |
+| `netlab_strix_last_run_in_progress` | 直近runが実行中/待機中か(1/0) |
+| `netlab_strix_last_success_age_seconds` | 最後に成功したrunからの経過秒数(成功run無しなら-1) |
+| `netlab_strix_recent_runs_total{conclusion}` | 直近取得分(既定5件)中の成功/失敗件数 |
+
+### アラート(`alert_rules.yml`の`strix-pentest`グループ)
+
+- `StrixPentestRunFailed`: 直近runが失敗で確定している場合(`has_runs==1`で
+  ゲートし、一度もDispatchしていない状態での誤発火を防ぐ)
+- `StrixPentestStale`: 成功runが7日間無い、または一度も無い場合
+
+### 起動(上記のPrometheus/Alertmanagerに追加して)
+
+```bash
+# exporter(Strixステータスも含めてポーリング)
+python tools/prometheus_exporter.py --port 9877
+
+# Lokiへの転送(Lokiが別途動いている前提)
+python tools/strix_status_to_loki.py --loki-url http://localhost:3100
+```
+
+`/metrics`で`netlab_strix_last_run_success 0`になったタイミングで
+`StrixPentestRunFailed`がfiringになり、既存の`webhook_catcher.py`に着弾
+する(SNMP trapの時と同じ通知経路をそのまま使う)。
