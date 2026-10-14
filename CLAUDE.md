@@ -1572,3 +1572,197 @@ GitHub MCP連携用に既に設定されていたトークンを`app.py`がそ�
 安全なフォールバック・不正な`target`の400・正常系のレスポンス整形を
 固定する(実際のGitHub APIへの到達性はこのサンドボックスから毎回
 保証されるものではないため、回帰テスト自体はネットワーク非依存)。
+
+**「ネットワークラボの改善点ありますか？」への回答として提案し、
+実装を依頼された5件**: ユーザーに既知の未修正課題を提案したところ
+「1～5の対応お願いします」とまとめて依頼された。
+
+1. **`show running-config`のBGP neighbor行が常に`10.0.0.2`を表示する
+   バグ(修正)**: `app.py`の3箇所(IOS/NX-OS/Si-R向けの`show
+   running-config`ブロックそれぞれ)が、実際の設定IPを無視して
+   ハードコードされた`'10.0.0.2'`、または常にフォールバックするだけの
+   未使用`bn['_neighbor_ips']`(一度も書き込まれていない死に辞書)を
+   参照していた。`engine/protocols.py`の`BgpSession`には元々
+   `neighbor_ip`フィールド(「設定上のネイバーIP（表示用）」)が
+   存在し`add_neighbor()`で正しく設定されていたにも関わらず、表示側
+   3箇所がどれもそれを見ていなかった。`peer_ip = sess.neighbor_ip or
+   nid`(またはSi-R側は`or sess.neighbor_id`)に統一して修正。
+
+2. **ASAの`show crypto ipsec sa`がDPD専用トラッキングしか見ていない
+   バグ(修正)**: `app.py`の`show crypto ipsec sa`ハンドラが
+   `icmp_engine.get_ipsec_sa_status()`(DPD=`crypto isakmp keepalive`
+   設定時のみ使われるトラッキング)が空なら無条件に"There are no
+   ipsec sas."を即返していたため、DPDを設定しない通常のIPsec
+   ネゴシエーションが実際には確立していても(`state.ipsec_peers`に
+   反映されている)、二層ディスパッチの後続レイヤー
+   (`engine/rules.py`の`_ios_show_crypto`/`_asa_show_crypto_ipsec_sa`
+   ——どちらも`state.ipsec_peers`から正しくレンダリングできる実装が
+   既にあった)に一切処理が渡っていなかった(CLAUDE.mdの「二層
+   ディスパッチで先に処理されると下位が死ぬ」と全く同じ class の
+   問題)。空のときは`None`を返して後続層に処理を委ねるよう修正。
+   ついでに`_asa_show_crypto_ipsec_sa`自体にも見つかった実バグを修正:
+   `state.ipsec_peers`に何か1件でもあれば(ネゴシエーション中/失敗
+   済みでも)先頭のpeerを無条件に"確立済み"として表示していたのを、
+   IOS側と同じ`phase2 == 'MATURE'`判定でフィルタし、該当する全peerを
+   列挙するよう直した。
+
+3. **Juniper NETCONF未配線(実装)**: 既知ギャップ
+   (`junipernetworks.junos`系AnsibleモジュールはデフォルトでNETCONF
+   トランスポートを使うが、これまでJuniperの`set system services ssh`
+   (netmikoのSSH-over-CLI用)しか実装しておらず、NETCONFは未配線
+   だった)への対応。`_juniper_process`に`set system services netconf
+   ssh`を追加(SSHと同じステージ→commit→フラグ確定のパターン)、
+   `_junos_apply_commit`でcommit時に`state.netconf_enabled = True`を
+   立てる(Cisco/Catalystの既存`netconf-yang`と同じフラグ)。実リスナー
+   起動は、Juniper SSHの時と全く同じ理由(`handle_protocol_config`は
+   `rule_engine.process()`より前に走るため、まだ反映されていない旧IP
+   でbindしてしまう)で、`app.py`の`cli_command()`内、
+   `rule_engine.process()`実行後に`ensure_netconf_agent()`を呼ぶ
+   トリガーを追加。`engine/netconf_agent.py`の`ensure_netconf_agent()`
+   も`device_type not in ('cisco', 'catalyst')`のガードに`'juniper'`
+   を追加(これが無いと常に`None`を返して何も起動しなかった)。
+   Live-verified: 実際に`ncclient`(`pip install ncclient`)でJuniper
+   デバイスのNETCONFリスナーに接続し、`<hello>`交換(`server_
+   capabilities`が7件返る)・`get-config`で実際にcommit済みの
+   `ge-0/0/0`インタフェース(設定した実IP)がXMLで返ることを確認。
+   `tests/test_netmiko_ansible_compat.py`に`TestJuniperRealNetconf
+   Enablement`(5 tests)を追加: commit後のフラグ確定・commit前は
+   立たないこと・`show configuration | display set`への反映・実
+   リスナーが新しいcommit後のIPでbindすること・SSHだけ有効化した
+   場合にNETCONFリスナーが勝手に起動しないこと(2つの別々のトリガー
+   であることの固定)。
+
+4. **IPv6アドレッシング/ルーティング(実装)**: 既知ギャップ
+   (`engine/rules.py`の"ipv6"言及37件は全部見た目だけの固定応答で、
+   実ルーティングが無い)への対応。調べると`ipv6 address`/`ipv6
+   unicast-routing`は既に`state.interfaces[if]['ipv6']`へ実際に
+   反映されていた(CLAUDE.mdの以前の記述はやや不正確だった)——
+   無かったのは`ipv6 route`スタティック経路コマンド・`show ipv6
+   route`・ping/tracerouteのIPv6宛先認識の3つ。`engine/protocols.py`
+   に新設`Ipv6Engine`(`ipv6_engine`)が、直結経路の自動導出・
+   スタティック経路・実vnetトポロジーBFSによるマルチホップ到達性
+   判定(IPv4の`IcmpEngine`と同じ戻り値の形にして既存の
+   `_format_ping`/`_format_traceroute`をそのまま再利用)を担う。
+   IPv4側のACL/NAT/VRF/ICMP Redirect相当の機能はスコープ外
+   (v6プラス/MAP-E実装時と同じ現実的なカット)。**実装直後にテストで
+   見つけた実バグ2件**: (1) `app.py`の「設定コマンド実行後に
+   icmp_engineへ再登録する」トリガー正規表現が`ip\s+addr(?:ess)?`
+   だったため(「ip」の直後に空白を要求)、「ipv6 address」は
+   マッチせず、設定したIPv6アドレスがいつまでも`ipv6_engine`に
+   反映されない状態になっていた——`ipv6\s+addr(?:ess)?|ipv6\s+route`
+   を追加して解決。(2) `trace_path()`が同一サブネット直結到達
+   (送信元と宛先が同じ/64内)の場合、tracerouteの最終ホップに
+   宛先ではなく送信元自身のホスト名を表示してしまうバグをライブ
+   検証で発見——`_find_device_owning_addr(dest_addr)`で宛先を実際に
+   持つデバイスを引き直すよう修正。詳細と実機ライブ検証の全文
+   トランスクリプトは`docs/ipv6-routing.md`参照。
+   `tests/test_ipv6_routing.py`(12 tests)がアドレス設定の表示反映・
+   直結経路の自動導出・スタティック経路の追加/削除・直結ピアへの
+   ping/traceroute成功・未知の宛先への失敗・IPv4側への無影響・
+   マルチホップ到達性(スタティック経路あり/なし)を固定する。
+
+5. **Strixワークフローの LLM フォールバック(実装)**: run #1
+   (`--output`フラグ不一致)・run #2(デフォルトGroqモデル名が
+   `model_not_found`)と2回連続でDispatchが失敗していた問題への
+   対応。アプリ本体の`query_llm()`の`_LLM_CHAIN`(Groq→Mistral→
+   Ollama)と同じ考え方を`.github/scripts/run_strix_with_fallback.sh`
+   として持ち込んだ——`workflow_dispatch`の`strix_llm_candidates`
+   (カンマ区切り、既定`groq/llama-3.1-8b-instant,groq/llama-3.3-70b-
+   versatile,mistral/mistral-small-latest`)を先頭から順に試し、
+   モデル名のプレフィックス(`groq/`/`mistral/`/`openai/`)に応じて
+   対応するGitHub Secret(`GROQ_API_KEY`/`MISTRAL_API_KEY`/
+   `OPENAI_API_KEY`)を自動選択、未設定ならその候補をAPIキー無しで
+   `strix`を呼ばずにスキップする(`detect_groq()`/`detect_mistral()`
+   と同じ安全策)。`/pentest`操作パネル側のフィールド名も
+   `strix_llm`→`strix_llm_candidates`に合わせて更新(`app.py`の
+   `github_dispatch_pentest`/`api_pentest_dispatch`、
+   `static/pentest.html`)。ローカルでモックの`strix`コマンド
+   (1番目の候補で失敗・2番目で成功するよう仕込んだシェルスクリプト)
+   を使い、フォールバックが実際に次の候補へ移ること・全滅時に
+   `exit 1`すること・APIキー未設定の候補がスキップされることを
+   ライブ検証済み(実際のGroq/Mistral APIへの疎通はこのサンドボックス
+   から確認できないため、ロジック自体をモックで検証——実際のAPI疎通
+   を含む完全なgreen runの確認は次回Dispatch時)。詳細は
+   `docs/strix-pentest-integration.md`の「LLMフォールバック」節参照。
+
+**Strixペンテスト結果のPrometheus/Grafana/Loki連携**: ユーザー提案
+「それを、GrafanaやPrometheusでステータスを取ったらどうなるかな」→
+「GrafanaアラートやGrafanalokiと連携してほしい」への対応。既存の
+`/pentest`操作パネルが使っている`/api/pentest/runs`を、新しい監視の
+入口として再利用した(新しいAPIは追加していない)。
+
+- `tools/prometheus_exporter.py`: `/api/snmp/dashboard`のポーリングに
+  加えて`/api/pentest/runs`もベストエフォートでポーリングし
+  (`--no-strix`で無効化可)、`netlab_strix_has_runs`/
+  `netlab_strix_last_run_success`/`netlab_strix_last_run_in_progress`/
+  `netlab_strix_last_success_age_seconds`(成功run無しなら`-1`)/
+  `netlab_strix_recent_runs_total{conclusion}`を公開する。
+  `/api/pentest/runs`側が失敗(`GITHUB_TOKEN`未設定等)してもSNMP側の
+  メトリクス公開は止めない設計。
+- `tools/monitoring_stack/alert_rules.yml`に`strix-pentest`グループを
+  追加: `StrixPentestRunFailed`(直近runが失敗)は`netlab_strix_has_runs
+  == 1`でゲートし、**一度もDispatchしていない状態での誤発火を防いで
+  いる**(実装直後に気づいた——`has_runs`相当のメトリクスが無いと
+  「runが0件」も「last_run_success=0」になり、未実行なのに「失敗」と
+  誤報される)。`StrixPentestStale`は成功runが7日間(または一度も)無い
+  場合に発火。`tools/monitoring_stack/prometheus.yml`に`netlab-
+  emulator`(ポート9877)のscrape jobを追加し、既存のSNMP trap専用
+  デモスタックでもこのアラートが評価できるようにした。
+- `tools/strix_status_to_loki.py`(新規、`tools/device_log_to_loki.py`
+  と同じ「新規に増えた分だけ転送」パターン): `/api/pentest/runs`を
+  ポーリングし、`status=='completed'`になった未転送のrunだけを
+  Lokiへpushする(`in_progress`/`queued`の段階ではまだ結論が
+  出ていないため送らない)。
+
+`tests/test_prometheus_exporter.py`に`build_strix_metrics_text`/
+staleness計算のテストを追加(本体13件→計17件)、
+`tests/test_strix_status_to_loki.py`(新規7件)が転送対象判定・ログ行
+整形を固定する。いずれもネットワーク非依存(push_to_loki自体の実HTTP
+呼び出しはテスト対象外、既存のdevice_log_to_loki.pyと同じ方針)。
+
+**ZGrab2(ZMapプロジェクト製のL7アプリケーション層スキャナ)**:
+ユーザー依頼「ZGrab2: ポートスキャンはせず、指定したIP:ポート群に
+対してプロトコルのハンドシェイクを最後まで実行してバナー/証明書/
+レスポンス全体を構造化データ(JSON)で取得する。これもラボに入れて
+ほしい」への対応。nmapとの違い(ポートスキャンはしない、プロトコル
+ハンドシェイクを最後まで完了させて構造化JSONを返す)を活かし、この
+リポジトリの実SSHリスナー(`engine/ssh_cli_agent.py`)に対して本物の
+`zgrab2 ssh`で実際にバナー/鍵交換情報を取得できることを確認した。
+
+`go install github.com/zmap/zgrab2/cmd/zgrab2@latest`でビルド可能
+(このサンドボックスでも実際にビルド・実行確認済み)。
+
+**ライブ検証で初めて踏んだ実バグ2件**(コードレビューだけでは気づけな
+かった、`strix --output`の時と同じ class の「実際のCLIヘルプを見ずに
+書いた」失敗): (1) `--timeout`フラグは存在せず、正しくは
+`--connect-timeout`(接続確立タイムアウト)。(2) `-b`/`--blocklist-file`
+の既定値`-`は「無効化」ではなく`$HOME/.config/zgrab2/blocklist.conf`
+を指す特殊な意味で、このファイルが存在しない環境では`could not read
+blocklist file`で即`fatal`終了する——テストでは`tmp_path`に空の
+ブロックリストファイルを作って明示的に指定することで回避した。
+
+実際にCatalystの実SSHリスナーへ`zgrab2 ssh`を実行し、`SSH-2.0-
+paramiko_5.0.0`(`engine/ssh_cli_agent.py`が使うparamikoのバージョン
+文字列そのまま)のバナーと、RSA 2048bitホスト鍵のフィンガープリント・
+対応する鍵交換アルゴリズム一覧まで実際に取得できることを確認した
+(生のJSON出力は`docs/zgrab2-scan-detection.md`に全文掲載)。
+
+`tests/test_zgrab2_ssh_banner.py`(新規、`tests/test_ssh_cli_server.py`
+と同じ自己完結サーバーfixtureパターン)が、Catalystデバイスに
+`crypto key generate rsa`でSSHを有効化した上で実際に`zgrab2 ssh`を
+実行し、ハンドシェイク成功時の`SSH-2.0`バナー取得と、SSHが上がって
+いないポートに対する失敗判定の両方を固定する。`netmiko`/`ansible`の
+既存テストと同じ考え方で、`zgrab2`バイナリがPATH上に無い環境では
+ファイル全体を`pytest.mark.skipif`でスキップする(回帰テスト自体は
+この外部バイナリに依存しない、手動/オプションのライブ検証という
+位置づけ)。詳細は`docs/zgrab2-scan-detection.md`参照。
+
+**次に合意した拡張(このセッションではまだ未着手)**: ASAへの実SSH
+拡張(`crypto key generate rsa`のdevice_typeタプルに`'asa'`追加)、
+Si-RのSCPサーバー機能(実機コマンド確認が先)、ASAの`threat-detection
+scanning-threat`(ZGrab2のような短時間多数接続の検知)、「設定生成」
+タブ拡張によるLLM→Ansible Playbook生成(構成投入/事実取得・差分検知/
+検証/ロールバックの4パターン、LLM生成部分はモック化して回帰テストに
+含め、実`ansible-playbook`実行はnetmiko/ansibleの既存テストと同じ
+手動ライブ検証に留める)、LLM-as-judge型の試験自動化(既存のshow
+出力ベース検証テストにLLM判定を足す薄いラッパー)。
