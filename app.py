@@ -4177,7 +4177,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ── crypto key generate rsa ── 実機はRSA鍵を作って初めてSSHが
     # 起動する。ここで TCP/22 の実CLIリスナーを立ち上げるので、
     # 本物のSSHクライアントでログインして show コマンドを打てる。
-    if state.device_type in ('cisco', 'catalyst', 'arista'):
+    if state.device_type in ('cisco', 'catalyst', 'arista', 'asa'):
         m_key = re.match(r'^crypto\s+key\s+generate\s+rsa'
                          r'(?:\s+(?:general-keys|usage-keys))?'
                          r'(?:\s+modulus\s+(\d+))?\s*$', c)

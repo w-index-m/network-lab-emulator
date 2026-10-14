@@ -83,10 +83,43 @@ SSHハンドシェイクが最後まで完了して鍵交換アルゴリズム�
 `pytest.mark.skipif`でスキップする(回帰テスト自体はこの外部バイナリ
 に依存しない、手動/オプションのライブ検証という位置づけ)。
 
+## ASAへの拡張(実装済み)
+
+実機Cisco ASAも`crypto key generate rsa`の構文はIOS/Catalystと完全に
+同一(Aristaのような代替コマンドではない、本物)なので、`app.py`の
+`crypto key generate rsa`有効化デバイスタイプタプルに`'asa'`を追加する
+だけで、実SSHリスナー(`engine/ssh_cli_agent.py`)がASAの管理IP
+(`_management_ip()`が選ぶ、デフォルトでは`GigabitEthernet0/0`
+= outsideの`203.0.113.1`)に対して起動するようになった。新しい
+ネゴシエーションロジックは一切追加していない(Arista追加時と全く
+同じ、タプルを広げるだけのパターン)。
+
+ライブ検証(実行結果そのまま): ASAデバイスを作成し、`configure
+terminal` → `crypto key generate rsa modulus 2048`でSSHを有効化後、
+実際に`zgrab2 ssh`をASAの管理IP(`203.0.113.1`)に向けて実行:
+
+```
+time="2026-10-14T21:09:39Z" level=info msg="started grab at 2026-10-14T21:09:39Z"
+{"ip":"203.0.113.1","data":{"ssh":{"status":"success","protocol":"ssh","port":22,"result":{"server_id":{"raw":"SSH-2.0-paramiko_5.0.0","version":"2.0","software":"paramiko_5.0.0"},"server_key_exchange":{"cookie":"Aa1E+fwng4DzJTuq05IVcg==","kex_algorithms":["curve25519-sha256@libssh.org","ecdh-sha2-nistp256","ecdh-sha2-nistp384","ecdh-sha2-nistp521","diffie-hellman-group16-sha512","diffie-hellman-group-exchange-sha256","diffie-hellman-group14-sha256","kex-strict-s-v00@openssh.com"],"host_key_algorithms":["rsa-sha2-512","rsa-sha2-256"], "...(鍵交換アルゴリズム一覧は略、Catalyst検証時と同一)"},"algorithm_selection":{"dh_kex_algorithm":"curve25519-sha256@libssh.org","host_key_algorithm":"rsa-sha2-256"},"server_host_key":{"rsa_public_key":{"exponent":65537,"length":2048},"algorithm":"ssh-rsa","fingerprint_sha256":"92ba8ea07b928354d05452a27d8d621a69dc59a0c1b83de3d77c6ba559492e56"}}},"timestamp":"2026-10-14T21:09:39Z"}}}
+time="2026-10-14T21:09:39Z" level=info msg="finished grab at 2026-10-14T21:09:39Z"
+00h:00m:00s; Scan Complete; 1 targets scanned; 7.85 targets/sec; 100.0% success rate
+{"statuses":{"ssh":{"successes":1,"failures":0}},"start":"2026-10-14T21:09:39Z","end":"2026-10-14T21:09:39Z","duration":"127.306214ms","zgrab_cli_parameters":"zgrab2 ssh --port 22 --connect-timeout 10s","num_targets_scanned":1}
+```
+
+Catalyst検証と同じ`SSH-2.0-paramiko_5.0.0`バナー・RSA 2048bitホスト鍵
+(別のSHA256フィンガープリント、鍵は装置ごとに別個に生成される)で
+ハンドシェイクが成功することを確認。
+
+`tests/test_netmiko_ansible_compat.py`の`TestAsaRealSshEnablement`
+(3 tests)が、`crypto key generate rsa`での`ssh_rsa_key`フラグ確定、
+実リスナーがASAのoutside IP(`203.0.113.1`)にbindすること、
+コマンド未投入時は有効化されないことを固定する(同一テストモジュール内
+で複数のASAデバイスがデフォルトで同じoutside IPを共有するため、各
+テストは`stop_ssh_cli_agent`で後片付けすることでポート競合を避けて
+いる)。
+
 ## 今後の展開(未着手、次の合意済みタスク)
 
-- ASAにも同じ`crypto key generate rsa`パターンで実SSHを有効化し、
-  ZGrab2でのバナー取得を同様に確認する
 - Si-RのSCPサーバー機能(実機の正式機能)を有効化できれば、SSH
   トランスポート経由でZGrab2のバナー取得対象にできる(実機コマンド
   確認が先)

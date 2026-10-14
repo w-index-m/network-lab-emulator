@@ -84,6 +84,42 @@ class TestAristaRealSshEnablement:
         assert out == ''
 
 
+class TestAsaRealSshEnablement:
+    """ASAはCisco IOS/Catalystと全く同じ `crypto key generate rsa` 構文が
+    実機そのまま使える(Aristaのような代替コマンドではない、本物)ため、
+    device_typeタプルに'asa'を追加するだけで済んだ。"""
+    def test_crypto_key_generate_rsa_sets_ssh_rsa_key_flag(self):
+        from engine.ssh_cli_agent import stop_ssh_cli_agent
+        dev_id = 'nm-asa-ssh-1'
+        try:
+            _dev(dev_id, 'asa')
+            _cli(dev_id, 'configure terminal')
+            _cli(dev_id, 'crypto key generate rsa modulus 2048')
+            state = app_module.device_sessions[dev_id]
+            assert state.ssh_rsa_key is True
+        finally:
+            stop_ssh_cli_agent(dev_id)
+
+    def test_ssh_listener_binds_to_asa_outside_interface_ip(self):
+        from engine.ssh_cli_agent import _servers as ssh_servers
+        dev_id = 'nm-asa-ssh-2'
+        try:
+            _dev(dev_id, 'asa')
+            _cli(dev_id, 'configure terminal')
+            _cli(dev_id, 'crypto key generate rsa modulus 2048')
+            srv = ssh_servers.get(dev_id)
+            assert srv is not None, 'SSHリスナーが起動していない'
+            assert srv.ip == '203.0.113.1', f'想定外のIPにbindしている: {srv.ip}'
+        finally:
+            from engine.ssh_cli_agent import stop_ssh_cli_agent
+            stop_ssh_cli_agent(dev_id)
+
+    def test_not_enabled_before_crypto_key_command(self):
+        _dev('nm-asa-ssh-3', 'asa')
+        state = app_module.device_sessions['nm-asa-ssh-3']
+        assert not getattr(state, 'ssh_rsa_key', False)
+
+
 class TestAristaJsonOutput:
     def test_show_version_json_is_valid_json_with_expected_keys(self):
         import json
