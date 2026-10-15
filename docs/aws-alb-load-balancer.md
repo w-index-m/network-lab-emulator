@@ -252,6 +252,54 @@ stickiness有効/無効のON/OFFで同じツール・同じクライアント集
 クライアントからALB経由で動作を見る」という依頼の狙い通りのデモに
 なった。
 
+## 本家aws-cliマニュアルとの突き合わせ
+
+ユーザー依頼「ALBのaws-cli仕様も本家マニュアルと突き合わせといて」への
+対応。`docs.aws.amazon.com`はこの環境のegressポリシーでブロックされて
+いるため(PyTorchの`download.pytorch.org`等と同じ扱い)、代わりに
+aws-cliが実際にパースしている一次情報そのもの——`boto/botocore`の
+`botocore/data/elbv2/2015-12-01/service-2.json`(サービスモデル)と
+`examples-1.json`(AWS公式の実例JSON)——をGitHubから取得して照合した
+(`github.com`はブロックされていない)。見つけた欠落フィールドを
+`engine/rules.py`の`_alb_process`系に追加:
+
+1. **`Rule`に常にある`IsDefault`が欠けていた**: `create-rule`の出力にも
+   `describe-rules`の出力にも付与。さらに実機の`describe-rules`は
+   `create-rule`で追加したルールだけでなく、**リスナー自身の既定
+   アクション(`create-listener --default-actions`由来)も常に
+   `IsDefault: true`・`Priority: "default"`の1ルールとして一緒に
+   返す**——これが今まで一切見えていなかった(`_alb_describe_rules`で
+   合成するよう修正)。
+2. **`TargetGroup`に常にある`Matcher`/`HealthCheckPort`/
+   `HealthCheckTimeoutSeconds`/`VpcId`が欠けていた**: 実例
+   (`elbv2-create-target-group-1`)では`Matcher: {"HttpCode": "200"}`・
+   `HealthCheckPort: "traffic-port"`・`HealthCheckTimeoutSeconds: 5`が
+   常に付く。このエミュレータはヘルスチェックポートの個別設定もVPCも
+   持たないため、常にこの既定値を返すようにした
+   (`_alb_tg_output()`、`create-target-group`/`describe-target-groups`
+   共通化)。
+3. **`TargetHealthDescription`の`HealthCheckPort`は`unused`状態の時だけ
+   省略される**: 公式実例(`elbv2-describe-target-health-1`)をよく見ると、
+   healthyなターゲットには`HealthCheckPort`が付くが、どのリスナーの
+   アクションからも参照されていない(`unused`)ターゲットには
+   `HealthCheckPort`自体が無い——ヘルスチェック自体を実行していない
+   ターゲットだから、という理屈と一致する。最初の修正では全状態に
+   無条件で付けていたため、この実例と食い違っていたのを直した。
+   あわせて`unused`時の`Description`文言も「Target is not registered
+   with the target group」(`Target.NotRegistered`に即した文言)に
+   修正(以前は無関係な文言が入っていた)。
+
+それ以外(TLS終端、header-based/query-string-basedルール条件、
+重み付けターゲットグループ、リダイレクト/固定レスポンスアクション、
+`LoadBalancer`の`AvailabilityZones`/`SecurityGroups`/`CreatedTime`等)は
+実機の`Action`/`RuleCondition`/`LoadBalancer`シェイプにも存在すると
+確認した上で、既存の「スコープ外」節に記載済みの通り意図的な
+部分対応のまま。
+
+`TestAlbAwsCliSpecCompliance`(`tests/test_alb_load_balancer.py`、
+6 tests、計30 tests)がIsDefault/既定ルールの合成/Matcher等の既定値/
+unused時のHealthCheckPort省略を固定する。
+
 ## BIG-IPとの比較
 
 同じ`tools/virtual_client.py`は`tcp`モードでBIG-IP(L4 VIP)にも使える
@@ -272,7 +320,7 @@ stickiness有効/無効のON/OFFで同じツール・同じクライアント集
 
 ## テスト
 
-`tests/test_alb_load_balancer.py`(25 tests)がCLI設定(create-*/
+`tests/test_alb_load_balancer.py`(30 tests)がCLI設定(create-*/
 register-targets/deregister-targets/describe-*/modify-target-group-
 attributes、ARN解決、エラーケース)、名前付きオブジェクトの一意性
 (target-groupの再登録で重複しないこと、複数target-group/listenerが

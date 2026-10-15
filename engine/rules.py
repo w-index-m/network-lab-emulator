@@ -8139,6 +8139,25 @@ Configuration Revision            : 5"""
         }]}
         return '\n' + _json.dumps(out, indent=4)
 
+    @staticmethod
+    def _alb_tg_output(arn, tg):
+        """実機の`create-target-group`/`describe-target-groups`が常に
+        返すフィールド(`Matcher`/`HealthCheckPort`/
+        `HealthCheckTimeoutSeconds`/`VpcId`込み——botocore/data/elbv2の
+        examples-1.jsonの実例で確認、このエミュレータはhealth-check-port
+        個別設定もVPCも持たないため既定値のまま)を1か所にまとめる。"""
+        hc = tg['health_check']
+        return {
+            'TargetGroupArn': arn, 'TargetGroupName': tg['name'], 'Protocol': tg['protocol'],
+            'Port': tg['port'], 'VpcId': 'vpc-0123456789abcdef0', 'TargetType': tg['target_type'],
+            'HealthCheckProtocol': hc['protocol'], 'HealthCheckPort': 'traffic-port',
+            'HealthCheckPath': hc['path'], 'HealthCheckIntervalSeconds': hc['interval'],
+            'HealthCheckTimeoutSeconds': 5,
+            'HealthyThresholdCount': hc['healthy_threshold'],
+            'UnhealthyThresholdCount': hc['unhealthy_threshold'],
+            'Matcher': {'HttpCode': '200'},
+        }
+
     def _alb_create_tg(self, args, state):
         import json as _json
         name = (args.get('name') or [''])[0]
@@ -8151,20 +8170,15 @@ Configuration Revision            : 5"""
         healthy_th = int((args.get('healthy-threshold-count') or ['3'])[0])
         unhealthy_th = int((args.get('unhealthy-threshold-count') or ['3'])[0])
         arn = self._alb_arn(state, 'targetgroup', name)
-        state.alb_target_groups[arn] = {
+        tg = {
             'name': name, 'protocol': protocol, 'port': port, 'target_type': target_type,
             'health_check': {'protocol': hc_protocol, 'path': hc_path, 'interval': hc_interval,
                              'healthy_threshold': healthy_th, 'unhealthy_threshold': unhealthy_th},
             'members': [],
             'stickiness': {'enabled': False, 'type': 'lb_cookie', 'duration': 86400},
         }
-        out = {'TargetGroups': [{
-            'TargetGroupArn': arn, 'TargetGroupName': name, 'Protocol': protocol,
-            'Port': port, 'TargetType': target_type,
-            'HealthCheckProtocol': hc_protocol, 'HealthCheckPath': hc_path,
-            'HealthCheckIntervalSeconds': hc_interval,
-            'HealthyThresholdCount': healthy_th, 'UnhealthyThresholdCount': unhealthy_th,
-        }]}
+        state.alb_target_groups[arn] = tg
+        out = {'TargetGroups': [self._alb_tg_output(arn, tg)]}
         return '\n' + _json.dumps(out, indent=4)
 
     def _alb_register_targets(self, args, state):
@@ -8299,12 +8313,8 @@ Configuration Revision            : 5"""
 
     def _alb_describe_tgs(self, args, state):
         import json as _json
-        out = {'TargetGroups': [{
-            'TargetGroupArn': arn, 'TargetGroupName': tg['name'], 'Protocol': tg['protocol'],
-            'Port': tg['port'], 'TargetType': tg['target_type'],
-            'HealthCheckProtocol': tg['health_check']['protocol'],
-            'HealthCheckPath': tg['health_check']['path'],
-        } for arn, tg in state.alb_target_groups.items()]}
+        out = {'TargetGroups': [self._alb_tg_output(arn, tg)
+                                 for arn, tg in state.alb_target_groups.items()]}
         return '\n' + _json.dumps(out, indent=4)
 
     def _alb_describe_target_health(self, args, state):
@@ -8325,17 +8335,22 @@ Configuration Revision            : 5"""
                 state_str = 'healthy' if healthy else 'unhealthy'
                 reason = None if healthy else 'Target.FailedHealthChecks'
             m['state'] = state_str
-            # 実機は常にHealthCheckPortを返す(health-check-portを個別
-            # 設定していない限り既定の"traffic-port"——ターゲット自身の
-            # ポートでヘルスチェックする、という意味。botocore/data/elbv2
-            # のTargetHealthDescriptionシェイプで確認)。
             entry = {'Target': {'Id': m['ip'], 'Port': m['port']},
-                     'HealthCheckPort': 'traffic-port',
                      'TargetHealth': {'State': state_str}}
+            # 実機はhealth-check-portを個別設定していない限り既定の
+            # "traffic-port"(ターゲット自身のポートでヘルスチェックする、
+            # という意味)を返すが、examples-1.json(elbv2-describe-
+            # target-health-1)の実例を見ると"unused"状態のターゲット
+            # (どのリスナーのアクションからも参照されていない)では
+            # HealthCheckPort自体が省略されている——実際にヘルスチェック
+            # を実行していないターゲットだから、という理屈と合う。
+            if state_str != 'unused':
+                entry['HealthCheckPort'] = 'traffic-port'
             if reason:
                 entry['TargetHealth']['Reason'] = reason
-                entry['TargetHealth']['Description'] = 'Health checks failed' if state_str == 'unhealthy' \
-                    else 'Target is in the stopped state'
+                entry['TargetHealth']['Description'] = (
+                    'Health checks failed' if state_str == 'unhealthy'
+                    else 'Target is not registered with the target group')
             descs.append(entry)
         return '\n' + _json.dumps({'TargetHealthDescriptions': descs}, indent=4)
 

@@ -2156,3 +2156,43 @@ before/afterが一目でわかる形で記録した。
 ライブ検証はこのセッションの作法通り、全体回帰テストとは同時実行
 しない独立したuvicornインスタンス(`NETLAB_AUTH_DISABLE=1`)で実施し、
 検証後に確実に停止してからpytestを実行した。
+
+**ALBのaws-cli仕様を本家マニュアルと突き合わせ**: ユーザー依頼
+「ALBのaws-cli仕様も本家マニュアルと突き合わせといて」への対応。
+`docs.aws.amazon.com`はこの環境のegressポリシーでブロックされている
+ため、aws-cliが実際にパースしている一次情報そのもの——GitHubの
+`boto/botocore`リポジトリの`botocore/data/elbv2/2015-12-01/
+service-2.json`(サービスモデル)と`examples-1.json`(AWS公式の実例
+JSON)——を取得して照合した(`add_repo`で読み取り専用アタッチ→
+`git sparse-checkout`でそのディレクトリだけ取得。サービスディレクトリ名
+は`elasticloadbalancingv2`ではなく`elbv2`という点で最初つまずいた)。
+
+見つけた欠落フィールドを`engine/rules.py`の`_alb_process`系に追加:
+1. `Rule`に常にある`IsDefault`が欠けていた(`create-rule`/
+   `describe-rules`両方に付与)。さらに実機の`describe-rules`は
+   `create-listener --default-actions`由来の既定ルールも常に
+   `IsDefault: true`・`Priority: "default"`で一緒に返す——これが
+   一切見えていなかったので`_alb_describe_rules`で合成するように
+   修正。
+2. `TargetGroup`に常にある`Matcher`(`{"HttpCode": "200"}`)/
+   `HealthCheckPort`(既定`"traffic-port"`)/
+   `HealthCheckTimeoutSeconds`(既定5)/`VpcId`が欠けていた——
+   `create-target-group`/`describe-target-groups`共通の
+   `_alb_tg_output()`ヘルパーに集約して追加。
+3. `TargetHealthDescription`の`HealthCheckPort`は実は`unused`状態
+   (どのリスナーのアクションからも参照されていないターゲット)の
+   時だけ省略される——公式実例(`elbv2-describe-target-health-1`)を
+   見て気づいた。最初の修正(直前の節)では全状態に無条件で付けていた
+   ため、この実例と食い違っていた。あわせて`unused`時の
+   `Description`文言も`Target.NotRegistered`に即した文言に修正
+   (以前は無関係な文言が入っていた)。
+
+それ以外(TLS終端、header-based/query-string-basedルール条件、
+重み付けターゲットグループ、リダイレクト/固定レスポンスアクション等)
+は実機のシェイプにも存在すると確認した上で、既存の「スコープ外」
+記載通り意図的な部分対応のまま変更していない。
+
+`TestAlbAwsCliSpecCompliance`(`tests/test_alb_load_balancer.py`、
+6 tests、ファイル計30 tests)がこれら全てを固定する。詳細は
+`docs/aws-alb-load-balancer.md`の「本家aws-cliマニュアルとの
+突き合わせ」節参照。

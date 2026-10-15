@@ -141,10 +141,14 @@ class TestAlbConfigCli:
 class TestAlbAwsCliSpecCompliance:
     """ユーザー依頼「ALBのaws-cli仕様も本家マニュアルと突き合わせといて」
     への対応。`boto/botocore`の`botocore/data/elbv2/2015-12-01/
-    service-2.json`(aws-cliが実際に使っているサービスモデル、本家
-    ドキュメントの一次情報)と照合して見つけた2つの欠落フィールドを
-    固定する: Ruleシェイプには常に`IsDefault`があり、
-    TargetHealthDescriptionには常に`HealthCheckPort`がある。"""
+    service-2.json`+`examples-1.json`(aws-cliが実際に使っている
+    サービスモデルと公式サンプル、本家ドキュメントの一次情報)と照合して
+    見つけた欠落フィールドを固定する: Ruleシェイプには常に`IsDefault`が
+    あり(describe-rulesはリスナーの既定ルールも一緒に返す)、
+    TargetGroupには常に`Matcher`/`HealthCheckPort`/
+    `HealthCheckTimeoutSeconds`/`VpcId`があり、TargetHealthDescriptionは
+    `unused`状態の時だけ`HealthCheckPort`が省略される
+    (elbv2-describe-target-health-1の実例で確認)。"""
 
     def test_create_rule_output_includes_is_default_false(self):
         _dev('alb-spec-1')
@@ -194,6 +198,37 @@ class TestAlbAwsCliSpecCompliance:
         out = _json_out(_cli('alb-spec-3', 'aws elbv2 describe-target-health --target-group-arn tg3'))
         desc = out['TargetHealthDescriptions'][0]
         assert desc['HealthCheckPort'] == 'traffic-port'
+
+    def test_describe_target_health_omits_health_check_port_for_unused_target(self):
+        """examples-1.jsonのelbv2-describe-target-health-1の実例:
+        unused状態(ここではderegister-targetsと同じadmin_down経路)の
+        エントリだけHealthCheckPortが丸ごと無い。"""
+        _dev('alb-spec-3b')
+        _cli('alb-spec-3b', 'aws elbv2 create-target-group --name tg3b --protocol HTTP --port 9401')
+        _cli('alb-spec-3b', 'aws elbv2 register-targets --target-group-arn tg3b '
+                            '--targets Id=10.2.2.3,Port=9401')
+        state = app_module.device_sessions['alb-spec-3b']
+        arn = list(state.alb_target_groups.keys())[0]
+        state.alb_target_groups[arn]['members'][0]['admin_down'] = True
+        out = _json_out(_cli('alb-spec-3b', 'aws elbv2 describe-target-health --target-group-arn tg3b'))
+        desc = out['TargetHealthDescriptions'][0]
+        assert desc['TargetHealth']['State'] == 'unused'
+        assert 'HealthCheckPort' not in desc
+
+    def test_create_and_describe_target_group_include_matcher_and_defaults(self):
+        _dev('alb-spec-4')
+        create_out = _json_out(_cli('alb-spec-4',
+                                     'aws elbv2 create-target-group --name tg4 --protocol HTTP --port 8080'))
+        tg = create_out['TargetGroups'][0]
+        assert tg['Matcher'] == {'HttpCode': '200'}
+        assert tg['HealthCheckPort'] == 'traffic-port'
+        assert tg['HealthCheckTimeoutSeconds'] == 5
+        assert tg['VpcId']
+
+        describe_out = _json_out(_cli('alb-spec-4', 'aws elbv2 describe-target-groups'))
+        described = next(t for t in describe_out['TargetGroups'] if t['TargetGroupName'] == 'tg4')
+        assert described['Matcher'] == {'HttpCode': '200'}
+        assert described['HealthCheckPort'] == 'traffic-port'
 
 
 class TestAlbRealHttpHealthCheck:
