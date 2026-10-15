@@ -263,11 +263,26 @@ class DeviceState:
             # のVIP(実際には複数AZのIPにDNSラウンドロビンする)を単一の
             # eth0として表現する(172.31.0.0/16はAWSのデフォルトVPC CIDR)。
             "eth0": {"ip": "172.31.0.10", "prefix": 16, "status": "up", "speed": "", "duplex": ""},
-        } if device_type == "alb" else {
+        } if device_type == "alb" else ({
+            # F5 BIG-IP: 実機は "slot.port" 形式(1.1/1.2等)でインタ
+            # フェースを命名し、管理用は専用の"mgmt"インタフェース。
+            # Self IPは実機ではVLANに対して割り当てる
+            # (tmsh create net self <name> address <ip>/<mask> vlan
+            # <vlan_name>)が、このエミュレータの他デバイスと同じ
+            # 「IPを直接インタフェースに持たせる」簡略モデルを踏襲しつつ、
+            # cisco/arista/fortigate等が共有するデフォルト
+            # (203.0.113.2/10.0.0.1)と衝突しない専用のSelf IPを持たせる
+            # ("モックのBIGIPなのでモックIPくらいのモック"という依頼への対応)。
+            # internal self-IPの10.1.20.245/24はF5公式トレーニングラボの
+            # 実例値(clouddocs.f5.com Lab 10)に合わせた。
+            "mgmt":  {"ip": "192.168.245.1",  "prefix": 24, "status": "up", "speed": "1000", "duplex": "full"},
+            "1.1":   {"ip": "203.0.113.245",  "prefix": 24, "status": "up", "speed": "1000", "duplex": "full"},
+            "1.2":   {"ip": "10.1.20.245",     "prefix": 24, "status": "up", "speed": "1000", "duplex": "full"},
+        } if device_type == "bigip" else {
             "GigabitEthernet0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        }))))))
+        })))))))
 
         if device_type == "sir":
             # ether <slot> <port> vlan untag <vid>（実機のfactory-default）
@@ -412,7 +427,15 @@ class DeviceState:
                                     #          'monitor','lb_mode'}
             self.f5_virtuals = {}   # name -> {'destination','pool','status','profiles'}
             self.f5_monitors = {}   # name -> {'type', ...}
+            self.f5_persistence_profiles = {}  # name -> {'type': 'source-addr', 'timeout': secs}
+            self.f5_snatpools = {}  # name -> {'members': [ip, ...]}
             self.f5_folder = "/Common"
+            # net vlan / net self: 実機はSelf IPをインタフェースへ直接では
+            # なくVLANへ割り当てる("tmsh create net self <name> address
+            # <ip>/<mask> vlan <vlan_name>")。VLANの所属インタフェースは
+            # "tmsh create net vlan <name> interfaces add { 1.1 }" で設定する。
+            self.f5_vlans = {}  # name -> {'interfaces': ['1.1', ...]}
+            self.f5_selfips = {}  # name -> {'address','prefix','vlan'}
 
         # AWS ALB(Application Load Balancer)状態
         # 実機にSSH/コンソールログインという概念は無く、aws-cli(`aws
@@ -7567,6 +7590,16 @@ Configuration Revision            : 5"""
             secs.append(self._bigip_show_virtual(state, None, list_mode=True))
             for k, v in state.f5_monitors.items():
                 secs.append(f'ltm monitor {v["type"]} {k} {{ }}')
+            for k, prof in state.f5_persistence_profiles.items():
+                secs.append(f'ltm persistence source-addr {k} {{\n    timeout {prof["timeout"]}\n}}')
+            for k, sp in state.f5_snatpools.items():
+                members_str = ' '.join(sp['members'])
+                secs.append(f'ltm snatpool {k} {{\n    members {{ {members_str} }}\n}}')
+            for k, v in state.f5_vlans.items():
+                secs.append(f'net vlan {k} {{\n    interfaces {{ {" ".join(v["interfaces"])} }}\n}}')
+            for k, s in state.f5_selfips.items():
+                secs.append(f'net self {k} {{\n    address {s["address"]}/{s["prefix"]}\n'
+                            f'    vlan {s["vlan"]}\n}}')
             body_out = '\n'.join(s for s in secs if s)
             return body_out if body_out.strip() else '(empty configuration)'
 
@@ -7649,6 +7682,13 @@ Configuration Revision            : 5"""
             profs = re.search(r'profiles\s+(?:add\s+)?\{(.*?)\}', rest, re.S)
             if profs:
                 v['profiles'] = [p for p in re.split(r'\s+', profs.group(1).strip()) if p]
+            persist = re.search(r'persist\s+(?:replace-all-with\s+)?\{\s*(\S+)', rest, re.I)
+            if persist:
+                v['persist'] = persist.group(1)
+            snat = re.search(r'source-address-translation\s*\{\s*type\s+(automap|snat|none)'
+                             r'(?:\s+pool\s+(\S+))?', rest, re.I)
+            if snat:
+                v['snat'] = {'type': snat.group(1).lower(), 'pool': snat.group(2)}
             return ''
 
         # ── create ltm monitor ──
@@ -7658,12 +7698,116 @@ Configuration Revision            : 5"""
             state.f5_monitors[mname] = {'type': mtype}
             return ''
 
+        # ── create/modify ltm persistence source-addr (パーシステンス) ──
+        m = re.match(r'^(create|modify)\s+ltm\s+persistence\s+source-addr\s+(\S+)\s*(.*)$',
+                     body, re.I | re.S)
+        if m:
+            name, rest = m.group(2), m.group(3)
+            prof = state.f5_persistence_profiles.setdefault(
+                name, {'type': 'source-addr', 'timeout': 180})
+            mt = re.search(r'timeout\s+(\d+)', rest, re.I)
+            if mt:
+                prof['timeout'] = int(mt.group(1))
+            return ''
+
+        # ── create/modify ltm snatpool (SNAT: automap/snatpool) ──
+        m = re.match(r'^(create|modify)\s+ltm\s+snatpool\s+(\S+)\s*(.*)$', body, re.I | re.S)
+        if m:
+            name, rest = m.group(2), m.group(3)
+            pool = state.f5_snatpools.setdefault(name, {'members': []})
+            mem = re.search(r'members\s+(?:add\s+)?\{(.*?)\}', rest, re.S)
+            if mem:
+                ips = re.findall(r'(\d{1,3}(?:\.\d{1,3}){3})', mem.group(1))
+                for ip in ips:
+                    if ip not in pool['members']:
+                        pool['members'].append(ip)
+            return ''
+
+        # ── create/modify net vlan(VLANへのインタフェース割り当て) ──
+        m = re.match(r'^(create|modify)\s+net\s+vlan\s+(\S+)\s*(.*)$', body, re.I | re.S)
+        if m:
+            name, rest = m.group(2), m.group(3)
+            vlan = state.f5_vlans.setdefault(name, {'interfaces': []})
+            ifs = re.search(r'interfaces\s+(?:add\s+)?\{(.*?)\}', rest, re.S)
+            if ifs:
+                for tok in re.split(r'\s+', ifs.group(1).strip()):
+                    if tok and tok not in vlan['interfaces']:
+                        vlan['interfaces'].append(tok)
+            return ''
+
+        # ── create/modify net self(Self IP。実機はインタフェースではなく
+        # VLANへ割り当てる: address <ip>/<prefix> vlan <vlan_name>) ──
+        m = re.match(
+            r'^(create|modify)\s+net\s+self\s+(\S+)\s*(?:\{)?\s*'
+            r'address\s+([\d.]+)/(\d+)\s*vlan\s+(\S+)',
+            body, re.I | re.S)
+        if m:
+            name, addr, prefix, vlan = m.group(2), m.group(3), int(m.group(4)), m.group(5)
+            state.f5_selfips[name] = {'address': addr, 'prefix': prefix, 'vlan': vlan}
+            # 実機同様このIPは即座に有効("set"→commitの二段階を持つJunosとは
+            # 異なり、tmshのcreateは即時反映)。vlanが指すインタフェース名
+            # (1.1/1.2等)に対して、state.interfacesの当該エントリのIPを
+            # 更新する — icmp_engine/LLDP等、他デバイスと共通の
+            # state.interfaces経由の到達性判定にそのまま乗る。
+            vlan_ifs = state.f5_vlans.get(vlan, {}).get('interfaces', [])
+            for ifname in vlan_ifs:
+                if ifname in state.interfaces:
+                    state.interfaces[ifname]['ip'] = addr
+                    state.interfaces[ifname]['prefix'] = prefix
+                    state.interfaces[ifname]['status'] = 'up'
+            return ''
+
+        # ── show/list net self ──
+        if re.match(r'^(show|list)\s+net\s+self\b', bl):
+            msp = re.match(r'^(?:show|list)\s+net\s+self\s+(\S+)', body, re.I)
+            target = msp.group(1) if msp else None
+            if target and target.lower() in ('detail', 'all', 'all-properties', 'field-fmt',
+                                               'recursive', 'one-line'):
+                target = None
+            if not state.f5_selfips:
+                return '' if bl.startswith('list') else '(no self IPs configured)'
+            names = [target] if target and target in state.f5_selfips else list(state.f5_selfips.keys())
+            if target and target not in state.f5_selfips:
+                return f'  01020036:3: The requested Self IP ({target}) was not found.'
+            out = []
+            for name in names:
+                s = state.f5_selfips[name]
+                if bl.startswith('list'):
+                    out.append(f'net self {name} {{\n    address {s["address"]}/{s["prefix"]}\n'
+                               f'    vlan {s["vlan"]}\n}}')
+                else:
+                    out.append(f'Net::Self IP: {name}')
+                    out.append(f'  Address: {s["address"]}/{s["prefix"]}   Vlan: {s["vlan"]}')
+            return '\n'.join(out)
+
+        # ── show/list net vlan ──
+        if re.match(r'^(show|list)\s+net\s+vlan\b', bl):
+            if not state.f5_vlans:
+                return '' if bl.startswith('list') else '(no VLANs configured)'
+            out = []
+            for name, v in state.f5_vlans.items():
+                if bl.startswith('list'):
+                    out.append(f'net vlan {name} {{\n    interfaces {{ {" ".join(v["interfaces"])} }}\n}}')
+                else:
+                    out.append(f'Net::Vlan: {name}')
+                    out.append(f'  Interfaces: {", ".join(v["interfaces"]) or "(none)"}')
+            return '\n'.join(out)
+
+        # ── show net interface ──
+        if re.match(r'^(show|list)\s+net\s+interface\b', bl):
+            out = []
+            for name, info in state.interfaces.items():
+                out.append(f'Net::Interface: {name}   Status: {"up" if info["status"] == "up" else "down"}')
+            return '\n'.join(out)
+
         # ── delete ──
-        m = re.match(r'^delete\s+ltm\s+(pool|virtual|node|monitor)\s+(\S+)', body, re.I)
+        m = re.match(r'^delete\s+ltm\s+(pool|virtual|node|monitor|snatpool|persistence)\s+(\S+)', body, re.I)
         if m:
             kind, name = m.group(1).lower(), m.group(2)
             store = {'pool': state.f5_pools, 'virtual': state.f5_virtuals,
-                     'node': state.f5_nodes, 'monitor': state.f5_monitors}[kind]
+                     'node': state.f5_nodes, 'monitor': state.f5_monitors,
+                     'snatpool': state.f5_snatpools,
+                     'persistence': state.f5_persistence_profiles}[kind]
             store.pop(name, None)
             return ''
 
@@ -7697,6 +7841,32 @@ Configuration Revision            : 5"""
                 return ''
             return '\n'.join(f'ltm monitor {v["type"]} {k} {{ }}'
                              for k, v in state.f5_monitors.items())
+
+        # ── show/list ltm snatpool ──
+        if re.match(r'^(show|list)\s+ltm\s+snatpool', bl):
+            if not state.f5_snatpools:
+                return '' if bl.startswith('list') else '(no snatpools configured)'
+            out = []
+            for k, sp in state.f5_snatpools.items():
+                if bl.startswith('list'):
+                    out.append(f'ltm snatpool {k} {{\n    members {{ {" ".join(sp["members"])} }}\n}}')
+                else:
+                    out.append(f'Ltm::SNAT Pool: {k}')
+                    out.append(f'  Members: {", ".join(sp["members"]) or "(none)"}')
+            return '\n'.join(out)
+
+        # ── show/list ltm persistence ──
+        if re.match(r'^(show|list)\s+ltm\s+persistence', bl):
+            if not state.f5_persistence_profiles:
+                return '' if bl.startswith('list') else '(no persistence profiles configured)'
+            out = []
+            for k, prof in state.f5_persistence_profiles.items():
+                if bl.startswith('list'):
+                    out.append(f'ltm persistence source-addr {k} {{\n    timeout {prof["timeout"]}\n}}')
+                else:
+                    out.append(f'Ltm::Persistence Profile: {k}')
+                    out.append(f'  Type: {prof["type"]}   Timeout: {prof["timeout"]}s')
+            return '\n'.join(out)
 
         # ── メンバーの手動 up/down（動作確認用: modify ... session/state）──
         m = re.match(r'^modify\s+ltm\s+pool\s+(\S+)\s+members\s+modify\s+\{\s*([\d.]+[:.]\d+)\s*\{\s*(?:session\s+(\S+)|state\s+(\S+))', body, re.I)
@@ -7783,6 +7953,14 @@ Configuration Revision            : 5"""
                     for pr in v['profiles']:
                         out.append(f'        {pr} {{ }}')
                     out.append('    }')
+                if v.get('persist'):
+                    out.append(f'    persist {{ {v["persist"]} {{ }} }}')
+                if v.get('snat'):
+                    snat = v['snat']
+                    if snat['type'] == 'snat':
+                        out.append(f'    source-address-translation {{ type snat pool {snat["pool"]} }}')
+                    else:
+                        out.append(f'    source-address-translation {{ type {snat["type"]} }}')
                 out.append('}')
             else:
                 out.append(f'Ltm::Virtual Server: {name}')
@@ -7793,6 +7971,18 @@ Configuration Revision            : 5"""
                 out.append(f'    Destination  : {v["destination"]}')
                 out.append(f'    Pool         : {v.get("pool","(none)")}')
                 out.append(f'    Members up   : {up}')
+                if v.get('persist'):
+                    prof = state.f5_persistence_profiles.get(v['persist'], {})
+                    out.append(f'    Persistence  : {v["persist"]} '
+                               f'(source-addr, timeout {prof.get("timeout", 180)}s)')
+                if v.get('snat'):
+                    snat = v['snat']
+                    if snat['type'] == 'snat':
+                        pool = state.f5_snatpools.get(snat['pool'], {})
+                        out.append(f'    SNAT         : pool {snat["pool"]} '
+                                   f'({", ".join(pool.get("members", []))})')
+                    else:
+                        out.append(f'    SNAT         : {snat["type"]}')
                 out.append('')
         return '\n'.join(out)
 
@@ -7833,6 +8023,9 @@ Configuration Revision            : 5"""
             '  describe-target-health  --target-group-arn <arn>\n'
             '  describe-listeners      --load-balancer-arn <arn>\n'
             '  describe-rules          --listener-arn <arn>\n'
+            '  modify-target-group-attributes --target-group-arn <arn>\n'
+            '                         --attributes Key=stickiness.enabled,Value=true\n'
+            '                         Key=stickiness.lb_cookie.duration_seconds,Value=<secs>\n'
         )
 
     def _alb_parse_args(self, rest: str) -> dict:
@@ -7920,6 +8113,7 @@ Configuration Revision            : 5"""
             'describe-target-health': self._alb_describe_target_health,
             'describe-listeners': self._alb_describe_listeners,
             'describe-rules': self._alb_describe_rules,
+            'modify-target-group-attributes': self._alb_modify_tg_attributes,
         }
         handler = handlers.get(sub)
         if handler is None:
@@ -7962,6 +8156,7 @@ Configuration Revision            : 5"""
             'health_check': {'protocol': hc_protocol, 'path': hc_path, 'interval': hc_interval,
                              'healthy_threshold': healthy_th, 'unhealthy_threshold': unhealthy_th},
             'members': [],
+            'stickiness': {'enabled': False, 'type': 'lb_cookie', 'duration': 86400},
         }
         out = {'TargetGroups': [{
             'TargetGroupArn': arn, 'TargetGroupName': name, 'Protocol': protocol,
@@ -8005,6 +8200,36 @@ Configuration Revision            : 5"""
             return True
         tg['members'] = [m for m in tg['members'] if _keep(m)]
         return ''
+
+    def _alb_modify_tg_attributes(self, args, state):
+        """`aws elbv2 modify-target-group-attributes --attributes
+        Key=stickiness.enabled,Value=true
+        Key=stickiness.lb_cookie.duration_seconds,Value=<secs>`。
+        duration-based cookie stickiness(lb_cookie、実機ALBの既定
+        モード)のみ対応する。"""
+        import json as _json
+        tg_ref = (args.get('target-group-arn') or [''])[0]
+        arn = self._alb_resolve(state.alb_target_groups, tg_ref)
+        if arn is None:
+            return (f"\nAn error occurred (TargetGroupNotFoundException) when calling "
+                    f"the ModifyTargetGroupAttributes operation: Target group '{tg_ref}' not found")
+        tg = state.alb_target_groups[arn]
+        stick = tg.setdefault('stickiness', {'enabled': False, 'type': 'lb_cookie', 'duration': 86400})
+        for spec in args.get('attributes', []):
+            kv = self._alb_kv(spec)
+            key, val = kv.get('Key', ''), kv.get('Value', '')
+            if key == 'stickiness.enabled':
+                stick['enabled'] = val.lower() == 'true'
+            elif key == 'stickiness.type':
+                stick['type'] = val
+            elif key == 'stickiness.lb_cookie.duration_seconds':
+                stick['duration'] = int(val)
+        out = {'Attributes': [
+            {'Key': 'stickiness.enabled', 'Value': str(stick['enabled']).lower()},
+            {'Key': 'stickiness.type', 'Value': stick['type']},
+            {'Key': 'stickiness.lb_cookie.duration_seconds', 'Value': str(stick['duration'])},
+        ]}
+        return '\n' + _json.dumps(out, indent=4)
 
     def _alb_create_listener(self, args, state):
         import json as _json
@@ -8060,6 +8285,7 @@ Configuration Revision            : 5"""
             'RuleArn': arn, 'Priority': str(priority),
             'Conditions': [{'Field': cnd['field'], 'Values': cnd['values']} for cnd in conditions],
             'Actions': [{'Type': 'forward', 'TargetGroupArn': tg_arn}] if tg_arn else [],
+            'IsDefault': False,
         }]}
         return '\n' + _json.dumps(out, indent=4)
 
@@ -8099,7 +8325,12 @@ Configuration Revision            : 5"""
                 state_str = 'healthy' if healthy else 'unhealthy'
                 reason = None if healthy else 'Target.FailedHealthChecks'
             m['state'] = state_str
+            # 実機は常にHealthCheckPortを返す(health-check-portを個別
+            # 設定していない限り既定の"traffic-port"——ターゲット自身の
+            # ポートでヘルスチェックする、という意味。botocore/data/elbv2
+            # のTargetHealthDescriptionシェイプで確認)。
             entry = {'Target': {'Id': m['ip'], 'Port': m['port']},
+                     'HealthCheckPort': 'traffic-port',
                      'TargetHealth': {'State': state_str}}
             if reason:
                 entry['TargetHealth']['Reason'] = reason
@@ -8122,17 +8353,37 @@ Configuration Revision            : 5"""
         return '\n' + _json.dumps(out, indent=4)
 
     def _alb_describe_rules(self, args, state):
+        """実機の`describe-rules`は常にそのリスナーの既定ルール
+        (`create-listener`の`--default-actions`由来、`IsDefault: true`、
+        優先度表示は"default")も一緒に返す——`create-rule`で追加した
+        ルールしか無い間は見えない状態だった。実機のRule構造体には
+        `IsDefault`フィールドが常にあるため、ここでも付与する
+        (botocore/data/elbv2のservice-2.jsonで確認)。"""
         import json as _json
         listener_ref = (args.get('listener-arn') or [''])[0]
         rules = state.alb_rules
         if listener_ref:
             rules = {a: r for a, r in rules.items() if r['listener_arn'] == listener_ref}
-        out = {'Rules': [{
+        out_rules = [{
             'RuleArn': arn, 'Priority': str(r['priority']),
             'Conditions': [{'Field': c['field'], 'Values': c['values']} for c in r['conditions']],
             'Actions': [{'Type': 'forward', 'TargetGroupArn': r['tg_arn']}] if r['tg_arn'] else [],
-        } for arn, r in sorted(rules.items(), key=lambda kv: kv[1]['priority'])]}
-        return '\n' + _json.dumps(out, indent=4)
+            'IsDefault': False,
+        } for arn, r in sorted(rules.items(), key=lambda kv: kv[1]['priority'])]
+        listener_arns = [listener_ref] if listener_ref else list(state.alb_listeners.keys())
+        for larn in listener_arns:
+            listener = state.alb_listeners.get(larn)
+            if listener is None:
+                continue
+            out_rules.append({
+                'RuleArn': f'{larn}/default-rule',
+                'Priority': 'default',
+                'Conditions': [],
+                'Actions': ([{'Type': 'forward', 'TargetGroupArn': listener['default_tg_arn']}]
+                            if listener.get('default_tg_arn') else []),
+                'IsDefault': True,
+            })
+        return '\n' + _json.dumps({'Rules': out_rules}, indent=4)
 
     # ══════════════════════════════════════════
     # Juniper Junos (vSRX/vJunos) — set/delete/commit 階層型CLI

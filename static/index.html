@@ -526,6 +526,8 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
           <option value="srs">Core-SW (SR-S)</option>
           <option value="catalyst">Dist-SW (Catalyst)</option>
           <option value="cisco">GW-Router (Cisco)</option>
+          <option value="arista-demo">Spine-1 (Arista)</option>
+          <option value="juniper-demo">vSRX-1 (Juniper)</option>
         </select></div>
       </div></div>
       <div class="gbox"><div class="gbox-hdr">基本設定</div><div class="gbox-body">
@@ -551,6 +553,19 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
         <button class="lab-btn" onclick="validateConfig()">✔ 検証</button>
         <button class="lab-btn dang" onclick="document.getElementById('config-out').textContent=''">✕</button>
       </div>
+      <div class="gbox" style="margin-top:14px"><div class="gbox-hdr">🤖 Ansible Playbook生成(LLM)</div><div class="gbox-body">
+        <div class="gf"><label>パターン</label><select id="pb-pattern">
+          <option value="push">構成投入 (push)</option>
+          <option value="facts">事実取得・差分検知 (facts)</option>
+          <option value="verify">検証 (verify)</option>
+          <option value="rollback">ロールバック (rollback)</option>
+        </select></div>
+        <div class="gf gf-extra"><label>要件</label><textarea id="pb-instruction" rows="4" placeholder="自然文で書いてください。例:&#10;Ethernet1にdescription「to-core」を設定して&#10;ホスト名がspine-1であることを確認して&#10;Ethernet1のインタフェース状態を確認して"></textarea></div>
+        <div style="font-size:11px;color:var(--text2);margin:2px 0 6px">対応: Arista / Juniper / Cisco / Catalyst。生成のみ行い、実行はしません(ansible-playbookは手元の環境で実行してください)。</div>
+        <button class="lab-btn prim" onclick="generatePlaybook()">▶ Playbook生成</button>
+        <button class="lab-btn dang" onclick="document.getElementById('pb-out').textContent=''">✕</button>
+        <pre id="pb-out" style="margin-top:8px;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto;background:var(--panel2,#0a1414);padding:8px;border-radius:4px;font-size:12px"></pre>
+      </div></div>
     </div>
     <div class="cfg-right">
       <div class="cfg-hdr"><span>構成定義コマンド出力</span>
@@ -2513,6 +2528,28 @@ async function validateConfig(){
   document.getElementById('config-out').style.color='var(--text)';
 }
 function copyConfig(){navigator.clipboard.writeText(document.getElementById('config-out').textContent).then(()=>{const b=document.querySelector('.cfg-hdr button');b.textContent='✓ コピー済み';setTimeout(()=>b.textContent='コピー',2000);});}
+
+// ════════════════════════════════════════════
+// Ansible Playbook生成(LLM→Ansible、4パターン: push/facts/verify/rollback)
+// ════════════════════════════════════════════
+async function generatePlaybook(){
+  const target=document.getElementById('cfg-target').value;
+  const pattern=document.getElementById('pb-pattern').value;
+  const instruction=document.getElementById('pb-instruction').value;
+  const out=document.getElementById('pb-out');
+  out.style.color='var(--cyan)';out.textContent='Playbook生成中...';
+  try{
+    const res=await fetch('/api/generate_playbook',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:target,pattern,instruction})});
+    const data=await res.json();
+    if(data.ok){
+      out.style.color='var(--green)';
+      out.textContent=`# collection: ${data.ansible_collection}  connection: ${data.ansible_connection}\n`+data.playbook_yaml;
+    }else{
+      out.style.color='var(--red)';
+      out.textContent='エラー: '+(data.error||'生成に失敗しました')+(data.raw?('\n\n--- AI生出力 ---\n'+data.raw):'');
+    }
+  }catch(e){out.style.color='var(--red)';out.textContent='エラー: サーバーに接続できません';}
+}
 
 // ════════════════════════════════════════════
 // タブ切り替え・ステータスバー

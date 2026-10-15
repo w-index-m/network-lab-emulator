@@ -31,18 +31,43 @@
    別のバックエンドへ振り分けが切り替わる、という挙動を素のソケット
    で確認できる。
 
+3. **Source Address Affinityパーシステンス**: `create ltm persistence
+   source-addr <name> { timeout <secs> }` + 仮想サーバへの
+   `persist replace-all-with { <name> }` 設定で、同じ送信元IPからの
+   接続は(timeout以内・選ばれたメンバーがまだ健全なら)同じプール
+   メンバーへ実際に固定して中継する(`VirtualServerProxy`内の
+   `_affinity`辞書が実際にクライアントIP→メンバーの対応を保持し、
+   期限切れ/メンバーdown時は通常のロードバランシングにフォール
+   バックする——実機のsource_addrパーシステンスプロファイルと同じ
+   挙動)。
+
+4. **SNAT(Source NAT、automap/snatpool)**: `create ltm snatpool
+   <name> { members add { <ip1> <ip2> } }` + 仮想サーバへの
+   `source-address-translation { type snat pool <name> }`(または
+   `{ type automap }`)設定で、プールメンバーへの実アウトバウンド
+   接続(`socket.create_connection`)の送信元IPを実際に変える
+   (`source_address`引数で本物のソケットバインドを行う——バックエンド
+   側から見ても本当に別IPとして見える、シミュレーションではない)。
+   automapはVIP自身のIPを送信元として使う(実機のAutoMap SNATと同じ)。
+   snatpoolは指定したSNATプールのメンバーIPを接続ごとにラウンド
+   ロビンで使う。
+
 スコープ外(実装していない):
   - httpモニターの実際のHTTPリクエスト送信/レスポンス検証(この
     エミュレータの装置は実HTTPサーバを持たないため、tcp相当の
     接続性チェックに留める——http/httpsモニターは実質tcp同等として
     扱う、と明記)
-  - SSL/TLSプロファイル、iRules、persistence(セッション永続化)
+  - SSL/TLSプロファイル、iRules
+  - source-addr以外のパーシステンスタイプ(cookie/hash等)
+  - SNATポートマッピングの詳細(実機はポートも変換するが、ここでは
+    送信元IPの変換のみ確認する)
   - UDPベースのロードバランシング(TCPパススルーのみ)
 """
 
 import re
 import socket
 import threading
+import time
 
 
 def member_tcp_reachable(ip: str, port: int, timeout: float = 1.5) -> bool:
@@ -84,16 +109,20 @@ class VirtualServerProxy:
     新規接続ごとに、その時点でヘルシーなプールメンバーをロード
     バランシングモードに従って選び、本物のTCP中継を行う。"""
 
-    def __init__(self, vip, port, get_members, get_lb_mode):
+    def __init__(self, vip, port, get_members, get_lb_mode, get_persist_timeout=None,
+                 get_snat_source=None):
         self.vip = vip
         self.port = port
         self._get_members = get_members    # () -> [(ip, port), ...] (healthyのみ)
         self._get_lb_mode = get_lb_mode     # () -> 'round-robin' | 'least-connections' | ...
+        self._get_persist_timeout = get_persist_timeout  # () -> int秒 | None (source-addr persistence)
+        self._get_snat_source = get_snat_source  # () -> ip文字列 | None (SNAT送信元IP)
         self._sock = None
         self._thread = None
         self._stop = threading.Event()
         self._rr_index = -1
         self._active_conns = {}            # (ip, port) -> 現在の接続数
+        self._affinity = {}                # client_ip -> (member, last_seen_ts)
         self._lock = threading.Lock()
 
     def start(self):
@@ -127,20 +156,40 @@ class VirtualServerProxy:
                 return
             threading.Thread(target=self._handle, args=(client,), daemon=True).start()
 
-    def _select_member(self):
+    def _select_member(self, client_ip=''):
         members = self._get_members()
         if not members:
             return None
+        timeout = self._get_persist_timeout() if self._get_persist_timeout else None
+        now = time.time()
+        if timeout and client_ip:
+            with self._lock:
+                aff = self._affinity.get(client_ip)
+            if aff is not None:
+                member, last_seen = aff
+                if member in members and now - last_seen <= timeout:
+                    with self._lock:
+                        self._affinity[client_ip] = (member, now)
+                    return member
         mode = self._get_lb_mode()
         with self._lock:
             if mode == 'least-connections':
-                return min(members, key=lambda m: self._active_conns.get(m, 0))
-            # round-robin(既定)
-            self._rr_index = (self._rr_index + 1) % len(members)
-            return members[self._rr_index]
+                member = min(members, key=lambda m: self._active_conns.get(m, 0))
+            else:
+                # round-robin(既定)
+                self._rr_index = (self._rr_index + 1) % len(members)
+                member = members[self._rr_index]
+        if timeout and client_ip:
+            with self._lock:
+                self._affinity[client_ip] = (member, now)
+        return member
 
     def _handle(self, client):
-        member = self._select_member()
+        try:
+            client_ip = client.getpeername()[0]
+        except OSError:
+            client_ip = ''
+        member = self._select_member(client_ip)
         if member is None:
             try:
                 client.close()
@@ -149,8 +198,14 @@ class VirtualServerProxy:
             return
         with self._lock:
             self._active_conns[member] = self._active_conns.get(member, 0) + 1
+        snat_ip = self._get_snat_source() if self._get_snat_source else None
         try:
-            backend = socket.create_connection(member, timeout=3.0)
+            if snat_ip:
+                from engine.loopback_alias import ensure_loopback_alias
+                ensure_loopback_alias(snat_ip)
+                backend = socket.create_connection(member, timeout=3.0, source_address=(snat_ip, 0))
+            else:
+                backend = socket.create_connection(member, timeout=3.0)
         except OSError:
             try:
                 client.close()
@@ -241,7 +296,36 @@ def ensure_virtual_server_proxy(device_id, vs_name, device_sessions) -> bool:
         pool = state.f5_pools.get(pool_name)
         return (pool or {}).get('lb_mode', 'round-robin')
 
-    proxy = VirtualServerProxy(vip, port, get_members, get_lb_mode)
+    def get_persist_timeout():
+        persist_name = v.get('persist')
+        if not persist_name:
+            return None
+        prof = getattr(state, 'f5_persistence_profiles', {}).get(persist_name)
+        if not prof or prof.get('type') != 'source-addr':
+            return None
+        return prof.get('timeout', 180)
+
+    _snat_rr_counter = {'i': 0}
+
+    def get_snat_source():
+        snat = v.get('snat')
+        if not snat:
+            return None
+        t = snat.get('type')
+        if t == 'automap':
+            return vip
+        if t == 'snat':
+            pool = getattr(state, 'f5_snatpools', {}).get(snat.get('pool'))
+            members_ips = (pool or {}).get('members', [])
+            if not members_ips:
+                return None
+            idx = _snat_rr_counter['i'] % len(members_ips)
+            _snat_rr_counter['i'] += 1
+            return members_ips[idx]
+        return None
+
+    proxy = VirtualServerProxy(vip, port, get_members, get_lb_mode, get_persist_timeout,
+                               get_snat_source)
     try:
         proxy.start()
     except OSError as e:

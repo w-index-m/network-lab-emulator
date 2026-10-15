@@ -1946,3 +1946,213 @@ web-tg)を設定、本物のcurlでVIP(`172.31.0.10:80`)の`/index.html`を
 **スコープ外**: HTTPSのTLS終端、header-based/query-string-based条件、
 重み付けターゲットグループ、リダイレクト/固定レスポンスアクション、
 least_outstanding_requestsアルゴリズム、スティッキーセッション。
+
+**「設定生成」タブ拡張: LLM→Ansible Playbook生成**: 「LLMを使っている
+のでLLMとansibleのうまい組み合わせありますか？」への回答として提案した
+4パターン(構成投入系/事実取得・差分検知系/検証系/ロールバック系)を、
+「これも試験に反映お願いします」との指示通り実装・テストした。
+新設`POST /api/generate_playbook`(`app.py`)が、自然文の要件+パターン+
+対象装置から、そのベンダー向けAnsible Playbook(YAML)をLLM(Groq優先/
+Mistral/Ollama)に生成させる。「設定生成」タブに「🤖 Ansible
+Playbook生成(LLM)」セクションを追加。
+
+対応device_typeは、このセッションで実際にnetmiko/ansibleの実SSH/
+NETCONF接続を確認済みの4つのみ(`_ANSIBLE_DEVICE_MAP`): arista
+(arista.eos、network_cli)、juniper(junipernetworks.junos、netconf)、
+cisco/catalyst(cisco.ios、network_cli)。対応外のdevice_typeは`ok:
+false`で明示的にエラーを返す(フェイクの成功を作らない)。LLM出力は
+Markdownフェンスを剥がした上で`yaml.safe_load()`で検証し、妥当な
+YAMLのリスト(play一覧)でなければエラー+生出力を返す(LLMがsystem
+promptを無視することがあるため信用せず検証する)。
+
+実`ansible-playbook`の実行はこのエンドポイントの責務外——netmiko/
+ansibleの既存ライブ検証(`tests/test_netmiko_ansible_compat.py`等)と
+同じ方針で、このエミュレータ自体はAnsibleランタイムを持たず、生成
+されたPlaybookの実行はユーザー環境での手動/オプションのライブ検証に
+留める。verify パターンの「LLM判定」部分は別タスク(LLM-as-judge型
+試験自動化)として切り分け、ここで生成されるのは`*_command`+`debug`
+タスクまで。
+
+`DEFAULT_DEVICES`に`arista-demo`/`juniper-demo`を追加(既存の`catalyst`/
+`cisco`に相乗りする形で「設定生成」タブの装置セレクトから選べるように
+した——これが無いと未知のdevice_idは`cisco`型にフォールバックして
+しまう既知のバグパターンを踏むため)。
+
+Live-verified: 実際にサーバーを起動し、LLMバックエンド無し(この
+サンドボックスの既定)での4パターンのグレースフルフォールバック、
+対応外device_type(sir)でのエラー、`arista-demo`が正しく`arista`型
+(cisco型への誤フォールバックではなく)として作られていることを
+`show version`の実際の出力で確認。Playwright(`/opt/pw-browsers/
+chromium`)で「設定生成」タブの新セクションが正しく描画され、パターン
+選択・要件入力・生成ボタン・エラー表示まで実際に確認した。詳細は
+`docs/llm-ansible-playbook-generation.md`参照。
+
+`tests/test_generate_playbook_endpoint.py`(13 tests)が4パターンの
+モジュール名/構造反映、device_type別のコレクション/接続方式の
+出し分け、対応外device_typeのエラー、LLMが壊れたYAML/非リスト/
+マークダウンフェンス付きを返した場合の扱い、AIバックエンド無し・
+LLM無応答時のフォールバックを固定する(`tests/test_generate_config_
+endpoint.py`と同じmonkeypatchでのquery_llmモックパターン)。
+
+**次に合意した拡張(このセッションではまだ未着手)**: LLM-as-judge型の
+試験自動化(既存のshow出力ベース検証テストにLLM判定を足す薄い
+ラッパー)。
+
+**BIG-IP/ALB: パーシステンス(セッション維持)の実装**: ユーザー依頼
+「疑似クライアントから、パーシステンスの確認とかもお願いできますか？」
+への対応。これまでのround-robin/least-connectionsは送信元を一切見て
+おらず、同じクライアントでも毎回別バックエンドへ振り分けられていた
+(パーシステンス無しの実機デフォルトとしては正しい挙動だが、実際に
+パーシステンスを設定した状態は未実装だった)。
+
+**BIG-IP**: 実機の`source_addr`パーシステンスプロファイルを実装。
+`create ltm persistence source-addr <name> { timeout <secs> }` +
+仮想サーバへの`persist replace-all-with { <name> }`で有効化すると、
+`VirtualServerProxy`(`engine/bigip_lb.py`)が実際にクライアントIP→
+メンバーの対応(`_affinity`辞書)を保持し、timeout以内・選ばれた
+メンバーがまだ健全なら同じメンバーへ固定して中継する(メンバーが
+downになれば通常のロードバランシングにフォールバック)。
+
+**ALB**: 実機のduration-based cookie stickiness(`lb_cookie`、既定
+モード)を実装。`aws elbv2 modify-target-group-attributes
+--attributes Key=stickiness.enabled,Value=true
+Key=stickiness.lb_cookie.duration_seconds,Value=<secs>`で有効化すると、
+`AlbListenerProxy`(`engine/alb_lb.py`)が実際にレスポンスへ
+`Set-Cookie: AWSALB=<member>; Max-Age=<secs>; Path=/`を注入し(本物の
+HTTPレスポンスヘッダ操作、フェイクではない)、次回以降のリクエストが
+同じCookieを持っていればそのメンバーへ固定する。Cookie値は実ALBの
+ような暗号化トークンではなく素の"ip:port"文字列(このエミュレータ
+自身がデコードできれば十分という割り切り)。
+
+**実装中に見つけた既存の実バグ**: BIG-IPの`show running-config`も
+ASA/bas/fortigate/ALBと全く同じ class のバグを踏んでいた——
+`app.py`の`_build_running_config`に`bigip`の明示的な委譲が無く、
+どの分岐にも一致しないとSi-Rスタイルのダミー出力にフォールバックして
+いた。これまでBIG-IPの`show running-config`を直接呼ぶテストが一つも
+無かったため気づかれていなかった(パーシステンスプロファイルの
+running-config反映テストを書いて初めて踏んだ)。`apresia`/`bas`/
+`fortigate`/`asa`と同じ`if state.device_type == 'bigip': return
+rule_engine.process('show running-config', state)`を追加して解決。
+
+Live-verified: pc装置2台(`web-svr-1`=10.80.0.1、`web-svr-2`=
+10.80.0.2)に実`http.server`、ALBにstickiness有効なターゲットグループ
+を設定——`curl -c/-b`でCookieを維持する疑似クライアントから5回
+アクセスすると(stickiness無しならround-robinで交互になるはずが)
+実際に全て同じバックエンド(`web-svr-1`)に固定され、保存された
+Cookieファイルに実際の`AWSALB=10.80.0.1:9100`が記録されていることを
+確認。Cookie無しの別クライアントは独立してround-robinされることも
+確認。BIG-IP側も、Catalyst/Ciscoの2台に`source_addr`パーシステンス
+(timeout 60s)付きの仮想サーバを設定し、本物のparamikoクライアントで
+同じ送信元から4回SSH接続すると実際に全て同じバックエンド
+(`bigip-be1`)に固定されることを確認。詳細は`docs/bigip-load-
+balancing.md`/`docs/aws-alb-load-balancer.md`参照。
+
+`tests/test_bigip_lb_healthcheck.py`(17 tests、+6)・
+`tests/test_alb_load_balancer.py`(26 tests、+9)がパーシステンス/
+スティッキーセッションのCLI設定反映・`VirtualServerProxy`/
+`AlbListenerProxy`単体の固定/フォールバック/無効時のregression防止を
+固定する。
+
+**BIG-IP: SNAT(automap/snatpool) + オブジェクト一意性 + 仮想クライアント
+ツール**: ユーザー依頼「パーシステンス、バーチャルサーバー、ナット、
+プール、ノードを実装して一意性を保って、負荷分散してるか試験も
+お願いします」「ALBとBIGIP両方試験してください」「ちなみにSナットの
+試験も含めて欲しい」「仮想クライアントを作るソフトなかったっけか？」
+への対応。
+
+**SNAT**: `create ltm snatpool <name> { members add { <ip1> <ip2> } }`
++ 仮想サーバへの`source-address-translation { type snat pool <name>
+}`(または`{ type automap }`)で、プールメンバーへの実アウトバウンド
+接続(`socket.create_connection`)の送信元IPを本物のソケットバインド
+(`source_address`引数)で実際に変える——バックエンド側から見ても
+本当に別IPとして見える、シミュレーションではない。automapはVIP自身
+のIPを、snatpoolは指定プールのメンバーIPを接続ごとにラウンドロビン
+で使う。`tests/test_bigip_lb_healthcheck.py`の
+`TestVirtualServerProxySnatDirect`が、接続元IPをそのまま返す簡易
+バックエンドを使い、automap/snatpool/未設定それぞれで実際に見える
+送信元IPが変わることをソケットレベルで固定する。
+
+**オブジェクト一意性**: pool/snatpool/persistence/virtualの名前付き
+オブジェクトが再投入で重複/破損しないこと、複数プール間でノードIP
+が重複登録されず1つにまとまることを`TestBigipObjectUniqueness`
+(BIG-IP)/`TestAlbObjectUniqueness`(ALB)で固定。
+
+**新設`tools/virtual_client.py`**: 複数の仮想クライアント(それぞれ
+別の実送信元IP、`engine.loopback_alias`で実際にバインド)からVIPへ
+接続し、どのバックエンドに振り分けられたかを一括集計するツール——
+このリポジトリを検索した限り該当するものが存在しなかったため新設
+した。httpモード(ALB向け、Set-Cookieを引き継いでstickinessを検証)
+とtcpモード(BIG-IP向け、`--ssh-login`で実際にログインしてホスト名
+まで確認)の両方に対応。「クライアントごとの振り分け(STICKY/
+DISTRIBUTED)」と「全体の振り分け(負荷分散の均等さ)」の2段サマリーを
+出す。
+
+**実装中に見つけた既存の実バグ(`engine/loopback_alias.py`)**:
+`ensure_loopback_alias()`は従来`127.0.0.1`のみを特例扱いしていたが、
+127.0.0.0/8全体がデフォルトでループバックにルーティングされるため、
+`tools/virtual_client.py`の仮想クライアント送信元IP(`127.0.10.N`等)
+のような他の127.x.x.xアドレスでも実際にはエイリアス不要でbind可能
+だった(にもかかわらず`ip addr add`自体は「Address already
+assigned」で失敗し、この文言は旧来の成功判定(`File exists`のみ)に
+引っかからず「失敗」と誤判定されていた)。127.0.0.0/8全体を早期
+リターンで成功扱いにし、`already assigned`も成功文言に追加して修正。
+`tests/test_loopback_alias.py`に2件追加して固定。
+
+Live-verified(`tools/virtual_client.py`で実際に確認): ALB——4台の
+仮想クライアントがstickiness無効時は2バックエンドへ`6:6`で均等
+分散、stickiness有効時は各クライアントが1種類に固定されつつ全体では
+依然`6:6`で均等。BIG-IP——4台の仮想クライアントがpersistence無効時は
+`{ssh-a:1,ssh-b:1}`ずつ均等分散、persistence(timeout 120s)有効時は
+各クライアントが1種類に固定されつつ全体では`6:6`で均等。SNAT
+(snatpool)を設定した仮想サーバ経由でも実SSH接続が問題なく動作する
+ことを確認。詳細なコマンド列は`docs/load-balancer-testing-
+quickstart.md`(今後の再現・試験を高速化するためのクイックスタート
+メモ、今回新設)参照。
+
+**F5 BIG-IPの「モックIP」/Self IP対応**: ユーザー指摘
+「仮想クライアントからサーバにアクセスするソフトで、ALB経由で動作を
+見たら面白そうやって欲しい\nBIGIPのマニュアル通りに実装してほしい\n
+ALBのマニュアル通りに実装してほしい\nモックのBIGIPなのでモックIP
+くらいのモック頼みます\nモックIPいけたのかな?」への対応。
+
+調べると`bigip`はinterfaces定義を専用に持たず、cisco/arista/
+fortigate共有のデフォルト(`GigabitEthernet0/0/0` @ `203.0.113.2`、
+`10.0.0.1`)をそのまま継承しており、「モックIP」としてのF5らしさも、
+他機種との衝突回避も、どちらも無かった(`モックIPいけたのかな?`への
+答えは「いけていなかった」)。
+
+clouddocs.f5.com(tmsh reference / training lab)で実機構文を確認した
+上で修正: F5実機はインタフェースを`1.1`/`1.2`等の"slot.port"形式で
+命名し、管理用は専用の`MGMT`相当インタフェース、Self IPは
+インタフェースへ直接ではなく**VLANへ**割り当てる(`tmsh create net
+self <name> address <ip>/<mask> vlan <vlan_name>`、事前に`tmsh create
+net vlan <name> interfaces add { 1.1 }`が必要)。`DeviceState.__init__`
+の`bigip`分岐に専用interfaces(`mgmt`=192.168.245.1、`1.1`=
+203.0.113.245、`1.2`=10.1.20.245——内部側のIPはF5公式トレーニングラボ
+の実例値に合わせた)を新設し、`_bigip_process`(`engine/rules.py`)に
+`create/modify net vlan`・`create/modify net self`・`show/list net
+self`・`show/list net vlan`・`show net interface`を追加。`net self`
+投入時、VLANが指すインタフェースの`state.interfaces`のIPを実際に
+更新する(icmp_engine/LLDP等、他デバイスと共通の到達性判定にそのまま
+乗る、新しい判定ロジックは追加していない)。`show running-config`にも
+`net vlan`/`net self`ブロックを追加。
+
+`tests/test_bigip_lb_healthcheck.py`に`TestBigipMockSelfIp`(5 tests、
+計33 tests)を追加: デフォルトSelf IPが他機種と衝突しないこと、
+`net vlan`/`net self`投入でインタフェースのIPが実際に更新されること、
+`show`/`list net self`・`show running-config`への反映、未作成VLANを
+指すSelf IPが既存インタフェースに影響しないこと、を固定。
+
+**「仮想クライアントからALB経由で動作を見る」デモ**: `tools/
+virtual_client.py`を使い、同一の4台の仮想クライアントでstickiness
+無効→有効の前後を比較するデモを実施(`docs/aws-alb-load-balancer.md`
+「仮想クライアントツールでのALBデモ」節に全文)。無効時は各クライアント
+がラウンドロビンで2種類のバックエンドに散らばり(`DISTRIBUTED`)、
+`modify-target-group-attributes`でstickiness有効化後は同じクライアント
+集合が実際にCookie(`Set-Cookie: AWSALB=<member>`)を介して1種類ずつに
+固定される(`STICKY`)のに、全体では依然として6:6で均等分散——
+before/afterが一目でわかる形で記録した。
+
+ライブ検証はこのセッションの作法通り、全体回帰テストとは同時実行
+しない独立したuvicornインスタンス(`NETLAB_AUTH_DISABLE=1`)で実施し、
+検証後に確実に停止してからpytestを実行した。

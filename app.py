@@ -109,6 +109,10 @@ DEFAULT_DEVICES = {
     "pc-1":     {"type": "pc",       "hostname": "PC-1",     "color": "#888888", "ip": "192.168.1.10", "gateway": "192.168.1.1"},
     "pc-2":     {"type": "pc",       "hostname": "PC-2",     "color": "#555555", "ip": "192.168.1.11", "gateway": "192.168.1.1"},
     "asa":      {"type": "asa",      "hostname": "ASA-FW",   "color": "#cc4400"},
+    # LLM→Ansible Playbook生成タブ(/api/generate_playbook)の対象として
+    # 選べるよう追加。実ネットミコ/Ansible接続を確認済みのdevice_type。
+    "arista-demo":  {"type": "arista",  "hostname": "Spine-1", "color": "#00bcd4"},
+    "juniper-demo": {"type": "juniper", "hostname": "vSRX-1",  "color": "#7a5cff"},
 }
 
 # ══════════════════════════════════════════
@@ -1071,6 +1075,155 @@ async def generate_config(body: dict):
         "output": show_result.get('output', ''),
         "applied_commands": applied,
         "notes": notes,
+    }
+
+
+# ══════════════════════════════════════════
+# 「設定生成」タブ拡張: LLM→Ansible Playbook生成
+#   ユーザー依頼「LLMを使っているのでLLMとansibleのうまい組み合わせ
+#   ありますか？」→ 4パターン(構成投入系/事実取得・差分検知系/検証系/
+#   ロールバック系)を試験に反映してほしいとの依頼に対応。
+#   実`ansible-playbook`実行はこのエンドポイントでは行わない——
+#   netmiko/ansibleの既存ライブ検証(tests/test_netmiko_ansible_compat.py
+#   等)と同じ方針で、このエミュレータ自体はAnsibleランタイムを持たず、
+#   実行はユーザー環境での手動/オプションのライブ検証に留める。
+#   ここでのスコープは「正しいモジュール名/接続方式/構造を持つ
+#   Playbook YAMLを生成すること」。
+# ══════════════════════════════════════════
+
+# このセッションで実際にnetmiko/ansibleの実SSH/NETCONF接続を確認済みの
+# 4 device_type のみ対応する(CLAUDE.md参照)。arista/catalyst/ciscoは
+# network_cli(SSH)、juniperはnetconf(NETCONFエージェント実装済み)。
+_ANSIBLE_DEVICE_MAP = {
+    'arista': {'collection': 'arista.eos', 'config': 'eos_config', 'facts': 'eos_facts',
+               'command': 'eos_command', 'connection': 'network_cli', 'network_os': 'eos'},
+    'juniper': {'collection': 'junipernetworks.junos', 'config': 'junos_config', 'facts': 'junos_facts',
+                'command': 'junos_command', 'connection': 'netconf', 'network_os': 'junos'},
+    'cisco': {'collection': 'cisco.ios', 'config': 'ios_config', 'facts': 'ios_facts',
+              'command': 'ios_command', 'connection': 'network_cli', 'network_os': 'ios'},
+    'catalyst': {'collection': 'cisco.ios', 'config': 'ios_config', 'facts': 'ios_facts',
+                 'command': 'ios_command', 'connection': 'network_cli', 'network_os': 'ios'},
+}
+
+_PLAYBOOK_PATTERNS = ('push', 'facts', 'verify', 'rollback')
+
+
+def _playbook_system_prompt(dt: str, pattern: str) -> Optional[str]:
+    m = _ANSIBLE_DEVICE_MAP.get(dt)
+    if m is None or pattern not in _PLAYBOOK_PATTERNS:
+        return None
+    common = (
+        f"あなたはAnsibleによるネットワーク自動化の専門家です。対象装置は"
+        f"device_type={dt}、Ansibleコレクションは{m['collection']}、"
+        f"接続方式はansible_connection={m['connection']}、"
+        f"ansible_network_os={m['network_os']}です。"
+        "出力は妥当なYAML形式のAnsible Playbookのみとし、"
+        "マークダウンのコードブロック(```)や説明文、前置きは"
+        "一切付けないでください。hostsはallとし、"
+        "vars(ansible_connection/ansible_network_os)をplay内に"
+        "含めてください。"
+    )
+    if pattern == 'push':
+        return common + (
+            f"ユーザーの要望する設定変更を、{m['collection']}.{m['config']}"
+            "モジュールのlinesパラメータ(投入すべきCLIコマンドの"
+            "リスト)に変換した1つのtaskを持つplayを生成してください。"
+        )
+    if pattern == 'facts':
+        return common + (
+            f"{m['collection']}.{m['facts']}モジュールで現在の状態を"
+            "取得するtaskと、ユーザーが期待する状態と比較して差分を"
+            "検知する(一致しなければ失敗させる)"
+            "ansible.builtin.assertタスクの、2つのtaskを持つplayを"
+            "生成してください。"
+        )
+    if pattern == 'verify':
+        return common + (
+            "ユーザーの要望を確認するために必要なshowコマンドを"
+            f"{m['collection']}.{m['command']}モジュールのcommandsで"
+            "実行し、結果をregisterした上でansible.builtin.debugで"
+            "出力する、2つのtaskを持つplayを生成してください。"
+        )
+    if pattern == 'rollback':
+        return common + (
+            f"{m['collection']}.{m['config']}モジュールでbackup: yesを"
+            "指定して設定変更を適用するplayと、直前のバックアップ"
+            "(1つ目のplayでregisterしたbackup_pathの結果)から設定を"
+            "復元するロールバック用のplayの、2つのplayから成る"
+            "playbookを生成してください。"
+        )
+    return None
+
+
+def _strip_markdown_fence(text: str) -> str:
+    text = text.strip()
+    if not text.startswith('```'):
+        return text
+    lines = text.splitlines()
+    if lines and lines[0].startswith('```'):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith('```'):
+        lines = lines[:-1]
+    return '\n'.join(lines).strip()
+
+
+@app.post("/api/generate_playbook")
+async def generate_playbook(body: dict):
+    """LLMにAnsible Playbook(YAML)を生成させる。4パターン:
+    push(構成投入)/facts(事実取得・差分検知)/verify(検証)/
+    rollback(ロールバック)。生成のみ行い、実行はしない
+    (フェイクの実行成功を作らない——実行結果が要るなら実際に
+    `ansible-playbook`をユーザー環境で走らせて確認してもらう)。"""
+    device_id = body.get('device_id', '')
+    pattern = (body.get('pattern') or '').strip()
+    instruction = (body.get('instruction') or '').strip()
+
+    if pattern not in _PLAYBOOK_PATTERNS:
+        return {"ok": False, "error": f"pattern は {list(_PLAYBOOK_PATTERNS)} のいずれかを指定してください"}
+
+    if device_id not in device_sessions:
+        dev = DEFAULT_DEVICES.get(device_id, {"type": "cisco", "hostname": device_id})
+        device_sessions[device_id] = DeviceState(dev["type"], dev["hostname"])
+        _register_icmp(device_id)
+        vnet.device_types[device_id] = device_sessions[device_id].device_type
+    dt = device_sessions[device_id].device_type
+
+    m = _ANSIBLE_DEVICE_MAP.get(dt)
+    if m is None:
+        return {"ok": False,
+                "error": f"device_type '{dt}' はPlaybook生成に対応していません"
+                         f"(対応: {sorted(_ANSIBLE_DEVICE_MAP)})"}
+
+    if LLM_BACKEND == 'rules':
+        return {"ok": False, "error": "AIバックエンド(Groq/Mistral/Ollama)が利用できないため生成できません"}
+
+    sys_prompt = _playbook_system_prompt(dt, pattern)
+    user_prompt = instruction or f"{dt}に対する{pattern}の標準的な例"
+    llm_out = await query_llm(user_prompt, sys_prompt)
+    if not llm_out:
+        return {"ok": False, "error": "AI応答が得られませんでした"}
+
+    playbook_yaml = _strip_markdown_fence(llm_out)
+
+    import yaml
+    try:
+        parsed = yaml.safe_load(playbook_yaml)
+    except yaml.YAMLError as e:
+        return {"ok": False,
+                "error": f"生成されたPlaybookが妥当なYAMLではありません: {e}",
+                "raw": playbook_yaml}
+    if not isinstance(parsed, list):
+        return {"ok": False,
+                "error": "生成されたPlaybookはYAMLのリスト(play一覧)ではありません",
+                "raw": playbook_yaml}
+
+    return {
+        "ok": True,
+        "pattern": pattern,
+        "device_type": dt,
+        "ansible_collection": m['collection'],
+        "ansible_connection": m['connection'],
+        "playbook_yaml": playbook_yaml,
     }
 
 # device_id -> 直近60件の {t, cpu, total_bytes} サンプル（CPU/トラフィック遷移表示用）。
@@ -5349,6 +5502,15 @@ def _build_running_config(device_id: str, state) -> str:
     # 専用の _fortigate_process 側に明示的に委譲する。
     if state.device_type == 'fortigate':
         return rule_engine.process('show full-configuration', state)
+
+    # F5 BIG-IP: 同じ理由(app.py側の汎用ハンドラが先に勝ってしまい、
+    # どの分岐にも一致しないとSi-Rスタイルのダミー出力になってしまう)
+    # で専用の_bigip_process側に明示的に委譲する。これまでBIG-IPの
+    # "show running-config"を直接呼ぶテストが無く見つからなかった
+    # 既存の実バグ(persistenceプロファイルの反映テスト追加時に発見、
+    # ASA/bas/fortigateと全く同じ class)。
+    if state.device_type == 'bigip':
+        return rule_engine.process('show running-config', state)
 
     # ── NX-OS (Nexus 9000) running-config ──
     if is_nexus:

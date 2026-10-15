@@ -138,6 +138,64 @@ class TestAlbConfigCli:
         assert 'create-load-balancer' in out
 
 
+class TestAlbAwsCliSpecCompliance:
+    """ユーザー依頼「ALBのaws-cli仕様も本家マニュアルと突き合わせといて」
+    への対応。`boto/botocore`の`botocore/data/elbv2/2015-12-01/
+    service-2.json`(aws-cliが実際に使っているサービスモデル、本家
+    ドキュメントの一次情報)と照合して見つけた2つの欠落フィールドを
+    固定する: Ruleシェイプには常に`IsDefault`があり、
+    TargetHealthDescriptionには常に`HealthCheckPort`がある。"""
+
+    def test_create_rule_output_includes_is_default_false(self):
+        _dev('alb-spec-1')
+        _cli('alb-spec-1', 'aws elbv2 create-load-balancer --name specdemo --type application')
+        _cli('alb-spec-1', 'aws elbv2 create-target-group --name tg1 --protocol HTTP --port 80')
+        out = _cli('alb-spec-1', 'aws elbv2 create-rule --listener-arn no-listener --priority 10 '
+                                 '--conditions Field=path-pattern,Values=/api/* '
+                                 '--actions Type=forward,TargetGroupArn=tg1')
+        assert 'ListenerNotFoundException' in out
+
+    def test_create_rule_and_describe_rules_include_is_default(self):
+        from engine.alb_lb import stop_alb_listener_proxy
+        _dev('alb-spec-2')
+        try:
+            _cli('alb-spec-2', 'aws elbv2 create-load-balancer --name specdemo2 --type application')
+            _cli('alb-spec-2', 'aws elbv2 create-target-group --name tg2 --protocol HTTP --port 80')
+            listener_out = _json_out(_cli(
+                'alb-spec-2',
+                'aws elbv2 create-listener --load-balancer-arn specdemo2 --protocol HTTP --port 80 '
+                '--default-actions Type=forward,TargetGroupArn=tg2'))
+            listener_arn = listener_out['Listeners'][0]['ListenerArn']
+            rule_out = _json_out(_cli(
+                'alb-spec-2',
+                f'aws elbv2 create-rule --listener-arn {listener_arn} --priority 10 '
+                '--conditions Field=path-pattern,Values=/api/* --actions Type=forward,TargetGroupArn=tg2'))
+            assert rule_out['Rules'][0]['IsDefault'] is False
+
+            describe_out = _json_out(_cli('alb-spec-2',
+                                           f'aws elbv2 describe-rules --listener-arn {listener_arn}'))
+            by_default = {r['IsDefault'] for r in describe_out['Rules']}
+            assert by_default == {True, False}, (
+                '実機は常にcreate-listenerのdefault-actions由来の既定ルール'
+                f'(IsDefault: true)も一緒に返すはず: {describe_out}')
+            default_rule = next(r for r in describe_out['Rules'] if r['IsDefault'])
+            assert default_rule['Priority'] == 'default'
+            assert default_rule['Actions'][0]['TargetGroupArn']
+        finally:
+            state = app_module.device_sessions['alb-spec-2']
+            for arn in state.alb_listeners:
+                stop_alb_listener_proxy('alb-spec-2', arn)
+
+    def test_describe_target_health_includes_health_check_port(self):
+        _dev('alb-spec-3')
+        _cli('alb-spec-3', 'aws elbv2 create-target-group --name tg3 --protocol HTTP --port 9400')
+        _cli('alb-spec-3', 'aws elbv2 register-targets --target-group-arn tg3 '
+                           '--targets Id=10.2.2.2,Port=9400')
+        out = _json_out(_cli('alb-spec-3', 'aws elbv2 describe-target-health --target-group-arn tg3'))
+        desc = out['TargetHealthDescriptions'][0]
+        assert desc['HealthCheckPort'] == 'traffic-port'
+
+
 class TestAlbRealHttpHealthCheck:
     def test_target_healthy_against_real_mock_http_server(self):
         from engine.mock_http_server import ensure_mock_http_server, stop_mock_http_server
@@ -236,6 +294,22 @@ def _http_get(host, port, path='/', timeout=3.0):
         conn.request('GET', path, headers={'Host': host, 'Connection': 'close'})
         resp = conn.getresponse()
         return resp.read()
+    finally:
+        conn.close()
+
+
+def _http_get_with_headers(host, port, path='/', cookie=None, timeout=3.0):
+    """ボディと一緒にレスポンスヘッダ(Set-Cookie確認用)も返す。"""
+    import http.client
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        headers = {'Host': host, 'Connection': 'close'}
+        if cookie:
+            headers['Cookie'] = cookie
+        conn.request('GET', path, headers=headers)
+        resp = conn.getresponse()
+        body = resp.read()
+        return body, dict(resp.getheaders())
     finally:
         conn.close()
 
@@ -400,6 +474,139 @@ def alb_with_http_backends(server):
              f'--actions Type=forward,TargetGroupArn=api-tg', ALB)
     time.sleep(2)
     yield {'a_ip': a_ip, 'b_ip': b_ip, 'c_ip': c_ip}
+
+
+class TestAlbStickinessConfigCli:
+    """ユーザー依頼「疑似クライアントから、パーシステンスの確認とかも
+    お願いできますか？」への対応——実機ALBのduration-based cookie
+    stickiness(`modify-target-group-attributes`)のCLI設定面。"""
+
+    def test_modify_target_group_attributes_enables_stickiness(self):
+        _dev('alb-stick-cli-1')
+        _cli('alb-stick-cli-1', 'aws elbv2 create-target-group --name tg1 --protocol HTTP --port 8000')
+        out = _cli('alb-stick-cli-1',
+                   'aws elbv2 modify-target-group-attributes --target-group-arn tg1 '
+                   '--attributes Key=stickiness.enabled,Value=true '
+                   'Key=stickiness.lb_cookie.duration_seconds,Value=120')
+        data = _json_out(out)
+        attrs = {a['Key']: a['Value'] for a in data['Attributes']}
+        assert attrs['stickiness.enabled'] == 'true'
+        assert attrs['stickiness.lb_cookie.duration_seconds'] == '120'
+        state = app_module.device_sessions['alb-stick-cli-1']
+        tg = list(state.alb_target_groups.values())[0]
+        assert tg['stickiness'] == {'enabled': True, 'type': 'lb_cookie', 'duration': 120}
+
+    def test_stickiness_disabled_by_default(self):
+        _dev('alb-stick-cli-2')
+        _cli('alb-stick-cli-2', 'aws elbv2 create-target-group --name tg2 --protocol HTTP --port 8000')
+        state = app_module.device_sessions['alb-stick-cli-2']
+        tg = list(state.alb_target_groups.values())[0]
+        assert tg['stickiness']['enabled'] is False
+
+    def test_nonexistent_target_group_reports_error(self):
+        _dev('alb-stick-cli-3')
+        out = _cli('alb-stick-cli-3',
+                   'aws elbv2 modify-target-group-attributes --target-group-arn no-such-tg '
+                   '--attributes Key=stickiness.enabled,Value=true')
+        assert 'TargetGroupNotFoundException' in out
+
+
+class TestAlbListenerProxyStickinessDirect:
+    """AlbListenerProxyの実際のCookieベースstickinessの振る舞いを、
+    簡易HTTPバックエンドで直接固定する。"""
+
+    def test_response_sets_cookie_and_subsequent_request_sticks(self):
+        from engine.alb_lb import AlbListenerProxy
+
+        b1 = _FakeHttpBackend(b'B1')
+        b2 = _FakeHttpBackend(b'B2')
+        members = [('127.0.0.1', b1.port), ('127.0.0.1', b2.port)]
+        stickiness = {'enabled': True, 'duration': 86400}
+        proxy = AlbListenerProxy('127.0.0.1', 0, lambda p, h: 'tg', lambda k: members,
+                                 lambda k: stickiness)
+        try:
+            proxy.start()
+            vip_port = proxy._sock.getsockname()[1]
+
+            body1, headers1 = _http_get_with_headers('127.0.0.1', vip_port, '/')
+            assert body1 == b'B1', 'stickiness有効でも初回はround-robinで選ばれる'
+            cookie_header = headers1.get('Set-Cookie', '')
+            assert cookie_header.startswith('AWSALB='), f'Set-Cookieが注入されているはず: {headers1}'
+            cookie_value = cookie_header.split(';')[0]
+
+            # 次の接続は本来ならround-robinでB2が選ばれるはずだが、
+            # 同じCookieを持っているのでB1に固定される
+            for _ in range(3):
+                body, _ = _http_get_with_headers('127.0.0.1', vip_port, '/', cookie=cookie_value)
+                assert body == b'B1', 'Cookieを持つリクエストは同じメンバーに固定されるはず'
+        finally:
+            proxy.stop()
+            b1.stop()
+            b2.stop()
+
+    def test_cookie_for_down_member_falls_back_to_load_balancing(self):
+        from engine.alb_lb import AlbListenerProxy
+
+        b2 = _FakeHttpBackend(b'B2')
+        # b1は実在しないポート(停止済み)を指すCookieを偽装する
+        stale_cookie = 'AWSALB=127.0.0.1:1;'
+        members = [('127.0.0.1', b2.port)]
+        stickiness = {'enabled': True, 'duration': 86400}
+        proxy = AlbListenerProxy('127.0.0.1', 0, lambda p, h: 'tg', lambda k: members,
+                                 lambda k: stickiness)
+        try:
+            proxy.start()
+            vip_port = proxy._sock.getsockname()[1]
+            body, _ = _http_get_with_headers('127.0.0.1', vip_port, '/', cookie=stale_cookie)
+            assert body == b'B2', '固定先がもう存在しないメンバーならload balancingにフォールバックするはず'
+        finally:
+            proxy.stop()
+            b2.stop()
+
+    def test_stickiness_disabled_does_not_set_cookie(self):
+        from engine.alb_lb import AlbListenerProxy
+
+        b1 = _FakeHttpBackend(b'B1')
+        members = [('127.0.0.1', b1.port)]
+        stickiness = {'enabled': False, 'duration': 86400}
+        proxy = AlbListenerProxy('127.0.0.1', 0, lambda p, h: 'tg', lambda k: members,
+                                 lambda k: stickiness)
+        try:
+            proxy.start()
+            vip_port = proxy._sock.getsockname()[1]
+            body, headers = _http_get_with_headers('127.0.0.1', vip_port, '/')
+            assert body == b'B1'
+            assert 'Set-Cookie' not in headers
+        finally:
+            proxy.stop()
+            b1.stop()
+
+
+class TestAlbObjectUniqueness:
+    """ユーザー依頼「一意性を保って...試験もお願いします」への対応
+    (BIG-IP側のpool/node相当)——ALBのtarget-group/register-targetsが
+    再投入で重複しないことを固定する。"""
+
+    def test_registering_same_target_twice_does_not_duplicate(self):
+        _dev('alb-uniq-1')
+        _cli('alb-uniq-1', 'aws elbv2 create-target-group --name utg1 --protocol HTTP --port 8000')
+        _cli('alb-uniq-1', 'aws elbv2 register-targets --target-group-arn utg1 --targets Id=10.1.1.1,Port=8000')
+        _cli('alb-uniq-1', 'aws elbv2 register-targets --target-group-arn utg1 --targets Id=10.1.1.1,Port=8000')
+        state = app_module.device_sessions['alb-uniq-1']
+        tg = list(state.alb_target_groups.values())[0]
+        assert len(tg['members']) == 1
+
+    def test_distinct_target_groups_and_listeners_stay_independent(self):
+        _dev('alb-uniq-2')
+        _cli('alb-uniq-2', 'aws elbv2 create-target-group --name utg2a --protocol HTTP --port 8000')
+        _cli('alb-uniq-2', 'aws elbv2 create-target-group --name utg2b --protocol HTTP --port 9000')
+        _cli('alb-uniq-2', 'aws elbv2 register-targets --target-group-arn utg2a --targets Id=10.1.1.1,Port=8000')
+        _cli('alb-uniq-2', 'aws elbv2 register-targets --target-group-arn utg2b --targets Id=10.1.1.2,Port=9000')
+        state = app_module.device_sessions['alb-uniq-2']
+        tgs = {tg['name']: tg for tg in state.alb_target_groups.values()}
+        assert tgs['utg2a']['members'][0]['ip'] == '10.1.1.1'
+        assert tgs['utg2b']['members'][0]['ip'] == '10.1.1.2'
+        assert tgs['utg2a']['port'] == 8000 and tgs['utg2b']['port'] == 9000
 
 
 class TestAlbLiveEndToEnd:

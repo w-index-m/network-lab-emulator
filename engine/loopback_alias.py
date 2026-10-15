@@ -50,7 +50,15 @@ def ensure_loopback_alias(ip: str) -> bool:
     （bind 側で失敗が観測できるので、ここで止める意味が無い）。
     戻り値は「呼び出し後にエイリアスが存在するとみなせるか」。
     """
-    if not ip or ip == '127.0.0.1':
+    if not ip:
+        return True
+    # 127.0.0.0/8 全体がデフォルトでループバックにルーティングされる
+    # (127.0.0.1だけでなく127.x.x.xすべて)ため、エイリアス不要で
+    # 常にbind可能——tools/virtual_client.pyの仮想クライアント用送信元
+    # IP(127.0.10.N等)を試した際に判明した(「Address already
+    # assigned」という、下のFile exists判定とは異なる文言でipコマンド
+    # 自体は失敗していたが、実際にはbind自体は常に成功していた)。
+    if ip.startswith('127.'):
         return True
     with _lock:
         if ip in _added:
@@ -59,13 +67,17 @@ def ensure_loopback_alias(ip: str) -> bool:
             r = _run_ip_addr_add(ip, use_sudo=False)
         except Exception:
             return False
-        # rc=2 は "File exists"（既に足されている）なので成功扱い
-        ok = r.returncode == 0 or b'File exists' in (r.stderr or b'')
+        # rc=2 は既にエイリアス済みという意味だが、iproute2のバージョン
+        # によって文言が異なる("File exists" または "Address already
+        # assigned")ため両方を成功扱いにする。
+        stderr = r.stderr or b''
+        ok = r.returncode == 0 or b'File exists' in stderr or b'already assigned' in stderr
         if not ok and b'Operation not permitted' in (r.stderr or b''):
             # root権限が無い(CI等)。パスワード無しsudoでリトライする。
             try:
                 r = _run_ip_addr_add(ip, use_sudo=True)
-                ok = r.returncode == 0 or b'File exists' in (r.stderr or b'')
+                _stderr2 = r.stderr or b''
+                ok = r.returncode == 0 or b'File exists' in _stderr2 or b'already assigned' in _stderr2
             except Exception:
                 ok = False
         if ok:

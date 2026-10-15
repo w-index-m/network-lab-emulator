@@ -29,6 +29,18 @@ BIG-IPのL4 TCPパススルーより一段実装が多い。
    `http.server`——が相手なら、クライアントは本物のHTTPレスポンスを
    受け取る)。
 
+3. **スティッキーセッション(duration-based cookie stickiness)**:
+   `aws elbv2 modify-target-group-attributes --attributes
+   Key=stickiness.enabled,Value=true
+   Key=stickiness.lb_cookie.duration_seconds,Value=<secs>`で有効化
+   すると、`AlbListenerProxy`が実際にレスポンスへ`Set-Cookie:
+   AWSALB=<member>; Max-Age=<secs>; Path=/`を注入し(本物のHTTPヘッダ
+   操作、フェイクではない)、次回以降のリクエストが同じCookieを
+   持っていればそのメンバーへ固定して中継する(メンバーがdownに
+   なった場合は通常のround-robinにフォールバックする)。Cookie値は
+   実ALBのような暗号化トークンではなく、素の"ip:port"文字列
+   (このエミュレータ自身がデコードできれば十分という割り切り)。
+
 スコープ外(実装していない):
   - HTTPSのTLS終端(実ALBはここでTLS復号するが、このエミュレータは
     証明書/TLSプロファイルを持たないため、HTTPS指定でも平文TCPとして
@@ -37,7 +49,8 @@ BIG-IPのL4 TCPパススルーより一段実装が多い。
     リダイレクト/固定レスポンスアクション(forwardアクションのみ)
   - least_outstanding_requestsアルゴリズム(実ALBの既定はround robin
     であり、これのみ実装)
-  - スティッキーセッション(target group stickiness)
+  - app_cookie(アプリ側が発行するCookie名を使うモード)——
+    lb_cookie(ALB自身が発行する既定モード)のみ実装
 """
 
 import fnmatch
@@ -99,11 +112,12 @@ class AlbListenerProxy:
     からターゲットグループを選び、健全なメンバーへround-robinで
     実中継する。"""
 
-    def __init__(self, vip, port, select_target_group, get_healthy_members):
+    def __init__(self, vip, port, select_target_group, get_healthy_members, get_stickiness=None):
         self.vip = vip
         self.port = port
         self._select_tg = select_target_group   # (path, host) -> tg_key | None
         self._get_members = get_healthy_members  # (tg_key) -> [(ip,port), ...]
+        self._get_stickiness = get_stickiness     # (tg_key) -> {'enabled','duration'} | None
         self._sock = None
         self._thread = None
         self._stop = threading.Event()
@@ -151,13 +165,31 @@ class AlbListenerProxy:
             path = parts[1] if len(parts) >= 2 else '/'
             path = path.split('?', 1)[0]
             host = ''
+            cookies = {}
             for line in lines[1:]:
                 if line.lower().startswith(b'host:'):
                     host = line.split(b':', 1)[1].strip().decode(errors='replace')
-                    break
-            return path, host
+                elif line.lower().startswith(b'cookie:'):
+                    cookie_str = line.split(b':', 1)[1].strip().decode(errors='replace')
+                    for part in cookie_str.split(';'):
+                        if '=' in part:
+                            k, v = part.strip().split('=', 1)
+                            cookies[k] = v
+            return path, host, cookies
         except Exception:
-            return '/', ''
+            return '/', '', {}
+
+    @staticmethod
+    def _encode_member(member):
+        return f'{member[0]}:{member[1]}'
+
+    @staticmethod
+    def _decode_member(token):
+        try:
+            ip, port = token.rsplit(':', 1)
+            return (ip, int(port))
+        except (ValueError, AttributeError):
+            return None
 
     def _select_member(self, tg_key):
         members = self._get_members(tg_key)
@@ -187,9 +219,18 @@ class AlbListenerProxy:
                 pass
             return
         client.settimeout(None)
-        path, host = self._parse_request(buf)
+        path, host, cookies = self._parse_request(buf)
         tg_key = self._select_tg(path, host)
-        member = self._select_member(tg_key) if tg_key is not None else None
+        stick = self._get_stickiness(tg_key) if (tg_key is not None and self._get_stickiness) else None
+        sticky_enabled = bool(stick and stick.get('enabled'))
+        member = None
+        if sticky_enabled:
+            healthy = self._get_members(tg_key)
+            candidate = self._decode_member(cookies.get('AWSALB'))
+            if candidate and candidate in healthy:
+                member = candidate
+        if member is None:
+            member = self._select_member(tg_key) if tg_key is not None else None
         if member is None:
             try:
                 client.sendall(b'HTTP/1.1 503 Service Unavailable\r\n'
@@ -218,17 +259,56 @@ class AlbListenerProxy:
             backend.sendall(buf)
         except OSError:
             pass
+        if sticky_enabled:
+            self._relay_with_cookie_injection(client, backend, member, stick.get('duration', 86400))
+        else:
+            t1 = threading.Thread(target=self._pump, args=(client, backend), daemon=True)
+            t2 = threading.Thread(target=self._pump, args=(backend, client), daemon=True)
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+        for s in (client, backend):
+            try:
+                s.close()
+            except OSError:
+                pass
+
+    def _relay_with_cookie_injection(self, client, backend, member, duration):
+        """バックエンドの応答ヘッダ部分だけ読み、Set-Cookie(AWSALB=
+        ip:port)を注入してからクライアントへ転送し、残りは双方向に
+        そのまま中継する(実ALBのduration-based cookie stickinessと
+        同じ仕組み——本物のHTTPレスポンスヘッダ操作、フェイクではない)。"""
+        resp_buf = b''
+        try:
+            backend.settimeout(5.0)
+            while b'\r\n\r\n' not in resp_buf and len(resp_buf) < 65536:
+                chunk = backend.recv(4096)
+                if not chunk:
+                    break
+                resp_buf += chunk
+            backend.settimeout(None)
+        except OSError:
+            pass
+        if b'\r\n\r\n' in resp_buf:
+            head, rest = resp_buf.split(b'\r\n\r\n', 1)
+            cookie_line = (f'Set-Cookie: AWSALB={self._encode_member(member)}; '
+                           f'Max-Age={duration}; Path=/').encode()
+            try:
+                client.sendall(head + b'\r\n' + cookie_line + b'\r\n\r\n' + rest)
+            except OSError:
+                pass
+        elif resp_buf:
+            try:
+                client.sendall(resp_buf)
+            except OSError:
+                pass
         t1 = threading.Thread(target=self._pump, args=(client, backend), daemon=True)
         t2 = threading.Thread(target=self._pump, args=(backend, client), daemon=True)
         t1.start()
         t2.start()
         t1.join()
         t2.join()
-        for s in (client, backend):
-            try:
-                s.close()
-            except OSError:
-                pass
 
     @staticmethod
     def _pump(src, dst):
@@ -296,7 +376,11 @@ def ensure_alb_listener_proxy(device_id, listener_arn, device_sessions) -> bool:
                 out.append((m['ip'], m['port']))
         return out
 
-    proxy = AlbListenerProxy(vip, port, select_tg, get_healthy_members)
+    def get_stickiness(tg_arn):
+        tg = state.alb_target_groups.get(tg_arn) if tg_arn else None
+        return (tg or {}).get('stickiness')
+
+    proxy = AlbListenerProxy(vip, port, select_tg, get_healthy_members, get_stickiness)
     try:
         proxy.start()
     except OSError as e:

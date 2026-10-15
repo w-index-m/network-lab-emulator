@@ -92,3 +92,25 @@ def test_loopback_itself_is_always_ok_without_subprocess():
     with patch('engine.loopback_alias.subprocess.run') as m:
         assert la.ensure_loopback_alias('127.0.0.1') is True
     m.assert_not_called()
+
+
+def test_any_127_address_is_always_ok_without_subprocess():
+    """tools/virtual_client.pyの仮想クライアント送信元IP(127.0.10.N等)
+    で踏んだ既存の実バグ: 127.0.0.0/8全体がデフォルトでループバック
+    ルーティングされるため、127.0.0.1に限らずどのアドレスも
+    エイリアス不要でbind可能——従来は127.0.0.1のみ特例扱いだった。"""
+    with patch('engine.loopback_alias.subprocess.run') as m:
+        assert la.ensure_loopback_alias('127.0.10.5') is True
+    m.assert_not_called()
+
+
+def test_already_assigned_wording_is_treated_as_success_without_sudo():
+    """tools/virtual_client.pyのライブ検証で踏んだ既存の実バグ:
+    iproute2のバージョンによっては「既に割り当て済み」のエラー文言が
+    'File exists'ではなく'Address already assigned'になることがあり、
+    この文言が成功判定から漏れていた(非127.x.x.xアドレスのケース)。"""
+    la._added.discard('10.250.0.6')
+    with patch('engine.loopback_alias.subprocess.run') as m:
+        m.return_value = _completed(2, stderr=b'Error: ipv4: Address already assigned.')
+        assert la.ensure_loopback_alias('10.250.0.6') is True
+    assert m.call_count == 1

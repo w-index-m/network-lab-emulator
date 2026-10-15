@@ -134,6 +134,133 @@ web2
 web2
 ```
 
+## スティッキーセッション(duration-based cookie stickiness)
+
+ユーザー依頼「疑似クライアントから、パーシステンスの確認とかも
+お願いできますか？」への対応。実機ALBのduration-based cookie
+stickiness(lb_cookie、既定モード)を実装した:
+
+```
+aws elbv2 modify-target-group-attributes --target-group-arn web-tg \
+  --attributes Key=stickiness.enabled,Value=true \
+               Key=stickiness.lb_cookie.duration_seconds,Value=3600
+```
+
+有効化すると、`AlbListenerProxy`が実際にレスポンスへ`Set-Cookie:
+AWSALB=<member>; Max-Age=<secs>; Path=/`を注入し(本物のHTTPヘッダ
+操作)、同じCookieを持つ次回以降のリクエストは同じメンバーへ固定
+される。
+
+ライブ検証: `curl -c/-b`でCookieを維持する疑似クライアントから5回
+アクセスすると(stickiness無しならround-robinで交互になるはずが)
+実際に全て同じバックエンド(`web-svr-1`)に固定され、保存された
+Cookieファイルにも実際の`AWSALB=10.80.0.1:9100`が記録されている
+ことを確認:
+
+```
+$ curl -c cookies.txt -b cookies.txt http://172.31.0.10:80/  (×5)
+web-svr-1
+web-svr-1
+web-svr-1
+web-svr-1
+web-svr-1
+
+$ cat cookies.txt
+172.31.0.10  FALSE  /  FALSE  <expiry>  AWSALB  10.80.0.1:9100
+```
+
+Cookieを持たない別クライアントは、既存のround-robinのまま独立して
+振り分けられることも確認(`web-svr-2`→`web-svr-1`→`web-svr-2`)。
+
+## 仮想クライアントツールでのALBデモ(before/after stickiness)
+
+ユーザー依頼「仮想クライアントからサーバにアクセスするソフトで、ALB
+経由で動作を見たら面白そうやって欲しい」への対応。`tools/
+virtual_client.py`(`docs/load-balancer-testing-quickstart.md`参照)を
+使い、同じ4台の仮想クライアントに対してstickiness無効/有効の2回
+アクセスさせ、挙動が切り替わる様子をそのまま記録した。
+
+Web用target-group(`web-tg`、2バックエンド)+path-patternルール
+(`/api/*` → `api-tg`、1バックエンド)を構成した上で、まずstickiness
+無効のまま4台の仮想クライアントから`/index.html`へ各3回アクセス:
+
+```
+$ python3 tools/virtual_client.py http --vip 172.31.0.10 --port 80 \
+    --clients 4 --requests 3 --path /index.html
+
+クライアントごとの振り分け:
+  client-0: {'vcdemo-web1': 2, 'vcdemo-web2': 1}  [DISTRIBUTED]
+  client-1: {'vcdemo-web2': 2, 'vcdemo-web1': 1}  [DISTRIBUTED]
+  client-2: {'vcdemo-web1': 2, 'vcdemo-web2': 1}  [DISTRIBUTED]
+  client-3: {'vcdemo-web2': 2, 'vcdemo-web1': 1}  [DISTRIBUTED]
+
+全体の振り分け:
+  vcdemo-web1: 6
+  vcdemo-web2: 6
+```
+
+同じ4台のパスを`/api/widgets`に変えると、path-patternルールにより
+全員が`api-tg`の唯一のメンバーに固定される(`STICKY`扱いだが、これは
+persistenceではなくルーティングの結果であることに注意):
+
+```
+$ python3 tools/virtual_client.py http --vip 172.31.0.10 --port 80 \
+    --clients 3 --requests 2 --path /api/widgets
+  client-0: {'vcdemo-api1': 2}  [STICKY]
+  client-1: {'vcdemo-api1': 2}  [STICKY]
+  client-2: {'vcdemo-api1': 2}  [STICKY]
+```
+
+次に`web-tg`へ`modify-target-group-attributes`でstickinessを有効化し、
+**同じ4台の仮想クライアント**(送信元IP・Cookie保持は仮想クライアント
+ツール側が個別に維持)で全く同じコマンドを再実行すると、今度は各
+クライアントが実際に1種類のバックエンドへ固定される
+(`Set-Cookie: AWSALB=<member>`が実際に注入・引き継がれていることを
+`--path`出力のcookie欄で確認):
+
+```
+$ aws elbv2 modify-target-group-attributes --target-group-arn web-tg \
+    --attributes Key=stickiness.enabled,Value=true \
+                 Key=stickiness.lb_cookie.duration_seconds,Value=3600
+
+$ python3 tools/virtual_client.py http --vip 172.31.0.10 --port 80 \
+    --clients 4 --requests 3 --path /index.html
+
+=== client-0 (src=127.0.10.1) ===
+  request 0: backend='vcdemo-web1'  cookie=AWSALB=10.92.0.1:9300
+  request 1: backend='vcdemo-web1'  cookie=AWSALB=10.92.0.1:9300
+  request 2: backend='vcdemo-web1'  cookie=AWSALB=10.92.0.1:9300
+=== client-1 (src=127.0.10.2) ===
+  request 0: backend='vcdemo-web2'  cookie=AWSALB=10.92.0.2:9300
+  ...
+
+クライアントごとの振り分け:
+  client-0: {'vcdemo-web1': 3}  [STICKY]
+  client-1: {'vcdemo-web2': 3}  [STICKY]
+  client-2: {'vcdemo-web1': 3}  [STICKY]
+  client-3: {'vcdemo-web2': 3}  [STICKY]
+
+全体の振り分け:
+  vcdemo-web1: 6
+  vcdemo-web2: 6
+```
+
+stickiness有効/無効のON/OFFで同じツール・同じクライアント集合の結果が
+実際に切り替わり、かつ全体では依然として2バックエンドへ均等に分散
+されている(1クライアントに固定されているだけで、全体としての
+ロードバランシングは壊れていない)ことが一目で確認できる——「仮想
+クライアントからALB経由で動作を見る」という依頼の狙い通りのデモに
+なった。
+
+## BIG-IPとの比較
+
+同じ`tools/virtual_client.py`は`tcp`モードでBIG-IP(L4 VIP)にも使える
+(`docs/bigip-load-balancing.md`「仮想クライアントツールでの負荷分散/
+パーシステンス確認」参照)。ALBはHTTPモード+Cookie、BIG-IPはTCP
+モード+送信元IPという、それぞれの実機が実際に使うパーシステンスの
+方式の違いがそのままツールの引数の違い(`http`か`tcp`か)に対応して
+いる。
+
 ## スコープ外(実装していない)
 
 - HTTPSのTLS終端(証明書/TLSプロファイルを持たないため、HTTPS指定でも
@@ -141,15 +268,18 @@ web2
 - header-based/query-string-based条件、重み付けターゲットグループ、
   リダイレクト/固定レスポンスアクション(forwardアクションのみ)
 - least_outstanding_requestsアルゴリズム(round robinのみ)
-- スティッキーセッション(target group stickiness)
+- app_cookie(lb_cookieのみ実装)
 
 ## テスト
 
-`tests/test_alb_load_balancer.py`(17 tests)がCLI設定(create-*/
-register-targets/deregister-targets/describe-*、ARN解決、エラー
-ケース)、実HTTPヘルスチェック(健全/不健全/非HTTPサービスへの誤検知
-防止)、`AlbListenerProxy`単体の振り分けロジック(path-pattern
-ルーティング、ターゲットグループ内round-robin、ルール不一致時の
-503)、および実http.serverを使ったエンドツーエンド(本物のuvicorn
-サーバ+本物のurllibクライアント、round-robin+path-basedルーティング+
-`fuser -k`による実フェイルオーバー)を固定する。
+`tests/test_alb_load_balancer.py`(25 tests)がCLI設定(create-*/
+register-targets/deregister-targets/describe-*/modify-target-group-
+attributes、ARN解決、エラーケース)、名前付きオブジェクトの一意性
+(target-groupの再登録で重複しないこと、複数target-group/listenerが
+独立して管理されること)、実HTTPヘルスチェック(健全/不健全/非HTTP
+サービスへの誤検知防止)、`AlbListenerProxy`単体の振り分けロジック
+(path-patternルーティング、ターゲットグループ内round-robin、ルール
+不一致時の503、Cookieベースstickinessの付与/固定/フォールバック)、
+および実http.serverを使ったエンドツーエンド
+(本物のuvicornサーバ+本物のurllibクライアント、round-robin+
+path-basedルーティング+`fuser -k`による実フェイルオーバー)を固定する。

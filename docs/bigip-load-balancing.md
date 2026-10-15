@@ -40,12 +40,142 @@ least-connections)は設定として保持されるだけで実際に使われ�
   に、設定済みの全仮想サーバに対して`ensure_virtual_server_proxy()`を
   呼び直す。`delete ltm virtual`でリスナーを停止する。
 
+## パーシステンス(Source Address Affinity)
+
+ユーザー依頼「疑似クライアントから、パーシステンスの確認とかも
+お願いできますか？」への対応。実機の`source_addr`パーシステンス
+プロファイルを実装し、同じ送信元IPからの接続は(timeout以内・選ばれた
+メンバーがまだ健全なら)実際に同じプールメンバーへ固定して中継する。
+
+```
+create ltm persistence source-addr sp_demo { timeout 60 }
+create ltm virtual web_vs { destination 10.250.5.1:2224 pool web_pool persist replace-all-with { sp_demo } }
+```
+
+ライブ検証: 本物のparamikoクライアントで同じ送信元から4回SSH接続すると、
+(persistence無しならround-robinで交互になるはずが)実際に全て同じ
+バックエンド(`bigip-be1`)に固定されることを確認:
+
+```
+--- conn 0 --- bigip-be1#
+--- conn 1 --- bigip-be1#
+--- conn 2 --- bigip-be1#
+--- conn 3 --- bigip-be1#
+```
+
+## SNAT(automap / snatpool)
+
+ユーザー依頼「ナット...を実装して...一意性を保って、負荷分散して
+るか試験もお願いします」「ちなみにSナットの試験も含めて欲しい」への
+対応。プールメンバーへの実アウトバウンド接続(`socket.create_
+connection`)の送信元IPを、本物のソケットバインド(`source_address`)
+で実際に変える——バックエンド側から見ても本当に別IPとして見える、
+シミュレーションではない。
+
+```
+create ltm snatpool my_snat { members add { 10.95.0.1 10.95.0.2 } }
+create ltm virtual web_vs { destination 10.96.0.1:2225 pool web_pool source-address-translation { type snat pool my_snat } }
+# または、自分自身(VIP)のIPをそのまま名乗るautomap:
+create ltm virtual web_vs { destination 10.96.0.1:2225 pool web_pool source-address-translation { type automap } }
+```
+
+ライブ検証(`tests/test_bigip_lb_healthcheck.py`の
+`TestVirtualServerProxySnatDirect`で実際にソケットレベルで確認):
+接続元IPをそのまま返すだけの簡易バックエンドを使い、automapなら
+バックエンドが実際にVIP自身のIPを送信元として見ること、snatpool
+なら指定したプールメンバーのIPを見ること、SNAT未設定ならプロキシ
+自身のデフォルトの送信元(通常127.0.0.1)のままであることを確認。
+
+## 仮想クライアントツールでの負荷分散/パーシステンス確認
+
+`tools/virtual_client.py`(新設、`docs/load-balancer-testing-
+quickstart.md`参照)で複数の仮想クライアントから接続し、「クライアント
+ごとに1種類のバックエンドに固定されるか(persistence)」「全体では
+均等に分散されるか(load balancing)」を一括で確認できる。
+
+```bash
+python3 tools/virtual_client.py tcp --vip 10.96.0.1 --port 2225 \
+    --clients 4 --requests 3 --ssh-login
+```
+
+ライブ検証: persistence無効時は4台の仮想クライアントそれぞれが
+`{ssh-a: 1, ssh-b: 1}`のように2つのバックエンドへ均等に分散され
+(DISTRIBUTED)、persistence(`persist replace-all-with`)を設定すると
+各クライアントが`{ssh-a: 3}`のように1種類だけに固定され(STICKY)、
+それでも4台全体では`ssh-a: 6 / ssh-b: 6`と均等に分散されることを
+確認した。
+
+## Self IP / VLAN(「モックIPくらいのモック頼みます」)
+
+ユーザー指摘「モックのBIGIPなのでモックIPくらいのモック頼みます\n
+モックIPいけたのかな?」への対応。確認したところ、`bigip`は
+interfaces定義を専用に持たず、他のCisco系device_typeの既定
+(`GigabitEthernet0/0/0` @ `203.0.113.2`、`10.0.0.1`)をそのまま継承
+していた——cisco/arista/fortigateと同じIPを名乗ってしまっており、
+F5実機の見た目にもなっていなかった。
+
+実機のF5 BIG-IPはインタフェースを`1.1`/`1.2`/`2.1`のような
+"slot.port"形式で命名し、管理用は専用の`MGMT`インタフェースを持つ。
+Self IPもインタフェースへ直接ではなく**VLANへ**割り当てる
+(`tmsh create net self <name> address <ip>/<mask> vlan <vlan_name>`、
+事前に`tmsh create net vlan <name> interfaces add { 1.1 }`でVLANへ
+インタフェースを割り当てておく必要がある——`clouddocs.f5.com`の
+tmsh referenceで構文を確認)。
+
+これに合わせて:
+
+- デフォルトインタフェースを`mgmt`(192.168.245.1/24)・`1.1`
+  (203.0.113.245/24)・`1.2`(10.1.20.245/24 — F5公式トレーニングラボ
+  `clouddocs.f5.com/training/community/f5cert/html/class2/modules/
+  module10.html`の実例値に合わせた)に変更し、cisco/arista/
+  fortigate/asa/pc等が共有するデフォルト(203.0.113.2/10.0.0.1/
+  192.168.1.10/192.168.10.1等)と衝突しないようにした。
+- `_bigip_process`(`engine/rules.py`)に`create/modify net vlan`・
+  `create/modify net self`・`show/list net self`・`show/list net
+  vlan`・`show net interface`を追加。`net self`でSelf IPを設定すると、
+  そのVLANが指すインタフェース(`state.interfaces`)のIPが実際に
+  更新される——icmp_engine/LLDP等、他デバイスと共通の
+  `state.interfaces`経由の到達性判定にそのまま乗る(新しい判定
+  ロジックは追加していない)。`show running-config`にも
+  `net vlan`/`net self`ブロックを追加。
+
+```
+create net vlan internal { interfaces add { 1.2 } }
+create net self internal_self address 10.1.20.246/24 vlan internal
+show net self
+```
+
+ライブ検証: 上記を投入すると`state.interfaces['1.2']['ip']`が実際に
+`10.1.20.246`へ更新されること、`show net self`/`list net self`/
+`show running-config`すべてに反映されることを確認した
+(`python3 -c`での直接呼び出しで確認、トランスクリプトは下記)。
+
+```
+>>> r.process('create net vlan internal { interfaces add { 1.2 } }', s)
+''
+>>> r.process('create net self internal_self address 10.1.20.246/24 vlan internal', s)
+''
+>>> r.process('show net self', s)
+Net::Self IP: internal_self
+  Address: 10.1.20.246/24   Vlan: internal
+>>> s.interfaces['1.2']
+{'ip': '10.1.20.246', 'prefix': 24, 'status': 'up', 'speed': '1000', 'duplex': 'full'}
+```
+
+`tests/test_bigip_lb_healthcheck.py`の`TestBigipMockSelfIp`(5 tests、
+計33 tests)が、デフォルトSelf IPが他機種と衝突しないこと・
+`net vlan`/`net self`投入でVLANが指すインタフェースのIPが実際に
+更新されること・`show`/`list net self`の表示・`show running-config`
+への反映・未作成のVLANを指すSelf IPは既存インタフェースに影響しない
+こと、を固定する。
+
 ## スコープ外(実装していない)
 
 - httpモニターの実際のHTTPリクエスト送信/レスポンス検証(この
   エミュレータの装置は実HTTPサーバを持たないため、tcp相当の接続性
   チェックに留める)
-- SSL/TLSプロファイル、iRules、persistence(セッション永続化)
+- SSL/TLSプロファイル、iRules
+- source-addr以外のパーシステンスタイプ(cookie/hash等)
 - UDPベースのロードバランシング(TCPパススルーのみ)
 
 ## ライブ検証(実行結果そのまま)
@@ -115,11 +245,16 @@ lb-be2#
 
 ## テスト
 
-`tests/test_bigip_lb_healthcheck.py`(11 tests、`bigip`に対する
+`tests/test_bigip_lb_healthcheck.py`(33 tests、`bigip`に対する
 初めての専用テストファイル——従来は`tests/test_untested_device_types.py`
-の最小限のスモークテストのみだった)が、CLI設定(pool/virtual作成)、
-実TCPヘルスチェック(up/down/monitor無し)、`VirtualServerProxy`単体の
-振り分けロジック(round-robin/least-connections/down除外、簡易TCP
-バックエンドで検証)、および実SSHリスナーを持つ2台のバックエンドへの
-エンドツーエンドのround-robin振り分け+実フェイルオーバー(本物の
-uvicornサーバ+本物のparamikoクライアント)を固定する。
+の最小限のスモークテストのみだった)が、CLI設定(pool/virtual/
+snatpool/persistence作成)、実TCPヘルスチェック(up/down/monitor無し)、
+`VirtualServerProxy`単体の振り分けロジック(round-robin/
+least-connections/down除外、source-addrパーシステンスの固定/
+フォールバック、SNAT automap/snatpoolの実ソケットレベル確認、簡易
+TCPバックエンドで検証)、名前付きオブジェクトの一意性(pool/
+snatpool/persistence/nodeの再投入で重複しないこと)、デフォルト
+Self IP/`net vlan`/`net self`(`TestBigipMockSelfIp`)、および実SSH
+リスナーを持つ2台のバックエンドへのエンドツーエンドのround-robin
+振り分け+実フェイルオーバー(本物のuvicornサーバ+本物のparamiko
+クライアント)を固定する。

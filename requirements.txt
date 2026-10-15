@@ -14,3 +14,7 @@ grpcio-tools>=1.60
 # （このリポジトリで実際に使っているのに requirements.txt に
 # 無いことに気付かず放置されていた）。
 paramiko>=3.4
+# /api/generate_playbook(LLM→Ansible Playbook生成)がLLM出力を妥当な
+# YAMLか検証するのに使う。transitive依存(uvicorn[standard]等)で
+# 既に入っていることが多いが、paramikoと同じ理由で明示しておく。
+PyYAML>=6.0
