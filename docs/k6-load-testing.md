@@ -113,7 +113,70 @@ Strixの時と同じ「`has_run`でゲートして未実行時の誤発火を防
 
 ## ライブ検証
 
-<!-- 実際にk6をALB/BIG-IPのVIPへ対して実行した結果をここに追記する -->
+ALB(`k6alb`、VIP `172.31.0.10:80`)+2台のpc装置に実`http.server`
+(`k6web1`=10.94.0.1、`k6web2`=10.94.0.2、ポート9600)を立て、
+`k6 run --summary-export=...`で実際に負荷をかけた。
+
+**実装の不整合を発見・修正**: 最初に200 VU・20秒で実行したところ、
+失敗率4.73%・p95レイテンシ4.04秒という明らかに悪い結果が出た。
+調べると`engine/mock_http_server.py`が単純な`HTTPServer`(シングル
+スレッド、1リクエストずつ直列処理)を使っていた——実機の
+`python3 -m http.server`はPython 3.7以降、既定で`ThreadingHTTPServer`
+(1リクエスト=1スレッド)を使うため、このエミュレータの「実機通りの
+コマンドで本物のhttp.serverを立てる」という前提と食い違っていた。
+`ThreadingHTTPServer`に修正して再実行:
+
+```
+VUS=200, DURATION=20s:
+  http_req_failed: rate=4.26% (修正前4.73%から改善したが依然高い)
+  http_req_duration: p(95)=4.01s p(99)=5.05s
+```
+
+ほとんど変わらなかった。原因を`engine/alb_lb.py`の`AlbListenerProxy`
+を見て特定: 接続ごとに`accept`スレッド+双方向リレー用の`_pump`
+スレッド2本を生成する設計(Pythonの素朴なthread-per-connection実装)
+のため、200同時接続では600本以上のスレッドが同時に動き、CPythonの
+GIL競合そのものがボトルネックになっていた——バックエンド側の
+スレッディングの問題ではなく、**このエミュレータの実プロキシ実装
+(Python threadベース)の本質的なスケール限界**だった。
+
+VU数を下げて再確認:
+
+```
+VUS=50,  DURATION=15s: failed=0.09%  p95=1.21s p99=2.21s
+VUS=20,  DURATION=15s: failed=0.00%  p95=1.08s p99=1.16s  avg=154ms  med=85ms
+```
+
+エラー率は同時接続数を抑えれば実機同様ほぼ0%まで下がる一方、p95/p99
+レイテンシは20 VUでも1秒前後と高いまま(med=85msとの差が大きい——
+一部のリクエストがスレッドスケジューリングの不利を受けて大きく
+遅延する、という性質)。**「数百〜数千並列」の本格負荷は、現状の
+Python thread-per-connectionなプロキシ実装では正直なところ厳しい**
+——これはk6統合そのものの欠陥ではなく、このラボの実トラフィック
+中継の実装がそういう設計だから、という誠実な結論。より高い並列度を
+試したい場合は、非同期I/O(asyncio)への置き換えが次の一手になる
+(今回はスコープ外、別タスクとして切り出す)。
+
+`netlab_k6_*`メトリクスへの反映を実際に確認(VUS=20の実行結果):
+
+```
+$ python3 tools/prometheus_exporter.py --k6-results-dir tools/k6_results --port 9878 &
+$ curl -s http://127.0.0.1:9878/metrics | grep netlab_k6
+netlab_k6_has_run 1
+netlab_k6_http_reqs_total 1970
+netlab_k6_http_req_rate 123.20922719070965
+netlab_k6_http_req_failed_rate 0
+netlab_k6_http_req_duration_ms{quantile="avg"} 153.88491067157378
+netlab_k6_http_req_duration_ms{quantile="p95"} 1086.1147197
+netlab_k6_http_req_duration_ms{quantile="p99"} 1161.4722247699997
+netlab_k6_vus 20
+netlab_k6_data_bytes{direction="sent"} 157600
+netlab_k6_data_bytes{direction="received"} 277770
+netlab_k6_last_run_age_seconds 14
+```
+
+複数回実行した`tools/k6_results/`内のJSONから、mtimeが一番新しい
+ものが正しく選ばれること(古いrunの値に引き戻されないこと)も確認。
 
 ## テスト
 

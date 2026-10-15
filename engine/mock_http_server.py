@@ -12,9 +12,9 @@ pc(汎用Linuxエンドポイント)に実機通りのコマンドで本物の
 """
 
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-_servers = {}  # (ip, port) -> HTTPServer
+_servers = {}  # (ip, port) -> ThreadingHTTPServer
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -35,7 +35,15 @@ def ensure_mock_http_server(ip: str, port: int, hostname: str) -> bool:
     from engine.loopback_alias import ensure_loopback_alias
     ensure_loopback_alias(ip)
     try:
-        srv = HTTPServer((ip, port), _Handler)
+        # 実機の`python3 -m http.server`はPython 3.7以降、既定で
+        # ThreadingHTTPServer(1リクエスト=1スレッド)を使う——単発の
+        # ヘルスチェック/手動curlでは差が出ないが、k6等で本格的に
+        # 並列負荷をかけると、単純なHTTPServer(シングルスレッド)は
+        # バックエンド自身が直列化のボトルネックになり、ALB/BIG-IPの
+        # 実トラフィック分散ではなくPython側の制約を計測してしまう
+        # ことがk6負荷試験のライブ検証(200 VU)で判明した。実機の
+        # デフォルト動作に合わせて修正。
+        srv = ThreadingHTTPServer((ip, port), _Handler)
     except OSError:
         return False
     srv.netlab_hostname = hostname

@@ -2222,3 +2222,45 @@ round-robin、`create ltm persistence source-addr`(timeout 120s)を
 virtual_client.py`自身が使っているのと同じ方式)、round-robinでの
 完全均等分散とsource-addrパーシステンスでの固定を`VirtualServerProxy`
 単体で固定する。
+
+**k6をこのラボに統合**: ユーザー質問「NW slb 負荷かけツールって知って
+ます？」への回答で、ab/wrk/hey/Locust/k6/tsung/httperfなど実務の
+NW負荷かけツールを紹介したところ、「本格的に負荷をかけたい(数百〜
+数千並列、QPS計測、Grafanaダッシュボードに流す)ならk6をこのラボに
+統合するのが一番筋が良いと思います」と提案し、承諾を得て実装した。
+
+k6はGo製。`go install go.k6.io/k6@latest`でビルドできた
+(`proxy.golang.org`はこの環境のegressポリシーでブロックされて
+いない)。新設`tools/k6_slb_load.js`(ALB/BIG-IPのVIPへQPS/レイテンシ
+負荷をかけるk6スクリプト)、`tools/prometheus_exporter.py`に
+`--k6-results-dir`オプションを追加(k6の`--summary-export`JSONの中で
+最新のものを読み、`netlab_k6_*`メトリクスを既存の`/metrics`に相乗り
+させる、Strixの実行状況と同じ「既存exporterにベストエフォートで
+データソースを足す」パターン)、`tools/monitoring_stack/alert_rules.yml`
+に`K6LoadTestHighErrorRate`/`K6LoadTestHighLatencyP95`を追加
+(`has_run`でゲートし未実行時の誤発火を防ぐ、Strixと同じ考え方)。
+
+**ライブ検証で見つけた実バグ**: ALB(`k6alb`、VIP 172.31.0.10:80)+
+pc装置2台の実`http.server`へ実際にk6で200 VU・20秒の負荷をかけたところ、
+失敗率4.73%・p95レイテンシ4.04秒という明らかに悪い結果が出た。
+`engine/mock_http_server.py`が単純な`HTTPServer`(シングルスレッド)を
+使っていたことが原因と判明——実機の`python3 -m http.server`はPython
+3.7以降既定で`ThreadingHTTPServer`を使うため、「実機通りのコマンドで
+本物のhttp.serverを立てる」という当初の前提自体に食い違いがあった。
+`ThreadingHTTPServer`に修正したが、200 VUでの結果はほぼ変わらず
+(失敗率4.26%・p95=4.01s)——原因は`engine/alb_lb.py`の
+`AlbListenerProxy`自体の設計(接続ごとにaccept+双方向リレー用の
+`_pump`スレッド2本、素朴なthread-per-connection)にあり、200同時接続で
+600本超のPythonスレッドが動くとCPythonのGIL競合がボトルネックになる
+ことが分かった——バックエンド側ではなく**このエミュレータの実プロキシ
+実装自体のスケール限界**という、正直な結論。VU数を下げると
+(50VU: 失敗0.09%・p95=1.21s、20VU: 失敗0%・p95=1.08s)エラー率は実機
+同等まで下がるが、tail latencyは依然高いまま——「数百〜数千並列」の
+本格負荷はPythonのthread-per-connection実装では現状厳しい、という
+スコープ上の誠実な記載を`docs/k6-load-testing.md`に残した
+(非同期I/O化は次の一手として切り出し、今回のスコープ外)。
+
+`tests/test_prometheus_exporter.py`に`build_k6_metrics_text`/
+`_load_latest_k6_summary`のテスト(9件)を追加、k6バイナリ自体には
+依存しない(サンプルJSONを直接渡すだけ、他の外部ツール連携と同じ
+方針)。詳細は`docs/k6-load-testing.md`参照。
