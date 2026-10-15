@@ -1834,3 +1834,115 @@ uvicornサーバ+生ソケット、外部バイナリ非依存)を固定する�
 「設定生成」タブ拡張によるLLM→Ansible Playbook生成(構成投入/事実
 取得・差分検知/検証/ロールバックの4パターン)、LLM-as-judge型の試験
 自動化。
+
+**F5 BIG-IP: 実ヘルスチェック + 実トラフィック分散**: 「ここに
+モックロードバランサーって存在しますか？」という質問に対し、既存の
+`bigip`(F5 BIG-IP、tmsh系CLI、`_bigip_process`)の存在を確認して
+回答したところ、「実際のヘルスチェック/振り分け動作を追加」を依頼
+された。既存の`_bigip_health_check`(app.py)は「メンバーのIPを持つ
+装置のインタフェースがshutdownされていないか」というトポロジー
+ベースの疎通判定のみで、`load-balancing-mode`(round-robin/
+least-connections)は設定として保持されるだけで実際に使われる場所が
+無かった。
+
+新設`engine/bigip_lb.py`が2つを実際に動くようにした: (1) monitorが
+tcp/http/https系なら、メンバーの実IP:portへ本物の
+`socket.create_connection`を試みる実TCPヘルスチェック
+(`member_tcp_reachable`/`member_is_up`、gateway_icmpは従来通り
+icmp_engineベースのトポロジー判定のまま)。(2) 仮想サーバの
+destinationに本物のTCPリスナー(`VirtualServerProxy`)を立て、
+load-balancing-modeに従って実際にヘルシーなプールメンバーへTCP接続
+を選択・中継する(バイト列をそのまま双方向リレーする本物のTCP
+プロキシ、シミュレーションではない)。`create`/`modify ltm
+virtual`/`pool`実行後(他の実リスナー起動と同じ理由で
+`rule_engine.process()`実行後)に全仮想サーバの`ensure_virtual_
+server_proxy()`を呼び直す。`app.py`の`_bigip_health_check`は
+`member_is_up()`経由に統一し、表示用判定と実トラフィック分散が同じ
+ロジックを共有する(重複実装を避ける、既存の教訓通り)。
+
+Live-verified: Catalyst/Ciscoの2台に実SSH(`crypto key generate
+rsa`)を有効化しBIG-IPのpool(`monitor tcp`)+virtual
+(destination+pool)を設定、本物のparamikoクライアントでVIP経由の
+SSHセッションを4回張り、実際にround-robinで`lb-be1`/`lb-be2`が
+交互に選ばれることを確認(各接続のプロンプトのホスト名そのもので
+判別)。`lb-be1`の実SSHを`crypto key zeroize rsa`で無効化すると
+`show ltm pool`が実際にdown判定に変わり、以降の接続は実際に
+`lb-be2`のみへフェイルオーバーすることも確認。詳細と生の
+ライブ検証記録は`docs/bigip-load-balancing.md`参照。
+
+`tests/test_bigip_lb_healthcheck.py`(11 tests、`bigip`に対する初の
+専用テストファイル——従来は`tests/test_untested_device_types.py`の
+最小限のスモークテストのみだった)がCLI設定・実TCPヘルスチェック・
+`VirtualServerProxy`単体の振り分けロジック(簡易TCPバックエンドで
+round-robin/least-connections/down除外を検証)・実SSHリスナーを
+使ったエンドツーエンドのround-robin+フェイルオーバーを固定する。
+
+**スコープ外**: httpモニターの実HTTPリクエスト送信/レスポンス検証
+(このエミュレータの装置は実HTTPサーバを持たないためtcp相当の接続性
+チェックに留める)、SSL/TLSプロファイル、iRules、persistence、UDP
+ロードバランシング。
+
+**AWS ALB(Application Load Balancer): 実ヘルスチェック + 実L7トラフィック
+分散**: 「ここにモックロードバランサーって存在しますか？」(既存の
+`bigip`で存在確認)→「ちなみにalbを実装することもできますか？実働様
+でおねがいします」への対応。実機ALBには他の装置のようなSSH/コンソール
+ログインという概念が無い(AWS CLI/API/Terraformで設定する管理対象
+オブジェクト)ため、ユーザーに確認した上で「aws-cli構文を部分対応」
+方式を選んだ。新規`alb` device_typeを`engine/rules.py`の
+`_alb_process`に実装し、`aws elbv2 create-load-balancer`/
+`create-target-group`/`register-targets`/`deregister-targets`/
+`create-listener`/`create-rule`/`describe-load-balancers`/
+`describe-target-groups`/`describe-target-health`/`describe-listeners`/
+`describe-rules`を`/api/cli`経由で受け付ける(実機aws-cliのJSON出力
+形状を再現)。
+
+BIG-IP実装と同じ「実ヘルスチェック+実トラフィック分散」の考え方だが、
+ALBはL7(HTTPリクエストのpath/Hostヘッダに基づくリスナールール評価)
+である分一段実装が多い。新設`engine/alb_lb.py`: health-check-protocol
+がHTTP/HTTPSならメンバーの実IP:portへ本物のHTTP GETを送る実ヘルス
+チェック(`target_is_healthy`、HTTPを話さない相手には正しく不健全
+判定になる)、リスナーのdestinationに本物のTCPリスナー
+(`AlbListenerProxy`)を立て新規接続ごとに実際にHTTPリクエストライン
++ヘッダーを読み取りリスナールール(path-pattern/host-header、
+fnmatchベース、優先度順)を評価してターゲットグループを選び、健全な
+メンバーへround-robinで実中継する。
+
+**このエミュレータに実HTTPサーバが無かったため新設した
+`engine/mock_http_server.py`**: pc装置向けの`python3 -m http.server
+<port>`(Python標準ライブラリの`http.server`そのもの、装置のホスト名
+を返すだけの最小限GETハンドラ)——ALB/BIG-IPの実ヘルスチェック・実L7
+ルーティングを本物のHTTP往復でデモできるようにする追加。停止は
+`fuser -k <port>/tcp`(実機Linuxの実コマンド、このエミュレータの
+CLIが1リクエスト=1コマンドの応答モデルのため実機のCtrl-Cそのものは
+再現できない代わり)。
+
+**実装時点で先回りして避けたバグ**: ALBには`show running-config`と
+いう概念が無く、`app.py`の`handle_protocol_show`/
+`handle_protocol_config`(二層ディスパッチのapp.py側、RuleEngineより
+先に評価される)の汎用正規表現群に巻き込まれるとASA/bas/fortigateで
+繰り返し踏んだのと同じ「Si-Rスタイルのダミー出力にフォールバックする」
+バグになるため、両関数の先頭に`if state.device_type == 'alb': return
+None`を追加して先回りで防いだ(同じ理由で`_expand_abbreviation`の
+Cisco略称展開スキップリストにも`alb`を追加)。
+
+Live-verified: pc装置3台に実`http.server`を起動し、ALBで2つの
+ターゲットグループ+path-patternルール(`/api/*`→api-tg、既定→
+web-tg)を設定、本物のcurlでVIP(`172.31.0.10:80`)の`/index.html`を
+4回叩くと実際にweb-tg内でround-robin(各レスポンスのボディはバック
+エンド自身のホスト名で判別)、`/api/widgets`は実際にapi-tgのみへ
+ルーティングされることを確認。`web1`を`fuser -k 9000/tcp`で止めると
+`describe-target-health`が実際にunhealthyへ変わり、以降の`/index.html`
+アクセスは実際にすべて`web2`のみへフェイルオーバーすることも確認。
+詳細と生のライブ検証記録は`docs/aws-alb-load-balancer.md`参照。
+
+`tests/test_alb_load_balancer.py`(17 tests)がCLI設定・実HTTPヘルス
+チェック・`AlbListenerProxy`単体の振り分けロジック・実http.serverを
+使ったエンドツーエンド(round-robin+path-basedルーティング+
+`fuser -k`による実フェイルオーバー)を固定する。全テスト装置が
+デフォルトで同じVIP(172.31.0.10)を共有するため、実リスナーを作成
+するテストは`stop_alb_listener_proxy()`で後片付けする必要がある
+(ASAの実SSHテストで踏んだのと同じ class の問題)。
+
+**スコープ外**: HTTPSのTLS終端、header-based/query-string-based条件、
+重み付けターゲットグループ、リダイレクト/固定レスポンスアクション、
+least_outstanding_requestsアルゴリズム、スティッキーセッション。

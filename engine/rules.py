@@ -258,11 +258,16 @@ class DeviceState:
             "port1": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "port2": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "port3": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        } if device_type == "fortigate" else {
+        } if device_type == "fortigate" else ({
+            # ALB: 実機に物理/論理インタフェースという概念は無く、ALB自体
+            # のVIP(実際には複数AZのIPにDNSラウンドロビンする)を単一の
+            # eth0として表現する(172.31.0.0/16はAWSのデフォルトVPC CIDR)。
+            "eth0": {"ip": "172.31.0.10", "prefix": 16, "status": "up", "speed": "", "duplex": ""},
+        } if device_type == "alb" else {
             "GigabitEthernet0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        })))))
+        }))))))
 
         if device_type == "sir":
             # ether <slot> <port> vlan untag <vid>（実機のfactory-default）
@@ -408,6 +413,18 @@ class DeviceState:
             self.f5_virtuals = {}   # name -> {'destination','pool','status','profiles'}
             self.f5_monitors = {}   # name -> {'type', ...}
             self.f5_folder = "/Common"
+
+        # AWS ALB(Application Load Balancer)状態
+        # 実機にSSH/コンソールログインという概念は無く、aws-cli(`aws
+        # elbv2 ...`)構文のみを受け付ける(_alb_process)。ランタイムの
+        # 実トラフィック分散(TCPリスナー)はengine.alb_lbが別途保持し
+        # (他のengineと同じ「設定はstate、ランタイムはengine」パター
+        # ン)、ここには設定値のみ置く。
+        if device_type == "alb":
+            self.alb_load_balancers = {}  # arn -> {'name','scheme','type','dns_name','vip','listeners':[arn,...]}
+            self.alb_target_groups = {}   # arn -> {'name','protocol','port','target_type','health_check':{...},'members':[{'ip','port','admin_down','state'}]}
+            self.alb_listeners = {}       # arn -> {'lb_arn','protocol','port','default_tg_arn','rules':[arn,...]}
+            self.alb_rules = {}           # arn -> {'listener_arn','priority','conditions':[...],'tg_arn'}
 
         # Juniper Junos (vSRX/vJunos) 状態
         # Junosはcandidate/active二段階コンフィグ(commitするまで反映されない)が
@@ -833,10 +850,12 @@ class RuleEngine:
         """
         if not cmd.strip():
             return cmd
-        if device_type in ('apresia', 'juniper', 'yamaha', 'fortigate'):
+        if device_type in ('apresia', 'juniper', 'yamaha', 'fortigate', 'alb'):
             # Juniper/Yamaha/FortiGateも同様、Cisco IOSと無関係な独自
             # コマンド体系(set/delete/commit、ip lanN address、
             # config/edit/next/end等)を持つため展開をスキップする。
+            # ALB(aws elbv2 ...)も同じ理由——"aws"始まりの略称展開は
+            # 対象外。
             return cmd
         tokens = cmd.strip().split()
         # Si-R/SR-Sの "ether" は、それ自体で完結する実機のキーワード
@@ -925,6 +944,10 @@ class RuleEngine:
         # F5 BIG-IP は tmsh 体系 → 専用ハンドラへ
         if state.device_type == 'bigip':
             return self._bigip_process(cmd, c, state)
+
+        # AWS ALB はSSH/コンソールという概念が無く、aws-cli体系のみ → 専用ハンドラへ
+        if state.device_type == 'alb':
+            return self._alb_process(cmd, c, state)
 
         # Juniper Junos は set/delete/commit の階層型体系 → 専用ハンドラへ
         if state.device_type == 'juniper':
@@ -7788,6 +7811,330 @@ Configuration Revision            : 5"""
         return '\n'.join(out)
 
     # ══════════════════════════════════════════
+    # AWS ALB (Application Load Balancer) — aws-cli(aws elbv2 ...)構文
+    # ══════════════════════════════════════════
+    def _alb_help(self) -> str:
+        return (
+            'aws elbv2 <subcommand> [options]\n\n'
+            'Available subcommands:\n'
+            '  create-load-balancer   --name <n> [--type application] [--scheme internet-facing]\n'
+            '  create-target-group    --name <n> --protocol HTTP|HTTPS|TCP --port <p>\n'
+            '                         [--health-check-protocol HTTP] [--health-check-path /]\n'
+            '                         [--health-check-interval-seconds 30]\n'
+            '  register-targets       --target-group-arn <arn> --targets Id=<ip>,Port=<p> [...]\n'
+            '  deregister-targets     --target-group-arn <arn> --targets Id=<ip>[,Port=<p>] [...]\n'
+            '  create-listener        --load-balancer-arn <arn> --protocol HTTP --port <p>\n'
+            '                         --default-actions Type=forward,TargetGroupArn=<arn>\n'
+            '  create-rule            --listener-arn <arn> --priority <n>\n'
+            '                         --conditions Field=path-pattern,Values=<pattern>\n'
+            '                         --actions Type=forward,TargetGroupArn=<arn>\n'
+            '  describe-load-balancers [--load-balancer-arns <arn>]\n'
+            '  describe-target-groups  [--target-group-arns <arn>]\n'
+            '  describe-target-health  --target-group-arn <arn>\n'
+            '  describe-listeners      --load-balancer-arn <arn>\n'
+            '  describe-rules          --listener-arn <arn>\n'
+        )
+
+    def _alb_parse_args(self, rest: str) -> dict:
+        """aws-cli風の`--flag val1 val2 --flag2 val3`をdict(key -> [values])に
+        する。クォートはshlexでそのまま尊重する(`--conditions
+        'Field=path-pattern,Values=/api/*'`等)。"""
+        import shlex
+        tokens = shlex.split(rest) if rest.strip() else []
+        args: dict = {}
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok.startswith('--'):
+                key = tok[2:]
+                vals = []
+                i += 1
+                while i < len(tokens) and not tokens[i].startswith('--'):
+                    vals.append(tokens[i])
+                    i += 1
+                args[key] = vals
+            else:
+                i += 1
+        return args
+
+    @staticmethod
+    def _alb_kv(spec: str) -> dict:
+        """`Id=1.2.3.4,Port=22` → {'Id': '1.2.3.4', 'Port': '22'}"""
+        out = {}
+        for part in spec.split(','):
+            if '=' in part:
+                k, v = part.split('=', 1)
+                out[k] = v
+        return out
+
+    def _alb_arn(self, state: DeviceState, kind: str, name: str) -> str:
+        import hashlib
+        h = hashlib.sha1(f'{state.hostname}:{kind}:{name}'.encode()).hexdigest()[:16]
+        account, region = '123456789012', 'us-east-1'
+        kind_path = {'loadbalancer': 'loadbalancer/app', 'targetgroup': 'targetgroup',
+                     'listener': 'listener/app', 'rule': 'listener-rule/app'}.get(kind, kind)
+        return f'arn:aws:elasticloadbalancing:{region}:{account}:{kind_path}/{name}/{h}'
+
+    def _alb_resolve(self, store: dict, ref: str):
+        """フルARN、または名前(ARN末尾セグメント)のどちらでも解決する。
+        実機aws-cliはARN必須だが、このエミュレータでは利便性のため
+        名前指定も救済する。"""
+        if ref in store:
+            return ref
+        for arn, obj in store.items():
+            if obj.get('name') == ref or arn.rsplit('/', 2)[-2:-1] == [ref]:
+                return arn
+        return None
+
+    def _alb_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """AWS ALBのCLI面——実機ALBにSSH/コンソールログインという概念は
+        無く、運用者が実際に触るインタフェースはaws-cli(aws elbv2 ...)
+        そのものなので、他の装置の「実機CLI」扱いと同じ精神でaws-cli
+        構文を部分再現する。実ヘルスチェック/実L7トラフィック分散は
+        engine/alb_lb.py が担当する。"""
+        import json as _json
+        body = cmd.strip()
+        if not body:
+            return ''
+        if body.lower() in ('exit', 'quit'):
+            return ''
+        m = re.match(r'^aws\s+elbv2\s+(\S+)\s*(.*)$', body, re.S | re.I)
+        if not m:
+            return self._alb_help()
+        sub = m.group(1).lower()
+        rest = m.group(2)
+        try:
+            args = self._alb_parse_args(rest)
+        except ValueError as e:
+            return f'Error parsing parameter: {e}'
+
+        handlers = {
+            'create-load-balancer': self._alb_create_lb,
+            'create-target-group': self._alb_create_tg,
+            'register-targets': self._alb_register_targets,
+            'deregister-targets': self._alb_deregister_targets,
+            'create-listener': self._alb_create_listener,
+            'create-rule': self._alb_create_rule,
+            'describe-load-balancers': self._alb_describe_lbs,
+            'describe-target-groups': self._alb_describe_tgs,
+            'describe-target-health': self._alb_describe_target_health,
+            'describe-listeners': self._alb_describe_listeners,
+            'describe-rules': self._alb_describe_rules,
+        }
+        handler = handlers.get(sub)
+        if handler is None:
+            return (f"\nInvalid choice: '{sub}'\n\n" + self._alb_help())
+        return handler(args, state)
+
+    def _alb_create_lb(self, args, state):
+        import json as _json
+        name = (args.get('name') or [''])[0]
+        scheme = (args.get('scheme') or ['internet-facing'])[0]
+        lb_type = (args.get('type') or ['application'])[0]
+        arn = self._alb_arn(state, 'loadbalancer', name)
+        vip = state.interfaces.get('eth0', {}).get('ip', '172.31.0.10')
+        dns_name = f'{name}-{arn[-8:]}.{state.hostname.lower()}.elb.amazonaws.com'
+        state.alb_load_balancers[arn] = {
+            'name': name, 'scheme': scheme, 'type': lb_type,
+            'dns_name': dns_name, 'vip': vip, 'listeners': [],
+        }
+        out = {'LoadBalancers': [{
+            'LoadBalancerArn': arn, 'LoadBalancerName': name, 'Scheme': scheme,
+            'Type': lb_type, 'DNSName': dns_name, 'VpcId': 'vpc-0123456789abcdef0',
+            'State': {'Code': 'active'}, 'IpAddressType': 'ipv4',
+        }]}
+        return '\n' + _json.dumps(out, indent=4)
+
+    def _alb_create_tg(self, args, state):
+        import json as _json
+        name = (args.get('name') or [''])[0]
+        protocol = (args.get('protocol') or ['HTTP'])[0].upper()
+        port = int((args.get('port') or ['80'])[0])
+        target_type = (args.get('target-type') or ['ip'])[0]
+        hc_protocol = (args.get('health-check-protocol') or [protocol])[0].upper()
+        hc_path = (args.get('health-check-path') or ['/'])[0]
+        hc_interval = int((args.get('health-check-interval-seconds') or ['30'])[0])
+        healthy_th = int((args.get('healthy-threshold-count') or ['3'])[0])
+        unhealthy_th = int((args.get('unhealthy-threshold-count') or ['3'])[0])
+        arn = self._alb_arn(state, 'targetgroup', name)
+        state.alb_target_groups[arn] = {
+            'name': name, 'protocol': protocol, 'port': port, 'target_type': target_type,
+            'health_check': {'protocol': hc_protocol, 'path': hc_path, 'interval': hc_interval,
+                             'healthy_threshold': healthy_th, 'unhealthy_threshold': unhealthy_th},
+            'members': [],
+        }
+        out = {'TargetGroups': [{
+            'TargetGroupArn': arn, 'TargetGroupName': name, 'Protocol': protocol,
+            'Port': port, 'TargetType': target_type,
+            'HealthCheckProtocol': hc_protocol, 'HealthCheckPath': hc_path,
+            'HealthCheckIntervalSeconds': hc_interval,
+            'HealthyThresholdCount': healthy_th, 'UnhealthyThresholdCount': unhealthy_th,
+        }]}
+        return '\n' + _json.dumps(out, indent=4)
+
+    def _alb_register_targets(self, args, state):
+        tg_ref = (args.get('target-group-arn') or [''])[0]
+        arn = self._alb_resolve(state.alb_target_groups, tg_ref)
+        if arn is None:
+            return f"\nAn error occurred (TargetGroupNotFoundException) when calling the RegisterTargets operation: Target group '{tg_ref}' not found"
+        tg = state.alb_target_groups[arn]
+        for spec in args.get('targets', []):
+            kv = self._alb_kv(spec)
+            ip = kv.get('Id', '')
+            port = int(kv.get('Port', tg['port']))
+            if not any(m['ip'] == ip and m['port'] == port for m in tg['members']):
+                tg['members'].append({'ip': ip, 'port': port, 'admin_down': False, 'state': 'initial'})
+        return ''
+
+    def _alb_deregister_targets(self, args, state):
+        tg_ref = (args.get('target-group-arn') or [''])[0]
+        arn = self._alb_resolve(state.alb_target_groups, tg_ref)
+        if arn is None:
+            return f"\nAn error occurred (TargetGroupNotFoundException) when calling the DeregisterTargets operation: Target group '{tg_ref}' not found"
+        tg = state.alb_target_groups[arn]
+        remove = set()
+        for spec in args.get('targets', []):
+            kv = self._alb_kv(spec)
+            ip = kv.get('Id', '')
+            port = kv.get('Port')
+            remove.add((ip, int(port) if port is not None else None))
+        def _keep(m):
+            for ip, port in remove:
+                if m['ip'] == ip and (port is None or m['port'] == port):
+                    return False
+            return True
+        tg['members'] = [m for m in tg['members'] if _keep(m)]
+        return ''
+
+    def _alb_create_listener(self, args, state):
+        import json as _json
+        lb_ref = (args.get('load-balancer-arn') or [''])[0]
+        lb_arn = self._alb_resolve(state.alb_load_balancers, lb_ref)
+        if lb_arn is None:
+            return f"\nAn error occurred (LoadBalancerNotFoundException) when calling the CreateListener operation: Load balancer '{lb_ref}' not found"
+        protocol = (args.get('protocol') or ['HTTP'])[0].upper()
+        port = int((args.get('port') or ['80'])[0])
+        default_tg = None
+        for spec in args.get('default-actions', []):
+            kv = self._alb_kv(spec)
+            if kv.get('Type') == 'forward':
+                default_tg = self._alb_resolve(state.alb_target_groups, kv.get('TargetGroupArn', ''))
+        name = state.alb_load_balancers[lb_arn]['name']
+        arn = self._alb_arn(state, 'listener', f'{name}-{port}')
+        state.alb_listeners[arn] = {
+            'lb_arn': lb_arn, 'protocol': protocol, 'port': port,
+            'default_tg_arn': default_tg, 'rules': [],
+        }
+        state.alb_load_balancers[lb_arn].setdefault('listeners', []).append(arn)
+        out = {'Listeners': [{
+            'ListenerArn': arn, 'LoadBalancerArn': lb_arn,
+            'Protocol': protocol, 'Port': port,
+            'DefaultActions': [{'Type': 'forward', 'TargetGroupArn': default_tg}] if default_tg else [],
+        }]}
+        return '\n' + _json.dumps(out, indent=4)
+
+    def _alb_create_rule(self, args, state):
+        import json as _json
+        listener_ref = (args.get('listener-arn') or [''])[0]
+        if listener_ref not in state.alb_listeners:
+            return f"\nAn error occurred (ListenerNotFoundException) when calling the CreateRule operation: Listener '{listener_ref}' not found"
+        priority = int((args.get('priority') or ['1'])[0])
+        conditions = []
+        for spec in args.get('conditions', []):
+            kv = self._alb_kv(spec)
+            field = kv.get('Field')
+            if field:
+                values = [v.strip() for v in kv.get('Values', '').split(',')] if kv.get('Values') else []
+                conditions.append({'field': field, 'values': values})
+        tg_arn = None
+        for spec in args.get('actions', []):
+            kv = self._alb_kv(spec)
+            if kv.get('Type') == 'forward':
+                tg_arn = self._alb_resolve(state.alb_target_groups, kv.get('TargetGroupArn', ''))
+        arn = self._alb_arn(state, 'rule', f'rule-{listener_ref[-8:]}-{priority}')
+        state.alb_rules[arn] = {'listener_arn': listener_ref, 'priority': priority,
+                                'conditions': conditions, 'tg_arn': tg_arn}
+        if arn not in state.alb_listeners[listener_ref]['rules']:
+            state.alb_listeners[listener_ref]['rules'].append(arn)
+        out = {'Rules': [{
+            'RuleArn': arn, 'Priority': str(priority),
+            'Conditions': [{'Field': cnd['field'], 'Values': cnd['values']} for cnd in conditions],
+            'Actions': [{'Type': 'forward', 'TargetGroupArn': tg_arn}] if tg_arn else [],
+        }]}
+        return '\n' + _json.dumps(out, indent=4)
+
+    def _alb_describe_lbs(self, args, state):
+        import json as _json
+        out = {'LoadBalancers': [{
+            'LoadBalancerArn': arn, 'LoadBalancerName': lb['name'], 'Scheme': lb['scheme'],
+            'Type': lb['type'], 'DNSName': lb['dns_name'], 'State': {'Code': 'active'},
+        } for arn, lb in state.alb_load_balancers.items()]}
+        return '\n' + _json.dumps(out, indent=4)
+
+    def _alb_describe_tgs(self, args, state):
+        import json as _json
+        out = {'TargetGroups': [{
+            'TargetGroupArn': arn, 'TargetGroupName': tg['name'], 'Protocol': tg['protocol'],
+            'Port': tg['port'], 'TargetType': tg['target_type'],
+            'HealthCheckProtocol': tg['health_check']['protocol'],
+            'HealthCheckPath': tg['health_check']['path'],
+        } for arn, tg in state.alb_target_groups.items()]}
+        return '\n' + _json.dumps(out, indent=4)
+
+    def _alb_describe_target_health(self, args, state):
+        import json as _json
+        from engine.alb_lb import target_is_healthy
+        tg_ref = (args.get('target-group-arn') or [''])[0]
+        arn = self._alb_resolve(state.alb_target_groups, tg_ref)
+        if arn is None:
+            return f"\nAn error occurred (TargetGroupNotFoundException) when calling the DescribeTargetHealth operation: Target group '{tg_ref}' not found"
+        tg = state.alb_target_groups[arn]
+        hc = tg['health_check']
+        descs = []
+        for m in tg['members']:
+            if m.get('admin_down'):
+                state_str, reason = 'unused', 'Target.NotRegistered'
+            else:
+                healthy = target_is_healthy(hc['protocol'], m['ip'], m['port'], hc.get('path', '/'))
+                state_str = 'healthy' if healthy else 'unhealthy'
+                reason = None if healthy else 'Target.FailedHealthChecks'
+            m['state'] = state_str
+            entry = {'Target': {'Id': m['ip'], 'Port': m['port']},
+                     'TargetHealth': {'State': state_str}}
+            if reason:
+                entry['TargetHealth']['Reason'] = reason
+                entry['TargetHealth']['Description'] = 'Health checks failed' if state_str == 'unhealthy' \
+                    else 'Target is in the stopped state'
+            descs.append(entry)
+        return '\n' + _json.dumps({'TargetHealthDescriptions': descs}, indent=4)
+
+    def _alb_describe_listeners(self, args, state):
+        import json as _json
+        lb_ref = (args.get('load-balancer-arn') or [''])[0]
+        lb_arn = self._alb_resolve(state.alb_load_balancers, lb_ref) if lb_ref else None
+        listeners = state.alb_listeners
+        if lb_arn:
+            listeners = {a: l for a, l in listeners.items() if l['lb_arn'] == lb_arn}
+        out = {'Listeners': [{
+            'ListenerArn': arn, 'LoadBalancerArn': l['lb_arn'],
+            'Protocol': l['protocol'], 'Port': l['port'],
+        } for arn, l in listeners.items()]}
+        return '\n' + _json.dumps(out, indent=4)
+
+    def _alb_describe_rules(self, args, state):
+        import json as _json
+        listener_ref = (args.get('listener-arn') or [''])[0]
+        rules = state.alb_rules
+        if listener_ref:
+            rules = {a: r for a, r in rules.items() if r['listener_arn'] == listener_ref}
+        out = {'Rules': [{
+            'RuleArn': arn, 'Priority': str(r['priority']),
+            'Conditions': [{'Field': c['field'], 'Values': c['values']} for c in r['conditions']],
+            'Actions': [{'Type': 'forward', 'TargetGroupArn': r['tg_arn']}] if r['tg_arn'] else [],
+        } for arn, r in sorted(rules.items(), key=lambda kv: kv[1]['priority'])]}
+        return '\n' + _json.dumps(out, indent=4)
+
+    # ══════════════════════════════════════════
     # Juniper Junos (vSRX/vJunos) — set/delete/commit 階層型CLI
     # ══════════════════════════════════════════
     def _juniper_process(self, cmd: str, c: str, state: DeviceState) -> str:
@@ -9565,6 +9912,36 @@ Key Version         : A
         # nc / netcat  (TCP接続テスト)
         if re.match(r'^nc\s+|^netcat\s+', c):
             return self._pc_nc(cmd, c, state)
+
+        # python3 -m http.server [port] — ALB/BIG-IPの実ヘルスチェック・
+        # 実トラフィック分散のデモ用に、本物のHTTPサーバを起動する
+        # (engine.mock_http_server、Python標準ライブラリのhttp.server
+        # そのもの)。
+        m_httpd = re.match(r'^(?:python3?\s+-m\s+http\.server|http\.server)(?:\s+(\d+))?\s*$', c)
+        if m_httpd:
+            port = int(m_httpd.group(1)) if m_httpd.group(1) else 8000
+            from engine.mock_http_server import ensure_mock_http_server
+            ip = self._pc_my_ip(state)
+            if not ip:
+                return 'socket.gaierror: [Errno -2] Name or service not known'
+            ok = ensure_mock_http_server(ip, port, state.hostname)
+            if not ok:
+                return (f'Traceback (most recent call last):\n'
+                        f'OSError: [Errno 98] Address already in use')
+            return f'Serving HTTP on {ip} port {port} (http://{ip}:{port}/) ...'
+
+        # fuser -k <port>/tcp — 実機Linuxでバックグラウンド/フォア
+        # グラウンドのhttp.server等を止める際の実コマンド。CLIが1
+        # リクエスト=1コマンドの応答モデルのため「Ctrl-C」自体は
+        # 再現できないが、同じ目的を果たす実コマンドとしてこちらを
+        # 受け付ける。
+        m_fuser = re.match(r'^fuser\s+-k\s+(\d+)/tcp\s*$', c)
+        if m_fuser:
+            port = int(m_fuser.group(1))
+            from engine.mock_http_server import stop_mock_http_server
+            ip = self._pc_my_ip(state)
+            stopped = stop_mock_http_server(ip, port)
+            return f'{port}/tcp:' + (' ' if stopped else '')
 
         # telnet (TCP ポート確認)
         if re.match(r'^telnet\s+', c):

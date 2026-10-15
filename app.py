@@ -1545,6 +1545,31 @@ async def cli_command(body: dict):
         ensure_netconf_agent(device_id, device_sessions,
                              on_change=lambda: _register_icmp(device_id))
 
+    # ── BIG-IP: 仮想サーバ(destination+pool)が揃ったら実TCPリスナー
+    # (実トラフィック分散)を起動/張り直す。create/modify ltm virtual
+    # だけでなく create/modify ltm pool 側の変更(destination設定後に
+    # poolをmember追加/monitor変更した場合等)でも再評価が要るため、
+    # 既存の全virtualに対して呼び直す(Juniperのcommit→SSHリスナー
+    # 起動と同じ理由でrule_engine.process()実行後に行う)。
+    if state.device_type == 'bigip' and re.search(r'(create|modify)\s+ltm\s+(virtual|pool)', command, re.I):
+        from engine.bigip_lb import ensure_virtual_server_proxy
+        for vs_name in list(getattr(state, 'f5_virtuals', {}).keys()):
+            ensure_virtual_server_proxy(device_id, vs_name, device_sessions)
+    if state.device_type == 'bigip' and re.match(r'^\s*delete\s+ltm\s+virtual\s+(\S+)', command, re.I):
+        from engine.bigip_lb import stop_virtual_server_proxy
+        m_del = re.match(r'^\s*delete\s+ltm\s+virtual\s+(\S+)', command, re.I)
+        stop_virtual_server_proxy(device_id, m_del.group(1))
+
+    # ── ALB: リスナー/ルール/ターゲットグループが変化したら実リスナー
+    # (実L7トラフィック分散)を起動/張り直す。BIG-IPと同じ理由で
+    # rule_engine.process()実行後に行う。
+    if state.device_type == 'alb' and re.search(
+            r'aws\s+elbv2\s+(create-listener|create-rule|register-targets|'
+            r'deregister-targets|create-target-group)', command, re.I):
+        from engine.alb_lb import ensure_alb_listener_proxy
+        for listener_arn in list(getattr(state, 'alb_listeners', {}).keys()):
+            ensure_alb_listener_proxy(device_id, listener_arn, device_sessions)
+
     # ── Si-R/SR-S: 投入した設定コマンドをキャプチャ（show running-config で忠実再現）──
     if state.device_type in ('sir', 'srs'):
         _capture_sir_config(state, command)
@@ -1814,6 +1839,13 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # 適用されてしまう(= 二層ディスパッチでapp.py層が常に先に実行される
     # ため)。
     if state.mode == 'config-tftp-file' and c not in ('exit', 'end', 'quit'):
+        return None
+
+    # ── ALB: aws-cli(aws elbv2 ...)構文のみを受け付ける装置で、Cisco
+    # 系のinterface/ip address等の設定コマンド体系を持たない。この層の
+    # 汎用正規表現に巻き込まれないよう早期にNoneを返し、_alb_process
+    # (RuleEngine側)に全て委譲する。
+    if state.device_type == 'alb':
         return None
 
     # ── NX-OS: コマンド実行ログ ──
@@ -4412,6 +4444,14 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     """showコマンドでエンジンが起動していればエンジン出力を返す"""
     c = command.lower().strip()
 
+    # ── ALB: 実機にCLI/showコマンドという概念が無く、aws-cli(aws elbv2
+    # ...)構文のみ——ここの汎用show系正規表現群(show running-config等)
+    # に巻き込まれるとSi-Rスタイルのダミー出力になってしまう(ASA/bas/
+    # fortigateで踏んだのと同じ二層ディスパッチのトラップ)ため、ALBは
+    # 早期にNoneを返して_alb_process(RuleEngine側)に全て委譲する。
+    if state.device_type == 'alb':
+        return None
+
     # ── NX-OS: show logging ──
     if re.match(r'^show\s+logging$', c) and state.device_type == 'nexus':
         logs = nxos_log_buffer.get(device_id, [])
@@ -5228,31 +5268,23 @@ def _sir_config_key(cmd: str) -> str:
     return ' '.join(toks).lower()
 
 
-def _member_reachable(member_ip: str) -> bool:
-    """プールメンバー(実サーバ)がヘルスモニター的に到達可能か判定。
-    そのIPを持つ装置が存在し、当該インターフェースがdown(shutdown)でなければ up。
-    装置が無い/インターフェースdown → down。"""
-    dev = icmp_engine._find_device_owning_ip(member_ip)
-    if not dev:
-        return False
-    info = icmp_engine.device_ips.get(dev, {})
-    down_ifaces = vnet.down_interfaces.get(dev, set())
-    for ifname, iinfo in info.get('interfaces', {}).items():
-        if iinfo.get('ip') == member_ip:
-            return ifname not in down_ifaces
-    return member_ip in info.get('ips', {})
-
-
 def _bigip_health_check(state):
-    """BIG-IP: monitorが設定されたプールのメンバー状態を疎通で自動更新。
-    実効status = (admin_downでない) かつ (monitorがnoneならup / それ以外は疎通結果)。"""
+    """BIG-IP: monitorが設定されたプールのメンバー状態を自動更新。
+    実効status = (admin_downでない) かつ (monitorがnoneならup / それ以外は
+    モニター種別ごとの判定結果)。
+
+    tcp/http/https系モニターは実際にメンバーのIP:portへ本物のTCP
+    connectを試みる——実SSHリスナー等が有効化されていないバックエンド
+    は、インタフェースがupでもdown判定になる。gateway_icmp(実機の
+    既定)は従来通りトポロジーベースの疎通判定(icmp_engineの既存
+    L3到達性判定を再利用、重複実装しない)。判定ロジック本体は
+    engine.bigip_lb.member_is_up に集約し、実トラフィック分散
+    (VirtualServerProxy)の振り分け判定とも共有する。"""
+    from engine.bigip_lb import monitor_type, member_is_up
     for pool in getattr(state, 'f5_pools', {}).values():
-        has_monitor = pool.get('monitor', 'none') not in ('none', '', None)
+        mtype = monitor_type(state, pool.get('monitor', 'none'))
         for m in pool['members']:
-            if has_monitor:
-                m['monitor_status'] = 'up' if _member_reachable(m['node']) else 'down'
-            else:
-                m['monitor_status'] = 'up'
+            m['monitor_status'] = 'up' if member_is_up(state, mtype, m['node'], m['port']) else 'down'
             m['status'] = 'down' if (m.get('admin_down') or m['monitor_status'] == 'down') else 'up'
 
 
