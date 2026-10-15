@@ -134,3 +134,47 @@ python tools/strix_status_to_loki.py --loki-url http://localhost:3100
 `/metrics`で`netlab_strix_last_run_success 0`になったタイミングで
 `StrixPentestRunFailed`がfiringになり、既存の`webhook_catcher.py`に着弾
 する(SNMP trapの時と同じ通知経路をそのまま使う)。
+
+## k6(`tools/k6_slb_load.js`)負荷試験結果の監視
+
+ユーザー質問「NW slb 負荷かけツールって知ってます？」→「本格的に
+負荷をかけたい(数百〜数千並列、QPS計測、Grafanaダッシュボードに
+流す)ならk6をこのラボに統合」への対応。詳細は
+`docs/k6-load-testing.md`参照。Strixと同じ「既存exporterに新しい
+データソースをベストエフォートで足す」パターン:
+
+```
+k6 run --summary-export=tools/k6_results/run-<ts>.json tools/k6_slb_load.js
+   ▼
+tools/prometheus_exporter.py --k6-results-dir tools/k6_results
+   └─ /metrics (netlab_k6_*) ──▶ Prometheus
+   └─ (本ディレクトリのalert_rules.yml: k6-load-test グループ) ──▶ Alertmanager
+```
+
+### メトリクス(`netlab_k6_*`)
+
+| メトリクス | 意味 |
+|---|---|
+| `netlab_k6_has_run` | k6を一度でも実行したか(1/0) |
+| `netlab_k6_http_reqs_total` | 直近runの総リクエスト数 |
+| `netlab_k6_http_req_rate` | 直近runのQPS |
+| `netlab_k6_http_req_failed_rate` | 失敗率(0.0-1.0) |
+| `netlab_k6_http_req_duration_ms{quantile}` | レイテンシ(avg/p95/p99) |
+| `netlab_k6_vus` | 実行したVU数 |
+| `netlab_k6_data_bytes{direction}` | 送受信バイト数 |
+| `netlab_k6_last_run_age_seconds` | 直近run完了からの経過秒数 |
+
+### アラート(`alert_rules.yml`の`k6-load-test`グループ)
+
+- `K6LoadTestHighErrorRate`: 直近runのHTTPエラー率が1%超
+- `K6LoadTestHighLatencyP95`: 直近runのp95レイテンシが500ms超
+
+### 起動
+
+```bash
+mkdir -p tools/k6_results
+TARGET_URL=http://<ALB/BIG-IPのVIP>:<port>/ VUS=200 DURATION=20s \
+  k6 run --summary-export=tools/k6_results/run-$(date +%s).json tools/k6_slb_load.js
+
+python tools/prometheus_exporter.py --k6-results-dir tools/k6_results
+```

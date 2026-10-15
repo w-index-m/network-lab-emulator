@@ -28,3 +28,24 @@ groups:
           severity: warning
         annotations:
           summary: "Strixペンテストが7日間(または一度も)成功していません"
+
+  # k6(tools/k6_slb_load.js)の負荷試験結果。
+  # ユーザー依頼「NW slb 負荷かけツールって知ってます？」→「k6をこの
+  # ラボに統合してほしい」への対応。tools/prometheus_exporter.pyが
+  # --k6-results-dirでポーリングして公開する netlab_k6_* メトリクスを
+  # 評価する。has_run==0(一度もk6を実行していない)状態での誤発火を
+  # 防ぐため、Strixと同じくhas_runでゲートする。
+  - name: k6-load-test
+    rules:
+      - alert: K6LoadTestHighErrorRate
+        expr: netlab_k6_has_run == 1 and netlab_k6_http_req_failed_rate > 0.01
+        labels:
+          severity: critical
+        annotations:
+          summary: "直近のk6負荷試験でHTTPエラー率が1%を超えました"
+      - alert: K6LoadTestHighLatencyP95
+        expr: netlab_k6_has_run == 1 and netlab_k6_http_req_duration_ms{quantile="p95"} > 500
+        labels:
+          severity: warning
+        annotations:
+          summary: "直近のk6負荷試験でp95レイテンシが500msを超えました"

@@ -10,10 +10,14 @@ tools/prometheus_exporter.py テスト
 import sys
 import os
 import json
+import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
-from tools.prometheus_exporter import build_metrics_text, _load_watchlist, build_strix_metrics_text
+from tools.prometheus_exporter import (
+    build_metrics_text, _load_watchlist, build_strix_metrics_text,
+    build_k6_metrics_text, _load_latest_k6_summary,
+)
 
 
 def _sample_dashboard():
@@ -236,6 +240,110 @@ def test_updated_at_is_preferred_over_created_at():
             break
     else:
         pytest.fail('netlab_strix_last_success_age_seconds 行が見つからない')
+
+
+# ── build_k6_metrics_text() / _load_latest_k6_summary() ──
+# ユーザー依頼「NW slb 負荷かけツールって知ってます？」→「k6をこの
+# ラボに統合してほしい」への対応。k6の`--summary-export`で書き出した
+# JSON(k6 v1.8.2で実際に`k6 run --summary-export`を実行して確認した
+# 実物の形: metrics.<name>に統計量キーが直接並ぶ——"values"でラップ
+# されるバージョンにも両対応する)をPrometheusメトリクスに変換する。
+
+_SAMPLE_K6_SUMMARY = {
+    'metrics': {
+        'http_reqs': {'count': 500, 'rate': 33.3},
+        'http_req_failed': {'passes': 5, 'fails': 495, 'value': 0.01},
+        'http_req_duration': {'avg': 12.5, 'min': 1.0, 'med': 10.0, 'max': 80.0,
+                              'p(90)': 20.0, 'p(95)': 30.0, 'p(99)': 60.0},
+        'vus_max': {'value': 100, 'min': 100, 'max': 100},
+        'data_sent': {'count': 40000, 'rate': 2666.0},
+        'data_received': {'count': 900000, 'rate': 60000.0},
+    },
+}
+
+
+def test_no_summary_reports_has_run_zero_and_nothing_else():
+    text = build_k6_metrics_text(None, None)
+    assert 'netlab_k6_has_run 0' in text
+    assert 'netlab_k6_http_reqs_total' not in text
+
+
+def test_summary_reports_has_run_one_and_core_metrics():
+    text = build_k6_metrics_text(_SAMPLE_K6_SUMMARY, time.time() - 5)
+    assert 'netlab_k6_has_run 1' in text
+    assert 'netlab_k6_http_reqs_total 500' in text
+    assert 'netlab_k6_http_req_rate 33.3' in text
+    assert 'netlab_k6_http_req_failed_rate 0.01' in text
+    assert 'netlab_k6_vus 100' in text
+
+
+def test_duration_percentiles_are_each_their_own_labeled_line():
+    text = build_k6_metrics_text(_SAMPLE_K6_SUMMARY, time.time())
+    assert 'netlab_k6_http_req_duration_ms{quantile="avg"} 12.5' in text
+    assert 'netlab_k6_http_req_duration_ms{quantile="p95"} 30.0' in text
+    assert 'netlab_k6_http_req_duration_ms{quantile="p99"} 60.0' in text
+
+
+def test_data_sent_and_received_are_separate_labeled_lines():
+    text = build_k6_metrics_text(_SAMPLE_K6_SUMMARY, time.time())
+    assert 'netlab_k6_data_bytes{direction="sent"} 40000' in text
+    assert 'netlab_k6_data_bytes{direction="received"} 900000' in text
+
+
+def test_last_run_age_reflects_the_file_mtime():
+    text = build_k6_metrics_text(_SAMPLE_K6_SUMMARY, time.time() - 42)
+    for line in text.splitlines():
+        if line.startswith('netlab_k6_last_run_age_seconds '):
+            age = int(line.split()[1])
+            assert 40 <= age <= 45
+            break
+    else:
+        pytest.fail('netlab_k6_last_run_age_seconds 行が見つからない')
+
+
+def test_wrapped_values_schema_is_also_supported():
+    """k6のバージョンによっては各メトリクスが{"values": {...}}で
+    ラップされることがある(botocoreのELB examplesと同じ「実例を見て
+    対応する」方針)——両方の形を受け付けることを固定する。"""
+    wrapped = {'metrics': {
+        'http_reqs': {'values': {'count': 10, 'rate': 1.0}},
+        'http_req_failed': {'values': {'value': 0.0}},
+        'http_req_duration': {'values': {'avg': 5.0, 'p(95)': 9.0, 'p(99)': 15.0}},
+        'vus_max': {'values': {'value': 3}},
+        'data_sent': {'values': {'count': 100}},
+        'data_received': {'values': {'count': 200}},
+    }}
+    text = build_k6_metrics_text(wrapped, time.time())
+    assert 'netlab_k6_http_reqs_total 10' in text
+    assert 'netlab_k6_vus 3' in text
+
+
+def test_load_latest_k6_summary_missing_dir_returns_none(tmp_path):
+    summary, mtime = _load_latest_k6_summary(str(tmp_path / 'does-not-exist'))
+    assert summary is None and mtime is None
+
+
+def test_load_latest_k6_summary_empty_dir_returns_none(tmp_path):
+    summary, mtime = _load_latest_k6_summary(str(tmp_path))
+    assert summary is None and mtime is None
+
+
+def test_load_latest_k6_summary_picks_the_most_recently_modified_file(tmp_path):
+    old_file = tmp_path / 'run-old.json'
+    old_file.write_text(json.dumps({'metrics': {'http_reqs': {'count': 1, 'rate': 1.0}}}))
+    new_file = tmp_path / 'run-new.json'
+    new_file.write_text(json.dumps({'metrics': {'http_reqs': {'count': 999, 'rate': 1.0}}}))
+    os.utime(old_file, (time.time() - 100, time.time() - 100))
+    os.utime(new_file, (time.time(), time.time()))
+    summary, mtime = _load_latest_k6_summary(str(tmp_path))
+    assert summary['metrics']['http_reqs']['count'] == 999
+
+
+def test_load_latest_k6_summary_malformed_json_returns_none(tmp_path):
+    bad = tmp_path / 'run-bad.json'
+    bad.write_text('{not valid json')
+    summary, mtime = _load_latest_k6_summary(str(tmp_path))
+    assert summary is None and mtime is None
 
 
 if __name__ == '__main__':

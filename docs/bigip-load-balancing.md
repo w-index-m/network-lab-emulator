@@ -105,6 +105,62 @@ python3 tools/virtual_client.py tcp --vip 10.96.0.1 --port 2225 \
 それでも4台全体では`ssh-a: 6 / ssh-b: 6`と均等に分散されることを
 確認した。
 
+### 5台の仮想クライアント→BIG-IP→実Webサーバ2台
+
+ユーザー依頼「仮想クライアントを5台にしてモックBIGIPを経由して2台の
+Webサーバに負荷をかける試験行けそうですか？」への対応。
+`VirtualServerProxy`はHTTPを解釈しない純粋なバイトリレー(TCPプロキシ)
+なので、`tools/virtual_client.py`の`http`モード(本来はALB向けに作った
+もの)がそのままBIG-IPにも通ることを確認した——ALB用に作ったツールが
+コード変更なしでL4ロードバランサにも使える、という横展開。
+
+```bash
+mkdev vc5-web1 pc; mkdev vc5-web2 pc
+cli vc5-web1 '"ip addr add 10.93.0.1/24 dev eth0"'
+cli vc5-web2 '"ip addr add 10.93.0.2/24 dev eth0"'
+cli vc5-web1 '"python3 -m http.server 9500"'
+cli vc5-web2 '"python3 -m http.server 9500"'
+
+mkdev vc5-bigip bigip
+cli vc5-bigip '"create ltm pool vc5pool { members add { 10.93.0.1:9500 10.93.0.2:9500 } monitor tcp load-balancing-mode round-robin }"'
+cli vc5-bigip '"create ltm virtual vc5vs { destination 10.93.0.100:9500 pool vc5pool }"'
+
+python3 tools/virtual_client.py http --vip 10.93.0.100 --port 9500 \
+    --clients 5 --requests 4 --path /index.html
+```
+
+persistence無効(5台×4リクエスト=20リクエスト)では各クライアント内も
+round-robin(`DISTRIBUTED`)、全体では`vc5-web1: 10 / vc5-web2: 10`と
+完全均等:
+
+```
+client-0: {'vc5-web2': 2, 'vc5-web1': 2}  [DISTRIBUTED]
+client-1: {'vc5-web2': 2, 'vc5-web1': 2}  [DISTRIBUTED]
+client-2: {'vc5-web2': 2, 'vc5-web1': 2}  [DISTRIBUTED]
+client-3: {'vc5-web2': 2, 'vc5-web1': 2}  [DISTRIBUTED]
+client-4: {'vc5-web2': 2, 'vc5-web1': 2}  [DISTRIBUTED]
+vc5-web2: 10
+vc5-web1: 10
+```
+
+`create ltm persistence source-addr vc5persist { timeout 120 }` +
+`modify ltm virtual vc5vs { persist replace-all-with { vc5persist } }`を
+投入した後に同じコマンドを再実行すると、今度は5台それぞれが1種類に
+固定される(`STICKY`)。クライアント台数が奇数(5台)なので、2バックエンド
+への割り振り自体は`12:8`と偏るが、これは「どのクライアントも1台に
+固定される」という正しい挙動の結果であり、ロードバランシングが壊れた
+わけではない:
+
+```
+client-0: {'vc5-web2': 4}  [STICKY]
+client-1: {'vc5-web1': 4}  [STICKY]
+client-2: {'vc5-web2': 4}  [STICKY]
+client-3: {'vc5-web1': 4}  [STICKY]
+client-4: {'vc5-web2': 4}  [STICKY]
+vc5-web2: 12
+vc5-web1: 8
+```
+
 ## Self IP / VLAN(「モックIPくらいのモック頼みます」)
 
 ユーザー指摘「モックのBIGIPなのでモックIPくらいのモック頼みます\n
@@ -245,7 +301,7 @@ lb-be2#
 
 ## テスト
 
-`tests/test_bigip_lb_healthcheck.py`(33 tests、`bigip`に対する
+`tests/test_bigip_lb_healthcheck.py`(35 tests、`bigip`に対する
 初めての専用テストファイル——従来は`tests/test_untested_device_types.py`
 の最小限のスモークテストのみだった)が、CLI設定(pool/virtual/
 snatpool/persistence作成)、実TCPヘルスチェック(up/down/monitor無し)、
@@ -254,7 +310,10 @@ least-connections/down除外、source-addrパーシステンスの固定/
 フォールバック、SNAT automap/snatpoolの実ソケットレベル確認、簡易
 TCPバックエンドで検証)、名前付きオブジェクトの一意性(pool/
 snatpool/persistence/nodeの再投入で重複しないこと)、デフォルト
-Self IP/`net vlan`/`net self`(`TestBigipMockSelfIp`)、および実SSH
-リスナーを持つ2台のバックエンドへのエンドツーエンドのround-robin
-振り分け+実フェイルオーバー(本物のuvicornサーバ+本物のparamiko
+Self IP/`net vlan`/`net self`(`TestBigipMockSelfIp`)、5台の仮想
+クライアント→実http.server 2台の実HTTPトラフィック中継(round-robin/
+persistence、`TestBigipHttpTrafficFromMultipleVirtualClients`)、
+および実SSHリスナーを持つ2台のバックエンドへのエンドツーエンドの
+round-robin振り分け+実フェイルオーバー(本物のuvicornサーバ+本物の
+paramiko
 クライアント)を固定する。

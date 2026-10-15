@@ -85,6 +85,103 @@ def _fetch_pentest_runs(emulator_url: str, token: str) -> dict:
         return json.loads(r.read().decode('utf-8'))
 
 
+def _load_latest_k6_summary(results_dir: str):
+    """k6の`--summary-export=<file>.json`で書き出された実行結果の中から
+    最新のものを1件読む。ユーザー依頼「NW slb 負荷かけツールって
+    知ってます？」→「k6をこのラボに統合」への対応——tools/
+    virtual_client.py(少数クライアントでの振り分け可視化)とは別に、
+    本格的なQPS/レイテンシ負荷試験の結果をGrafanaへ流すための入口。
+    ディレクトリが無い/JSONが1件も無い場合はNoneを返す(k6を一度も
+    実行していない状態は実機のStrix未Dispatchと同じくエラーではない)。"""
+    try:
+        files = [os.path.join(results_dir, f) for f in os.listdir(results_dir)
+                 if f.endswith('.json')]
+    except FileNotFoundError:
+        return None, None
+    if not files:
+        return None, None
+    latest = max(files, key=os.path.getmtime)
+    try:
+        with open(latest, encoding='utf-8') as f:
+            return json.load(f), os.path.getmtime(latest)
+    except (json.JSONDecodeError, OSError):
+        return None, None
+
+
+def build_k6_metrics_text(summary, run_mtime) -> str:
+    """k6の--summary-export JSONをPrometheusメトリクスにする。
+    直近1回分の実行結果をgaugeとして公開する(k6はprometheus自体への
+    continuous pushも可能だが、このラボは既存のポーリング型exporterに
+    合わせて「最新の実行結果ファイルを読む」方式に揃えた)。
+    summaryがNone(一度もk6を実行していない)場合は空文字列を返し、
+    SNMP側のメトリクスには影響させない。"""
+    lines = []
+    lines.append('# HELP netlab_k6_has_run Whether a k6 load-test summary has ever been observed (1) or not (0, e.g. never run yet)')
+    lines.append('# TYPE netlab_k6_has_run gauge')
+    lines.append(f'netlab_k6_has_run {1 if summary else 0}')
+    if not summary:
+        return '\n'.join(lines) + '\n'
+
+    # k6の--summary-export JSONは"metrics": {"<name>": {<統計量キー>: ...}}
+    # という構造(バージョンによっては"values"でラップされることもある
+    # ため両方に対応する——k6 v1.8.2で実際に出力させて確認したところ
+    # ラップは無く直接キーが並んでいた)。
+    metrics = summary.get('metrics', {})
+
+    def _value(name, key, default=0.0):
+        m = metrics.get(name, {})
+        if 'values' in m and isinstance(m['values'], dict):
+            m = m['values']
+        return m.get(key, default)
+
+    reqs_total = _value('http_reqs', 'count', 0)
+    reqs_rate = _value('http_reqs', 'rate', 0.0)
+    # http_req_failedは"rate"型メトリクスで、要約JSONでは"value"キーに
+    # 実際の割合(0.0-1.0)が入る("rate"というキーではない——他のCounter/
+    # Trend系メトリクスとはキー名が異なる点に注意)。
+    fail_rate = _value('http_req_failed', 'value', 0.0)
+    dur_p95 = _value('http_req_duration', 'p(95)', 0.0)
+    dur_p99 = _value('http_req_duration', 'p(99)', 0.0)
+    dur_avg = _value('http_req_duration', 'avg', 0.0)
+    vus_max = _value('vus_max', 'value', _value('vus', 'value', 0))
+    data_sent = _value('data_sent', 'count', 0)
+    data_recv = _value('data_received', 'count', 0)
+
+    lines.append('# HELP netlab_k6_http_reqs_total Total number of HTTP requests made in the most recent k6 run')
+    lines.append('# TYPE netlab_k6_http_reqs_total gauge')
+    lines.append(f'netlab_k6_http_reqs_total {reqs_total}')
+
+    lines.append('# HELP netlab_k6_http_req_rate Requests per second (QPS) achieved in the most recent k6 run')
+    lines.append('# TYPE netlab_k6_http_req_rate gauge')
+    lines.append(f'netlab_k6_http_req_rate {reqs_rate}')
+
+    lines.append('# HELP netlab_k6_http_req_failed_rate Fraction of failed HTTP requests in the most recent k6 run (0.0-1.0)')
+    lines.append('# TYPE netlab_k6_http_req_failed_rate gauge')
+    lines.append(f'netlab_k6_http_req_failed_rate {fail_rate}')
+
+    lines.append('# HELP netlab_k6_http_req_duration_ms HTTP request duration in milliseconds, by percentile, for the most recent k6 run')
+    lines.append('# TYPE netlab_k6_http_req_duration_ms gauge')
+    lines.append(f'netlab_k6_http_req_duration_ms{{quantile="avg"}} {dur_avg}')
+    lines.append(f'netlab_k6_http_req_duration_ms{{quantile="p95"}} {dur_p95}')
+    lines.append(f'netlab_k6_http_req_duration_ms{{quantile="p99"}} {dur_p99}')
+
+    lines.append('# HELP netlab_k6_vus Virtual users configured for the most recent k6 run')
+    lines.append('# TYPE netlab_k6_vus gauge')
+    lines.append(f'netlab_k6_vus {vus_max}')
+
+    lines.append('# HELP netlab_k6_data_bytes Bytes sent/received by k6 during the most recent run')
+    lines.append('# TYPE netlab_k6_data_bytes gauge')
+    lines.append(f'netlab_k6_data_bytes{{direction="sent"}} {data_sent}')
+    lines.append(f'netlab_k6_data_bytes{{direction="received"}} {data_recv}')
+
+    age = int(time.time() - run_mtime) if run_mtime else -1
+    lines.append('# HELP netlab_k6_last_run_age_seconds Seconds since the most recent k6 run completed')
+    lines.append('# TYPE netlab_k6_last_run_age_seconds gauge')
+    lines.append(f'netlab_k6_last_run_age_seconds {age}')
+
+    return '\n'.join(lines) + '\n'
+
+
 def build_strix_metrics_text(runs_data: dict) -> str:
     """StrixペンテストのGitHub Actions実行状況をPrometheusメトリクスにする。
     「それを、GrafanaやPrometheusでステータスを取ったらどうなるかな」という
@@ -252,7 +349,8 @@ class MetricsHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def poll_loop(emulator_url: str, token: str, interval: int, watchlist_path: str, include_strix: bool = True):
+def poll_loop(emulator_url: str, token: str, interval: int, watchlist_path: str, include_strix: bool = True,
+              k6_results_dir: str = None):
     while True:
         try:
             data = _fetch_dashboard(emulator_url, token)
@@ -267,6 +365,14 @@ def poll_loop(emulator_url: str, token: str, interval: int, watchlist_path: str,
                     text += build_strix_metrics_text(strix_data)
                 except Exception as e:
                     print(f'[exporter] Strix実行状況の取得失敗(SNMP側には影響なし): {e}')
+            # k6の負荷試験結果もベストエフォート(ローカルファイル読み取りの
+            # みなので失敗要因は少ないが、他と同じ方針で揃える)。
+            if k6_results_dir:
+                try:
+                    summary, mtime = _load_latest_k6_summary(k6_results_dir)
+                    text += build_k6_metrics_text(summary, mtime)
+                except Exception as e:
+                    print(f'[exporter] k6結果の取得失敗(SNMP側には影響なし): {e}')
             _last_payload['text'] = text
             _last_payload['error'] = None
             _last_payload['fetched_at'] = time.time()
@@ -293,6 +399,10 @@ def main():
                              f'(既定: {_DEFAULT_WATCHLIST})')
     parser.add_argument('--no-strix', action='store_true',
                         help='/api/pentest/runs(Strixペンテストの実行状況)のポーリングを無効化する')
+    parser.add_argument('--k6-results-dir', default=None,
+                        help='k6の--summary-exportで書き出したJSONを置くディレクトリ'
+                             '(既定: 無効。指定するとtools/k6_slb_load.jsの実行結果を'
+                             'netlab_k6_*メトリクスとして公開する)')
     args = parser.parse_args()
 
     print('\n' + '=' * 70)
@@ -306,7 +416,7 @@ def main():
     import threading
     t = threading.Thread(target=poll_loop,
                          args=(args.emulator_url, args.token, args.interval, args.watchlist,
-                               not args.no_strix),
+                               not args.no_strix, args.k6_results_dir),
                          daemon=True)
     t.start()
 

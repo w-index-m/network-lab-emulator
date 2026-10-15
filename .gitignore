@@ -44,3 +44,7 @@ chef/chef_guid
 # ベンダーマニュアルPDF（再配布可否が不明なためgit管理しない。
 # docs/reference/ 配下に実装検証用として置くのはローカルのみ）
 docs/reference/*.pdf
+
+# k6負荷試験の実行結果(--summary-export)。実行毎に生成される
+# ランタイム出力なのでgit管理しない(tools/k6_slb_load.js参照)。
+tools/k6_results/

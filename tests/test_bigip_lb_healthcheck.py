@@ -670,6 +670,79 @@ class TestBigipMockSelfIp:
         assert state.interfaces['1.2']['ip'] == '10.1.20.245'
 
 
+class TestBigipHttpTrafficFromMultipleVirtualClients:
+    """ユーザー依頼「仮想クライアントを5台にしてモックBIGIPを経由して
+    2台のWebサーバに負荷をかける試験行けそうですか？」への対応。
+    `VirtualServerProxy`はHTTPを解釈しない純粋なバイトリレーなので、
+    ALB向けに作った`tools/virtual_client.py`の`http`モードがそのまま
+    BIG-IPにも通ることを固定する(本物の`engine.mock_http_server`2台+
+    5つの異なる実送信元IPから、`http.client.HTTPConnection`で直接
+    確認——`tools/virtual_client.py`自身が使っているのと同じやり方)。"""
+
+    def _client_ip(self, n):
+        return f'127.0.33.{n}'
+
+    def test_five_clients_round_robin_evenly_across_two_real_web_backends(self):
+        from engine.bigip_lb import VirtualServerProxy
+        from engine.mock_http_server import ensure_mock_http_server, stop_mock_http_server
+        import http.client
+
+        ensure_mock_http_server('127.0.40.1', 9500, 'web-a')
+        ensure_mock_http_server('127.0.40.2', 9500, 'web-b')
+        members = [('127.0.40.1', 9500), ('127.0.40.2', 9500)]
+        proxy = VirtualServerProxy('127.0.0.1', 0, lambda: members, lambda: 'round-robin')
+        try:
+            proxy.start()
+            vip_port = proxy._sock.getsockname()[1]
+            counts = {}
+            for client_n in range(5):
+                src_ip = self._client_ip(client_n + 1)
+                for _ in range(4):
+                    conn = http.client.HTTPConnection('127.0.0.1', vip_port, timeout=3,
+                                                       source_address=(src_ip, 0))
+                    conn.request('GET', '/index.html')
+                    body = conn.getresponse().read().decode().strip()
+                    conn.close()
+                    counts[body] = counts.get(body, 0) + 1
+            assert counts == {'web-a': 10, 'web-b': 10}
+        finally:
+            proxy.stop()
+            stop_mock_http_server('127.0.40.1', 9500)
+            stop_mock_http_server('127.0.40.2', 9500)
+
+    def test_five_clients_stick_to_one_backend_with_source_addr_persistence(self):
+        from engine.bigip_lb import VirtualServerProxy
+        from engine.mock_http_server import ensure_mock_http_server, stop_mock_http_server
+        import http.client
+
+        ensure_mock_http_server('127.0.41.1', 9500, 'web-a')
+        ensure_mock_http_server('127.0.41.2', 9500, 'web-b')
+        members = [('127.0.41.1', 9500), ('127.0.41.2', 9500)]
+        proxy = VirtualServerProxy('127.0.0.1', 0, lambda: members, lambda: 'round-robin',
+                                    get_persist_timeout=lambda: 120)
+        try:
+            proxy.start()
+            vip_port = proxy._sock.getsockname()[1]
+            per_client = {}
+            for client_n in range(5):
+                src_ip = self._client_ip(client_n + 50)
+                seen = set()
+                for _ in range(4):
+                    conn = http.client.HTTPConnection('127.0.0.1', vip_port, timeout=3,
+                                                       source_address=(src_ip, 0))
+                    conn.request('GET', '/index.html')
+                    body = conn.getresponse().read().decode().strip()
+                    conn.close()
+                    seen.add(body)
+                per_client[src_ip] = seen
+            assert all(len(backends) == 1 for backends in per_client.values()), (
+                f'persistence有効時は各クライアントが1種類に固定されるはず: {per_client}')
+        finally:
+            proxy.stop()
+            stop_mock_http_server('127.0.41.1', 9500)
+            stop_mock_http_server('127.0.41.2', 9500)
+
+
 class TestBigipLiveLoadBalancing:
     def test_pool_shows_both_backends_up(self, lb_with_ssh_backends):
         out = _live_cli('show ltm pool e2e_pool', LB)

@@ -2196,3 +2196,29 @@ JSON)——を取得して照合した(`add_repo`で読み取り専用アタッ�
 6 tests、ファイル計30 tests)がこれら全てを固定する。詳細は
 `docs/aws-alb-load-balancer.md`の「本家aws-cliマニュアルとの
 突き合わせ」節参照。
+
+**5台の仮想クライアント→モックBIG-IP→実Webサーバ2台**: ユーザー依頼
+「仮想クライアントを5台にしてモックBIGIPを経由して2台のWebサーバに
+負荷をかける試験行けそうですか？」への対応。`engine.bigip_lb.
+VirtualServerProxy`はHTTPを解釈しない純粋なバイトリレー(TCPプロキシ)
+なので、ALB向けに作った`tools/virtual_client.py`の`http`モードが
+コード変更なしでBIG-IPにもそのまま通ることを確認した——ALB用の
+ツールがL4ロードバランサにも横展開できる、という発見。
+
+ライブ検証: `vc5-web1`/`vc5-web2`(pc装置の実`http.server`)2台を
+`create ltm pool`+`create ltm virtual`でBIG-IPの背後に配置し、5台の
+仮想クライアント(それぞれ別の実送信元IP)×各4リクエスト=20リクエスト
+を実行。persistence無効時は`vc5-web1: 10 / vc5-web2: 10`と完全均等
+round-robin、`create ltm persistence source-addr`(timeout 120s)を
+有効化すると各クライアントが1種類に固定(`STICKY`、クライアント数が
+奇数のため全体は`12:8`——固定された結果としての偏りで、分散自体が
+壊れたわけではない)。詳細は`docs/bigip-load-balancing.md`「5台の
+仮想クライアント→BIG-IP→実Webサーバ2台」節参照。
+
+`tests/test_bigip_lb_healthcheck.py`に
+`TestBigipHttpTrafficFromMultipleVirtualClients`(2 tests、ファイル計
+35 tests)を追加: 本物の`engine.mock_http_server`2台+5つの異なる実
+送信元IPから`http.client.HTTPConnection`で直接接続し(`tools/
+virtual_client.py`自身が使っているのと同じ方式)、round-robinでの
+完全均等分散とsource-addrパーシステンスでの固定を`VirtualServerProxy`
+単体で固定する。
