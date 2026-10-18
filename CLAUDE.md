@@ -2264,3 +2264,95 @@ pc装置2台の実`http.server`へ実際にk6で200 VU・20秒の負荷をかけ
 `_load_latest_k6_summary`のテスト(9件)を追加、k6バイナリ自体には
 依存しない(サンプルJSONを直接渡すだけ、他の外部ツール連携と同じ
 方針)。詳細は`docs/k6-load-testing.md`参照。
+
+**「変わった検証」3件(gNMI over BIG-IP / CPS新規接続レート / automapの
+Self IP)**: ユーザー質問「ちなみにClaude側で思いつく変わった検証って
+どんなのあります？」→「3つくらい上げてその検証を進めてマークダウンに
+残してほしい」への対応。別々に実装された機能同士を普段と違う組み合わせ
+で突き合わせる3件を実施、1件で実バグを発見・修正した。詳細は
+`docs/unusual-verifications-gnmi-cps-automap.md`参照。
+
+1. **gNMI(gRPC/HTTP2)がBIG-IPのTCPリレーを素通りするか**: `pip install
+   pygnmi`で実gRPCクライアントを用意し、Cisco装置の実gNMIリスナー
+   (`gnxi`/`gnxi server`、ポート50052)をBIG-IPのpool+virtualの背後に
+   配置、BIG-IPのVIP経由で`Capabilities`/`Get`を実行——成功。
+   `VirtualServerProxy`がHTTP/SSH以外のプロトコル(gRPC/HTTP2)でも
+   プロトコル非依存のバイトリレーとして動くことを初めて実証した。
+   **検証中に踏んだ環境的な落とし穴(エミュレータのバグではない)**:
+   このサンドボックスの`no_proxy`は`127.0.0.0/8`・`10.0.0.0/8`・
+   `172.16.0.0/12`・`192.168.0.0/16`・`100.64.0.0/10`しか含まず、
+   cisco/arista/fortigateのデフォルトWANアドレスに使われる
+   `203.0.113.0/24`(TEST-NET-3)は含まれていない——grpc-pythonが
+   `https_proxy`経由でルーティングしてしまい、プロキシが平文gRPCを
+   HTTP/1.1と誤認して403を返す(`10.0.0.0/8`のIPに切り替えて回避)。
+
+2. **BIG-IPのSSHバックエンドへのCPS(秒間新規コネクション数)試験**:
+   k6のHTTP試験は「同時並列数」軸だったのに対し、`paramiko`で毎回
+   新規にTCP+SSHハンドシェイクする自作スクリプトで「新規接続の生成
+   レート」軸を試験した。10〜100 CPSではほぼ100%成功・レイテンシ
+   安定(~50ms)だが、**実際に達成できるレートが~100〜110 CPSで頭打ち
+   になり**、それ以上は失敗率急増・レイテンシ1秒超に悪化する——
+   k6のHTTP試験で見つけた「`VirtualServerProxy`のthread-per-connection
+   実装によるGIL競合」と根本原因は同じだが、現れる負荷の軸(同時並列
+   vs 新規接続レート)が違う、という実務的な区別を確認した。
+
+3. **automap SNATが設定済みのSelf IPを実際に使うか(実バグ発見・
+   修正)**: 「モックIP/Self IP」(`net vlan`/`net self`)とSNAT
+   (automap)は別々のタイミングで実装されたため、組み合わせテストが
+   一度も無かった。実機のAutoMap SNATは仮想サーバのdestination(VIP)
+   ではなく発信側VLANのSelf IPを送信元に使う(VIPとSelf IPは別概念)が、
+   `engine/bigip_lb.py`の`get_snat_source()`は常に`vip`を返していた
+   ——`net self`設定済みのBIG-IPでライブ検証したところ、接続元IPを
+   そのまま返す簡易バックエンドが実際に`vip`(10.95.70.1)を見てしまい、
+   設定した`10.95.50.245`は使われていないことを確認。`state.f5_selfips`
+   があればそれを使い、無ければ(既存テスト/ドキュメントとの後方互換
+   のため)VIPへフォールバックするよう修正、ライブ検証で両ケースとも
+   正しい挙動になることを確認した。`TestBigipAutomapUsesConfiguredSelfIp`
+   (`tests/test_bigip_lb_healthcheck.py`、2 tests、ファイル計37 tests)
+   がこの修正とregression防止(未設定時のVIPフォールバック)を固定する。
+
+**自動検証のパターン化 + 設定永続化層の実バグ発見・修正**: ユーザー
+指摘「今までの検証を色々やってみましたが自分が依頼したものが多いので
+どうかなと...opus使うので試験と試験結果まとめをClaudeに案を出して、
+自動検証のパターン出しとかお願いしたい」への対応。これまでの検証は
+ほぼ全てユーザーの具体的な依頼から始まっていたため、Claude側が自発的に
+検証対象を見つける再利用可能なパターンを`docs/automated-verification-
+patterns.md`にまとめた(組み合わせ検証/負荷の軸を変えるストレス試験/
+状態永続化の監査/二層ディスパッチ先取りの横断チェック、の4パターン)。
+
+このパターンの一つ(「新device_type/新機能追加時、`_save_config`/
+`_load_config`に保存・復元ブロックを追加したか」の監査)を実際に適用し、
+**実バグを発見・修正した**: `app.py`の設定永続化層(`saved_config.json`
+への保存、60秒ごとの自動保存、起動時の復元)は、Nexus TACACS+/AAA・
+Si-R IPsec等は個別に対応済みだったが、このセッションで追加された
+BIG-IPのLTM設定(pool/virtual/monitor/persistence/snatpool/net vlan/
+net self)とALBのtarget-group/listener/ruleは一度も保存・復元リストに
+入れられておらず、**アプリの再起動(=自動保存→次回起動時のロード)の
+たびに全て消え、実TCPリスナー(VirtualServerProxy/AlbListenerProxy)も
+再起動されないまま失われる**という実バグだった。
+
+修正: `_save_config()`/`_load_config()`にBIG-IP
+(`f5_nodes`/`f5_pools`/`f5_virtuals`/`f5_monitors`/
+`f5_persistence_profiles`/`f5_snatpools`/`f5_vlans`/`f5_selfips`)と
+ALB(`alb_load_balancers`/`alb_target_groups`/`alb_listeners`/
+`alb_rules`)の保存・復元ブロックを追加。さらに`_load_config()`の
+`_rebuild_all_neighbors()`直後に、復元済みの`f5_virtuals`/
+`alb_listeners`に基づいて`ensure_virtual_server_proxy()`/
+`ensure_alb_listener_proxy()`を呼び直す処理を追加した——辞書状態が
+戻るだけでは実ソケットは上がらないため、Juniperのcommit後SSH
+リスナー起動と同じ「post-restore再評価」パターンが必要だった。
+
+`tests/test_bigip_alb_config_persistence.py`(4 tests、
+`tests/test_nexus_tacacs_persistence.py`と同じSAVED_CONFIG_PATH/
+device_sessionsをmonkeypatchする隔離パターン)が、辞書状態の
+保存・復元往復**と**復元後に実際にTCP/HTTP接続が通ることの両方
+(実`socket.create_connection`/実HTTPクライアントで確認)を固定する
+——辞書が戻っただけで「直った」と判定しない。
+
+**まだ永続化されていない既知のギャップ(スコープ外、次の一手)**:
+Juniper(`junos_candidate`/`junos_committed`)・Yamaha(NAT descriptor/
+PPPoE設定)・BAS(`map_e_engine`のプール設定)・FortiGate
+(`fortigate_pppoe`/phase1-interface)・ASA threat-detection
+(`state.threat_detection`)の状態は、この調査時点でもまだ永続化層に
+含まれていない。`docs/automated-verification-patterns.md`の
+チェックリストをそのまま適用すれば横展開できる。

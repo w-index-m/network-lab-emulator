@@ -449,6 +449,25 @@ def _save_config():
                 dev_data["aaa_accounting_commands"] = state.aaa_accounting_commands
             if getattr(state, "aaa_accounting_exec", None):
                 dev_data["aaa_accounting_exec"] = state.aaa_accounting_exec
+        # F5 BIG-IP: LTM設定(pool/virtual/monitor/snatpool/persistence/
+        # net vlan/net self)を保存。これが無いと再起動のたびにLTM設定が
+        # 消え、実TCPリスナー(VirtualServerProxy)も再起動されないまま
+        # 消失する(「変わった検証」でこのギャップそのものを発見した)。
+        if state.device_type == "bigip":
+            for attr in ("f5_nodes", "f5_pools", "f5_virtuals", "f5_monitors",
+                         "f5_persistence_profiles", "f5_snatpools",
+                         "f5_vlans", "f5_selfips"):
+                val = getattr(state, attr, None)
+                if val:
+                    dev_data[attr] = val
+        # AWS ALB: target-group/listener/rule設定を保存。BIG-IPと同じ
+        # ギャップ(実リスナーAlbListenerProxyも含めて再起動で消失)。
+        if state.device_type == "alb":
+            for attr in ("alb_load_balancers", "alb_target_groups",
+                         "alb_listeners", "alb_rules"):
+                val = getattr(state, attr, None)
+                if val:
+                    dev_data[attr] = val
         data["devices"][dev_id] = dev_data
     # vnetリンク
     for a, neighbors in vnet.links.items():
@@ -560,6 +579,19 @@ def _load_config():
                 state.aaa_accounting_commands = dev_data["aaa_accounting_commands"]
             if dev_data.get("aaa_accounting_exec"):
                 state.aaa_accounting_exec = dev_data["aaa_accounting_exec"]
+        # F5 BIG-IP: LTM設定を復元(_save_configの対)
+        if dev_data["type"] == "bigip":
+            for attr in ("f5_nodes", "f5_pools", "f5_virtuals", "f5_monitors",
+                         "f5_persistence_profiles", "f5_snatpools",
+                         "f5_vlans", "f5_selfips"):
+                if dev_data.get(attr):
+                    setattr(state, attr, dev_data[attr])
+        # AWS ALB: target-group/listener/rule設定を復元(_save_configの対)
+        if dev_data["type"] == "alb":
+            for attr in ("alb_load_balancers", "alb_target_groups",
+                         "alb_listeners", "alb_rules"):
+                if dev_data.get(attr):
+                    setattr(state, attr, dev_data[attr])
         device_sessions[dev_id] = state
         vnet.device_types[dev_id] = state.device_type
         ifaces = {name: {'ip': info.get('ip',''), 'prefix': info.get('prefix',24)}
@@ -608,6 +640,20 @@ def _load_config():
     # vnet.links には存在せず、OSPF/RIP等のパケットが一切流れない」という
     # 食い違いが起きる（実際にcatalyst↔ciscoでこの状態を踏んだ）。
     _rebuild_all_neighbors()
+
+    # BIG-IP/ALBの実リスナー(VirtualServerProxy/AlbListenerProxy)を
+    # 復元した設定に基づいて再起動する——状態(f5_virtuals/alb_listeners)
+    # を復元しただけでは実ソケットは上がらないため、他の実リスナー起動
+    # (Juniperのcommit後SSH起動等)と同じ「post-restore再評価」が必要。
+    for dev_id, state in device_sessions.items():
+        if state.device_type == "bigip" and getattr(state, "f5_virtuals", None):
+            from engine.bigip_lb import ensure_virtual_server_proxy
+            for vs_name in list(state.f5_virtuals.keys()):
+                ensure_virtual_server_proxy(dev_id, vs_name, device_sessions)
+        if state.device_type == "alb" and getattr(state, "alb_listeners", None):
+            from engine.alb_lb import ensure_alb_listener_proxy
+            for listener_arn in list(state.alb_listeners.keys()):
+                ensure_alb_listener_proxy(dev_id, listener_arn, device_sessions)
 
     print(f"[Config] 設定をロードしました: {len(data.get('devices',{}))} devices, "
           f"{len(data.get('links',[]))} links")

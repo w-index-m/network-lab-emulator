@@ -16,12 +16,14 @@
 
 このプロジェクトは、ネットワーク機器のCLI・設定・プロトコル動作をブラウザ上で再現するためのエミュレーション基盤です。
 
-- Cisco / Nexus / Catalyst / APRESIA / F5 BIG-IP / Si-R / SR-S を含むマルチベンダー対応
-- CLIベースの操作と設定流し込み
-- OSPF / BGP / RIP / VRRP / HSRP / STP / LACP / VLAN などの実習・検証用途向け挙動
+- Cisco / Nexus / Catalyst / ASA / Arista / Juniper / Yamaha RTX / APRESIA / FortiGate / F5 BIG-IP / AWS ALB / Si-R / SR-S / BAS(擬似FLET'S) を含むマルチベンダー対応
+- CLIベースの操作と設定流し込み（一部機種はaws-cli/tmsh/setコマンド等、実機の構文そのまま）
+- OSPF / BGP(Route Reflector・RTBH・Confederation・Graceful Restart/LLGR・RPKI等含む) / RIP / VRRP(unicast-peer含む) / HSRP / STP / LACP / VLAN / IPv6ルーティング / IPsec / PPPoE / v6プラス(MAP-E) などの実習・検証用途向け挙動
+- F5 BIG-IP / AWS ALBは実ヘルスチェック + 実TCP/HTTPトラフィック分散（round-robin / least-connections / パーシステンス / SNAT）まで実装
 - topology editor による接続構成の作成
-- SNMP / Syslog / Prometheus / Alertmanager 連携を含む運用監視の検証
-- 実機連携用のツール群
+- SNMP / Syslog / Prometheus / Grafana / Loki / Alertmanager 連携を含む運用監視の検証
+- Strix(AIペンテストエージェント)・ZGrab2・k6などセキュリティ/負荷試験ツールとの連携
+- 実機連携用のツール群（netmiko / Ansible / ncclient / pygnmi 等）
 
 ---
 
@@ -31,7 +33,7 @@
 
 | Digital Twinの要素 | このリポジトリでの実装 |
 |---|---|
-| 物理資産を仮想空間に再現 | Catalyst / Cisco / SR-S / ASA / Nexus / BigIP / APRESIA / Si-R をコア製品としてプロトコルエンジンでエミュレート |
+| 物理資産を仮想空間に再現 | Catalyst / Cisco / SR-S / ASA / Nexus / Arista / Juniper / Yamaha RTX / APRESIA / FortiGate / BigIP / AWS ALB / Si-R / BAS をコア製品としてプロトコルエンジンでエミュレート |
 | 仮想モデルからリアルなテレメトリを出力 | 仮想SNMPエージェント（MIB-II）、実UDPでのsyslog / SNMP trap送信（`engine/syslog_sender.py`） |
 | 監視・観測レイヤー | [SNMPモニタリングダッシュボード](./docs/snmp-dashboard.md)、[Syslog AIモニター](./docs/syslog-ai-monitor.md)（Ollamaによる要約 + ルール評価） |
 | 実世界との橋渡し（ツール群） | netmiko/paramikoによる実機連携、`route_injector`（経路負荷試験）、`bigip_qkview_collector`（実機ログ採取）等 |
@@ -45,15 +47,25 @@
 
 | 機種 | コマンド体系 | 主な実装機能 |
 |------|------------|------------|
-| **Cisco Catalyst** | IOS-XE 17.x準拠 | OSPF / BGP / HSRP / STP / EtherChannel |
-| **Cisco Nexus** | NX-OS 10.2準拠 | OSPF / BGP / vPC / VRRP / LACP |
-| **Cisco ASA** | ASA 9.x準拠 | ファイアウォール / NAT / ACL |
+| **Cisco Catalyst** | IOS-XE 17.x準拠 | OSPF / BGP / HSRP / STP / EtherChannel / ZTP(AUTOINSTALL) |
+| **Cisco Nexus** | NX-OS 10.2準拠 | OSPF / BGP / vPC / VRRP / LACP / TACACS+・AAA |
+| **Cisco ASA** | ASA 9.x準拠 | ファイアウォール / NAT / ACL / IPsec / PPPoE WAN / threat-detection scanning-threat |
+| **Arista** | EOS準拠 | 共有Ciscoツリーに相乗り、netmiko/Ansible(eAPI JSON)対応 |
+| **Juniper** | Junos準拠(set/delete/commit) | 2段階candidate/active config、NETCONF/SSH実リスナー |
+| **Yamaha RTX(RTX1300)** | RTX準拠 | ルーティング実反映、PPPoEクライアント、v6プラス(MAP-E)、NAT/PPPoE設定反映 |
 | **APRESIA** | ApresiaLight準拠 | VLAN / STP / LACP |
-| **F5 BIG-IP** | TMOS / tmsh準拠 | LTM / Pool / Virtual Server ✨ |
+| **FortiGate** | FortiOS準拠(config/edit/set/next/end) | PPPoE WAN、IPsec(IKE/IPsec) |
+| **F5 BIG-IP** | TMOS / tmsh準拠 | LTM(Pool/Virtual/Monitor) ✨ **実TCPヘルスチェック + 実トラフィック分散**(round-robin/least-connections)、パーシステンス(source-addr)、SNAT(automap/snatpool)、net vlan/net self(モックSelf IP) |
+| **AWS ALB** | aws-cli(elbv2)準拠 | **実HTTPヘルスチェック + 実L7トラフィック分散**(path/host-basedルーティング)、cookieスティッキーセッション |
 | **富士通 SR-S** | SR-Sシリーズ準拠 | VLAN / LACP / STP |
-| **富士通 Si-R** | Si-R Gシリーズ準拠 | RIP / OSPF / VRRP / BGP |
+| **富士通 Si-R** | Si-R Gシリーズ準拠 | RIP / OSPF / VRRP / BGP / IPsec |
+| **BAS(擬似FLET'S網)** | 独自(収容局モデル) | PPPoE/v6プラス(MAP-E)ルールサーバー役 |
 | **Generic Router / Switch** | 汎用CLI準拠 | 軽量なラボ構成、接続検証 |
-| **PC / Host** | ホストコマンド互換 | IP設定・デフォルトゲートウェイ確認 |
+| **PC / Host** | ホストコマンド互換 | IP設定・デフォルトゲートウェイ確認、実`http.server` |
+
+BGPはRoute Reflector(cluster-id/route-reflector-client)・RTBH・Confederation・
+Hostname Capability・Graceful Restart/LLGR・RPKIにも対応。IPv6アドレッシング/
+スタティックルーティング/ping・tracerouteも実装済み（詳細は`docs/ipv6-routing.md`）。
 
 ---
 
@@ -134,15 +146,49 @@ python tools/eveng_deploy.py export --api http://127.0.0.1:8099 --out ./out --pl
 
 ## ドキュメント一覧
 
+`docs/`配下には機能ごとに実機ライブ検証のトランスクリプト付きドキュメントが
+多数あります（2026年時点で90件超）。全件は`docs/`ディレクトリを参照してください。
+ここでは代表的なものをカテゴリ別に挙げます。
+
+**全体像・進捗**
 - [README.md](./README.md)
 - [IMPLEMENTATION_PROGRESS.md](./IMPLEMENTATION_PROGRESS.md)
 - [docs/feature-inventory.md](./docs/feature-inventory.md)
 - [docs/implementation-roadmap.md](./docs/implementation-roadmap.md)
 - [docs/implementation-status.md](./docs/implementation-status.md)
-- [docs/bigip-ltm-usage.md](./docs/bigip-ltm-usage.md)
-- [docs/bigip-qkview.md](./docs/bigip-qkview.md)
+- [docs/multivendor_multiprotocol_test_report.md](./docs/multivendor_multiprotocol_test_report.md)
+
+**新規デバイスタイプ・プロトコル**
+- [docs/pppoe-ipsec-mesh-status.md](./docs/pppoe-ipsec-mesh-status.md)（Arista/Juniper/Yamaha/BAS/FortiGate/ASAのPPPoE+IPsec対応状況マトリクス）
+- [docs/ipoe-ipsec-verified.md](./docs/ipoe-ipsec-verified.md) / [docs/ipsec-cisco-cisco-verified.md](./docs/ipsec-cisco-cisco-verified.md)
+- [docs/ipv6-routing.md](./docs/ipv6-routing.md)（IPv6アドレッシング/スタティックルート/ping・traceroute）
+- [docs/bgp-community.md](./docs/bgp-community.md)（Route Reflector/RTBH/Confederation/Graceful Restart/LLGR/RPKI含む）
+- [docs/vrrp-hsrp.md](./docs/vrrp-hsrp.md)（VRRP unicast-peer含む）
+
+**ロードバランサー(F5 BIG-IP / AWS ALB)**
+- [docs/bigip-load-balancing.md](./docs/bigip-load-balancing.md)（実ヘルスチェック・実トラフィック分散・SNAT・パーシステンス・モックSelf IP）
+- [docs/aws-alb-load-balancer.md](./docs/aws-alb-load-balancer.md)（実HTTPヘルスチェック・path/host-basedルーティング・cookieスティッキー）
+- [docs/load-balancer-testing-quickstart.md](./docs/load-balancer-testing-quickstart.md)（`tools/virtual_client.py`を使った再現クイックスタート）
+- [docs/k6-load-testing.md](./docs/k6-load-testing.md)（k6によるQPS/レイテンシ負荷試験）
+- [docs/bigip-ltm-usage.md](./docs/bigip-ltm-usage.md) / [docs/bigip-qkview.md](./docs/bigip-qkview.md)
+
+**監視・観測**
 - [docs/snmp-dashboard.md](./docs/snmp-dashboard.md)
 - [docs/syslog-ai-monitor.md](./docs/syslog-ai-monitor.md)
+- [docs/syslog-anomaly-detection.md](./docs/syslog-anomaly-detection.md)
+- [docs/anomaly-autoencoder.md](./docs/anomaly-autoencoder.md)（NumPy/torch両実装）
+- [docs/gnmi-telemetry.md](./docs/gnmi-telemetry.md)
+
+**セキュリティ・AI連携**
+- [docs/strix-pentest-integration.md](./docs/strix-pentest-integration.md)（AIペンテストエージェントのGitHub Actions/操作パネル連携）
+- [docs/zgrab2-scan-detection.md](./docs/zgrab2-scan-detection.md)
+- [docs/asa-threat-detection-scanning.md](./docs/asa-threat-detection-scanning.md)
+- [docs/llm-ansible-playbook-generation.md](./docs/llm-ansible-playbook-generation.md)（LLM→Ansible Playbook生成）
+- [docs/unusual-verifications-gnmi-cps-automap.md](./docs/unusual-verifications-gnmi-cps-automap.md)（gNMI over BIG-IP / CPS試験 / automap SNATの実バグ発見）
+
+**実機連携**
+- [docs/netmiko-testing-guide.md](./docs/netmiko-testing-guide.md)
+- [docs/pyats-integration.md](./docs/pyats-integration.md)
 - [examples/c3650/README.md](./examples/c3650/README.md)
 - [tools/monitoring_stack/README.md](./tools/monitoring_stack/README.md)
 

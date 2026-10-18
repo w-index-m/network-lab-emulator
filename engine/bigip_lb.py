@@ -313,6 +313,17 @@ def ensure_virtual_server_proxy(device_id, vs_name, device_sessions) -> bool:
             return None
         t = snat.get('type')
         if t == 'automap':
+            # 実機のAutoMap SNATは仮想サーバのdestination(VIP)ではなく、
+            # 発信側VLANのSelf IPを送信元として使う——VIPはSelf IPである
+            # 必要すらない、別概念。`net self`で明示的にSelf IPが設定
+            # されていればそれを使い(複数あれば決定的に先頭を使う)、
+            # 一つも設定されていない場合のみ、従来通りVIPへフォール
+            # バックする(net self未使用の既存テスト/ドキュメントとの
+            # 後方互換のため)。
+            selfips = getattr(state, 'f5_selfips', {})
+            if selfips:
+                first = next(iter(selfips.values()))
+                return first.get('address') or vip
             return vip
         if t == 'snat':
             pool = getattr(state, 'f5_snatpools', {}).get(snat.get('pool'))

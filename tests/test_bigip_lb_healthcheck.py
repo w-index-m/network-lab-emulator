@@ -498,6 +498,66 @@ class TestBigipSnatConfigCli:
         assert '10.5.5.3' in out and '10.5.5.4' in out
 
 
+class TestBigipAutomapUsesConfiguredSelfIp:
+    """「変わった検証」の一環で見つけた実バグのregressionテスト:
+    `source-address-translation { type automap }`は実機では仮想サーバの
+    destination(VIP)ではなく、発信側VLANのSelf IPを送信元として使う
+    (VIPはSelf IPである必要すらない、別概念)。このエミュレータの
+    `get_snat_source()`(engine/bigip_lb.py)は元々常に`vip`を返して
+    いた——Self IP/VLAN機能(`net self`)とSNAT機能(automap)が別々の
+    セッションで実装されたため、組み合わせテストが無く見逃されていた。
+    `net self`が設定されていればそれを使い、無ければ(既存の挙動を
+    壊さないよう)VIPへフォールバックするよう修正した。"""
+
+    def test_automap_uses_the_configured_self_ip_not_the_vip(self):
+        from engine.bigip_lb import stop_virtual_server_proxy
+        _dev('bp-selfip-snat-1')
+        try:
+            _cli('bp-selfip-snat-1', 'create net vlan internal { interfaces add { 1.2 } }')
+            _cli('bp-selfip-snat-1',
+                 'create net self my_self address 10.96.50.245/24 vlan internal')
+            backend = _FakeBackendReportingPeer()
+            _cli('bp-selfip-snat-1',
+                 f'create ltm pool selfippool1 {{ members add {{ 127.0.0.1:{backend.port} }} }}')
+            _cli('bp-selfip-snat-1',
+                 'create ltm virtual selfipvs1 { destination 10.96.60.1:2300 pool selfippool1 '
+                 'source-address-translation { type automap } }')
+            try:
+                with socket.create_connection(('10.96.60.1', 2300), timeout=3) as s:
+                    s.settimeout(3)
+                    seen_source = s.recv(64).decode().strip()
+                assert seen_source == '10.96.50.245', (
+                    f'automapは設定済みのSelf IPを送信元に使うはず(実機通り): {seen_source}')
+            finally:
+                backend.stop()
+        finally:
+            stop_virtual_server_proxy('bp-selfip-snat-1', 'selfipvs1')
+
+    def test_automap_falls_back_to_vip_when_no_self_ip_configured(self):
+        """regression防止: net self未使用の既存テスト/ドキュメントとの
+        後方互換——Self IPが一つも設定されていなければVIP自身を使う
+        従来の挙動を維持する。"""
+        from engine.bigip_lb import stop_virtual_server_proxy
+        _dev('bp-selfip-snat-2')
+        try:
+            backend = _FakeBackendReportingPeer()
+            _cli('bp-selfip-snat-2',
+                 f'create ltm pool selfippool2 {{ members add {{ 127.0.0.1:{backend.port} }} }}')
+            _cli('bp-selfip-snat-2',
+                 'create ltm virtual selfipvs2 { destination 10.96.61.1:2301 pool selfippool2 '
+                 'source-address-translation { type automap } }')
+            try:
+                with socket.create_connection(('10.96.61.1', 2301), timeout=3) as s:
+                    s.settimeout(3)
+                    seen_source = s.recv(64).decode().strip()
+                assert seen_source == '10.96.61.1', (
+                    f'Self IP未設定時はVIP自身にフォールバックするはず: {seen_source}')
+            finally:
+                backend.stop()
+        finally:
+            stop_virtual_server_proxy('bp-selfip-snat-2', 'selfipvs2')
+
+
 class TestVirtualServerProxySnatDirect:
     """VirtualServerProxyの実際のSNAT(automap/snatpool)の振る舞いを、
     「接続元IPをそのまま返すバックエンド」で直接固定する——本物の
