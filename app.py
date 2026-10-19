@@ -417,8 +417,10 @@ def _save_config():
         vlans = getattr(state, "vlans", {})
         if vlans:
             dev_data["vlans"] = vlans
-        # Si-R IPsec設定を保存
-        if state.device_type in ("sir", "srs"):
+        # Si-R / Yamaha / FortiGate IPsec設定を保存（3機種とも同じ
+        # ipsec_tunnels辞書形式をengine/ike_engine.pyで共用しているため、
+        # 保存ロジックも共通化できる）
+        if state.device_type in ("sir", "srs", "yamaha", "fortigate"):
             tunnels = getattr(state, "ipsec_tunnels", {})
             if tunnels:
                 dev_data["ipsec_tunnels"]  = tunnels
@@ -429,6 +431,85 @@ def _save_config():
             crypto = getattr(state, "ipsec_crypto", {})
             if crypto:
                 dev_data["ipsec_crypto"] = crypto
+        # SSH実リスナー(crypto key generate rsa)有効化状態を保存。
+        # cisco/catalyst/arista/asaはこのフラグと実RSA鍵投入コマンドが
+        # 揃って初めて実SSHリスナーが起動する(app.pyのhandle_protocol_
+        # config内、'crypto key generate rsa'ハンドラと同じ判定タプル)。
+        # これが無いとASAのthreat-detection scanning-threatのように
+        # 実SSHリスナーへの接続試行に依存する機能が再起動後に動かなく
+        # なる。
+        if state.device_type in ("cisco", "catalyst", "arista", "asa"):
+            if getattr(state, "ssh_rsa_key", False):
+                dev_data["ssh_rsa_key"] = True
+                dev_data["ssh_rsa_modulus"] = getattr(state, "ssh_rsa_modulus", 1024)
+        # ASA threat-detection scanning-threat設定を保存
+        # (rate-interval/average-rate/burst-rate/shun/except等)。
+        if state.device_type == "asa":
+            td = getattr(state, "threat_detection", None)
+            if td:
+                dev_data["threat_detection"] = td
+        # Juniper Junos: candidate/committed両方を保存。実機のJunosも
+        # commit前のcandidate configはセッションを跨いで残る(exitで
+        # 破棄確認が出るのと同じ理由)ため、candidateも含めて復元する。
+        # SSH/NETCONF実リスナーの再起動要否判定に使うssh_rsa_key/
+        # netconf_enabledフラグも一緒に保存する。
+        if state.device_type == "juniper":
+            committed = getattr(state, "junos_committed", [])
+            if committed:
+                dev_data["junos_committed"] = committed
+            candidate = getattr(state, "junos_candidate", [])
+            if candidate:
+                dev_data["junos_candidate"] = candidate
+            if getattr(state, "ssh_rsa_key", False):
+                dev_data["juniper_ssh_rsa_key"] = True
+            if getattr(state, "netconf_enabled", False):
+                dev_data["juniper_netconf_enabled"] = True
+        # Yamaha RTX: NAT記述子/PPPoE(pp select)設定/v6プラスIPv6
+        # プレフィックス(見た目)/MAP-E払い出し結果を保存。IPsecトンネル
+        # は上のsir/srs/yamaha/fortigate共通ブロックで保存済み。
+        if state.device_type == "yamaha":
+            nat = getattr(state, "nat_descriptors", {})
+            if nat:
+                dev_data["nat_descriptors"] = nat
+            pp = getattr(state, "yamaha_pp", {})
+            if pp:
+                dev_data["yamaha_pp"] = pp
+            if getattr(state, "yamaha_ipv6_prefix", ""):
+                dev_data["yamaha_ipv6_prefix"] = state.yamaha_ipv6_prefix
+            if getattr(state, "map_e_rule", None):
+                dev_data["map_e_rule"] = state.map_e_rule
+        # FortiGate: PPPoE WAN(set mode pppoe)設定を保存。IPsecトンネル
+        # は上のsir/srs/yamaha/fortigate共通ブロックで保存済み。
+        if state.device_type == "fortigate":
+            pppoe = getattr(state, "fortigate_pppoe", {})
+            if pppoe:
+                dev_data["fortigate_pppoe"] = pppoe
+        # 擬似FLET'S BAS: プール/認証ユーザー(engine.protocols.pppoe_engine)
+        # とv6プラスMAP-Eルールサーバー設定(engine.protocols.map_e_engine)
+        # を保存。どちらもDeviceStateではなくモジュール単位のengine
+        # シングルトンにdevice_idをキーとして持たせているため(rib_engine
+        # への経路委譲と同じ方針)、他のdevice_type別ブロックとは違い
+        # state属性ではなくengineから直接読む。実際に払い出し済みの
+        # セッション/ルール(leased/sessions/rules)はランタイム状態として
+        # 意図的に永続化しない(再起動後はYamaha側が`pp enable`/
+        # `map-e use`を打ち直せば再払い出しされる、実機のBASが再起動後に
+        # セッションを忘れるのと同じ実際的な割り切り)。
+        if state.device_type == "bas":
+            bas_pool = pppoe_engine.nodes.get(dev_id)
+            if bas_pool and (bas_pool.get("pool_start") or bas_pool.get("users")):
+                dev_data["pppoe_pool"] = {
+                    "pool_start": bas_pool.get("pool_start"),
+                    "pool_end":   bas_pool.get("pool_end"),
+                    "prefix":     bas_pool.get("prefix", 32),
+                    "users":      bas_pool.get("users", {}),
+                }
+            mape_srv = map_e_engine.nodes.get(dev_id)
+            if mape_srv and (mape_srv.get("ipv4_pool") or mape_srv.get("br_ipv6")):
+                dev_data["mape_server"] = {
+                    "ipv4_pool":       mape_srv.get("ipv4_pool", []),
+                    "br_ipv6":         mape_srv.get("br_ipv6", ""),
+                    "ports_per_user":  mape_srv.get("ports_per_user", 4096),
+                }
         # BGP: 設定済みneighbor（トポロジー上ピア未解決でもrunning-config
         # に残すためのもの。実セッション状態はbgp_engine側が別途持つ）
         if getattr(state, "_bgp_configured_neighbors", None):
@@ -488,6 +569,24 @@ async def _auto_save_loop():
         await asyncio.sleep(60)
         _save_config()
         print("[Config] 自動保存完了")
+
+
+def _intkey_dict(d: dict) -> dict:
+    """JSON往復で文字列化された整数キーの辞書を、int型キーへ戻す。
+
+    json.dump/json.loadは辞書キーを常に文字列化する(JSONオブジェクトの
+    キーは文字列しか許されないため)。ipsec_tunnels(tunnel_id)/
+    yamaha_pp(pp_id)等、本来int型キーで管理している辞書を
+    _load_config()で復元する際にこれを通さないと、復元済みのstr型キー
+    と、復元後に装置へ新たに打ち込まれたint型キーが同じ辞書に混在して
+    しまい、`sorted(d.items())`がint/str比較で`TypeError`を起こす
+    （実際にフルスイート回帰テストで踏んだ実バグ: 他のテストが残した
+    saved_config.jsonをlifespan起動のたびに再ロードする既存の挙動と
+    組み合わさって、yamaha_pp/ipsec_tunnelsを新たに永続化対象に
+    加えたことで初めて表面化した）。
+    """
+    return {(int(k) if isinstance(k, str) and k.lstrip('-').isdigit() else k): v
+            for k, v in d.items()}
 
 
 def _load_config():
@@ -552,14 +651,72 @@ def _load_config():
         # VLANを復元
         if dev_data.get("vlans") and hasattr(state, "vlans"):
             state.vlans = dev_data["vlans"]
-        # Si-R IPsec設定を復元
-        if dev_data["type"] in ("sir", "srs") and dev_data.get("ipsec_tunnels"):
-            state.ipsec_tunnels = dev_data["ipsec_tunnels"]
+        # Si-R / Yamaha / FortiGate IPsec設定を復元(_save_configの対)。
+        # tunnel_idはint型キーのため_intkey_dict()でJSON文字列化を戻す。
+        if dev_data["type"] in ("sir", "srs", "yamaha", "fortigate") and dev_data.get("ipsec_tunnels"):
+            state.ipsec_tunnels = _intkey_dict(dev_data["ipsec_tunnels"])
             state.ipsec_enabled = dev_data.get("ipsec_enabled", False)
             state.ike_enabled   = dev_data.get("ike_enabled", False)
         # Cisco/Catalyst IPsec設定を復元
         if dev_data["type"] in ("cisco", "catalyst") and dev_data.get("ipsec_crypto"):
             state.ipsec_crypto = dev_data["ipsec_crypto"]
+        # SSH実リスナー有効化状態を復元(_save_configの対)。実リスナー
+        # 自体の再起動は後段(_rebuild_all_neighbors()の後)でまとめて行う。
+        if dev_data["type"] in ("cisco", "catalyst", "arista", "asa") and dev_data.get("ssh_rsa_key"):
+            state.ssh_rsa_key = True
+            state.ssh_rsa_modulus = dev_data.get("ssh_rsa_modulus", 1024)
+        # ASA threat-detection scanning-threat設定を復元(_save_configの対)
+        if dev_data["type"] == "asa" and dev_data.get("threat_detection"):
+            state.threat_detection = dev_data["threat_detection"]
+        # Juniper Junos: candidate/committed設定とSSH/NETCONF有効化
+        # フラグを復元(_save_configの対)。実リスナー自体の再起動は
+        # BIG-IP/ALBと同じく後段でまとめて行う。
+        if dev_data["type"] == "juniper":
+            if dev_data.get("junos_committed"):
+                state.junos_committed = dev_data["junos_committed"]
+            if dev_data.get("junos_candidate"):
+                state.junos_candidate = dev_data["junos_candidate"]
+            if dev_data.get("juniper_ssh_rsa_key"):
+                state.ssh_rsa_key = True
+            if dev_data.get("juniper_netconf_enabled"):
+                state.netconf_enabled = True
+        # Yamaha RTX: NAT記述子/PPPoE(pp select)/v6プラス設定を復元
+        # (_save_configの対)
+        if dev_data["type"] == "yamaha":
+            if dev_data.get("nat_descriptors"):
+                state.nat_descriptors = dev_data["nat_descriptors"]
+            if dev_data.get("yamaha_pp"):
+                # pp_idはint型キーのため_intkey_dict()でJSON文字列化を戻す
+                state.yamaha_pp = _intkey_dict(dev_data["yamaha_pp"])
+            if dev_data.get("yamaha_ipv6_prefix"):
+                state.yamaha_ipv6_prefix = dev_data["yamaha_ipv6_prefix"]
+            if dev_data.get("map_e_rule"):
+                state.map_e_rule = dev_data["map_e_rule"]
+        # FortiGate: PPPoE WAN設定を復元(_save_configの対)
+        if dev_data["type"] == "fortigate" and dev_data.get("fortigate_pppoe"):
+            state.fortigate_pppoe = dev_data["fortigate_pppoe"]
+        # 擬似FLET'S BAS: PPPoEプール/MAP-Eルールサーバー設定を復元
+        # (_save_configの対)。state属性ではなくengineシングルトンへ
+        # 直接書き戻す(保存側と対称)。
+        if dev_data["type"] == "bas":
+            pool = dev_data.get("pppoe_pool")
+            if pool:
+                bas = pppoe_engine.nodes.setdefault(dev_id, {
+                    'pool_start': None, 'pool_end': None, 'prefix': 32,
+                    'users': {}, 'leased': set(), 'sessions': {},
+                })
+                bas['pool_start'] = pool.get('pool_start')
+                bas['pool_end']   = pool.get('pool_end')
+                bas['prefix']     = pool.get('prefix', 32)
+                bas['users']      = pool.get('users', {})
+            mape = dev_data.get("mape_server")
+            if mape:
+                srv = map_e_engine.nodes.setdefault(dev_id, {
+                    'ipv4_pool': [], 'br_ipv6': '', 'ports_per_user': 4096, 'rules': {},
+                })
+                srv['ipv4_pool']      = mape.get('ipv4_pool', [])
+                srv['br_ipv6']        = mape.get('br_ipv6', '')
+                srv['ports_per_user'] = mape.get('ports_per_user', 4096)
         # BGP: 設定済みneighborを復元
         if dev_data.get("_bgp_configured_neighbors"):
             state._bgp_configured_neighbors = dev_data["_bgp_configured_neighbors"]
@@ -654,6 +811,26 @@ def _load_config():
             from engine.alb_lb import ensure_alb_listener_proxy
             for listener_arn in list(state.alb_listeners.keys()):
                 ensure_alb_listener_proxy(dev_id, listener_arn, device_sessions)
+        # cisco/catalyst/arista/asa: SSH実リスナー(crypto key generate
+        # rsa)を復元済みssh_rsa_keyフラグに基づいて再起動する。これが
+        # 無いとASAのthreat-detection scanning-threatのように実SSH
+        # リスナーへの接続試行に依存する機能が再起動後に動かなくなる。
+        if state.device_type in ("cisco", "catalyst", "arista", "asa") \
+                and getattr(state, "ssh_rsa_key", False):
+            from engine.ssh_cli_agent import ensure_ssh_cli_agent
+            ensure_ssh_cli_agent(dev_id, device_sessions, _run_cli_sync)
+        # Juniper: commitで確定済みのSSH/NETCONFサービスをssh_rsa_key/
+        # netconf_enabledフラグに基づいて再起動する(Juniperのcommit直後
+        # トリガーと同じ判定条件)。
+        if state.device_type == "juniper":
+            committed = getattr(state, "junos_committed", [])
+            if getattr(state, "ssh_rsa_key", False) and 'system services ssh' in committed:
+                from engine.ssh_cli_agent import ensure_ssh_cli_agent
+                ensure_ssh_cli_agent(dev_id, device_sessions, _run_cli_sync)
+            if getattr(state, "netconf_enabled", False) and 'system services netconf ssh' in committed:
+                from engine.netconf_agent import ensure_netconf_agent
+                ensure_netconf_agent(dev_id, device_sessions,
+                                      on_change=lambda d=dev_id: _register_icmp(d))
 
     print(f"[Config] 設定をロードしました: {len(data.get('devices',{}))} devices, "
           f"{len(data.get('links',[]))} links")

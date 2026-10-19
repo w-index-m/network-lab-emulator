@@ -2356,3 +2356,108 @@ PPPoE設定)・BAS(`map_e_engine`のプール設定)・FortiGate
 (`state.threat_detection`)の状態は、この調査時点でもまだ永続化層に
 含まれていない。`docs/automated-verification-patterns.md`の
 チェックリストをそのまま適用すれば横展開できる。
+
+**設定永続化層をJuniper/Yamaha/BAS/FortiGate/ASA threat-detectionへ横展開**:
+ユーザー依頼「Juniper/Yamaha/BAS/FortiGate/ASA threat-detectionも永続化
+対応お願いします」——直前のBIG-IP/ALB永続化修正のCLAUDE.mdエントリで
+明示していた「まだ永続化されていない既知のギャップ」を、
+`docs/automated-verification-patterns.md`のパターン3のチェックリスト
+通りに横展開した。
+
+`_save_config()`/`_load_config()`に以下を追加:
+- **Juniper**: `junos_committed`/`junos_candidate`(実機のJunosもcommit前
+  のcandidate configはセッションを跨いで残るため、未commitの編集内容も
+  復元する)、SSH/NETCONF有効化フラグ(`ssh_rsa_key`/`netconf_enabled`)。
+  復元後、`junos_committed`に`'system services ssh'`/`'system services
+  netconf ssh'`が含まれていればBIG-IP/ALBと同じ「post-restore再評価」
+  パターンで実SSH/NETCONFリスナーを再起動する。
+- **Yamaha**: `nat_descriptors`/`yamaha_pp`(pp select設定)/
+  `yamaha_ipv6_prefix`(見た目のみ)/`map_e_rule`(MAP-E払い出し結果)。
+- **Si-R/SR-S/Yamaha/FortiGate共通**: 既存のSi-R専用`ipsec_tunnels`保存
+  ブロックの対象タプルを`('sir', 'srs')`から`('sir', 'srs', 'yamaha',
+  'fortigate')`へ拡張(3機種とも`engine/ike_engine.py`で同じ
+  `ipsec_tunnels`辞書形式を共用しているため、保存ロジックもそのまま
+  共用できる)。
+- **FortiGate**: `fortigate_pppoe`(PPPoE WAN設定)。
+- **ASA**: `threat_detection`(rate-interval/average-rate/burst-rate/
+  shun/except設定)。threat-detectionのshun判定は実SSHリスナー
+  (`engine/ssh_cli_agent.py`)への実際の接続試行回数に依存するため、
+  併せて`ssh_rsa_key`/`ssh_rsa_modulus`も保存・復元し、復元後に実SSH
+  リスナーを再起動するようにした——これはcisco/catalyst/arista/asa
+  全体に共通する既存の`crypto key generate rsa`トリガーと同じ判定
+  タプルを使っているため、ASAだけでなくこの4機種すべてのSSHリスナー
+  永続化がついでに直った(スコープを広げたわけではなく、既存トリガー
+  の条件をそのまま完成させた形)。
+- **擬似FLET'S BAS**: プール/認証ユーザー(`engine.protocols.
+  pppoe_engine.nodes[dev_id]`)とv6プラスMAP-Eルールサーバー設定
+  (`engine.protocols.map_e_engine.nodes[dev_id]`)。この2つは
+  `DeviceState`の属性ではなくモジュール単位のengineシングルトンに
+  device_idをキーとして持たせる設計(`rib_engine`への経路委譲と同じ
+  方針)のため、他のdevice_type別ブロックとは違いstate属性ではなく
+  engineから直接読み書きする——保存キーは`pppoe_pool`/`mape_server`
+  という新規の2キー。実際に払い出し済みのセッション/ルール
+  (`leased`/`sessions`/`rules`)はランタイム状態として意図的に永続化
+  しない(再起動後はYamaha側が`pp enable`/`map-e use`を打ち直せば
+  再払い出しされる、実機のBASが再起動後にセッションを忘れるのと同じ
+  実際的な割り切り——他の全device_typeで共通している「config状態は
+  復元するが、ライブなプロトコルセッション状態(BGPセッション確立
+  状態やOSPF隣接等)は再derivationに委ねて復元しない」という既存の
+  永続化層のスコープとも一致する)。
+
+`tests/test_persistence_juniper_yamaha_bas_fortigate_asa.py`(6 tests)
+が、`tests/test_nexus_tacacs_persistence.py`と同じ隔離パターン
+(SAVED_CONFIG_PATH/device_sessionsをmonkeypatch)で、各device_typeの
+辞書状態の保存・復元往復に加え、実ソケットを伴う機能(Juniperの実SSH/
+ASAのthreat-detectionが依存する実SSHリスナー)は復元後に実際に接続
+できることまで本物のTCPソケットで確認する。
+
+**Si-R/Cisco/catalyst/catalystのIPsecトンネル状態・BGPセッション確立
+状態等、まだ再derivation(再ネゴシエーション)されないまま復元される
+既知のスコープ**: これは今回新たに作った制約ではなく、BIG-IP/ALB
+永続化修正より前から存在した既存の挙動——`ipsec_tunnels`辞書内の
+`status`/`phase1`/`phase2`フィールドは「最後に保存された時点の値」が
+そのまま復元されるだけで、再起動後に実際のIKE再ネゴシエーション
+(`_trigger_ike_negotiation()`)が自動で走るわけではない。BGP/OSPF
+セッションはそもそも一切永続化されていない(最初から対象外)。今回も
+この既存スコープをそのまま踏襲し、新たに再ネゴシエーションの自動
+トリガーは追加していない(IPsec関連の各device_typeの間で挙動を
+不揃いにしないための一貫性重視の判断)。
+
+**実装中に見つけた実バグ(フルスイート回帰テストで初めて踏んだ、単体
+では再現しない不具合)**: `yamaha_pp`/`ipsec_tunnels`の永続化を追加した
+直後の全体テストで`_yamaha_show_config`の`sorted(state.yamaha_pp.items())`
+が`TypeError: '<' not supported between instances of 'int' and 'str'`で
+落ちた。原因は二重: (1) `json.dump`/`json.load`はdictキーを常に文字列化
+するため、本来int型キー(`pp_id`/`tunnel_id`)で管理している辞書を
+`_load_config()`でそのまま復元するとstr型キーに化ける。(2)
+このセッション中の度重なるライブ検証で蓄積した`saved_config.json`
+(gitignore対象のローカル実行時ファイル、削除時点で538デバイス分・
+1.1MB)が作業ディレクトリに残っており、`TestClient(app_module.app)`の
+インスタンス化自体がFastAPIのlifespanを起動して`_load_config()`を
+実際に実行するため、各テストファイルの`client = TestClient(...)`の
+時点でこの古いファイルが**pytestプロセス内の共有`device_sessions`へ
+毎回再ロードされていた**(各テストが独立した環境だと思っていたのは
+誤りだった)。このため、既存の`_dev()`ヘルパーの「既存IDならno-op」
+という挙動(`/api/device`の既知の仕様)と相まって、`test_yamaha_rtx.py`
+の`rtx-pp-2`のような特定IDのテストが、過去の実行で保存されたstr型
+キーのyamaha_ppを引き継いだ状態の上に新しいint型キーの`pp select 1`
+を実行し、同じ辞書にint型とstr型のキーが混在してクラッシュした——
+この(1)(2)の組み合わせが無いと表面化しない不具合だったため、単体
+テストでは再現せず、フルスイート実行時にだけ踏んだ。
+
+**修正**: `app.py`に`_intkey_dict()`ヘルパーを新設し、`_load_config()`
+で`ipsec_tunnels`(sir/srs/yamaha/fortigate共通)と`yamaha_pp`を復元する
+際に文字列化された数字キーをint型へ戻すようにした。この不具合は実は
+**今回の変更より前から存在していた**(sir/srsの`ipsec_tunnels`永続化は
+BIG-IP/ALB永続化修正の時点で既に実装済みだったため、Si-R側の
+`_sir_show_ike_policy`の同種`sorted()`呼び出しも同じ地雷を踏める状態
+だった)が、これまでsir/srsの`ipsec_tunnels`が実際にint/strキー混在を
+起こす組み合わせで踏まれたことがなかったため気づかれていなかった
+——`_intkey_dict()`の適用により両方とも修正された。また、作業ディレ
+クトリに残っていた古い`saved_config.json`はテスト実行間の汚染源その
+ものなので削除した(gitignore対象のローカル実行時ファイルで、削除は
+通常のアプリ再起動と同じ効果しかなく安全)。
+
+`nat_descriptors`(nat_id)・ALBのARN・BIG-IPのオブジェクト名等、他に
+このセッションで永続化対象へ追加した辞書のキーは元々文字列型のため
+この問題の対象外であることを確認済み。
