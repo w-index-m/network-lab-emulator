@@ -7556,15 +7556,32 @@ def _register_icmp(device_id: str):
         except Exception:
             return None
 
-    # 全デバイス: インタフェース直結ネットワークをrib_engineに登録
+    # 全デバイス: インタフェース直結ネットワークをrib_engineに登録。
+    # 先に「現在もどれかのインタフェースが直結しているネットワーク」の
+    # 集合を求め、それに含まれない古い直結ルート(ad=0, next_hop='0.0.0.0')
+    # を削除してから登録し直す——これが無いと、インタフェースのIPを
+    # 変更した際に旧サブネットの直結ルートが永久に残り続け、
+    # どのインタフェースにも属さないため`show ip route`に
+    # インタフェース名が空欄の幽霊ルートとして表示され続ける実バグを
+    # 踏んだ(OSPF動作確認中、VlanのIPを再割り当てした際に発見)。
+    current_connected = set()
     for ifname, info in state.interfaces.items():
         ip = info.get('ip', '')
         prefix = info.get('prefix', 24)
         if ip and ip != '127.0.0.1':
             net = _net_addr(ip, prefix)
             if net:
-                rib_engine.add_static_route(device_id, state.hostname,
-                                            net, prefix, '0.0.0.0', 0)
+                current_connected.add((net, prefix))
+    rib_node = rib_engine.nodes.get(device_id)
+    if rib_node:
+        for stale in [r for r in rib_node['static_routes']
+                      if r.ad == 0 and r.next_hop in ('0.0.0.0', '')
+                      and (r.network, r.prefix) not in current_connected]:
+            rib_engine.remove_static_route(device_id, stale.network, stale.prefix,
+                                           stale.next_hop)
+    for net, prefix in current_connected:
+        rib_engine.add_static_route(device_id, state.hostname,
+                                    net, prefix, '0.0.0.0', 0)
 
     # PC: デフォルトゲートウェイをrib_engineに登録
     if state.device_type == 'pc':
