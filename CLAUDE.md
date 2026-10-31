@@ -678,6 +678,47 @@ no-PPPoE-connection case. Also re-ran `tests/test_ipsec_dpd_timers.py`/
 files) to confirm the `ike_engine.py` tuple-widening didn't regress the
 pre-existing Si-R↔Cisco paths — both clean.
 
+**LLM-as-judge型の試験自動化**: ユーザーに提案していた未着手項目
+「LLM-as-judge型の試験自動化 — 既存show出力ベース検証テストへの
+LLM判定ラッパー追加」を依頼され実装した。新設`tools/llm_judge.py`の
+`judge(output, assertion, context="")`が、CLI出力が自然文の主張を
+満たしているかをLLMに判定させる——新しいLLM呼び出し経路は追加せず
+`tools/network_ontology_query.py`の`_chat_completion()`
+(Ollama→Groq→Mistral)をそのまま再利用する(`tools/
+syslog_anomaly_detector.py`が`summarize_logs_via_ollama`を直接import
+しているのと同じreuse-not-duplicateの方針)。
+
+既存の厳密な文字列検証(`assert 'FULL' in out`等)を置き換えるもの
+ではなく、文字列一致では表現しづらい「意味的な正しさ」を**追加で**
+確認する薄いレイヤーという位置づけ。`skip_if_unavailable(result)`が
+`verdict is None`(LLMバックエンド全滅、またはLLM応答がJSON判定として
+解釈できない)の場合に`pytest.skip()`する——Falseに倒してフェイクの
+不合格判定を作らない、Trueに倒してフェイクの合格判定も作らない。
+`app.py`の`_strip_markdown_fence()`と同じ10行程度のヘルパーを
+`tools/llm_judge.py`自身に複製している(標準ライブラリのみの`tools/`
+配下スクリプトでapp.pyを直接importするのは重すぎるため)。
+
+このサンドボックスからはGroq/Mistral/Ollamaのいずれにも到達できない
+ため、`judge()`自体のロジックは`_chat_completion`をmonkeypatchで
+モック化して検証し(他のLLM依存機能のテストと同じ既存パターン)、
+既存show出力検証テストへの実際の組み込み例
+(`tests/test_llm_judge.py::TestWrapExistingShowOutputTest`、
+スタティックルートが`show ip route`に反映されているかの確認)は
+実際にこのサンドボックス上で実行して`skip_if_unavailable`により
+安全にskipされることを確認した(実際のLLM応答を使った合否判定
+そのものは、本番Render環境等で改めて確認する必要がある)。
+`tests/test_llm_judge.py`(11 tests)が上記を固定する。詳細は
+`docs/llm-as-judge-testing.md`参照。
+
+**Si-RのSCPサーバー機能: 依然ブロック中**: ユーザーに上記と合わせて
+依頼されたが、`fujitsu.com`への到達はこのサンドボックスの
+egressポリシーで`getaddrinfo ENOTFOUND`(DNS解決自体が失敗、リトライ
+しても変わらない永続的なブロック)——`web-fetch`サブエージェントでの
+直接取得試行、WebSearchでの実機固有SCPコマンド構文の検索、いずれも
+手がかりが得られなかった。ユーザーに3つの選択肢(マニュアル該当箇所の
+貼付/アップロード・未確認ラベル付きでの推測実装・一旦スキップ)を
+提示し、回答待ち。実装は一切着手していない。
+
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 
 PyTorch could not be installed in this sandbox early on (pulled in a
