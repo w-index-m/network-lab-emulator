@@ -34,6 +34,7 @@ show nve vni / show bgp l2vpn evpn に反映されることを確認する。
 """
 
 import os
+import re
 import sys
 
 os.environ.setdefault('NETLAB_AUTH_DISABLE', '1')
@@ -105,6 +106,39 @@ class TestEvpnVniMode:
         _run('nx-evpn-2', EVPN_SETUP)
         out = _cli('nx-evpn-2', 'show running-config')
         assert 'vn-segment 10010' in out
+
+
+class TestShowFeature:
+    """`show feature`がnv overlay/vn-segment-vlan-basedを一切表示しない
+    実バグの回帰テスト。この2つはstate.nx_featuresに正しく保持され、
+    show running-configや/api/nexus/dashboardでは既に使われていたが、
+    show feature自身の固定テーブルには含まれていなかった(実機の
+    show featureは当然この2つを列挙する)。
+    """
+
+    def test_nv_overlay_and_vn_segment_shown_as_enabled(self):
+        _dev('nx-feat-1')
+        _run('nx-feat-1', [
+            'configure terminal', 'feature nv overlay',
+            'feature vn-segment-vlan-based', 'end',
+        ])
+        out = _cli('nx-feat-1', 'show feature')
+        assert 'nv overlay' in out
+        assert 'vn-segment-vlan-based' in out
+        for line in out.splitlines():
+            if line.startswith('nv overlay') or line.startswith('vn-segment-vlan-based'):
+                # 列がくっついていない(regression防止: 列幅がfeature名の
+                # 長さとちょうど同じだと、Instance列の"1"と直接くっついて
+                # 出力されてしまう——vn-segment-vlan-basedがまさにこの
+                # 長さでそれを踏んだ)
+                assert re.match(r'^\S.*\s+1\s+enabled$', line), line
+
+    def test_disabled_by_default_before_feature_command(self):
+        _dev('nx-feat-2')
+        out = _cli('nx-feat-2', 'show feature')
+        for line in out.splitlines():
+            if line.startswith('nv overlay') or line.startswith('vn-segment-vlan-based'):
+                assert 'disabled' in line
 
 
 class TestNveInterface:

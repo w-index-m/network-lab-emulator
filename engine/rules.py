@@ -3469,10 +3469,12 @@ Configuration Revision            : 5"""
                     ('interface-vlan', 'interface-vlan' in feats),
                     ('hsrp', 'hsrp' in feats), ('ospf', 'ospf' in feats),
                     ('bgp', 'bgp' in feats), ('pim', 'pim' in feats),
-                    ('eigrp', 'eigrp' in feats), ('dhcp', 'dhcp' in feats)]
+                    ('eigrp', 'eigrp' in feats), ('dhcp', 'dhcp' in feats),
+                    ('nv overlay', 'nv overlay' in feats),
+                    ('vn-segment-vlan-based', 'vn-segment-vlan-based' in feats)]
             lines = ['Feature Name          Instance  State', '-------------------- -------- --------']
             for f, en in base:
-                lines.append(f'{f:<21}1        {"enabled" if en else "disabled"}')
+                lines.append(f'{f:<22}1        {"enabled" if en else "disabled"}')
             return '\n'.join(lines)
         # show vrf
         if re.match(r'^show\s+vrf', c):

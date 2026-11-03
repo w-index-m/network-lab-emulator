@@ -719,6 +719,35 @@ egressポリシーで`getaddrinfo ENOTFOUND`(DNS解決自体が失敗、リト�
 貼付/アップロード・未確認ラベル付きでの推測実装・一旦スキップ)を
 提示し、回答待ち。実装は一切着手していない。
 
+**Nexus VXLAN EVPN: `show feature`が`nv overlay`/`vn-segment-vlan-based`を
+一切表示しないバグ(修正)**: ユーザー依頼「nexusでvxlanを設定する内容と
+showコマンドで確認した結果を表示してほしい」でのライブ検証中に発見。
+VXLAN EVPN自体(`feature nv overlay`/`vn-segment-vlan-based`、`vlan
+<n> vn-segment <vni>`、`interface nve1`の`source-interface`/
+`host-reachability protocol bgp`/`member vni`、`router bgp`配下の
+`address-family l2vpn evpn`)は既にこのセッションで実装済みで、
+`state.nx_features`に正しく記録され`show running-config`や
+`/api/nexus/dashboard`では既に使われていたが、`engine/rules.py`の
+`show feature`自身の固定テーブル(`_format_show_feature`)にこの2つの
+feature名が含まれておらず、`feature nv overlay`を打っても`show
+feature`には一切出てこなかった(実機は当然列挙する)。`base`リストに
+`('nv overlay', ...)`/`('vn-segment-vlan-based', ...)`を追加して解決。
+
+ついでに見つけた2つ目の小さな実バグ: 列幅の固定値(21)が
+`vn-segment-vlan-based`という文字列自体の長さ(21文字)とちょうど
+同じだったため、修正後の出力も区切りの空白なしでInstance列の"1"に
+くっついて`vn-segment-vlan-based1`と出ていた。幅を22に広げて解決。
+
+Live-verified: 2台のNexus(1.1.1.1/2.2.2.2)でVLAN10↔VNI 10010の
+VXLAN EVPNを実際に構成(`feature`群→loopback0→`vn-segment`→
+`interface nve1`→`router bgp`の`address-family l2vpn evpn`)し、
+`show feature`(修正後の2行が正しく`enabled`表示)/`show nve peers`
+(双方向で相手のloopbackが`Up`のpeerとして見える)/`show nve vni`/
+`show bgp l2vpn evpn summary`(`advertise-all-vni: enabled`含む)/
+`show running-config`で一通り確認した。`tests/test_evpn_vxlan.py`に
+`TestShowFeature`(2 tests)を追加し、この2つのfeatureが`enabled`/
+`disabled`で正しく出ること、列がくっついていないことを固定する。
+
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 
 PyTorch could not be installed in this sandbox early on (pulled in a
