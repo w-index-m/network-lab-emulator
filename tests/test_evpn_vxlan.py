@@ -248,6 +248,49 @@ class TestNexusDashboardApi:
         assert sw['overlay_enabled'] is True
         assert sw['vxlan_ready'] is False
 
+    def test_fabric_vni_inventory_includes_member_vni_only_configs(self):
+        """実バグの回帰テスト: ファブリック全体のVNIインベントリ
+        (`data['vnis']`/`fabric.vni_count`)が、NX-OSの明示的な
+        `evpn`/`vni <n> l2`グローバルサブモード経由のVNIしか見ておらず、
+        より一般的な`interface nve1`配下の`member vni <n>` +
+        `advertise-all-vni`だけで構成したVNI(明示的な`evpn`サブモードを
+        一切使わない、実運用でもよくある書き方)が、スイッチ単位の
+        `member_vnis`には出るのにファブリック全体のインベントリには
+        一切反映されなかった。"""
+        # 他テストが使う10010等と衝突しない専用VNIを使う
+        # (device_sessionsはテスト間で共有されるアプリ全体の状態なので、
+        # 同じVNI番号を別テストの装置が明示的evpnサブモード経由で
+        # 既に使っていると l2vpn_evpn の判定が汚染されるため)
+        vni = 20020
+        a, b = 'nx-evpn-12', 'nx-evpn-13'
+        for dev in (a, b):
+            _dev(dev)
+            _run(dev, [
+                'configure terminal', 'feature nv overlay',
+                'feature vn-segment-vlan-based', 'feature bgp',
+                'vlan 20', f'vn-segment {vni}', 'exit',
+                'interface nve1', 'source-interface loopback0',
+                'host-reachability protocol bgp',
+                f'member vni {vni}', 'ingress-replication protocol bgp',
+                'exit', 'exit',
+                'router bgp 65000', 'address-family l2vpn evpn',
+                'advertise-all-vni', 'end',
+            ])
+        r = client.get('/api/nexus/dashboard')
+        data = r.json()
+        sw_a = next(s for s in data['switches'] if s['device_id'] == a)
+        assert {'vni': vni, 'interface': 'nve1', 'type': 'L2',
+                'ingress_replication': True, 'mcast_group': None} in sw_a['member_vnis']
+        # 修正前はここが見つからず落ちていた
+        vni_entry = next((v for v in data['vnis'] if v['vni'] == vni), None)
+        assert vni_entry is not None, data['vnis']
+        assert a in vni_entry['switches']
+        assert b in vni_entry['switches']
+        # このVNIは明示的な"evpn"グローバルサブモードを一切使っていないので
+        # l2vpn_evpn(明示的なEVPNインスタンス設定の有無)はFalseのまま
+        assert vni_entry['l2vpn_evpn'] is False
+        assert data['fabric']['vni_count'] >= 1
+
 
 # ══════════════════════════════════════════════════════════
 # Catalyst 9000 (IOS-XE) のスタンドアロンVXLAN EVPN

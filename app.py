@@ -8899,12 +8899,25 @@ async def nexus_dashboard():
         }
         switches.append(switch_entry)
 
-        # ファブリック全体のVNIインベントリ（どのスイッチが参加しているか）
-        for vni in evpn_vnis:
+        # ファブリック全体のVNIインベントリ（どのスイッチが参加しているか）。
+        # VNIの出どころは2通りある: (a) NX-OSの"evpn"グローバルサブモード
+        # (evpn_vnis、rd/route-targetを明示する古典的な書き方)、
+        # (b) "interface nve1"配下の"member vni <n>"(member_vnis、
+        # advertise-all-vniでRD/RTを自動導出する、より一般的な現代の
+        # EVPN VXLAN設定)。従来はevpn_vnis側しか見ておらず、(b)だけで
+        # 構成したVNI(member vni + advertise-all-vni、evplグローバル
+        # サブモード無し)がスイッチ単位の表示には出るのに、ファブリック
+        # 全体のVNIインベントリ/件数には一切反映されない実バグがあった
+        # ——両方を同じvni_indexへ統合する。
+        fabric_vnis_this_switch = set(evpn_vnis) | {m["vni"] for m in member_vnis}
+        for vni in sorted(fabric_vnis_this_switch):
             entry = vni_index.setdefault(vni, {
-                "vni": vni, "l2vpn_evpn": True, "switches": [],
+                "vni": vni, "l2vpn_evpn": False, "switches": [],
             })
-            entry["switches"].append(device_id)
+            if vni in evpn_vnis:
+                entry["l2vpn_evpn"] = True
+            if device_id not in entry["switches"]:
+                entry["switches"].append(device_id)
 
     switches.sort(key=lambda s: s["device_id"])
     vni_list = [vni_index[v] for v in sorted(vni_index)]

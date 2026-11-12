@@ -748,6 +748,52 @@ VXLAN EVPNを実際に構成(`feature`群→loopback0→`vn-segment`→
 `TestShowFeature`(2 tests)を追加し、この2つのfeatureが`enabled`/
 `disabled`で正しく出ること、列がくっついていないことを固定する。
 
+**Nexus Dashboard風VXLAN EVPNビュー(`/static/nexus_dashboard.html`、
+`GET /api/nexus/dashboard`)が実機ベースかという質問、および
+ファブリック全体VNIインベントリの実バグ(修正)**: ユーザー質問
+「ちなみにnexusダッシュボードの画面見れる？NXOS版」→「nexusダッシュ
+ボードは実際のものをベースに作っているの？モックなのね。」→「モックの
+NXOSのコンフィグも出せる？あとモックも設定変更したら表示は変わるの？」
+への対応。このページ自体は実NX-OS/実Nexus Dashboard(Fabric
+Controller)のAPI/データモデルの再現ではなく、エミュレータ内の
+CLI設定状態(`state.nx_features`/`state.nve`/`state.evpn_vnis`/
+`state.vlan_vn_segment`/`state.bgp['l2vpn_evpn']`)を
+`/api/nexus/dashboard`が集計してダッシュボード形式に投影した完全な
+モックである旨、ページ自身の脚注にも明記済み(以前のセッションで
+実装済み、Dashboard自体のCLAUDE.mdエントリは当時これに未記載
+だったため今回追記)。
+
+ライブ検証(2台のNexus VTEPでVLAN10↔VNI 10010のVXLAN EVPNを構成)の
+過程で**実バグを発見・修正**: `/api/nexus/dashboard`のファブリック
+全体「VNIインベントリ」(`data['vnis']`/`fabric.vni_count`)が、NX-OSの
+明示的な`evpn`/`vni <n> l2`グローバルサブモード(`state.evpn_vnis`)
+からしかVNIを拾っておらず、より一般的な`interface nve1`配下の
+`member vni <n>` + `router bgp`側の`advertise-all-vni`だけで構成した
+VNI(`evpn`グローバルサブモードを一切使わない、実運用でもよくある
+書き方——今回私が検証に使った構成そのもの)は、スイッチ単位のカードの
+`member_vnis`には正しく出るのに、ファブリック全体のVNI件数・一覧には
+一切反映されない(常に0件のまま)という不整合があった。
+`app.py`の`nexus_dashboard()`で、`evpn_vnis`と各NVEインタフェースの
+`member_vnis`の両方の集合からVNIインベントリを統合するよう修正
+(`l2vpn_evpn`フラグは「明示的な`evpn`サブモード設定が存在するか」を
+示す値として維持、`member vni`のみのVNIは`l2vpn_evpn: false`で
+一覧には出る)。
+
+Live-verified: 修正前後でPlaywright(`/opt/pw-browsers/chromium`)
+スクリーンショットを比較し、`member vni`のみで構成したVNI 10010が
+修正後に「VNIs: 1」・インベントリ表に実際に反映されることを確認。
+さらに「設定変更で表示が追従するか」という質問に直接答える形で、
+稼働中のダッシュボードに対して`no feature nv overlay`を1台に投入する
+前後のスクリーンショット比較も実施し、該当スイッチのバッジが
+`VXLAN READY`→`PARTIAL`に変わり、上部の「VXLAN READY」カウントが
+2→1に即座に追従することを確認した(ポーリングではなく、投入直後の
+`/api/nexus/dashboard`レスポンス自体が既に新しい値を返す——
+ダッシュボード側は単にそれを定期ポーリング(既定5秒)で表示に反映する
+だけ)。`tests/test_evpn_vxlan.py::TestNexusDashboardApi::
+test_fabric_vni_inventory_includes_member_vni_only_configs`
+(ファイル計24 tests)がこの修正を固定する(他テストが使うVNI番号との
+衝突を避けるため専用のVNI 20020を使用)。
+
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 
 PyTorch could not be installed in this sandbox early on (pulled in a
