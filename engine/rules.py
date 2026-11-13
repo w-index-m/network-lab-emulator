@@ -254,6 +254,15 @@ class DeviceState:
             "wan1": {"ip": "100.64.0.254", "prefix": 16, "status": "up", "speed": "10000", "duplex": "full"},
             "uplink1": {"ip": "", "prefix": 0, "status": "down", "speed": "auto", "duplex": "auto"},
         } if device_type == "bas" else ({
+            # NetAttest EPS風RADIUSサーバ: port1でRADIUS(UDP 1812/1813)を待ち受ける
+            "port1": {"ip": "10.250.0.10", "prefix": 24, "status": "up", "speed": "1000", "duplex": "full"},
+            "port2": {"ip": "", "prefix": 0, "status": "down", "speed": "auto", "duplex": "auto"},
+        } if device_type == "netattest" else ({
+            # Cisco Catalyst 9800(C9800-CL)無線LANコントローラ: GigabitEthernet1〜3
+            "GigabitEthernet1": {"ip": "10.250.0.30", "prefix": 24, "status": "up", "speed": "1000", "duplex": "full"},
+            "GigabitEthernet2": {"ip": "", "prefix": 0, "status": "down", "speed": "auto", "duplex": "auto"},
+            "GigabitEthernet3": {"ip": "", "prefix": 0, "status": "down", "speed": "auto", "duplex": "auto"},
+        } if device_type == "wlc" else ({
             # FortiGate(FortiOS): port1(WAN想定)/port2(LAN)/port3 形式
             "port1": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "port2": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
@@ -282,7 +291,7 @@ class DeviceState:
             "GigabitEthernet0/0/0": {"ip": "203.0.113.2", "prefix": 30, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/1": {"ip": "10.0.0.1",    "prefix": 24, "status": "up",   "speed": "1000", "duplex": "full"},
             "GigabitEthernet0/0/2": {"ip": "",             "prefix": 0,  "status": "down", "speed": "auto", "duplex": "auto"},
-        })))))))
+        })))))))))
 
         if device_type == "sir":
             # ether <slot> <port> vlan untag <vid>（実機のfactory-default）
@@ -495,6 +504,13 @@ class DeviceState:
         if device_type == "bas":
             self.lldp_neighbors = []
 
+        # NetAttest EPS風RADIUSサーバ。clients/usersはengine.radius_server
+        # のRadiusServerがこの辞書を直接参照する(複製しない)。
+        if device_type == "netattest":
+            self.lldp_neighbors = []
+            self.netattest = {'service_enabled': False, 'clients': {}, 'users': {},
+                              'auth_log': [], 'acct_log': []}
+
         # FortiGate(FortiOS) 状態
         # IPsec(phase1-interface/phase2-interface)はYamahaと同じ考え方で
         # Si-R用ipsec_tunnels辞書形式に乗せ、ike_engine.pyのdt判定に
@@ -619,6 +635,11 @@ CONFIG_SUBMODES = {
     "config-sec-zone-pair":    ("config",            ('_zbfw_pair',)),
     "config-track":            ("config",            ('_track_obj',)),
     "config-sg-tacacs":        ("config",            ('_aaa_group_name',)),
+    "config-radius-server":    ("config",            ('_radius_server_name',)),
+    "config-sg-radius":        ("config",            ('_radius_group_name',)),
+    "config-wlan":             ("config",            ('_wlan_profile',)),
+    "config-wireless-policy":  ("config",            ('_wireless_policy',)),
+    "config-policy-tag":       ("config",            ('_wireless_tag',)),
     "config-std-nacl":         ("config",            ('_current_acl_name',)),
     "config-ext-nacl":         ("config",            ('_current_acl_name',)),
     "config-mdt":              ("config",            ('_mdt_sub',)),
@@ -873,7 +894,7 @@ class RuleEngine:
         """
         if not cmd.strip():
             return cmd
-        if device_type in ('apresia', 'juniper', 'yamaha', 'fortigate', 'alb'):
+        if device_type in ('apresia', 'juniper', 'yamaha', 'fortigate', 'alb', 'netattest'):
             # Juniper/Yamaha/FortiGateも同様、Cisco IOSと無関係な独自
             # コマンド体系(set/delete/commit、ip lanN address、
             # config/edit/next/end等)を持つため展開をスキップする。
@@ -983,6 +1004,10 @@ class RuleEngine:
         # 擬似FLETS網BAS(収容局) → 専用ハンドラへ
         if state.device_type == 'bas':
             return self._bas_process(cmd, c, state)
+
+        # NetAttest EPS風RADIUSサーバ → 専用ハンドラへ
+        if state.device_type == 'netattest':
+            return self._netattest_process(cmd, c, state)
 
         # FortiGate(FortiOS)は config/edit/set/next/end の階層型体系
         # → 専用ハンドラへ(Junosのset/delete/commitと同じ理由で、
@@ -9046,6 +9071,189 @@ Configuration Revision            : 5"""
                          f"status: {'up' if tun.get('status') == 'established' else 'down'}")
         return '\n'.join(lines)
 
+    def _netattest_process(self, cmd: str, c: str, state: DeviceState) -> str:
+        """NetAttest EPS風RADIUSサーバの簡易CLI。
+
+        実機のNetAttest EPSはWeb管理画面で設定する製品で公開CLIは無いため、
+        画面の設定項目(RADIUSクライアント・ユーザー・動的VLAN・
+        認証/アカウンティングログ)をCLIに置き換えた独自コマンド体系。
+        RADIUS自体は engine.radius_server の本物のUDPサーバが応答する
+        (起動/停止はapp.py側がrule_engine.process()の後に行う)。
+        """
+        orig = cmd.strip()
+        na = state.netattest
+        if c in ('configure terminal', 'conf t', 'configure', 'conf'):
+            state.mode = 'config'
+            return ''
+        if c in ('exit', 'end') and state.mode == 'config':
+            state.mode = 'exec'
+            return ''
+        if c in ('exit', 'quit') and state.mode == 'exec':
+            return ''
+
+        if state.mode == 'config':
+            m = re.match(r'^hostname\s+(\S+)$', orig, re.I)
+            if m:
+                state.hostname = m.group(1)
+                return ''
+            m = re.match(r'^ip\s+(port\d+)\s+address\s+([\d.]+)/(\d+)$', c)
+            if m:
+                ifname, ip, prefix = m.groups()
+                if ifname not in state.interfaces:
+                    return f'% Unknown interface: {ifname}'
+                state.interfaces[ifname].update({'ip': ip, 'prefix': int(prefix), 'status': 'up'})
+                return ''
+            m = re.match(r'^radius-client\s+([\d.]+)\s+secret\s+(\S+)(?:\s+name\s+(\S+))?$',
+                         orig, re.I)
+            if m:
+                ip, secret, name = m.groups()
+                na['clients'][ip] = {'secret': secret, 'name': name or ''}
+                return ''
+            m = re.match(r'^no\s+radius-client\s+([\d.]+)$', c)
+            if m:
+                if na['clients'].pop(m.group(1), None) is None:
+                    return f'% RADIUS client {m.group(1)} is not registered'
+                return ''
+            m = re.match(r'^user\s+(\S+)\s+password\s+(\S+)((?:\s+(?:vlan|group|privilege)\s+\S+)*)$',
+                         orig, re.I)
+            if m:
+                name, pw, opts = m.groups()
+                user = {'password': pw, 'disabled': False}
+                for k, v in re.findall(r'(vlan|group|privilege)\s+(\S+)', opts, re.I):
+                    k = k.lower()
+                    if k == 'vlan' and not (v.isdigit() and 1 <= int(v) <= 4094):
+                        return f'% Invalid VLAN ID: {v}'
+                    if k == 'privilege' and not (v.isdigit() and 0 <= int(v) <= 15):
+                        return f'% Invalid privilege level: {v}'
+                    user[k] = int(v) if k == 'privilege' else v
+                na['users'][name] = user
+                return ''
+            m = re.match(r'^user\s+(\S+)\s+(disable|enable)$', orig, re.I)
+            if m:
+                u = na['users'].get(m.group(1))
+                if not u:
+                    return f'% User {m.group(1)} not found'
+                u['disabled'] = m.group(2).lower() == 'disable'
+                return ''
+            m = re.match(r'^no\s+user\s+(\S+)$', orig, re.I)
+            if m:
+                if na['users'].pop(m.group(1), None) is None:
+                    return f'% User {m.group(1)} not found'
+                return ''
+            if c == 'service radius':
+                na['service_enabled'] = True
+                return ''
+            if c == 'no service radius':
+                na['service_enabled'] = False
+                return ''
+
+        if c == 'clear radius log':
+            na['auth_log'].clear()
+            na['acct_log'].clear()
+            return ''
+        if re.match(r'^show\s+(running-config|config)$', c):
+            return self._netattest_show_config(state)
+        if re.match(r'^show\s+radius\s+status$', c):
+            return self._netattest_show_status(state)
+        if re.match(r'^show\s+radius\s+clients?$', c):
+            if not na['clients']:
+                return 'No RADIUS clients registered.'
+            lines = ['Client IP        Name             Secret',
+                     '---------------- ---------------- ------']
+            for ip in sorted(na['clients'], key=lambda x: tuple(int(p) for p in x.split('.'))):
+                cl = na['clients'][ip]
+                lines.append(f'{ip:<16} {cl.get("name") or "-":<16} ********')
+            return '\n'.join(lines)
+        if re.match(r'^show\s+users?$', c):
+            if not na['users']:
+                return 'No users registered.'
+            lines = ['User             Status   VLAN  Group            Priv',
+                     '---------------- -------- ----- ---------------- ----']
+            for name in sorted(na['users']):
+                u = na['users'][name]
+                lines.append(f'{name:<16} {"disabled" if u.get("disabled") else "enabled":<8} '
+                             f'{u.get("vlan") or "-":<5} {u.get("group") or "-":<16} '
+                             f'{u.get("privilege", "-")}')
+            return '\n'.join(lines)
+        m = re.match(r'^show\s+radius\s+log(?:\s+(\d+))?$', c)
+        if m:
+            logs = na['auth_log'][-int(m.group(1) or 20):]
+            if not logs:
+                return 'No authentication log.'
+            lines = ['Time                User             NAS              Method   Result Reason',
+                     '------------------- ---------------- ---------------- -------- ------ ------']
+            for e in logs:
+                lines.append(f'{e["time"]:<19} {e["user"]:<16} {e["nas"]:<16} '
+                             f'{e["method"] or "-":<8} {e["result"]:<6} {e["reason"]}')
+            return '\n'.join(lines)
+        if re.match(r'^show\s+radius\s+accounting$', c):
+            recs = na['acct_log'][-20:]
+            if not recs:
+                return 'No accounting records.'
+            lines = ['Time                Status   User             NAS              Port             Session-ID       Time(s)',
+                     '------------------- -------- ---------------- ---------------- ---------------- ---------------- -------']
+            for r in recs:
+                st = '-' if r.get('session_time') is None else str(r['session_time'])
+                lines.append(f'{r["time"]:<19} {r["status"]:<8} {r["user"]:<16} {r["nas"]:<16} '
+                             f'{r.get("nas_port_id") or "-":<16} {r["session_id"]:<16} {st}')
+            return '\n'.join(lines)
+        if re.match(r'^show\s+interfaces?$', c):
+            lines = ['Interface  IP Address         Status']
+            for name in sorted(state.interfaces):
+                i = state.interfaces[name]
+                addr = f'{i["ip"]}/{i["prefix"]}' if i.get('ip') else 'unassigned'
+                lines.append(f'{name:<10} {addr:<18} {i.get("status", "down")}')
+            return '\n'.join(lines)
+        if c in ('show version', 'show system'):
+            return (f'NetAttest EPS (emulated)\nHostname: {state.hostname}\n'
+                    'RADIUS: RFC 2865/2866 (PAP, CHAP, EAP-MD5)')
+        return f'% Unknown command: {orig}'
+
+    def _netattest_show_status(self, state: DeviceState) -> str:
+        from engine.radius_server import get_radius_server, radius_server_ip, AUTH_PORT, ACCT_PORT
+        na = state.netattest
+        srv = get_radius_server(getattr(state, '_device_id', '') or '')
+        lines = [f'RADIUS service : {"enabled" if na["service_enabled"] else "disabled"}',
+                 f'Listening      : {f"{srv.ip}:{AUTH_PORT} (auth), {srv.ip}:{ACCT_PORT} (acct)" if srv else "not running"}',
+                 f'Clients        : {len(na["clients"])}',
+                 f'Users          : {len(na["users"])}']
+        if na['service_enabled'] and not srv:
+            ip = radius_server_ip(state)
+            lines.append(f'  (warning: server is not running{"" if ip else " - port1 has no IP address"})')
+        if srv:
+            s = srv.stats
+            lines += ['Statistics:',
+                      f'  Access-Request      : {s["access_requests"]}',
+                      f'  Access-Accept       : {s["access_accepts"]}',
+                      f'  Access-Reject       : {s["access_rejects"]}',
+                      f'  Access-Challenge    : {s["access_challenges"]}',
+                      f'  Accounting-Request  : {s["accounting_requests"]}',
+                      f'  Dropped (unknown client): {s["dropped_unknown_client"]}',
+                      f'  Dropped (bad authenticator): {s["bad_authenticator"]}']
+        return '\n'.join(lines)
+
+    def _netattest_show_config(self, state: DeviceState) -> str:
+        na = state.netattest
+        lines = [f'# {state.hostname} NetAttest EPS (emulated) configuration',
+                 f'hostname {state.hostname}']
+        for name in sorted(state.interfaces):
+            i = state.interfaces[name]
+            if i.get('ip'):
+                lines.append(f'ip {name} address {i["ip"]}/{i["prefix"]}')
+        for ip in sorted(na['clients']):
+            cl = na['clients'][ip]
+            lines.append(f'radius-client {ip} secret {cl["secret"]}'
+                         + (f' name {cl["name"]}' if cl.get('name') else ''))
+        for name in sorted(na['users']):
+            u = na['users'][name]
+            opts = ''.join(f' {k} {u[k]}' for k in ('vlan', 'group', 'privilege') if u.get(k) is not None)
+            lines.append(f'user {name} password {u["password"]}{opts}')
+            if u.get('disabled'):
+                lines.append(f'user {name} disable')
+        if na['service_enabled']:
+            lines.append('service radius')
+        return '\n'.join(lines)
+
     def _bas_process(self, cmd: str, c: str, state: DeviceState) -> str:
         """このエミュレータ独自の簡易CLI(特定の実製品を模したものではない)。
 
@@ -10378,8 +10586,32 @@ Key Version         : A
         count = int(m.group(1)) if m.group(1) else 5
         dest  = m.group(2)
         my_ip = self._pc_my_ip(state)
-        rtt_base = round(random.uniform(0.5, 3.0), 3)
         lines = [f"PING {dest} ({dest}) 56(84) bytes of data."]
+        # traceroute同様トポロジー(icmp_engine)で到達性を判定する。以前は
+        # 常に0% lossを返しており、存在しない宛先や未認証の802.1Xポート
+        # 越しでも成功してしまっていた。
+        from engine.protocols import icmp_engine as _icmp_engine
+        src_id = getattr(state, '_device_id', None)
+        if src_id not in _icmp_engine.device_ips:
+            src_id = next((d for d, info in _icmp_engine.device_ips.items()
+                           if my_ip in info.get('ips', {})), None)
+        if src_id:
+            r = _icmp_engine.ping(src_id, dest, count=count)
+            if not r['reachable']:
+                for i in range(count):
+                    lines.append(f"From {my_ip} icmp_seq={i+1} Destination Host Unreachable")
+                lines += ["", f"--- {dest} ping statistics ---",
+                          f"{count} packets transmitted, 0 received, +{count} errors, "
+                          f"100% packet loss, time {count*1000}ms"]
+                return "\n".join(lines)
+            for i, rtt in enumerate(r['rtts']):
+                lines.append(f"64 bytes from {dest}: icmp_seq={i+1} ttl={r['ttl']} time={rtt} ms")
+            rtts = r['rtts']
+            lines += ["", f"--- {dest} ping statistics ---",
+                      f"{count} packets transmitted, {count} received, 0% packet loss, time {count*1000}ms",
+                      f"rtt min/avg/max/mdev = {min(rtts):.3f}/{sum(rtts)/len(rtts):.3f}/{max(rtts):.3f}/0.100 ms"]
+            return "\n".join(lines)
+        rtt_base = round(random.uniform(0.5, 3.0), 3)
         for i in range(count):
             rtt = round(rtt_base + random.uniform(-0.2, 0.5), 3)
             lines.append(f"64 bytes from {dest}: icmp_seq={i+1} ttl=64 time={rtt} ms")

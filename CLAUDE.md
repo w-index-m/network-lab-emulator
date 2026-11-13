@@ -11,7 +11,8 @@ NETCONF/SSH-CLI/Telnet-CLI, gNMI over gRPC), so real clients (ncclient,
 gnmic/pygnmi, snmpwalk, an actual ssh/telnet client) can connect to emulated
 devices. See `README.md` for the full feature/protocol matrix and supported
 device types (`device_type`: `catalyst`, `nexus`, `cisco`, `asa`, `sir`,
-`srs`, `apresia`, `bigip`, `arista`, `juniper`, `yamaha`, `bas`, `pc`).
+`srs`, `apresia`, `bigip`, `arista`, `juniper`, `yamaha`, `bas`, `pc`,
+`fortigate`, `alb`, `netattest`, `wlc`).
 
 **Publicly deployed** at https://network-lab-emulator.onrender.com/ (Render).
 That deployment doesn't have Ollama available, so its `network_ontology_query.py
@@ -793,6 +794,74 @@ Live-verified: 修正前後でPlaywright(`/opt/pw-browsers/chromium`)
 test_fabric_vni_inventory_includes_member_vni_only_configs`
 (ファイル計24 tests)がこの修正を固定する(他テストが使うVNI番号との
 衝突を避けるため専用のVNI 20020を使用)。
+
+**RADIUS / NetAttest / 802.1X / Wi-Fi認証(段階1〜3)**: ユーザー依頼
+「ネットワーク運用計画radiusなど運用系を伸ばしたい、もしくはネットアテストと
+Wi-Fi認証のようなツールを実装して欲しい」(範囲はAskUserQuestionで
+「段階1+2+3(Wi-Fiまで)」を選択)。それまでRADIUSはコード上に一切無く、
+`engine/ssh_cli_agent.py`も「AAA連携(TACACS+/RADIUS)は非対応」と明記して
+いた。詳細・ライブ検証の全文は`docs/radius-netattest-8021x-wifi.md`。
+
+- **`engine/radius_server.py`**: 本物のRADIUS(RFC 2865/2866、UDP
+  1812/1813)。PAP/CHAP/EAP-MD5(Message-Authenticator・State・
+  Access-Challenge)、Accept時に`Cisco-AVPair shell:priv-lvl`・動的VLAN
+  (Tunnel-Type/Medium/Private-Group-ID)を返す。未登録クライアント
+  (**送信元IP**で照合)は黙って破棄。FreeRADIUSの実`radtest`/`radclient`
+  (`apt-get install freeradius-utils`)でPAP/CHAP/Reject/アカウンティング
+  の相互接続をライブ確認済み。
+- **`netattest` device type**(`_netattest_process`): NetAttest EPS風。
+  実機はWeb GUIのみで公開CLIが無いため独自CLI(`radius-client`/`user ...
+  vlan/group/privilege`/`service radius`/`show radius log|accounting`)。
+  `service radius`後、`cli_command()`のrule_engine実行後フックで
+  `ensure_radius_server()`が実UDPサーバを起動/張り直し。
+- **段階1 `engine/aaa_radius.py`**: cisco/catalyst/nexus/wlcの`radius
+  server`(`config-radius-server`)/`radius-server host`/`aaa group server
+  radius`(`config-sg-radius`)/`test aaa group`/`show aaa servers`。
+  SSH(`_CliSshServer.check_auth_password`)とTelnetのログインが
+  `aaa authentication login ... group <radius>`なら本物のRADIUS問い合わせを
+  行う。**IOSのメソッドリスト仕様どおりRejectではlocalへ進まず、無応答時
+  のみlocalへフォールバック**。Nexusは実SSHリスナーが無い(`feature ssh`
+  未モデル化)のでRADIUS設定/`test aaa`まで。
+- **段階2 `engine/nac.py`**: Catalystの`dot1x system-auth-control`/
+  `authentication port-control auto`/`dot1x pae authenticator`/
+  `aaa authentication dot1x`/`aaa authorization network`(無いと動的VLAN
+  非適用、実機同様)/`aaa accounting dot1x`、`show access-session`/
+  `show dot1x all`。PCのサプリカントはNetworkManagerの実構文`nmcli
+  connection add/up/down/delete`。未認証の802.1Xポートは
+  `vnet.interface_down`でデータプレーンを遮断(`reconcile_ports`、冪等に
+  毎回入れ直す——後から打った`no shutdown`が外してしまう実バグを踏んだ)。
+- **段階3 `wlc` device type**(Catalyst 9800、共有Ciscoツリーに乗る):
+  `wlan <profile> <id> <ssid>`(`config-wlan`)・`wireless profile policy`
+  (`aaa-override`/`vlan`)・`wireless tag policy`・PSK/802.1X、`show wlan
+  summary`/`show wireless client summary|mac-address ... detail`。PCは
+  wlan0をWLCにリンクして`nmcli device wifi list|connect`/`nmcli
+  connection add type wifi ...`。
+- **正直なスコープ**: EAPOLは実L2フレームではなくvnetのリンクで
+  解決(PPPoEと同じ方式)、NAS⇔RADIUSサーバ間だけが本物のUDP。PEAP/TTLSは
+  TLSトンネル無しで内側をEAP-MD5で検証し、show出力にその旨を明記。
+  EAP-TLS/MS-CHAPv2/802.11暗号化は非対応。
+- これらの専用コマンドは`cli_command()`で**`handle_protocol_show`より前**に
+  評価する狭いハンドラ(`aaa_radius.handle_config`→`nac.handle`、
+  RADIUS待ちでブロックし得るため`asyncio.to_thread`)。専用コマンドにしか
+  マッチしないので下の2層を食わず、逆に下の層の汎用正規表現に
+  巻き込まれる事故(ASA/bas/fortigateで繰り返し踏んだもの)も避けられる。
+  `netattest`は`alb`と同じくapp.pyの2層で早期`return None`。
+
+**ライブ検証で見つけた既存の実バグ(修正済み)**: **PCの`ping`は宛先にも
+トポロジーにも関係なく常に0% lossを返す固定出力だった**(`_pc_ping`。同じ
+PCの`traceroute`はicmp_engineを使っていた)。802.1Xで遮断したポート越しや
+存在しないIP宛でも成功して見えていた。icmp_engineで判定するよう修正
+(到達不可は`Destination Host Unreachable`/`100% packet loss`)。
+また`aaa new-model`等の既存AAA設定・ローカルユーザはそもそも永続化されて
+いなかったため、RADIUSログインが再起動後も機能するよう
+`_nac_persist_dump/_restore`(app.py)で併せて保存するようにした
+(RADIUSサーバ・グループ・dot1x/WLAN/NetAttest設定・PCのnmcliプロファイル
+も同様。セッション/ログ等のランタイム状態は保存しない)。フロントエンドは
+ランチャー画面とサイドバーの両方の装置追加ボタン一覧に`netattest`/`wlc`を
+追加(ランチャー側にはFortiGateも抜けていたので追加)、Playwrightで
+ランチャー→ラボ起動→ターミナル操作まで確認した。
+`tests/test_radius_netattest_8021x_wifi.py`(34 tests、クラスごとに
+専用IP帯10.251.<n>.0/24を使い実ソケットのbind衝突を避ける)。
 
 ## ML / anomaly detection notes（機械学習・異常検知メモ）
 

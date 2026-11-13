@@ -94,11 +94,13 @@ class TelnetCliServer:
             sock.settimeout(120)
             # ECHO と SGA はこちら（サーバ）が持つ、と宣言する
             sock.sendall(bytes([IAC, WILL, OPT_ECHO, IAC, WILL, OPT_SGA]))
+            self._remote_privilege = None
             user = self._login(sock)
             if user is None:
                 return
             from engine.ssh_cli_agent import initial_privilege
-            self._shell(sock, initial_privilege(self.state, user))
+            priv = self._remote_privilege
+            self._shell(sock, priv if priv is not None else initial_privilege(self.state, user))
         except OSError:
             pass
         finally:
@@ -119,7 +121,14 @@ class TelnetCliServer:
             pw = self._readline(sock, b'Password: ', echo=False)
             if pw is None:
                 return None
-            if users.get(user) == pw:
+            from engine import aaa_radius
+            decision = aaa_radius.login(self.state, user, pw, getattr(self, 'ip', None))
+            if decision is not None:
+                # RADIUSで確定(Accept/Reject)。Rejectはlocalへ進まない
+                if decision[0] == 'accept':
+                    self._remote_privilege = decision[1]
+                    return user
+            elif users.get(user) == pw:
                 return user
             sock.sendall(b'\r\n% Login invalid\r\n\r\n')
         sock.sendall(b'% Bad passwords\r\n')

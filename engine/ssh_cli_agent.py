@@ -28,7 +28,9 @@ Nexposeエミュレーションの認証スキャンが「ログインは本物�
   - プロンプト、モード遷移、Ctrl-C / Ctrl-D、`exit` での切断
 
 対応していない範囲（実機との差）:
-  - AAA連携（TACACS+/RADIUSでの `enable` 認証）
+  - TACACS+でのログイン認証(RADIUSは`aaa authentication login ... group
+    radius`で本物のRADIUS問い合わせを行う。engine.aaa_radius参照)と、
+    AAAサーバによる`enable`認証
   - user EXEC で塞ぐコマンドは代表的なもの（`configure terminal`・
     `show running/startup-config`・`write`/`copy`/`reload`/`debug`・
     `crypto`・`ip ssh pubkey-chain`）だけで、実機のコマンド単位の
@@ -143,8 +145,13 @@ def check_enable_password(state, password: str):
 
 
 class _CliSshServer(paramiko.ServerInterface if _HAS_PARAMIKO else object):
-    def __init__(self, valid_users, authorized_keys=None):
+    def __init__(self, valid_users, authorized_keys=None, state=None, nas_ip=None):
         self.valid_users = valid_users
+        # AAA(aaa authentication login ... group radius)の判定に使う装置状態と、
+        # RADIUS問い合わせの送信元(NAS)IP。Noneならローカル認証のみ。
+        self.state = state
+        self.nas_ip = nas_ip
+        self.remote_privilege = None
         # {username: ["ssh-rsa AAAA...", ...]}。`ip ssh pubkey-chain` で
         # 登録された鍵のみ（`engine/ssh_cli_agent._device_authorized_keys`）。
         self.authorized_keys = authorized_keys or {}
@@ -156,6 +163,16 @@ class _CliSshServer(paramiko.ServerInterface if _HAS_PARAMIKO else object):
         self.events = {}            # chanid -> Event
 
     def check_auth_password(self, username, password):
+        if self.state is not None:
+            from engine import aaa_radius
+            decision = aaa_radius.login(self.state, username, password, self.nas_ip)
+            if decision is not None:
+                if decision[0] == 'accept':
+                    self.authenticated_user = username
+                    self.remote_privilege = decision[1]
+                    return paramiko.AUTH_SUCCESSFUL
+                # RADIUSのRejectはlocalへフォールバックしない(IOSのメソッドリスト仕様)
+                return paramiko.AUTH_FAILED
         if self.valid_users.get(username) == password:
             self.authenticated_user = username
             return paramiko.AUTH_SUCCESSFUL
@@ -284,7 +301,8 @@ class SshCliServer:
         transport = paramiko.Transport(sock)
         transport.add_server_key(_shared_host_key())
         server = _CliSshServer(_device_users(self.state),
-                               _device_authorized_keys(self.state))
+                               _device_authorized_keys(self.state),
+                               state=self.state, nas_ip=self.ip)
         try:
             transport.start_server(server=server)
             # 1本の接続で複数チャンネルが開かれる。1本目を処理して
@@ -311,7 +329,8 @@ class SshCliServer:
                 chan.close()
                 return
             kind, payload = req
-            privilege = initial_privilege(self.state, server.authenticated_user)
+            privilege = (server.remote_privilege if server.remote_privilege is not None
+                         else initial_privilege(self.state, server.authenticated_user))
             if kind == 'exec':
                 self._run_exec(chan, payload, privilege)
             else:

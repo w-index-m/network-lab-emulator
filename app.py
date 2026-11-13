@@ -392,6 +392,53 @@ def _trigger_ike_negotiation(device_id: str, _cascade: bool = True):
                             _trigger_ike_negotiation(pid, _cascade=False)
 
 
+_NAC_PERSIST_ATTRS = ('radius_servers', 'radius_groups', 'radius_source_interface',
+                      'aaa_new_model', 'aaa_authentication_login_lists',
+                      'aaa_authentication_login', 'line_vty_login_authentication', 'users')
+
+
+def _nac_persist_dump(state) -> dict:
+    out = {}
+    if state.device_type in ('cisco', 'catalyst', 'nexus', 'wlc'):
+        for a in _NAC_PERSIST_ATTRS:
+            v = getattr(state, a, None)
+            if v:
+                out[a] = v
+    d = getattr(state, 'dot1x', None)
+    if d:
+        out['dot1x'] = {k: v for k, v in d.items() if k not in ('sessions', 'blocked')}
+    w = getattr(state, 'wireless', None)
+    if w:
+        out['wireless'] = {k: v for k, v in w.items() if k != 'clients'}
+    na = getattr(state, 'netattest', None)
+    if state.device_type == 'netattest' and na:
+        out['netattest'] = {k: v for k, v in na.items() if k not in ('auth_log', 'acct_log')}
+    nm = getattr(state, 'nm', None)
+    if state.device_type == 'pc' and nm and nm.get('connections'):
+        out['nm_connections'] = nm['connections']
+    return out
+
+
+def _nac_persist_restore(state, dev_data: dict) -> None:
+    for a in _NAC_PERSIST_ATTRS:
+        if a in dev_data:
+            setattr(state, a, dev_data[a])
+    for srv in (getattr(state, 'radius_servers', None) or {}).values():
+        # 統計カウンタは実機同様、再起動でリセットする
+        srv['stats'] = {k: 0 for k in srv.get('stats', {})}
+    if dev_data.get('dot1x'):
+        state.dot1x = dict(dev_data['dot1x'], sessions={}, blocked=[])
+    if dev_data.get('wireless'):
+        state.wireless = dict(dev_data['wireless'], clients={})
+    if dev_data.get('netattest'):
+        state.netattest = dict(dev_data['netattest'], auth_log=[], acct_log=[])
+    if dev_data.get('nm_connections'):
+        state.nm = {'connections': dev_data['nm_connections'], 'active': {}}
+        if any(p.get('type') == 'wifi' for p in state.nm['connections'].values()) \
+                and 'wlan0' not in state.interfaces:
+            state.interfaces['wlan0'] = {'ip': '', 'prefix': 0, 'status': 'down', 'speed': '', 'duplex': ''}
+
+
 def _save_config():
     """現在のデバイス設定・リンクをJSONに保存"""
     data = {"devices": {}, "links": []}
@@ -438,7 +485,7 @@ def _save_config():
         # これが無いとASAのthreat-detection scanning-threatのように
         # 実SSHリスナーへの接続試行に依存する機能が再起動後に動かなく
         # なる。
-        if state.device_type in ("cisco", "catalyst", "arista", "asa"):
+        if state.device_type in ("cisco", "catalyst", "arista", "asa", "wlc"):
             if getattr(state, "ssh_rsa_key", False):
                 dev_data["ssh_rsa_key"] = True
                 dev_data["ssh_rsa_modulus"] = getattr(state, "ssh_rsa_modulus", 1024)
@@ -549,6 +596,11 @@ def _save_config():
                 val = getattr(state, attr, None)
                 if val:
                     dev_data[attr] = val
+        # RADIUS/802.1X/無線LAN/NetAttest/nmcli(engine.aaa_radius・nac・
+        # radius_server)。設定だけを保存し、認証済みセッション・無線
+        # クライアント・RADIUSログ等のランタイム状態は保存しない(BGP/
+        # OSPFセッションと同じく、再起動後は再認証で作り直す)。
+        dev_data.update(_nac_persist_dump(state))
         data["devices"][dev_id] = dev_data
     # vnetリンク
     for a, neighbors in vnet.links.items():
@@ -662,9 +714,10 @@ def _load_config():
             state.ipsec_crypto = dev_data["ipsec_crypto"]
         # SSH実リスナー有効化状態を復元(_save_configの対)。実リスナー
         # 自体の再起動は後段(_rebuild_all_neighbors()の後)でまとめて行う。
-        if dev_data["type"] in ("cisco", "catalyst", "arista", "asa") and dev_data.get("ssh_rsa_key"):
+        if dev_data["type"] in ("cisco", "catalyst", "arista", "asa", "wlc") and dev_data.get("ssh_rsa_key"):
             state.ssh_rsa_key = True
             state.ssh_rsa_modulus = dev_data.get("ssh_rsa_modulus", 1024)
+        _nac_persist_restore(state, dev_data)
         # ASA threat-detection scanning-threat設定を復元(_save_configの対)
         if dev_data["type"] == "asa" and dev_data.get("threat_detection"):
             state.threat_detection = dev_data["threat_detection"]
@@ -798,6 +851,16 @@ def _load_config():
     # 食い違いが起きる（実際にcatalyst↔ciscoでこの状態を踏んだ）。
     _rebuild_all_neighbors()
 
+    # RADIUSサーバ(NetAttest)の再起動と、802.1Xポートの未認証ブロックの
+    # 再適用(セッションは復元しないため、認証済みだったポートも再認証待ち)。
+    for dev_id, state in device_sessions.items():
+        if state.device_type == "netattest":
+            from engine.radius_server import ensure_radius_server
+            ensure_radius_server(dev_id, state)
+        if getattr(state, "dot1x", None):
+            from engine.nac import reconcile_ports
+            reconcile_ports(dev_id, state)
+
     # BIG-IP/ALBの実リスナー(VirtualServerProxy/AlbListenerProxy)を
     # 復元した設定に基づいて再起動する——状態(f5_virtuals/alb_listeners)
     # を復元しただけでは実ソケットは上がらないため、他の実リスナー起動
@@ -815,7 +878,7 @@ def _load_config():
         # rsa)を復元済みssh_rsa_keyフラグに基づいて再起動する。これが
         # 無いとASAのthreat-detection scanning-threatのように実SSH
         # リスナーへの接続試行に依存する機能が再起動後に動かなくなる。
-        if state.device_type in ("cisco", "catalyst", "arista", "asa") \
+        if state.device_type in ("cisco", "catalyst", "arista", "asa", "wlc") \
                 and getattr(state, "ssh_rsa_key", False):
             from engine.ssh_cli_agent import ensure_ssh_cli_agent
             ensure_ssh_cli_agent(dev_id, device_sessions, _run_cli_sync)
@@ -1759,6 +1822,22 @@ async def cli_command(body: dict):
     # 新しいコマンドを足すときの原則:
     #   - プロトコルエンジンの状態を読む/書くもの → app.py 側
     #   - 装置種別ごとの定型応答・ヘルプ・補完     → rules.py 側
+    # ── RADIUS(NAS側設定・test aaa・show aaa servers) ──
+    # RADIUS専用のコマンドにしかマッチしない狭いハンドラなので、汎用正規表現を
+    # 持つ下の2層より先に評価する(下の層に巻き込まれる事故を避ける)。
+    from engine import aaa_radius
+    radius_out = await asyncio.to_thread(aaa_radius.handle_config, state, command)
+    if radius_out is not None:
+        return {"output": radius_out, "mode": state.mode, "hostname": state.hostname}
+
+    # ── 802.1X(有線)・無線LAN(C9800 WLC)・PCのnmcli(サプリカント) ──
+    # 同じく専用コマンドにしか反応しない狭いハンドラ。RADIUS問い合わせで
+    # 最大数秒ブロックし得るためスレッドで実行する。
+    from engine import nac
+    nac_out = await asyncio.to_thread(nac.handle, device_id, state, command, device_sessions)
+    if nac_out is not None:
+        return {"output": nac_out, "mode": state.mode, "hostname": state.hostname}
+
     # ── プロトコル動的show（エンジンが起動していればエンジンの出力を優先）──
     proto_output = await handle_protocol_show(device_id, command, state)
     if proto_output is not None:
@@ -1945,6 +2024,19 @@ async def cli_command(body: dict):
         from engine.alb_lb import ensure_alb_listener_proxy
         for listener_arn in list(getattr(state, 'alb_listeners', {}).keys()):
             ensure_alb_listener_proxy(device_id, listener_arn, device_sessions)
+
+    # ── NetAttest: `service radius`/IP変更を受けて本物のRADIUSサーバ
+    # (UDP 1812/1813)を起動/張り直し/停止する。他の実リスナーと同じ理由で
+    # rule_engine.process()の後に行う(変更後のIPでbindするため)。
+    if state.device_type == 'netattest':
+        from engine.radius_server import ensure_radius_server
+        ensure_radius_server(device_id, state)
+
+    # ── 802.1X: shutdown/no shutdown等でvnet上のポート状態が変わっても、
+    # 未認証の802.1Xポートは通さない状態を維持する。
+    if getattr(state, 'dot1x', None):
+        from engine.nac import reconcile_ports
+        reconcile_ports(device_id, state)
 
     # ── Si-R/SR-S: 投入した設定コマンドをキャプチャ（show running-config で忠実再現）──
     if state.device_type in ('sir', 'srs'):
@@ -2220,8 +2312,9 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ── ALB: aws-cli(aws elbv2 ...)構文のみを受け付ける装置で、Cisco
     # 系のinterface/ip address等の設定コマンド体系を持たない。この層の
     # 汎用正規表現に巻き込まれないよう早期にNoneを返し、_alb_process
-    # (RuleEngine側)に全て委譲する。
-    if state.device_type == 'alb':
+    # (RuleEngine側)に全て委譲する。NetAttest(RADIUSサーバ)も同じ理由で
+    # 独自CLI体系の_netattest_processへ全て委譲する。
+    if state.device_type in ('alb', 'netattest'):
         return None
 
     # ── NX-OS: コマンド実行ログ ──
@@ -4230,7 +4323,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # に名前ごとに保存しつつ、"default"については既存の単一属性
     # (aaa_authentication_login / aaa_authorization_exec、show
     # running-config やテストが直接参照する)も後方互換のため維持する。
-    if state.device_type in ('cisco', 'catalyst'):
+    if state.device_type in ('cisco', 'catalyst', 'wlc'):
         if re.match(r'^aaa\s+new-model$', c):
             state.aaa_new_model = True
             return ''
@@ -4585,7 +4678,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # ── crypto key generate rsa ── 実機はRSA鍵を作って初めてSSHが
     # 起動する。ここで TCP/22 の実CLIリスナーを立ち上げるので、
     # 本物のSSHクライアントでログインして show コマンドを打てる。
-    if state.device_type in ('cisco', 'catalyst', 'arista', 'asa'):
+    if state.device_type in ('cisco', 'catalyst', 'arista', 'asa', 'wlc'):
         m_key = re.match(r'^crypto\s+key\s+generate\s+rsa'
                          r'(?:\s+(?:general-keys|usage-keys))?'
                          r'(?:\s+modulus\s+(\d+))?\s*$', c)
@@ -4825,7 +4918,8 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     # に巻き込まれるとSi-Rスタイルのダミー出力になってしまう(ASA/bas/
     # fortigateで踏んだのと同じ二層ディスパッチのトラップ)ため、ALBは
     # 早期にNoneを返して_alb_process(RuleEngine側)に全て委譲する。
-    if state.device_type == 'alb':
+    # NetAttest(RADIUSサーバ)も同じ理由で_netattest_processへ委譲する。
+    if state.device_type in ('alb', 'netattest'):
         return None
 
     # ── NX-OS: show logging ──
@@ -5697,7 +5791,7 @@ def _capture_sir_config(state, command: str):
 
 def _build_running_config(device_id: str, state) -> str:
     """プロトコルエンジンの状態を反映したrunning-configを生成"""
-    is_cisco = state.device_type in ('catalyst', 'cisco', 'arista')
+    is_cisco = state.device_type in ('catalyst', 'cisco', 'arista', 'wlc')
     is_apresia = state.device_type == 'apresia'
     is_nexus = state.device_type == 'nexus'
 
@@ -5902,6 +5996,17 @@ def _build_running_config(device_id: str, state) -> str:
             if acct:
                 lines.append(f"aaa accounting commands default group {acct['group']}")
             lines.append('')
+        # RADIUS(NAS側)。TACACS+ブロックはfeature tacacs+が無いと出ないため、
+        # RADIUSでログイン認証する場合のaaa authentication行もここで出す。
+        from engine.aaa_radius import running_config_lines as _radius_lines
+        _rl = _radius_lines(state, nxos=True)
+        if _rl:
+            lines.extend(_rl)
+            _authc = getattr(state, 'aaa_authentication_login', None)
+            if _authc and not getattr(state, 'tacacs_feature_enabled', False):
+                _sfx = ' local' if _authc.get('local_fallback') else ''
+                lines.append(f"aaa authentication login default group {_authc['group']}{_sfx}")
+            lines.append('')
         lines.append('! end')
         return '\n'.join(lines)
 
@@ -5959,6 +6064,10 @@ def _build_running_config(device_id: str, state) -> str:
         # AAA（モデルベースAAAの前提。NETCONF/RESTCONFを使うには必要）
         if getattr(state, 'aaa_new_model', False):
             lines.append('aaa new-model')
+            from engine.aaa_radius import running_config_lines as _radius_lines
+            from engine.nac import switch_running_config_global, wlc_running_config
+            for _l in _radius_lines(state) + switch_running_config_global(state) + wlc_running_config(state):
+                lines.append(_l)
             for _name, _al in (getattr(state, 'aaa_authentication_login_lists', None) or {}).items():
                 if _al.get('group'):
                     _sfx = ' local' if _al.get('local_fallback') else ''
@@ -6168,6 +6277,8 @@ def _build_running_config(device_id: str, state) -> str:
                     lines.append(' switchport mode trunk')
                 else:
                     lines.append(' no ip address')
+                from engine.nac import switch_running_config_interface
+                lines.extend(switch_running_config_interface(state, ifname))
                 # PPPoEサーバ: Virtual-Template配下の設定
                 if iinfo.get('unnumbered'):
                     lines.append(f' ip unnumbered {iinfo["unnumbered"]}')
@@ -7789,7 +7900,8 @@ def _stop_real_listeners(dev_id: str):
                     ('engine.snmp_udp_agent', 'stop_snmp_agent'),
                     ('engine.ssh_cli_agent', 'stop_ssh_cli_agent'),
                     ('engine.telnet_cli_agent', 'stop_telnet_cli_agent'),
-                    ('engine.real_ospf_agent', 'stop_ospf_agent')):
+                    ('engine.real_ospf_agent', 'stop_ospf_agent'),
+                    ('engine.radius_server', 'stop_radius_server')):
         try:
             m = __import__(mod, fromlist=[fn])
             getattr(m, fn)(dev_id)

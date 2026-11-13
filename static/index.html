@@ -335,6 +335,9 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
         <button class="launcher-add-btn" onclick="launcherAddDev('juniper')"        style="border-color:#84b135;color:#84b135">+ Juniper vSRX</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('yamaha')"         style="border-color:#e2001a;color:#e2001a">+ Yamaha RTX1300</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('bas')"            style="border-color:#808080;color:#a0a0a0">+ 擬似FLETS BAS</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('fortigate')"      style="border-color:#ee3124;color:#ee3124">+ FortiGate</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('netattest')"      style="border-color:#0068b7;color:#3a9ad9">+ NetAttest (RADIUS)</button>
+        <button class="launcher-add-btn" onclick="launcherAddDev('wlc')"            style="border-color:#049fd9;color:#049fd9">+ C9800 WLC</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('generic-router')" style="border-color:#a040c0;color:#a040c0">+ Generic Router</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('generic-switch')" style="border-color:#408040;color:#408040">+ Generic Switch</button>
         <button class="launcher-add-btn" onclick="launcherAddDev('pc')"             style="border-color:#606060;color:#808080">+ PC</button>
@@ -421,6 +424,8 @@ body{background:var(--bg);color:var(--text);font-family:'Courier New',monospace;
           <button class="dev-add-btn" onclick="addDevice('yamaha')"   style="border-color:#e2001a;color:#e2001a">＋ Yamaha RTX1300</button>
           <button class="dev-add-btn" onclick="addDevice('bas')"      style="border-color:#808080;color:#a0a0a0">＋ 擬似FLETS BAS</button>
           <button class="dev-add-btn" onclick="addDevice('fortigate')" style="border-color:#ee3124;color:#ee3124">＋ FortiGate</button>
+          <button class="dev-add-btn" onclick="addDevice('netattest')" style="border-color:#0068b7;color:#3a9ad9">＋ NetAttest (RADIUS)</button>
+          <button class="dev-add-btn" onclick="addDevice('wlc')"      style="border-color:#049fd9;color:#049fd9">＋ C9800 WLC</button>
           <button class="dev-add-btn" onclick="addDevice('generic-router')" style="border-color:#a040c0;color:#a040c0">＋ 汎用Router</button>
           <button class="dev-add-btn" onclick="addDevice('generic-switch')" style="border-color:#408040;color:#408040">＋ 汎用Switch</button>
           <button class="dev-add-btn" onclick="addDevice('pc')"       style="border-color:#606060;color:#808080">＋ PC</button>
@@ -717,6 +722,8 @@ const DEV_TEMPLATES = {
   'yamaha':         {icon:'Y', color:'#e2001a', model:'Yamaha RTX1300',      prefix:'RTX',    type:'yamaha'},
   'bas':            {icon:'B', color:'#a0a0a0', model:'疑似FLETS BAS',       prefix:'BAS',    type:'bas'},
   'fortigate':      {icon:'F', color:'#ee3124', model:'FortiGate 100F',      prefix:'Forti',  type:'fortigate'},
+  'netattest':      {icon:'R', color:'#3a9ad9', model:'NetAttest EPS (RADIUS)', prefix:'EPS',  type:'netattest'},
+  'wlc':            {icon:'W', color:'#049fd9', model:'Catalyst 9800 WLC',   prefix:'WLC',    type:'wlc'},
   'generic-router': {icon:'R', color:'#a040c0', model:'Generic Router',      prefix:'Router', type:'cisco'},
   'generic-switch': {icon:'S', color:'#408040', model:'Generic Switch',      prefix:'SW',     type:'srs'},
   'pc':             {icon:'H', color:'#606060', model:'Host PC',             prefix:'PC',     type:'pc'},
@@ -1269,7 +1276,7 @@ function getPrompt(id) {
     // FortiOS: config/edit階層に関わらずプロンプトは常に"host #"のまま
     return `${d.hostname} # `;
   }
-  const suffix = mode==='config'?'(config)':mode==='config-if'?'(config-if)':mode==='config-router'?'(config-router)':mode==='config-vlan'?'(config-vlan)':mode==='config-vpc-domain'?'(config-vpc-domain)':'';
+  const suffix = mode==='config'?'(config)':mode==='config-if'?'(config-if)':mode==='config-router'?'(config-router)':mode==='config-vlan'?'(config-vlan)':mode==='config-vpc-domain'?'(config-vpc-domain)':['config-wlan','config-wireless-policy','config-policy-tag','config-radius-server','config-sg-radius'].includes(mode)?`(${mode})`:'';
   return `${d.hostname}${suffix}# `;
 }
 function renderInput(id) {
@@ -1918,6 +1925,8 @@ function defPort(type,n){
   if(type==='yamaha')return`lan${n+1}`;
   if(type==='bas')return n===0?'wan1':`uplink${n}`;
   if(type==='fortigate')return`port${n+1}`;
+  if(type==='netattest')return`port${n+1}`;
+  if(type==='wlc')return`GigabitEthernet${n+1}`;
   return`GigabitEthernet0/${n}`;
 }
 // 装置種別ごとの接続インターフェース候補（プルダウン用）
@@ -1943,7 +1952,7 @@ function portOptions(type){
     for(let i=0;i<=3;i++)o.push(`GigabitEthernet0/${i}`);
     o.push('Management0/0');
   } else if(type==='pc'){
-    o.push('eth0');
+    o.push('eth0','wlan0');
   } else if(type==='arista'){
     for(let i=1;i<=48;i++)o.push(`Ethernet${i}`);
     for(let i=1;i<=10;i++)o.push(`Port-Channel${i}`);
@@ -1955,6 +1964,10 @@ function portOptions(type){
     o.push('wan1','uplink1');
   } else if(type==='fortigate'){
     for(let i=1;i<=3;i++)o.push(`port${i}`);
+  } else if(type==='netattest'){
+    o.push('port1','port2');
+  } else if(type==='wlc'){
+    for(let i=1;i<=3;i++)o.push(`GigabitEthernet${i}`);
   } else {
     for(let i=0;i<=3;i++)o.push(`GigabitEthernet0/${i}`);
   }
@@ -2343,6 +2356,8 @@ function _inferDeviceType(text){
   if(/^\s*set\s+(interfaces|system|routing-options)\b|^\s*delete\s+interfaces\b|junos/m.test(t)) return 'juniper';
   if(/^\s*ip\s+lan\d+\s+address|administrator|nat\s+descriptor|pp\s+select/m.test(t)) return 'yamaha';
   if(/^\s*ip\s+pool\s+[\d.]+|pppoe-user\s+\S+/m.test(t)) return 'bas';
+  if(/^\s*radius-client\s+[\d.]+\s+secret|^\s*service\s+radius|netattest/m.test(t)) return 'netattest';
+  if(/^\s*wlan\s+\S+\s+\d+\s+\S+|wireless\s+(profile|tag)\s+policy/m.test(t)) return 'wlc';
   if(/^\s*config\s+(system\s+interface|vpn\s+ipsec)|set\s+psksecret|fortios/m.test(t)) return 'fortigate';
   if(/ip\s+address\s+[\d.]+\s+[\d.]+|router\s+(ospf|bgp|eigrp)|interface\s+gigabitethernet0\//m.test(t)) return 'cisco';
   return 'cisco';
@@ -2368,7 +2383,7 @@ async function _importMultipleConfigs(files){
     const type=_inferDeviceType(text);
     const id='dev'+Date.now().toString(36)+i;
     const hostname=_inferHostname(text, file.name.replace(/\.[^.]+$/,''));
-    const colors={sir:'#00c840',srs:'#00a0ff',catalyst:'#1e90ff',cisco:'#e05a00',nexus:'#7050d0',apresia:'#c00040',asa:'#cc4400',arista:'#00a8e0',juniper:'#84b135',yamaha:'#e2001a',bas:'#a0a0a0',fortigate:'#ee3124'};
+    const colors={sir:'#00c840',srs:'#00a0ff',catalyst:'#1e90ff',cisco:'#e05a00',nexus:'#7050d0',apresia:'#c00040',asa:'#cc4400',arista:'#00a8e0',juniper:'#84b135',yamaha:'#e2001a',bas:'#a0a0a0',fortigate:'#ee3124',netattest:'#3a9ad9',wlc:'#049fd9'};
     DEVICES[id]={type,hostname,color:colors[type]||'#888'};
     NODE_POS[id]={x:150+(i%3)*220,y:100+Math.floor(i/3)*160};
     TERMS[id]={busy:false,typed:'',cur:0,history:[],histIdx:-1};
