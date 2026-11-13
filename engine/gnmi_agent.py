@@ -314,20 +314,47 @@ if _HAS_GRPC:
                             yield m
                         yield self._sync()
                         continue
-                    # STREAM
+                    # STREAM: サブスクリプションごとのモードで扱う。
+                    # SAMPLE は sample_interval ごとに送る(suppress_redundant なら
+                    # 変化時のみ)。ON_CHANGE は値が変わった時だけ送り、
+                    # heartbeat_interval があればその周期でも送る。
+                    # TARGET_DEFINED はこの実装では ON_CHANGE として扱う。
+                    # (以前は全部を SAMPLE 扱いにしていたため、on-change 購読が
+                    # 既定10秒周期のポーリングになり変化が即時に届かなかった)
                     for m in self._updates(sub_list):
                         yield m
                     yield self._sync()
-                    interval = min(
-                        (s.sample_interval for s in sub_list.subscription
-                         if s.sample_interval), default=10_000_000_000)
-                    interval = max(interval / 1e9, 0.1)
+                    SM = gnmi_pb2.SubscriptionMode
+                    now = time.time()
+                    subs = []
+                    for s in sub_list.subscription:
+                        on_change = s.mode in (SM.ON_CHANGE, SM.TARGET_DEFINED)
+                        if on_change:
+                            period = s.heartbeat_interval / 1e9 if s.heartbeat_interval else None
+                        else:
+                            period = max((s.sample_interval or 10_000_000_000) / 1e9, 0.1)
+                        subs.append({'sub': s, 'on_change': on_change, 'period': period,
+                                     'next': now + period if period else None,
+                                     'suppress': (not on_change) and s.suppress_redundant,
+                                     'last': json.dumps(get_value(self.state, path_elems(s.path)))})
+                    tick = 0.2
                     while context.is_active():
-                        time.sleep(interval)
+                        time.sleep(tick)
                         if not context.is_active():
                             return
-                        for m in self._updates(sub_list):
-                            yield m
+                        now = time.time()
+                        for e in subs:
+                            cur = json.dumps(get_value(self.state, path_elems(e['sub'].path)))
+                            changed = cur != e['last']
+                            due = e['next'] is not None and now >= e['next']
+                            send = (changed if e['on_change'] else due and (changed or not e['suppress'])) \
+                                or (e['on_change'] and due)
+                            if due:
+                                e['next'] = now + e['period']
+                            if send:
+                                e['last'] = cur
+                                for m in self._updates_for([e['sub']]):
+                                    yield m
                     return
                 if req.HasField('poll'):
                     if sub_list is None:
@@ -338,8 +365,11 @@ if _HAS_GRPC:
                     yield self._sync()
 
         def _updates(self, sub_list):
+            return self._updates_for(sub_list.subscription)
+
+        def _updates_for(self, subscriptions):
             now = int(time.time() * 1e9)
-            for sub in sub_list.subscription:
+            for sub in subscriptions:
                 val = get_value(self.state, path_elems(sub.path))
                 if val is None:
                     continue

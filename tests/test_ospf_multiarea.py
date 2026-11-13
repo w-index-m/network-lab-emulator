@@ -13,6 +13,13 @@ ABR 経由のエリア間経路学習を検証
 
 このテストは上記の実装挙動を正として検証する。
 
+(追記) その後、Helloの送受信はリンクごとのエリア(そのIFのIPを含む network
+文のエリア)で判定するようになった(Batfishとの差分検証で、ABRの area 0 側
+リンクで隣接が張れないバグとして発見)。CLI経由でIFにIPを振った構成の
+回帰は tests/test_external_tool_fidelity.py::TestOspfMultiAreaAbr。
+IF情報が無い(このファイルのような)エンジン単体構成では従来どおり
+ノード既定エリアにフォールバックする。
+
 実行: pytest tests/test_ospf_multiarea.py -v
 """
 

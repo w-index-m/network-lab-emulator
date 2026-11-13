@@ -564,3 +564,9 @@ def _management_ip(state):
         if ip and ip != '127.0.0.1':
             return ip
     return ''
+
+
+def active_ssh_listeners() -> dict:
+    """稼働中の実SSHリスナー {device_id: {'ip':..., 'port':...}}
+    (tools/pyats_testbed.py が pyATS testbed を作るのに使う)"""
+    return {d: {'ip': s.ip, 'port': s.port} for d, s in list(_servers.items())}

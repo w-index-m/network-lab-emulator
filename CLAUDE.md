@@ -2679,3 +2679,39 @@ Live-verified: Catalyst1⇔Catalyst2をOSPF area 0で接続
 (Vlan10/Vlan20)を配置してOSPFアジャセンシーFullを確認、
 `show ip route`でお互いの配下2セグメントを`O`として正しく学習する
 ことを確認(修正前はCatalyst2側に上記の幽霊ルートが混入していた)。
+
+**外部CLIツール4本の連携(pyATS/Genie・GoBGP・gnmic・Batfish)**: ユーザー
+依頼「CLIで使えておすすめのツールありそうですか？」→「１から4までラボに
+実装をお願いします」。詳細・ライブ検証の全文は
+`docs/external-tools-pyats-gobgp-gnmic-batfish.md`。4本とも当てたことで
+エミュレータの実バグが見つかり修正した:
+- **GoBGP**: `engine/real_bgp_agent.py`をRFC準拠に書き直し(OPEN
+  capabilities・2/4バイトAS_PATH+AS4_PATH・WITHDRAWN・自発KEEPALIVE・自経路の
+  広告・neighbor設定時の未設定ピア/AS不一致拒否・`router bgp`等で
+  `ensure_bgp_agent()`による動的起動)。`_parse_update(body)`の既定(4バイト)と
+  `start_all_bgp_agents`の引数はroute_injector互換のため維持。
+- **gnmic**: STREAM購読が全部SAMPLE扱い(既定10秒)でon-changeが即時に届かない
+  バグを修正(サブスクリプションごとのモード処理)。
+- **pyATS/Genie**: `tools/pyats_testbed.py`(testbed生成/parse/snapshot/diff)、
+  `GET /api/ssh/listeners`。修正: `show interfaces`がCisco系でもSi-R形式、
+  `show inventory`がルータでもWS-C3650(catalystは実機採取どおり3650のまま)、`show ip ssh`未実装、running-configの
+  version不一致、OSPF Dead Timeの計算、IF shutdownでstubがLSAから外れず
+  対向に経路が残る。
+- **Batfish**: `tools/batfish_snapshot.py`(running-config書き出し・解析・
+  エミュレータの`show ip route`とBatfishの計算経路の差分検証)。修正:
+  ABR(1台に複数エリア)で全IFが最後のエリアになりarea 0側の隣接が張れない
+  (Helloをリンクごとのエリアで送受信、ABRの全エリアへフラッディング)、
+  `O IA`判定/`O IA`・`O E2`がO抜きで表示、running-configの`network ... area`
+  がnetwork単位・入力表記でない、`ip access-group`が常に`lan0`に紐付き
+  running-configに出ない(インタフェースACLのデータプレーン強制は元々無い
+  既存スコープのまま)。
+- pyATS/pybatfishはシステムのdebian管理`cryptography`をpipが外せず失敗する
+  ため`python3 -m venv --system-site-packages ~/venv-netops`に入れた。
+  gnmicは`go install ...@latest`がreplace指示で失敗するのでclone→`go build`。
+  unicon用に`openssh-client`が必要。いずれもrequirementsに入れず、テストは
+  無ければskip(`tests/test_gobgp_real_peering.py`/`tests/test_gnmic_cli.py`/
+  `tests/test_pyats_batfish_tools.py`)。外部ツール非依存の回帰は
+  `tests/test_external_tool_fidelity.py`(装置IDは実行ごとにuuid付き——
+  saved_config.jsonからの復元で前回の同名装置が混ざるのを避ける。
+  conftestのautouse `_cleanup`がテストごとにOSPF等を止めるので、
+  OSPFラボはテストごとに別IDで組み直す)。

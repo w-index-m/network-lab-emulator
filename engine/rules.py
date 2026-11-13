@@ -1392,6 +1392,22 @@ class RuleEngine:
                 return self._show_file_systems(state)
             if re.match(r'^show\s+inventory$', c):
                 return self._show_inventory(state)
+            if re.match(r'^show\s+ip\s+ssh$', c):
+                if not getattr(state, 'ssh_rsa_key', False):
+                    return ('SSH Disabled - version 2.0\n'
+                            '%Please create RSA keys to enable SSH (and of atleast 768 bits for SSH v2).')
+                bits = getattr(state, 'ssh_rsa_modulus', 2048) or 2048
+                return ('SSH Enabled - version 2.0\n'
+                        'Authentication methods:publickey,keyboard-interactive,password\n'
+                        'Authentication Publickey Algorithms:rsa-sha2-256,rsa-sha2-512\n'
+                        'Hostkey Algorithms:rsa-sha2-256,rsa-sha2-512\n'
+                        'Encryption Algorithms:aes128-ctr,aes192-ctr,aes256-ctr\n'
+                        'MAC Algorithms:hmac-sha2-256,hmac-sha2-512\n'
+                        'KEX Algorithms:diffie-hellman-group14-sha256\n'
+                        'Authentication timeout: 120 secs; Authentication retries: 3\n'
+                        'Minimum expected Diffie Hellman key size : 2048 bits\n'
+                        f'IOS Keys in SECSH format(ssh-rsa, base64 encoded): {state.hostname}.netlab '
+                        f'({bits} bits)')
             if re.match(r'^show\s+environment(\s+all)?$', c):
                 return self._show_environment(state)
             if re.match(r'^show\s+sdm\s+prefer$', c):
@@ -1440,7 +1456,12 @@ class RuleEngine:
         if re.match(r'^show\s+ip\s+arp\s+inspection', c):
             return self._show_dai(state)
         if re.match(r'^show\s+interfaces?$', c):
-            return self._show_interfaces(state)
+            # 引数なしは実機IOSでは全インタフェースの詳細(個別指定と同じ形式)を
+            # 並べる。以前はdevice_typeを問わずSi-R形式の一覧を返しており、
+            # pyATS/Genieの"show interfaces"パーサが空結果になっていた
+            if state.device_type in ('sir', 'srs'):
+                return self._show_interfaces(state)
+            return "\n".join(self._show_interface_detail(n, state) for n in state.interfaces)
         if re.match(r'^show\s+interfaces?\s+(\S+)$', c):
             m = re.match(r'^show\s+interfaces?\s+(\S+)$', c)
             return self._show_interface_detail(m.group(1), state)
@@ -11554,7 +11575,32 @@ Key Version         : A
         ])
 
     def _show_inventory(self, state):
-        """show inventory"""
+        """show inventory
+
+        cisco(ISR4321)/wlc は show version と同じ機種・シリアルを返す。以前は
+        全機種で WS-C3650 のスタック構成を返しており、ルータの show version と
+        食い違っていた(pyATS/Genieで突き合わせて発見)。catalyst は実機
+        WS-C3650 の show tech-support 採取に合わせてあるので(environment/sdm
+        等と同じ採取元。tests/test_show_output_fidelity.py)そのまま。
+        """
+        if state.device_type == 'cisco':
+            items = [
+                ('Chassis', 'Cisco ISR4321 Chassis', 'ISR4321/K9', 'V08', 'FLM2xxx0001'),
+                ('Power Supply Module 0', '250W AC Power Supply for Cisco ISR 4320',
+                 'PWR-4320-AC', 'V02', 'PST2xxx0001'),
+                ('module 0', 'Cisco ISR4321 Built-In NIM controller', 'ISR4321/K9', '', ''),
+                ('NIM subslot 0/0', 'Front Panel 2 ports Gigabitethernet Module',
+                 'ISR4321-2x1GE', 'V01', ''),
+                ('module R0', 'Cisco ISR4321 Route Processor', 'ISR4321/K9', 'V08', 'FOC2xxx0001'),
+                ('module F0', 'Cisco ISR4321 Forwarding Processor', 'ISR4321/K9', '', ''),
+            ]
+        elif state.device_type == 'wlc':
+            items = [('Chassis', 'Cisco Catalyst 9800-CL Wireless Controller', 'C9800-CL-K9', 'V01',
+                      '9xxxxxxxxxx')]
+        else:
+            items = None
+        if items is not None:
+            return self._format_inventory(items)
         items = [
             ('c36xx Stack', 'c36xx Stack', 'WS-C3650-24TD-E', 'V04', 'FDO2030Q1NL'),
             ('Switch 1', 'WS-C3650-24TD-E', 'WS-C3650-24TD-E', 'V04', 'FDO2030Q1NL'),
@@ -11563,6 +11609,10 @@ Key Version         : A
             ('Switch 1 - Power Supply A', 'Switch 1 - Power Supply A',
              'PWR-C2-250WAC', 'V03', 'LIT20291GJ0'),
         ]
+        return self._format_inventory(items)
+
+    @staticmethod
+    def _format_inventory(items):
         lines = ['']
         for name, descr, pid, vid, sn in items:
             lines.append(f'NAME: "{name}", DESCR: "{descr}"')

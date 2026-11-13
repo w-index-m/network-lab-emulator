@@ -1044,6 +1044,7 @@ class OspfNeighbor:
     state: str = 'Init'      # Init / TwoWay / ExStart / Exchange / Loading / Full
     dead_task: Optional[Any] = None
     uptime: float = field(default_factory=time.time)
+    last_hello: Optional[float] = None   # 最終Hello受信時刻(Dead Time表示用)
 
 @dataclass
 class OspfLsa:
@@ -1181,6 +1182,9 @@ class OspfEngine:
         n['process_id'] = process_id
         n['hostname'] = hostname
         n['area_id'] = _normalize_area(area)
+        # running-config用に入力どおりの表記を覚える(実機IOSは"area 0"と
+        # 打てば"area 0"、"area 0.0.0.0"と打てばそのまま表示する)
+        n.setdefault('area_display', {})[n['area_id']] = str(area).strip()
         # networks追加（重複排除）
         for net in networks:
             if net not in n['networks']:
@@ -1297,6 +1301,41 @@ class OspfEngine:
                 out.add(name)
         return out
 
+    def area_for_ip(self, device_id: str, ip: str) -> str:
+        """そのIPを含む network 文のエリア(ドット形式)。見つからなければノード既定。
+
+        1台に複数エリア(ABR)を設定した時、以前はノード単位の n['area_id']
+        (=最後に入力したエリア)で全インタフェースを扱っていたため、
+        area 0 側のリンクまで area 1 として Hello を出し隣接が張れなかった
+        (Batfishとの差分検証で発見)。network 文単位でエリアを引く。
+        """
+        import ipaddress
+        n = self.nodes.get(device_id) or {}
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return n.get('area_id', '0.0.0.0')
+        best = None
+        for area, nets in self.area_networks.get(device_id, {}).items():
+            for net in nets:
+                try:
+                    nw = ipaddress.ip_network(net, strict=False)
+                except ValueError:
+                    continue
+                if addr in nw and (best is None or nw.prefixlen > best[0]):
+                    best = (nw.prefixlen, area)
+        return best[1] if best else n.get('area_id', '0.0.0.0')
+
+    def _area_for_peer(self, device_id: str, peer: str):
+        """peer へ向くインタフェースのエリア。解決できなければ None。"""
+        ifaces = icmp_engine.device_ips.get(device_id, {}).get('interfaces', {})
+        norm = {vnet._norm_iface(k): v for k, v in ifaces.items()}
+        for ifn in vnet.ifaces_between(device_id, peer) or []:
+            info = norm.get(vnet._norm_iface(ifn))
+            if isinstance(info, dict) and info.get('ip'):
+                return self.area_for_ip(device_id, info['ip'])
+        return None
+
     def _non_ospf_peers(self, device_id: str) -> set:
         """OSPFが有効なインタフェースが1本も無いピアの集合。
 
@@ -1348,6 +1387,9 @@ class OspfEngine:
             'dr': n['dr'],
             'bdr': n['bdr'],
             'neighbors': list(n['neighbors'].keys()),
+            # リンクごとのエリア(ABRはリンクによってエリアが違う)
+            'areas_by_peer': {p: a for p in vnet.links.get(device_id, set())
+                              if (a := self._area_for_peer(device_id, p))},
             'networks': n['networks'],
             'external_routes': dict(n.get('redistributed', {})),
             # このエリアがNSSAなら、再配信経路はType-7(NSSA-External)。
@@ -1380,7 +1422,9 @@ class OspfEngine:
         # 802.1Qタグ不一致 → 実機ではフレームが受信側で捨てられる
         if src_id and not vnet.vlan_tags_compatible(receiver_id, src_id):
             return
-        if _normalize_area(area_id) != n['area_id']:
+        sender_area = (msg.get('areas_by_peer') or {}).get(receiver_id, area_id)
+        local_area = self._area_for_peer(receiver_id, src_id) or n['area_id']
+        if _normalize_area(sender_area) != local_area:
             return  # エリア不一致
 
         # hello/dead interval確認（不一致なら隣接不可）
@@ -1551,6 +1595,8 @@ class OspfEngine:
             return
         if nbr.dead_task:
             nbr.dead_task.cancel()
+        # show ip ospf neighbor の Dead Time は最終Hello受信からのカウントダウン
+        nbr.last_hello = time.time()
         async def dead():
             await asyncio.sleep(n['dead_interval'])
             nd = self.nodes.get(device_id)
@@ -1579,7 +1625,26 @@ class OspfEngine:
             return
         links = []
         # ① スタブネットワーク（直接接続ネットワーク）
+        # shutdown中のインタフェースのセグメントは載せない(実機はIFダウンで
+        # そのstubをRouter LSAから外し、対向から経路が消える)。以前は
+        # network文だけを見ていたため、shutdown後も対向に経路が残っていた
+        # (pyATSのsnapshot/diffで発見)。IF情報が無い装置は従来どおり全部載せる。
+        import ipaddress as _ipa
+        _ifs = icmp_engine.device_ips.get(device_id, {}).get('interfaces', {})
+        _down = {vnet._norm_iface(x) for x in vnet.down_interfaces.get(device_id, set())}
+
+        def _stub_alive(net):
+            try:
+                nw = _ipa.ip_network(net, strict=False)
+            except ValueError:
+                return True
+            owners = [k for k, v in _ifs.items() if isinstance(v, dict) and v.get('ip')
+                      and _ipa.ip_address(v['ip']) in nw]
+            return not owners or any(vnet._norm_iface(k) not in _down for k in owners)
+
         for net in n['networks']:
+            if not _stub_alive(net):
+                continue
             parts = net.split('/')
             prefix = int(parts[1]) if len(parts) > 1 else 24
             mask_int = (0xffffffff << (32 - prefix)) & 0xffffffff
@@ -1590,6 +1655,9 @@ class OspfEngine:
                 'link_data': mask,        # サブネットマスク
                 'metric': n['interface_cost'],
                 'network': net,
+                # このnetworkのエリア(ABRでは他エリアの経路をO IAにする判断材料)
+                'area': next((a for a, nets in self.area_networks.get(device_id, {}).items()
+                              if net in nets), n['area_id']),
             })
         # ② トランジットリンク（ネイバーへのリンク）
         for nid, nbr in n['neighbors'].items():
@@ -1743,14 +1811,18 @@ class OspfEngine:
                             prefix = int(net.split('/')[1]) if '/' in net else 24
                             if net:
                                 via_str = via if via != 'direct' else 'connected'
+                                # 自分が属していないエリアのstubは、ABRが要約して
+                                # 配ったエリア間経路(O IA)として扱う
+                                my_areas = set(self.area_networks.get(device_id, {})) or {n['area_id']}
+                                l_area = link.get('area', n['area_id'])
                                 routes.append({
                                     'network': link['link_id'],
                                     'prefix': str(prefix),
                                     'metric': link_cost,
                                     'via': via_str,
                                     'next_hop': nh or cur_rid,
-                                    'type': 'O',
-                                    'area': n['area_id'],
+                                    'type': 'O' if l_area in my_areas else 'O IA',
+                                    'area': l_area,
                                 })
 
                         elif ltype in ('transit', 'p2p'):
@@ -1855,14 +1927,27 @@ class OspfEngine:
             'type': 'ospf_routes', 'routes': nbr_node['routes']
         })
 
+    def refresh_local_networks(self, device_id: str):
+        """自装置のIF up/downでstubが変わった時にRouter LSAを作り直して
+        属する全エリアへ流す(対向で経路が追加/撤回される)。"""
+        n = self.nodes.get(device_id)
+        if not n or not n.get('enabled'):
+            return
+        for area in set(self.area_networks.get(device_id, {})) | {n['area_id']}:
+            self._flood_lsdb_area(area)
+
     def _flood_lsdb_area(self, area_id: str):
         """
         指定エリア内でLSDBを隣接関係に沿ってフラッディングし、収束(fixpoint)まで
         相互マージする。実機OSPFのType1/2 LSA面的フラッディングを再現。
         収束後、対象ノード全てでSPFを再計算する。
         """
+        # ABRは複数エリアに属する(area_networksで判定)。ノード既定エリアだけで
+        # 見るとABRのもう一方のエリアへフラッディングされなかった
+        def _in_area(d, nn):
+            return nn.get('area_id') == area_id or area_id in self.area_networks.get(d, {})
         active = [d for d, nn in self.nodes.items()
-                  if nn.get('enabled') and nn.get('area_id') == area_id]
+                  if nn.get('enabled') and _in_area(d, nn)]
         # フラッディング前に全ノードのRouter/Network/Summary LSAを最新化する。
         # これにより「R1のRouter LSAが古くR2へのリンクを含まない」等の順序依存を排除。
         for d in active:
@@ -1879,7 +1964,7 @@ class OspfEngine:
                 n = self.nodes[d]
                 for peer in vnet.get_neighbors(d):
                     pn = self.nodes.get(peer)
-                    if not pn or not pn.get('enabled') or pn.get('area_id') != area_id:
+                    if not pn or not pn.get('enabled') or not _in_area(peer, pn):
                         continue
                     # peer が shutdown 中のリンクはフラッディング対象外
                     for key, lsa in list(pn['lsdb'].items()):
@@ -1962,8 +2047,15 @@ class OspfEngine:
                     role = 'DROTHER'
             state_str = f'{nbr.state}/{role}'
             # Dead timeカウントダウン（HH:MM:SS形式）
-            elapsed = time.time() - nbr.uptime
-            dead_left = max(0, n['dead_interval'] - (elapsed % n['dead_interval']))
+            # 実機は最終Hello受信から dead_interval をカウントダウンする
+            # (Hello10/Dead40なら概ね30〜39秒)。以前は「隣接確立からの経過
+            # mod dead_interval」で、0〜40秒を不規則に回っていた。
+            last = getattr(nbr, 'last_hello', None)
+            if last:
+                dead_left = max(0, n['dead_interval'] - (time.time() - last))
+            else:
+                elapsed = time.time() - nbr.uptime
+                dead_left = max(0, n['dead_interval'] - (elapsed % n['dead_interval']))
             h = int(dead_left // 3600)
             m = int((dead_left % 3600) // 60)
             s_ = int(dead_left % 60)
@@ -2152,7 +2244,7 @@ class OspfEngine:
             state_str = 'administratively down' if down else 'up'
             proto = 'down' if down else 'up'
             lines.append(f'{name} is {state_str}, line protocol is {proto}')
-            lines.append(f'  Internet Address {ip}/{prefix}, Area {n["area_id"]}')
+            lines.append(f'  Internet Address {ip}/{prefix}, Area {self.area_for_ip(device_id, ip)}')
             lines.append(f'  Process ID {n["process_id"]}, Router ID {n["router_id"]}, '
                          f'Network Type BROADCAST, Cost: {n["interface_cost"]}')
             lines.append(f'  Transmit Delay is 1 sec, State {role}, '
@@ -4500,7 +4592,9 @@ class RibEngine:
                 # （実機は "O E2" のように2文字目でOSPF経路の種別を示す）。
                 # 単一文字コードと同じ合計9桁の幅に揃える。
                 # EIGRPの再配信経路は "D EX" で表示する（内部経路の D と区別）
-                disp_code = r.get('ospf_code') or (
+                # 実機は "O E2"/"O IA"/"O N2" と O を付けて出す。以前は細分コード
+                # だけ("E2"/"IA")を表示しており、コメントの意図とも食い違っていた
+                disp_code = (f"O {r['ospf_code']}" if r.get('ospf_code') else None) or (
                     'D EX' if r.get('eigrp_external') else code)
                 prefix = f'{disp_code}{star}'.ljust(9)
                 # RIP/BGPはnext_hopにデバイスIDを、OSPFはrouter-idを内部的に

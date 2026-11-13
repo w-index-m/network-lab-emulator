@@ -2032,6 +2032,15 @@ async def cli_command(body: dict):
         from engine.radius_server import ensure_radius_server
         ensure_radius_server(device_id, state)
 
+    # ── 実BGP(TCP/179): `router bgp`/`neighbor`/IP変更後に、変更後の管理IPで
+    # パッシブリスナーを起動/張り直す(起動時に居なかった装置もGoBGP/FRR等と
+    # 実ピアリングできるように)。他の実リスナーと同じ理由でprocess()の後。
+    if re.match(r'\s*(router\s+bgp|neighbor\s|network\s|ip\s+addr)', command, re.I):
+        from engine.protocols import bgp_engine as _bgp_eng
+        if device_id in _bgp_eng.nodes:
+            from engine.real_bgp_agent import ensure_bgp_agent
+            await ensure_bgp_agent(device_id, device_sessions, _bgp_eng)
+
     # ── 802.1X: shutdown/no shutdown等でvnet上のポート状態が変わっても、
     # 未認証の802.1Xポートは通さない状態を維持する。
     if getattr(state, 'dot1x', None):
@@ -2101,6 +2110,10 @@ async def cli_command(body: dict):
             await _flap_interface_down(device_id, state, iface_for_flap)
         elif _flap_action == 'up':
             await _flap_interface_up(device_id, state, iface_for_flap)
+    if _flap_targets and ospf_engine.nodes.get(device_id, {}).get('enabled'):
+        # 隣接に関係ないLAN側IFのup/downでも、そのstubの広告/撤回は要る
+        _register_icmp(device_id)
+        ospf_engine.refresh_local_networks(device_id)
 
     if re.search(r'ip\s+addr(?:ess)?|ip\s+route|remote\s+\d+\s+ip\s+route|'
                  r'ipv6\s+addr(?:ess)?|ipv6\s+route|'  # IPv6アドレス/スタティック経路
@@ -3217,8 +3230,15 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     acl_apply = re.match(r'^ip\s+access-group\s+(\S+)\s+(in|out)', c)
     if acl_apply:
         _og = orig_groups(acl_apply, orig)
-        ipfilter_engine.apply_acl(device_id, 'lan0', acl_apply.group(2),
+        # config-ifで打たれたら「そのインタフェース」に適用する。以前は常に
+        # 'lan0'固定で、どのインタフェースに打ってもrunning-configに出ず
+        # (Batfish連携で発見)、複数インタフェースの区別もできなかった。
+        _acl_if = (state.current_if if state.mode.startswith('config-if')
+                   and getattr(state, 'current_if', None) else 'lan0')
+        ipfilter_engine.apply_acl(device_id, _acl_if, acl_apply.group(2),
                                   _og.group(1))
+        if _acl_if in getattr(state, 'interfaces', {}):
+            state.interfaces[_acl_if][f'acl_{acl_apply.group(2)}'] = _og.group(1)
         return
     sir_acl_apply = re.match(r'^lan\s+(\d+)\s+acl\s+(\S+)\s+(in|out)', orig, re.I)
     if sir_acl_apply:
@@ -6024,7 +6044,8 @@ def _build_running_config(device_id: str, state) -> str:
             lines.append('')
             lines.append('Current configuration : ' + str(random.randint(1500, 4000)) + ' bytes')
             lines.append('!')
-            lines.append('version 17.3')
+            # show version(17.9.1 / 17.09.01)と揃える。以前は17.3で食い違っていた
+            lines.append('version 17.9')
             lines.append('!')
         lines.append(f'hostname {state.hostname}')
         lines.append('!')
@@ -6277,6 +6298,9 @@ def _build_running_config(device_id: str, state) -> str:
                     lines.append(' switchport mode trunk')
                 else:
                     lines.append(' no ip address')
+                for _dir in ('in', 'out'):
+                    if iinfo.get(f'acl_{_dir}'):
+                        lines.append(f' ip access-group {iinfo[f"acl_{_dir}"]} {_dir}')
                 from engine.nac import switch_running_config_interface
                 lines.extend(switch_running_config_interface(state, ifname))
                 # PPPoEサーバ: Virtual-Template配下の設定
@@ -6372,7 +6396,12 @@ def _build_running_config(device_id: str, state) -> str:
                     _wc_int = 0x000000ff
                 _wc = '.'.join(str((_wc_int >> s) & 0xff)
                                for s in (24, 16, 8, 0))
-                lines.append(f' network {_n} {_wc} area {on["area_id"]}')
+                # マルチエリア構成ではnetworkごとにエリアが違う。以前は全行を
+                # 最後に入力したエリア(on['area_id'])で出していた
+                _aid_net = next((a for a, nets in ospf_engine.area_networks.get(device_id, {}).items()
+                                 if net in nets), on['area_id'])
+                _aid_disp = on.get('area_display', {}).get(_aid_net, _aid_net)
+                lines.append(f' network {_n} {_wc} area {_aid_disp}')
             for _aid, _atype in sorted(on.get('area_types', {}).items()):
                 if _atype in ('nssa', 'stub'):
                     lines.append(f' area {_aid} {_atype}')
@@ -7901,7 +7930,8 @@ def _stop_real_listeners(dev_id: str):
                     ('engine.ssh_cli_agent', 'stop_ssh_cli_agent'),
                     ('engine.telnet_cli_agent', 'stop_telnet_cli_agent'),
                     ('engine.real_ospf_agent', 'stop_ospf_agent'),
-                    ('engine.radius_server', 'stop_radius_server')):
+                    ('engine.radius_server', 'stop_radius_server'),
+                    ('engine.real_bgp_agent', 'stop_bgp_agent')):
         try:
             m = __import__(mod, fromlist=[fn])
             getattr(m, fn)(dev_id)
@@ -9045,6 +9075,13 @@ async def nexus_dashboard():
         "switches": switches,
         "vnis": vni_list,
     }
+
+
+@app.get("/api/ssh/listeners")
+async def ssh_listeners():
+    """実SSHリスナーが動いている装置と待ち受けIP/ポート(pyATS testbed生成用)"""
+    from engine.ssh_cli_agent import active_ssh_listeners
+    return active_ssh_listeners()
 
 
 @app.get("/api/topology")
