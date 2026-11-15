@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Traffic Flow</title>
+<style>
+  :root {
+    --bg: #03060d; --panel: rgba(8, 16, 30, 0.86); --line: #16304d;
+    --text: #cfe3ff; --dim: #6c86a6; --accent: #39d0ff; --ok: #4dffb8; --ng: #ff4d6a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.45 "Segoe UI", "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: block; }
+  header { position: fixed; top: 0; left: 0; right: 0; display: flex; align-items: center; gap: 16px;
+    padding: 10px 16px; background: linear-gradient(var(--panel), rgba(8,16,30,0)); pointer-events: none; }
+  header h1 { margin: 0; font-size: 15px; letter-spacing: .18em; color: var(--accent); font-weight: 600;
+    text-shadow: 0 0 12px rgba(57,208,255,.6); white-space: nowrap; }
+  header h1 small { color: var(--dim); letter-spacing: .05em; font-weight: 400; margin-left: 8px; }
+  .stats { display: flex; gap: 18px; flex-wrap: wrap; }
+  .stat b { display: block; font-size: 16px; color: #fff; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--dim); font-size: 11px; }
+  #status { margin-left: auto; font-size: 12px; color: var(--dim); white-space: nowrap; }
+  #status.err { color: var(--ng); }
+  aside { position: fixed; right: 12px; top: 64px; bottom: 12px; width: 330px; display: flex;
+    flex-direction: column; gap: 10px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .card h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .12em; color: var(--accent); font-weight: 600; }
+  #log { flex: 1; overflow: auto; min-height: 120px; }
+  #log ol { list-style: none; margin: 0; padding: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+  #log li { padding: 4px 0; border-bottom: 1px solid rgba(22,48,77,.6); display: grid;
+    grid-template-columns: 52px 1fr auto; gap: 6px; align-items: baseline; }
+  #log li .t { color: var(--dim); }
+  #log li .r { color: var(--ok); } #log li.ng .r { color: var(--ng); }
+  #log li .p { grid-column: 2 / 4; color: var(--dim); font-size: 11px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  #top table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  #top td { padding: 3px 0; } #top td:last-child { text-align: right; color: #fff; }
+  form { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--dim); }
+  input, select, button { font: inherit; color: var(--text); background: #0b1626; border: 1px solid var(--line);
+    border-radius: 5px; padding: 5px 7px; min-width: 0; }
+  button { cursor: pointer; background: #0f3352; border-color: #1f5b86; color: #e6f6ff; }
+  button:hover { background: #154772; }
+  .row { grid-column: 1 / 3; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+  .legend i { display: inline-block; width: 90px; height: 6px; border-radius: 3px;
+    background: linear-gradient(90deg, #2b5cff, #19d3ff, #34ff9a, #ffe14d, #ff5a3c); }
+  #empty { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); text-align: center;
+    color: var(--dim); max-width: 420px; display: none; }
+  #empty code { color: var(--accent); }
+  .muted { color: var(--dim); font-size: 11px; }
+  @media (max-width: 760px) {
+    aside { position: fixed; left: 12px; right: 12px; top: auto; bottom: 12px; width: auto; height: 42vh; }
+    header .stats { display: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<header>
+  <h1>TRAFFIC FLOW<small>NIRVANA-style</small></h1>
+  <div class="stats">
+    <div class="stat"><b id="s-nodes">-</b><span>装置</span></div>
+    <div class="stat"><b id="s-links">-</b><span>リンク</span></div>
+    <div class="stat"><b id="s-bps">-</b><span>合計トラフィック</span></div>
+    <div class="stat"><b id="s-epm">-</b><span>通信/分</span></div>
+  </div>
+  <div id="status">接続中…</div>
+</header>
+<div id="empty">リンクで繋がった装置がまだありません。<br>
+  メイン画面で装置同士をリンクするか、<code>iac/cisco-traffic-monitoring/lab/provision_cisco_lab.sh</code>
+  でラボを作ってください。</div>
+<aside>
+  <div class="card">
+    <h2>テストトラフィック</h2>
+    <form id="gen">
+      <label>送信元<select id="g-src"></select></label>
+      <label>宛先IP<input id="g-dst" placeholder="10.240.2.1" required></label>
+      <label>回数 (repeat)<input id="g-rep" type="number" min="1" max="100000" value="500"></label>
+      <label>サイズ (byte)<input id="g-size" type="number" min="36" max="18024" value="1500"></label>
+      <div class="row"><button type="submit">ping 送信</button>
+        <span class="muted" id="g-msg"></span></div>
+    </form>
+  </div>
+  <div class="card" id="top"><h2>リンク流量 TOP</h2><table><tbody></tbody></table>
+    <div class="legend" style="margin-top:6px">低 <i></i> 高 <span>(1kbps〜1Gbps, 対数)</span></div></div>
+  <div class="card" id="log"><h2>通信ログ</h2><ol></ol></div>
+</aside>
+<script>
+(() => {
+  'use strict';
+  const SESSION_KEY = 'netlabToken_v1';      // index.html / dashboard.html と同じキー
+  const POS_KEY = 'trafficFlowPositions_v1';
+  const POLL_MS = 2000;
+  const cv = document.getElementById('stage');
+  const ctx = cv.getContext('2d');
+  const $ = id => document.getElementById(id);
+
+  let W = 0, H = 0, DPR = 1;
+  const nodes = new Map();     // id -> {id, hostname, type, fx, fy, bps, pulse}
+  let links = [];              // {a, b, key, iface_a, iface_b, down, ab, ba (bps), lastAB, lastBA}
+  const particles = [];        // 常時流れる粒 {link, dir, t, speed, color}
+  const comets = [];           // 通信イベントの彗星 {path, hop, t, ok, bytes}
+  const ripples = [];          // {id, t, color}
+  const recent = [];           // 直近のイベント時刻(通信/分)
+  let lastSeq = 0, lastNow = 0, firstPoll = true, hover = null, drag = null;
+
+  function token() { try { return localStorage.getItem(SESSION_KEY) || ''; } catch (e) { return ''; } }
+  function api(path, opts = {}) {
+    const t = token();
+    return fetch(path, {...opts, headers: {'Content-Type': 'application/json',
+      ...(t ? {'X-Session-Token': t} : {}), ...(opts.headers || {})}});
+  }
+  function loadPos() { try { return JSON.parse(localStorage.getItem(POS_KEY) || '{}'); } catch (e) { return {}; } }
+  function savePos() {
+    const o = {}; nodes.forEach(n => { o[n.id] = [n.fx, n.fy]; });
+    try { localStorage.setItem(POS_KEY, JSON.stringify(o)); } catch (e) { /* 保存できなくても動く */ }
+  }
+
+  // ── 傾いた床面への投影(NIRVANAの斜め見下ろし視点) ──
+  function floor() {
+    // 狭い画面ではサイドパネルが下半分(42vh)を占めるので、床面を上に寄せる
+    const wide = W > 760, side = wide ? 360 : 0;
+    const w = W - side, top = H * (wide ? 0.2 : 0.1), fh = H * (wide ? 0.62 : 0.38);
+    return {cx: w / 2, top, fh, R: Math.min(w * 0.46, fh * 1.3)};
+  }
+  function proj(fx, fy) {
+    const f = floor(), d = (fy + 1) / 2;          // 0=奥, 1=手前
+    const k = 0.62 + 0.45 * d;                     // 奥ほど小さく
+    return {x: f.cx + fx * f.R * k, y: f.top + d * f.fh, k};
+  }
+  function unproj(x, y) {
+    const f = floor(), d = Math.max(0, Math.min(1, (y - f.top) / f.fh));
+    const k = 0.62 + 0.45 * d;
+    return {fx: Math.max(-1, Math.min(1, (x - f.cx) / (f.R * k))), fy: d * 2 - 1};
+  }
+
+  // ── 色(流量の対数スケール) ──
+  const STOPS = [[43, 92, 255], [25, 211, 255], [52, 255, 154], [255, 225, 77], [255, 90, 60]];
+  function level(bps) { return bps <= 0 ? 0 : Math.max(0, Math.min(1, (Math.log10(bps) - 3) / 6)); }
+  function color(l, a = 1) {
+    const x = l * (STOPS.length - 1), i = Math.min(STOPS.length - 2, Math.floor(x)), t = x - i;
+    const c = STOPS[i].map((v, j) => Math.round(v + (STOPS[i + 1][j] - v) * t));
+    return `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+  }
+  function fmtBps(v) {
+    if (!v) return '0 bps';
+    const u = ['bps', 'kbps', 'Mbps', 'Gbps']; let i = 0;
+    while (v >= 1000 && i < u.length - 1) { v /= 1000; i++; }
+    return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${u[i]}`;
+  }
+  function fmtBytes(v) {
+    const u = ['B', 'KB', 'MB', 'GB']; let i = 0;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${u[i]}`;
+  }
+  const short = n => (nodes.get(n) || {}).hostname || n;
+
+  // ── 初期配置: 保存位置 → なければ簡易フォースレイアウト ──
+  function layout(newIds) {
+    const saved = loadPos();
+    newIds.forEach((id, i) => {
+      const n = nodes.get(id);
+      if (saved[id]) { [n.fx, n.fy] = saved[id]; return; }
+      const a = (i / Math.max(1, newIds.length)) * Math.PI * 2;
+      n.fx = Math.cos(a) * 0.6 + (Math.random() - .5) * .1;
+      n.fy = Math.sin(a) * 0.6 + (Math.random() - .5) * .1;
+      n.free = true;
+    });
+    const free = [...nodes.values()].filter(n => n.free);
+    if (!free.length) return;
+    const all = [...nodes.values()];
+    for (let it = 0; it < 300; it++) {
+      all.forEach(n => { n.vx = 0; n.vy = 0; });
+      for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+        const p = all[i], q = all[j], dx = p.fx - q.fx, dy = p.fy - q.fy;
+        const d2 = Math.max(0.01, dx * dx + dy * dy), f = 0.012 / d2;
+        p.vx += dx * f; p.vy += dy * f; q.vx -= dx * f; q.vy -= dy * f;
+      }
+      links.forEach(l => {
+        const p = nodes.get(l.a), q = nodes.get(l.b); if (!p || !q) return;
+        const dx = q.fx - p.fx, dy = q.fy - p.fy, d = Math.hypot(dx, dy) || .01, f = (d - 0.55) * 0.05;
+        p.vx += dx / d * f; p.vy += dy / d * f; q.vx -= dx / d * f; q.vy -= dy / d * f;
+      });
+      free.forEach(n => {
+        n.fx = Math.max(-0.95, Math.min(0.95, n.fx + n.vx));
+        n.fy = Math.max(-0.95, Math.min(0.95, n.fy + n.vy));
+      });
+    }
+    free.forEach(n => { delete n.free; });
+    savePos();
+  }
+
+  // ── データ取得 ──
+  async function poll() {
+    try {
+      const r = await api(`/api/traffic/flowmap?since=${lastSeq}`);
+      if (r.status === 401) throw new Error('未ログインです。メイン画面でログインしてから開き直してください');
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      apply(data);
+      $('status').textContent = `更新 ${new Date().toLocaleTimeString()}`;
+      $('status').className = '';
+    } catch (e) {
+      $('status').textContent = String(e.message || e);
+      $('status').className = 'err';
+    }
+    setTimeout(poll, POLL_MS);
+  }
+
+  function apply(data) {
+    const dt = lastNow ? Math.max(0.5, data.now - lastNow) : 0;
+    lastNow = data.now;
+    const newIds = [];
+    const seen = new Set();
+    data.nodes.forEach(n => {
+      seen.add(n.id);
+      if (!nodes.has(n.id)) { nodes.set(n.id, {...n, bps: 0, pulse: 0}); newIds.push(n.id); }
+      else Object.assign(nodes.get(n.id), {hostname: n.hostname, type: n.type});
+    });
+    [...nodes.keys()].forEach(id => { if (!seen.has(id)) nodes.delete(id); });
+    const prev = new Map(links.map(l => [l.key, l]));
+    links = data.links.map(l => {
+      const key = `${l.a}|${l.b}`, p = prev.get(key);
+      const ab = p && dt ? Math.max(0, (l.ab_bytes - p.lastAB) * 8 / dt) : 0;
+      const ba = p && dt ? Math.max(0, (l.ba_bytes - p.lastBA) * 8 / dt) : 0;
+      return {...l, key, ab, ba, lastAB: l.ab_bytes, lastBA: l.ba_bytes};
+    });
+    if (newIds.length) layout(newIds);
+    nodes.forEach(n => { n.bps = 0; });
+    links.forEach(l => {
+      const a = nodes.get(l.a), b = nodes.get(l.b);
+      if (a) a.bps += l.ab + l.ba; if (b) b.bps += l.ab + l.ba;
+    });
+    data.events.forEach(e => {
+      lastSeq = Math.max(lastSeq, e.seq);
+      if (firstPoll) { logEvent(e); return; }   // 開いた時点の過去分はログだけ
+      launch(e); logEvent(e); recent.push(performance.now());
+    });
+    if (firstPoll && data.seq) lastSeq = data.seq;
+    firstPoll = false;
+    renderSide();
+    $('empty').style.display = nodes.size ? 'none' : 'block';
+  }
+
+  function launch(e) {
+    const path = e.path.filter(id => nodes.has(id));
+    ripples.push({id: e.src, t: 0, color: e.ok ? '#4dffb8' : '#ff4d6a'});
+    if (path.length < 2) return;
+    // バイト数が多いほど粒を多く・明るく(1発〜6発)
+    const n = Math.min(6, 1 + Math.floor(Math.log10(Math.max(10, e.bytes)) - 2));
+    for (let i = 0; i < n; i++) {
+      comets.push({path, hop: 0, t: -i * 0.18, ok: e.ok, size: 2.5 + Math.min(3, Math.log10(e.bytes) / 2),
+                   dst: e.dst, back: false, reply: e.ok});
+    }
+  }
+
+  // ── サイドパネル ──
+  function logEvent(e) {
+    const ol = $('log').querySelector('ol');
+    const li = document.createElement('li');
+    if (!e.ok) li.className = 'ng';
+    const t = new Date(e.t * 1000).toLocaleTimeString().slice(0, 8);
+    li.innerHTML = '<span class="t"></span><span class="s"></span><span class="r"></span><span class="p"></span>';
+    li.querySelector('.t').textContent = t;
+    li.querySelector('.s').textContent = `${short(e.src)} → ${e.dst ? short(e.dst) : e.dst_ip}`;
+    li.querySelector('.r').textContent = e.ok ? fmtBytes(e.bytes) : '到達不可';
+    li.querySelector('.p').textContent =
+      `${e.proto.toUpperCase()} ${e.pkts}発  経路: ${e.path.map(short).join(' › ') || '-'}`;
+    ol.prepend(li);
+    while (ol.children.length > 60) ol.lastChild.remove();
+  }
+  function renderSide() {
+    $('s-nodes').textContent = nodes.size;
+    $('s-links').textContent = links.length;
+    $('s-bps').textContent = fmtBps(links.reduce((s, l) => s + l.ab + l.ba, 0));
+    const now = performance.now();
+    while (recent.length && now - recent[0] > 60000) recent.shift();
+    $('s-epm').textContent = recent.length;
+    const tb = $('top').querySelector('tbody');
+    tb.textContent = '';
+    const rows = links.flatMap(l => [[l.a, l.b, l.ab], [l.b, l.a, l.ba]])
+      .filter(r => r[2] > 0).sort((x, y) => y[2] - x[2]).slice(0, 6);
+    if (!rows.length) {
+      tb.innerHTML = '<tr><td class="muted">流れている通信はありません</td><td></td></tr>';
+    }
+    rows.forEach(([a, b, v]) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td></td><td></td>';
+      tr.children[0].textContent = `${short(a)} → ${short(b)}`;
+      tr.children[1].textContent = fmtBps(v);
+      tr.children[1].style.color = color(level(v));
+      tb.appendChild(tr);
+    });
+    const sel = $('g-src'), cur = sel.value;
+    const ids = [...nodes.values()].sort((x, y) => x.hostname.localeCompare(y.hostname));
+    if (sel.options.length !== ids.length) {
+      sel.textContent = '';
+      ids.forEach(n => sel.add(new Option(`${n.hostname} (${n.type})`, n.id)));
+      if (cur) sel.value = cur;
+    }
+  }
+
+  $('gen').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const src = $('g-src').value, dst = $('g-dst').value.trim();
+    const rep = +$('g-rep').value || 5, size = +$('g-size').value || 100;
+    if (!src || !/^\d+\.\d+\.\d+\.\d+$/.test(dst)) { $('g-msg').textContent = '送信元と宛先IPを指定してください'; return; }
+    $('g-msg').textContent = '送信中…';
+    try {
+      const r = await api('/api/cli', {method: 'POST',
+        body: JSON.stringify({device_id: src, command: `ping ${dst} repeat ${rep} size ${size}`})});
+      const out = (await r.json()).output || '';
+      const m = out.match(/Success rate is (\d+) percent \((\d+\/\d+)\)/) ||
+                out.match(/(\d+)% packet loss/);
+      $('g-msg').textContent = m ? m[0] : out.split('\n').pop().slice(0, 60);
+    } catch (e) { $('g-msg').textContent = String(e); }
+  });
+
+  // ── 描画 ──
+  function resize() {
+    DPR = window.devicePixelRatio || 1;
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = W * DPR; cv.height = H * DPR;
+    cv.style.width = W + 'px'; cv.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+
+  function drawFloor() {
+    const g = ctx.createRadialGradient(W * .4, H * .55, 10, W * .4, H * .55, Math.max(W, H) * .8);
+    g.addColorStop(0, '#071428'); g.addColorStop(1, '#02040a');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    ctx.lineWidth = 1;
+    for (let i = -10; i <= 10; i++) {
+      const v = i / 10;
+      const a1 = proj(v, -1), a2 = proj(v, 1), b1 = proj(-1, v), b2 = proj(1, v);
+      ctx.strokeStyle = `rgba(40, 110, 170, ${i % 5 === 0 ? .22 : .09})`;
+      ctx.beginPath(); ctx.moveTo(a1.x, a1.y); ctx.lineTo(a2.x, a2.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(b1.x, b1.y); ctx.lineTo(b2.x, b2.y); ctx.stroke();
+    }
+  }
+
+  function linkPts(l) {
+    const a = nodes.get(l.a), b = nodes.get(l.b);
+    return a && b ? [proj(a.fx, a.fy), proj(b.fx, b.fy)] : null;
+  }
+
+  function drawLinks() {
+    links.forEach(l => {
+      const p = linkPts(l); if (!p) return;
+      const lv = level(Math.max(l.ab, l.ba));
+      ctx.save();
+      if (l.down) { ctx.setLineDash([6, 6]); ctx.strokeStyle = 'rgba(255,77,106,.7)'; ctx.lineWidth = 1.5; }
+      else {
+        ctx.strokeStyle = color(lv, .35 + lv * .5); ctx.lineWidth = 1.2 + lv * 5;
+        ctx.shadowColor = color(lv, .9); ctx.shadowBlur = 4 + lv * 14;
+      }
+      ctx.beginPath(); ctx.moveTo(p[0].x, p[0].y); ctx.lineTo(p[1].x, p[1].y); ctx.stroke();
+      ctx.restore();
+      if (hover && (hover === l.a || hover === l.b)) {
+        const m = {x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2};
+        ctx.fillStyle = '#e6f6ff'; ctx.font = '11px system-ui';
+        ctx.fillText(`${short(l.a)}→${short(l.b)} ${fmtBps(l.ab)} / ← ${fmtBps(l.ba)}`, m.x + 6, m.y - 6);
+      }
+    });
+  }
+
+  // 常時の粒: リンクの方向ごとに流量(対数)に比例した数を流す
+  function spawnParticles(dt) {
+    links.forEach(l => {
+      if (l.down) return;
+      [['ab', l.ab], ['ba', l.ba]].forEach(([dir, bps]) => {
+        const lv = level(bps); if (lv <= 0) return;
+        if (Math.random() < dt * (0.6 + lv * 9)) {
+          particles.push({l, dir, t: 0, speed: 0.25 + lv * 0.5 + Math.random() * .1, color: color(lv)});
+        }
+      });
+    });
+    if (particles.length > 1500) particles.splice(0, particles.length - 1500);
+  }
+  function drawParticles(dt) {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const q = particles[i]; q.t += dt * q.speed;
+      const p = linkPts(q.l);
+      if (!p || q.t >= 1 || !links.includes(q.l)) { particles.splice(i, 1); continue; }
+      const [s, e] = q.dir === 'ab' ? p : [p[1], p[0]];
+      // 進行方向に対して少し横にずらし、往路と復路を別レーンにする
+      const nx = -(e.y - s.y), ny = e.x - s.x, nl = Math.hypot(nx, ny) || 1, off = 3;
+      const x = s.x + (e.x - s.x) * q.t + nx / nl * off, y = s.y + (e.y - s.y) * q.t + ny / nl * off;
+      ctx.fillStyle = q.color; ctx.shadowColor = q.color; ctx.shadowBlur = 8;
+      ctx.beginPath(); ctx.arc(x, y, 1.8, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+  }
+
+  // 通信イベント: 経路を1ホップずつたどる彗星。到達後はEcho Replyとして戻る
+  function drawComets(dt) {
+    for (let i = comets.length - 1; i >= 0; i--) {
+      const c = comets[i]; c.t += dt * 1.6;
+      if (c.t < 0) continue;
+      while (c.t >= 1) {
+        c.t -= 1; c.hop++;
+        if (c.hop >= c.path.length - 1) {
+          const end = c.path[c.path.length - 1];
+          if (!c.back) ripples.push({id: end, t: 0, color: c.ok ? '#39d0ff' : '#ff4d6a'});
+          if (!c.back && c.reply) { c.back = true; c.path = [...c.path].reverse(); c.hop = 0; }
+          else { comets.splice(i, 1); c.dead = true; break; }
+        }
+      }
+      if (c.dead) continue;
+      const a = nodes.get(c.path[c.hop]), b = nodes.get(c.path[c.hop + 1]);
+      if (!a || !b) { comets.splice(i, 1); continue; }
+      const s = proj(a.fx, a.fy), e = proj(b.fx, b.fy);
+      const col = !c.ok ? '255,77,106' : c.back ? '77,255,184' : '230,250,255';
+      for (let k = 0; k < 8; k++) {           // 尾
+        const tt = Math.max(0, c.t - k * 0.035);
+        const x = s.x + (e.x - s.x) * tt, y = s.y + (e.y - s.y) * tt;
+        ctx.fillStyle = `rgba(${col},${(1 - k / 8) * .9})`;
+        ctx.shadowColor = `rgba(${col},1)`; ctx.shadowBlur = k ? 0 : 18;
+        ctx.beginPath(); ctx.arc(x, y, c.size * (1 - k / 10), 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.shadowBlur = 0;
+    }
+  }
+
+  function drawNodes(dt) {
+    [...nodes.values()].sort((x, y) => x.fy - y.fy).forEach(n => {
+      const p = proj(n.fx, n.fy), lv = level(n.bps);
+      const h = (14 + lv * 70) * p.k;              // 柱の高さ = 装置を通る流量
+      const w = 9 * p.k;
+      const g = ctx.createLinearGradient(p.x, p.y - h, p.x, p.y);
+      g.addColorStop(0, color(lv, .05)); g.addColorStop(1, color(lv, .55));
+      ctx.fillStyle = g; ctx.fillRect(p.x - w / 2, p.y - h, w, h);
+      ctx.save();
+      ctx.shadowColor = color(lv, 1); ctx.shadowBlur = 16 + lv * 20;
+      ctx.fillStyle = n.id === hover ? '#ffffff' : color(Math.max(lv, .25), .95);
+      ctx.beginPath(); ctx.ellipse(p.x, p.y, 11 * p.k, 5.5 * p.k, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      ctx.fillStyle = '#e6f6ff'; ctx.font = `${Math.round(11 + 2 * p.k)}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.fillText(n.hostname, p.x, p.y - h - 6);
+      ctx.fillStyle = 'rgba(160,190,225,.75)'; ctx.font = '10px system-ui';
+      ctx.fillText(n.type + (n.bps ? '  ' + fmtBps(n.bps) : ''), p.x, p.y + 17 * p.k);
+      ctx.textAlign = 'start';
+    });
+  }
+
+  function drawRipples(dt) {
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const r = ripples[i]; r.t += dt;
+      const n = nodes.get(r.id);
+      if (!n || r.t > 1.2) { ripples.splice(i, 1); continue; }
+      const p = proj(n.fx, n.fy);
+      ctx.strokeStyle = r.color; ctx.globalAlpha = 1 - r.t / 1.2; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.ellipse(p.x, p.y, (10 + r.t * 40) * p.k, (5 + r.t * 20) * p.k, 0, 0, Math.PI * 2);
+      ctx.stroke(); ctx.globalAlpha = 1;
+    }
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    drawFloor(); drawLinks(); spawnParticles(dt); drawParticles(dt);
+    drawComets(dt); drawRipples(dt); drawNodes(dt);
+    requestAnimationFrame(frame);
+  }
+
+  // ── ドラッグで装置を動かす ──
+  function nodeAt(x, y) {
+    let best = null, bd = 22;
+    nodes.forEach(n => { const p = proj(n.fx, n.fy), d = Math.hypot(p.x - x, p.y - y); if (d < bd) { bd = d; best = n.id; } });
+    return best;
+  }
+  cv.addEventListener('pointerdown', e => { drag = nodeAt(e.clientX, e.clientY); if (drag) cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointermove', e => {
+    if (drag) { const f = unproj(e.clientX, e.clientY), n = nodes.get(drag); if (n) { n.fx = f.fx; n.fy = f.fy; } }
+    hover = drag || nodeAt(e.clientX, e.clientY);
+    cv.style.cursor = hover ? 'grab' : 'default';
+  });
+  cv.addEventListener('pointerup', () => { if (drag) savePos(); drag = null; });
+
+  resize();
+  requestAnimationFrame(frame);
+  poll();
+})();
+</script>
+</body>
+</html>

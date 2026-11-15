@@ -5280,9 +5280,16 @@ class IcmpEngine:
         # 同一IPを持つ非隣接のデフォルト機器へ誤って解決しないようにする。
         for peer in neighbors:
             if next_hop_ip in self.device_ips.get(peer, {}).get('ips', {}):
+                # 直結宛て(上)と同じく、リンクが断なら転送できない。以前はこの
+                # 分岐だけチェックが無く、次ホップ側のIFをshutdownしても
+                # その先のネットワークへのpingが成功していた
+                if _edge_dead(peer):
+                    return None, None
                 return peer, next_hop_ip
         nh_device = self._find_device_owning_ip(next_hop_ip)
         if nh_device:
+            if _edge_dead(nh_device):
+                return None, None
             return nh_device, next_hop_ip
         # 合成next-hopを実デバイス＋直結セグメント上の実IPへ解決する。
         # RIPはnext-hopにデバイスID（例 'r2'）、OSPFは隣接ルータのrouter-idを

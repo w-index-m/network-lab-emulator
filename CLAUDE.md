@@ -2732,3 +2732,18 @@ ifHighSpeed/ifAlias)とBER Counter64の追加、Counter32の2^32折り返し、
 CPU乱歩をポーリング回数ではなく時間ベースに(snmp_exporterだと数分で95%に
 張り付いていた)。`tests/test_cisco_traffic_monitoring.py`(IaC定義同士の
 整合チェック含む)。dockerの起動自体は手動ライブ検証(`nohup dockerd &`)。
+
+**NIRVANA風トラフィック可視化(`/traffic-flow`)**: ユーザー質問「トラフィックの
+流れを表示するようなソフトがないかな」→「nirvāṇaってソフトが昔あったはず」
+(NICTのNIRVANA/NIRVANA改。研究用で一般配布は見当たらない)→「NIRVANA風の可視化
+ページを追加してください」。`static/traffic_flow.html`(Canvas、外部ライブラリ
+無し、`/dashboard`と同じ単独ページ+`_NO_AUTH_PATHS`+`netlabToken_v1`)と
+`GET /api/traffic/flowmap?since=`(vnetリンク+両方向の累積バイト+断の有無+
+フローイベント)。`_learn_dataplane()`がpingごとに経路・バイト数・成否を
+`_flow_events`(最新500件)に記録する。詳細・スクリーンショットは
+`docs/traffic-flow-visualization.md`。直した実バグ: スタティックルートの
+ゲートウェイ経由の次ホップ解決だけリンク断を見ておらず、次ホップ側をshutdown
+しても先のネットワークにpingが通っていた(`_resolve_next_hop_detail`)、直結宛て
+pingで経路が送信元だけになり無関係リンクにカウンタが加算、宛先IPの持ち主を
+全装置から探して重複IPの別装置を拾う(`_owner_near`で経路終点→隣接→全体の順)。
+`tests/test_traffic_flow_view.py`。記録されるのはICMP(ping)のみ。

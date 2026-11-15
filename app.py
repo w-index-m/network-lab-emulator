@@ -1047,7 +1047,7 @@ def _valid_token(token: str) -> bool:
 # パスホワイトリスト（認証不要）
 # ルート "/" と各種静的アセットはHTML/ログインJSを返すため公開し、
 # 認証はAPI（/api/*）とWebSocket側で行う。
-_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico", "/dashboard", "/pentest",
+_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico", "/dashboard", "/pentest", "/traffic-flow",
                   "/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
 
 @app.middleware("http")
@@ -6906,6 +6906,37 @@ def _handle_nat_config(device_id: str, command: str, state: DeviceState):
     return None
 
 
+# ── トラフィック可視化(/traffic-flow)用のフローイベント ──
+# ping 1回(= repeat N 発のEcho)ごとに「どの経路を何バイト流れたか」を記録する。
+# 可視化ページはこれを差分取得し、経路に沿ってパケットの粒を飛ばす。
+_flow_events: deque = deque(maxlen=500)
+_flow_seq = 0
+
+
+def _owner_near(dev_id: str, ip: str):
+    """ip を持つ装置を、dev_id 自身 → その隣接 → 全体 の順で探す。
+    同じIPが別の場所(未接続の装置等)にもあると、全体検索だけでは
+    経路と無関係な装置を宛先として拾ってしまうため。"""
+    for d in [dev_id, *sorted(vnet.links.get(dev_id, set()))]:
+        if ip in icmp_engine.device_ips.get(d, {}).get('ips', {}):
+            return d
+    return icmp_engine._find_device_owning_ip(ip)
+
+
+def _record_flow_event(src_id: str, dest_ip: str, path: list, ping_result: dict,
+                       count: int, size: int, proto: str = 'icmp'):
+    global _flow_seq
+    _flow_seq += 1
+    dst_dev = _owner_near(path[-1] if path else src_id, dest_ip)
+    _flow_events.append({
+        'seq': _flow_seq, 't': time.time(), 'proto': proto,
+        'src': src_id, 'dst_ip': dest_ip, 'dst': dst_dev,
+        'path': [d for d in path if d],
+        'ok': bool(ping_result.get('reachable')),
+        'pkts': count, 'bytes': count * size,
+    })
+
+
 def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict,
                      count: int = 5, size: int = 100):
     """
@@ -6936,7 +6967,14 @@ def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict,
     path = [src_id] + [h['device'] for h in ping_result.get('hops', [])
                        if h.get('device') and not h.get('timeout')]
     path = [d for i, d in enumerate(path) if i == 0 or d != path[i - 1]]
+    # 直結の宛先は trace_path のホップに出てこないことがあるので補う。補わないと
+    # 経路が送信元だけになり、下のフォールバックで無関係なリンクまで加算していた
+    if ping_result.get('reachable'):
+        _dst_dev = _owner_near(path[-1], dest_ip)
+        if _dst_dev and _dst_dev != path[-1] and _dst_dev in vnet.links.get(path[-1], set()):
+            path.append(_dst_dev)
     links = [(x, y) for x, y in zip(path, path[1:]) if y in vnet.links.get(x, set())]
+    _record_flow_event(src_id, dest_ip, path, ping_result, count, size)
     if not links:
         # ホップ情報が無い(同一セグメント直結など)場合は従来どおり直結リンクへ
         links = [(src_id, p) for p in vnet.links.get(src_id, set())]
@@ -9411,6 +9449,52 @@ async def root():
     if index.exists():
         return HTMLResponse(index.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>index.html が見つかりません</h1>")
+
+@app.get("/api/traffic/flowmap")
+async def traffic_flowmap(since: int = 0):
+    """NIRVANA風トラフィック可視化(/traffic-flow)用のデータ。
+
+    - nodes: 装置(リンクを1本以上持つもの + all=1 なら全部)
+    - links: vnet のリンクと両端IFの累積バイトカウンタ(dp_engine。SNMPの
+      ifHCIn/OutOctets と同じ値)。bps は呼び出し側が前回値との差分で出す
+    - events: since より新しいフローイベント(pingごとの経路・バイト数・成否)
+    """
+    nodes, links, seen = {}, [], set()
+    down = {d: {vnet._norm_iface(x) for x in s}
+            for d, s in vnet.down_interfaces.items()}
+    for a, peers in list(vnet.links.items()):
+        for b in peers:
+            key = tuple(sorted((a, b)))
+            if key in seen or a not in device_sessions or b not in device_sessions:
+                continue
+            seen.add(key)
+            x, y = key
+            ix = vnet.interface_links.get(x, {}).get(y)
+            iy = vnet.interface_links.get(y, {}).get(x)
+            cx = dp_engine.get_counter(x, ix) if ix else {}
+            cy = dp_engine.get_counter(y, iy) if iy else {}
+            is_down = bool((ix and vnet._norm_iface(ix) in down.get(x, set())) or
+                           (iy and vnet._norm_iface(iy) in down.get(y, set())))
+            links.append({'a': x, 'b': y, 'iface_a': ix, 'iface_b': iy, 'down': is_down,
+                          # a→b は a の送信と b の受信。片側が取れない時は他方で代用
+                          'ab_bytes': cx.get('out_bytes') or cy.get('in_bytes', 0),
+                          'ba_bytes': cy.get('out_bytes') or cx.get('in_bytes', 0)})
+            for d in key:
+                st = device_sessions[d]
+                nodes[d] = {'id': d, 'hostname': st.hostname, 'type': st.device_type}
+    events = [e for e in _flow_events if e['seq'] > since]
+    return {'nodes': list(nodes.values()), 'links': links, 'events': events,
+            'seq': _flow_seq, 'now': time.time()}
+
+
+@app.get("/traffic-flow")
+async def traffic_flow_page():
+    """NIRVANA(NICT)風のトラフィック可視化ページ。トポロジ上をパケットが流れる"""
+    page = static_dir / "traffic_flow.html"
+    if page.exists():
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>traffic_flow.html が見つかりません</h1>")
+
 
 @app.get("/dashboard")
 async def resource_dashboard():
