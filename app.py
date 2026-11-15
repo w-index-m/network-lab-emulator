@@ -2110,6 +2110,11 @@ async def cli_command(body: dict):
             await _flap_interface_down(device_id, state, iface_for_flap)
         elif _flap_action == 'up':
             await _flap_interface_up(device_id, state, iface_for_flap)
+    for iface_for_flap in _flap_targets:
+        _n = vnet._norm_iface(iface_for_flap)
+        for _peer, _pif in list(vnet.interface_links.get(device_id, {}).items()):
+            if vnet._norm_iface(_pif) == _n:
+                _flow_recorder.record_link(device_id, _peer, iface_for_flap, _flap_action)
     if _flap_targets and ospf_engine.nodes.get(device_id, {}).get('enabled'):
         # 隣接に関係ないLAN側IFのup/downでも、そのstubの広告/撤回は要る
         _register_icmp(device_id)
@@ -6908,9 +6913,8 @@ def _handle_nat_config(device_id: str, command: str, state: DeviceState):
 
 # ── トラフィック可視化(/traffic-flow)用のフローイベント ──
 # ping 1回(= repeat N 発のEcho)ごとに「どの経路を何バイト流れたか」を記録する。
-# 可視化ページはこれを差分取得し、経路に沿ってパケットの粒を飛ばす。
-_flow_events: deque = deque(maxlen=500)
-_flow_seq = 0
+# 記録と同時に侵害検知ルールも評価される(engine/traffic_analytics.py)。
+from engine.traffic_analytics import recorder as _flow_recorder
 
 
 def _owner_near(dev_id: str, ip: str):
@@ -6925,16 +6929,9 @@ def _owner_near(dev_id: str, ip: str):
 
 def _record_flow_event(src_id: str, dest_ip: str, path: list, ping_result: dict,
                        count: int, size: int, proto: str = 'icmp'):
-    global _flow_seq
-    _flow_seq += 1
     dst_dev = _owner_near(path[-1] if path else src_id, dest_ip)
-    _flow_events.append({
-        'seq': _flow_seq, 't': time.time(), 'proto': proto,
-        'src': src_id, 'dst_ip': dest_ip, 'dst': dst_dev,
-        'path': [d for d in path if d],
-        'ok': bool(ping_result.get('reachable')),
-        'pkts': count, 'bytes': count * size,
-    })
+    _flow_recorder.record_flow(src_id, dest_ip, dst_dev, [d for d in path if d],
+                               bool(ping_result.get('reachable')), count, size, proto)
 
 
 def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict,
@@ -9451,7 +9448,7 @@ async def root():
     return HTMLResponse("<h1>index.html が見つかりません</h1>")
 
 @app.get("/api/traffic/flowmap")
-async def traffic_flowmap(since: int = 0):
+async def traffic_flowmap(since: int = 0, alert_since: int = 0):
     """NIRVANA風トラフィック可視化(/traffic-flow)用のデータ。
 
     - nodes: 装置(リンクを1本以上持つもの + all=1 なら全部)
@@ -9482,9 +9479,33 @@ async def traffic_flowmap(since: int = 0):
             for d in key:
                 st = device_sessions[d]
                 nodes[d] = {'id': d, 'hostname': st.hostname, 'type': st.device_type}
-    events = [e for e in _flow_events if e['seq'] > since]
+    events, alerts, seq, alert_seq = _flow_recorder.since(since, alert_since)
     return {'nodes': list(nodes.values()), 'links': links, 'events': events,
-            'seq': _flow_seq, 'now': time.time()}
+            'alerts': alerts, 'seq': seq, 'alert_seq': alert_seq, 'now': time.time()}
+
+
+@app.get("/api/traffic/history")
+async def traffic_history(start: float = None, end: float = None, src: str = None,
+                          dst: str = None, result: str = 'all'):
+    """トラフィック再現用: 期間・送信元・宛先(IPか装置ID)・結果(all/ok/ng)で
+    絞り込んだフローイベントと、リンク状態の変化、期間内のアラートを返す。"""
+    if result not in ('all', 'ok', 'ng'):
+        return JSONResponse({'error': 'result は all / ok / ng'}, status_code=400)
+    if start is not None and end is not None and start > end:
+        return JSONResponse({'error': 'start が end より後です'}, status_code=400)
+    data = _flow_recorder.query(start, end, src or None, dst or None, result)
+    data['now'] = time.time()
+    return data
+
+
+@app.get("/api/traffic/alerts")
+async def traffic_alerts(since: int = 0):
+    """侵害検知のアラート(新しいものだけ欲しい時は since=<alert_seq>)。"""
+    from engine.traffic_analytics import RULES
+    _e, alerts, _s, alert_seq = _flow_recorder.since(1 << 62, since)
+    return {'alerts': alerts, 'alert_seq': alert_seq,
+            'rules': {k: {x: v[x] for x in ('name', 'severity', 'window', 'threshold', 'desc')}
+                      for k, v in RULES.items()}}
 
 
 @app.get("/traffic-flow")

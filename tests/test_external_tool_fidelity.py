@@ -174,8 +174,12 @@ class TestOspfMultiAreaAbr:
         left = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
         from engine.protocols import ospf_engine
         n = ospf_engine.nodes[_id(o1)]
-        # 最終Hello受信からのカウントダウンなので dead - hello 以上(端数で-1)
-        assert n['dead_interval'] - n['hello_interval'] - 1 <= left <= n['dead_interval'], out
+        # 最終Hello受信からのカウントダウンであること(負荷でHelloが遅れても
+        # 成り立つよう、範囲ではなく last_hello から計算した値と比べる)
+        import time as _t
+        nbr = next(v for v in n['neighbors'].values() if v.router_id == '10.229.12.2')
+        expected = n['dead_interval'] - (_t.time() - nbr.last_hello)
+        assert nbr.last_hello and abs(left - expected) <= 1.5, (left, expected, out)
 
     def test_shutdown_withdraws_stub_and_no_shutdown_restores(self, lab):
         o1, o2 = self.o1, self.o2

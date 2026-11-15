@@ -6,8 +6,9 @@
 <title>Traffic Flow</title>
 <style>
   :root {
-    --bg: #03060d; --panel: rgba(8, 16, 30, 0.86); --line: #16304d;
+    --bg: #03060d; --panel: rgba(8, 16, 30, 0.88); --line: #16304d;
     --text: #cfe3ff; --dim: #6c86a6; --accent: #39d0ff; --ok: #4dffb8; --ng: #ff4d6a;
+    --warn: #ffb02e; --replay: #c58bff;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
@@ -21,28 +22,44 @@
   .stats { display: flex; gap: 18px; flex-wrap: wrap; }
   .stat b { display: block; font-size: 16px; color: #fff; font-variant-numeric: tabular-nums; }
   .stat span { color: var(--dim); font-size: 11px; }
+  #mode-badge { padding: 2px 10px; border-radius: 10px; font-size: 11px; letter-spacing: .1em;
+    border: 1px solid var(--accent); color: var(--accent); white-space: nowrap; }
+  #mode-badge.replay { border-color: var(--replay); color: var(--replay); box-shadow: 0 0 12px rgba(197,139,255,.45); }
   #status { margin-left: auto; font-size: 12px; color: var(--dim); white-space: nowrap; }
   #status.err { color: var(--ng); }
   aside { position: fixed; right: 12px; top: 64px; bottom: 12px; width: 330px; display: flex;
     flex-direction: column; gap: 10px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
-  .card h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .12em; color: var(--accent); font-weight: 600; }
-  #log { flex: 1; overflow: auto; min-height: 120px; }
-  #log ol { list-style: none; margin: 0; padding: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .card h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .12em; color: var(--accent); font-weight: 600;
+    display: flex; justify-content: space-between; align-items: baseline; }
+  .card h2 small { color: var(--dim); letter-spacing: 0; font-weight: 400; }
+  #log, #alerts { overflow: auto; min-height: 90px; }
+  #log { flex: 1.2; } #alerts { flex: 1; }
+  #log h2, #alerts h2 { position: sticky; top: -10px; margin: -10px -12px 8px; padding: 10px 12px 6px;
+    background: #08101e; z-index: 1; }
+  ol { list-style: none; margin: 0; padding: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
   #log li { padding: 4px 0; border-bottom: 1px solid rgba(22,48,77,.6); display: grid;
     grid-template-columns: 52px 1fr auto; gap: 6px; align-items: baseline; }
-  #log li .t { color: var(--dim); }
+  #log li .t, #alerts li .t { color: var(--dim); }
   #log li .r { color: var(--ok); } #log li.ng .r { color: var(--ng); }
   #log li .p { grid-column: 2 / 4; color: var(--dim); font-size: 11px; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
+  #alerts li { padding: 5px 4px; border-bottom: 1px solid rgba(22,48,77,.6); cursor: pointer; border-radius: 4px;
+    display: grid; grid-template-columns: 10px 52px 1fr; gap: 6px; align-items: baseline; }
+  #alerts li:hover, #alerts li.hit { background: rgba(255,77,106,.12); }
+  #alerts li .dot { width: 8px; height: 8px; border-radius: 50%; align-self: center; }
+  #alerts li .d { grid-column: 3; color: var(--dim); font-size: 11px; }
+  .sev-high { background: var(--ng); box-shadow: 0 0 8px var(--ng); }
+  .sev-medium { background: var(--warn); } .sev-low { background: #5a8cff; }
   #top table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
-  #top td { padding: 3px 0; } #top td:last-child { text-align: right; color: #fff; }
-  form { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  #top td { padding: 2px 0; } #top td:last-child { text-align: right; color: #fff; }
+  form#gen { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: var(--dim); }
   input, select, button { font: inherit; color: var(--text); background: #0b1626; border: 1px solid var(--line);
     border-radius: 5px; padding: 5px 7px; min-width: 0; }
   button { cursor: pointer; background: #0f3352; border-color: #1f5b86; color: #e6f6ff; }
   button:hover { background: #154772; }
+  button.on { background: #3a2160; border-color: var(--replay); }
   .row { grid-column: 1 / 3; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
   .legend i { display: inline-block; width: 90px; height: 6px; border-radius: 3px;
@@ -51,9 +68,24 @@
     color: var(--dim); max-width: 420px; display: none; }
   #empty code { color: var(--accent); }
   .muted { color: var(--dim); font-size: 11px; }
+  /* 再現バー */
+  #replay { position: fixed; left: 12px; right: 354px; bottom: 12px; padding: 8px 12px; }
+  #replay .ctl { display: flex; gap: 6px; align-items: flex-end; flex-wrap: wrap; }
+  #replay .ctl label { min-width: 0; }
+  #replay .grow { flex: 1; }
+  #replay .play { display: none; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+  #r-speed { min-width: 56px; }
+  #replay.active .play { display: flex; }
+  #tl { display: block; width: 100%; height: 34px; cursor: pointer; border-radius: 4px; background: #060d19; }
+  #r-time { font-variant-numeric: tabular-nums; color: var(--replay); white-space: nowrap; min-width: 150px; }
+  #r-msg { color: var(--dim); font-size: 11px; }
   @media (max-width: 760px) {
-    aside { position: fixed; left: 12px; right: 12px; top: auto; bottom: 12px; width: auto; height: 42vh; }
+    aside { position: fixed; left: 12px; right: 12px; top: auto; bottom: 12px; width: auto; height: 40vh; overflow: auto; }
     header .stats { display: none; }
+    #replay { right: 12px; bottom: calc(40vh + 20px); }
+    #replay .hide-sm { display: none; }
+    #replay .grow { flex-basis: 100%; order: 5; }
+    #r-time { min-width: 0; font-size: 12px; }
   }
 </style>
 </head>
@@ -61,17 +93,20 @@
 <canvas id="stage"></canvas>
 <header>
   <h1>TRAFFIC FLOW<small>NIRVANA-style</small></h1>
+  <span id="mode-badge">LIVE</span>
   <div class="stats">
     <div class="stat"><b id="s-nodes">-</b><span>装置</span></div>
     <div class="stat"><b id="s-links">-</b><span>リンク</span></div>
     <div class="stat"><b id="s-bps">-</b><span>合計トラフィック</span></div>
     <div class="stat"><b id="s-epm">-</b><span>通信/分</span></div>
+    <div class="stat"><b id="s-alerts">-</b><span>アラート</span></div>
   </div>
   <div id="status">接続中…</div>
 </header>
 <div id="empty">リンクで繋がった装置がまだありません。<br>
   メイン画面で装置同士をリンクするか、<code>iac/cisco-traffic-monitoring/lab/provision_cisco_lab.sh</code>
   でラボを作ってください。</div>
+
 <aside>
   <div class="card">
     <h2>テストトラフィック</h2>
@@ -85,27 +120,59 @@
     </form>
   </div>
   <div class="card" id="top"><h2>リンク流量 TOP</h2><table><tbody></tbody></table>
-    <div class="legend" style="margin-top:6px">低 <i></i> 高 <span>(1kbps〜1Gbps, 対数)</span></div></div>
+    <div class="legend" style="margin-top:4px">低 <i></i> 高 <span>(1kbps〜1Gbps)</span></div></div>
+  <div class="card" id="alerts"><h2>侵害検知アラート <small>クリックで再現</small></h2><ol></ol></div>
   <div class="card" id="log"><h2>通信ログ</h2><ol></ol></div>
 </aside>
+
+<div class="card" id="replay">
+  <div class="ctl">
+    <button type="button" id="b-live" class="on">ライブ</button>
+    <button type="button" id="b-rep">トラフィック再現</button>
+    <span class="hide-sm muted" style="align-self:center">期間</span>
+    <button type="button" data-min="5" class="quick">5分</button>
+    <button type="button" data-min="15" class="quick hide-sm">15分</button>
+    <button type="button" data-min="60" class="quick">1時間</button>
+    <label class="hide-sm">開始<input type="datetime-local" id="r-from" step="1"></label>
+    <label class="hide-sm">終了<input type="datetime-local" id="r-to" step="1"></label>
+    <label>送信元<select id="r-src"><option value="">すべて</option></select></label>
+    <label class="hide-sm">宛先(IP/装置)<input id="r-dst" size="12"></label>
+    <label>結果<select id="r-res"><option value="all">すべて</option><option value="ok">成功</option>
+      <option value="ng">到達不可</option></select></label>
+    <button type="button" id="b-load">再現</button>
+  </div>
+  <div class="play">
+    <button type="button" id="b-play">⏸</button>
+    <select id="r-speed" title="再生速度"><option>1</option><option selected>4</option><option>16</option>
+      <option>60</option></select>
+    <span id="r-time"></span>
+    <div class="grow"><canvas id="tl"></canvas></div>
+    <span id="r-msg"></span>
+  </div>
+</div>
+
 <script>
 (() => {
   'use strict';
   const SESSION_KEY = 'netlabToken_v1';      // index.html / dashboard.html と同じキー
   const POS_KEY = 'trafficFlowPositions_v1';
   const POLL_MS = 2000;
+  const RATE_WIN = 5;                        // 再現時の流量 = 直近5秒の再生分
   const cv = document.getElementById('stage');
   const ctx = cv.getContext('2d');
   const $ = id => document.getElementById(id);
 
   let W = 0, H = 0, DPR = 1;
-  const nodes = new Map();     // id -> {id, hostname, type, fx, fy, bps, pulse}
-  let links = [];              // {a, b, key, iface_a, iface_b, down, ab, ba (bps), lastAB, lastBA}
-  const particles = [];        // 常時流れる粒 {link, dir, t, speed, color}
-  const comets = [];           // 通信イベントの彗星 {path, hop, t, ok, bytes}
-  const ripples = [];          // {id, t, color}
-  const recent = [];           // 直近のイベント時刻(通信/分)
-  let lastSeq = 0, lastNow = 0, firstPoll = true, hover = null, drag = null;
+  const nodes = new Map();     // id -> {id, hostname, type, fx, fy, bps}
+  let links = [];              // {a, b, key, down, ab, ba, lastAB, lastBA}
+  const particles = [], comets = [], ripples = [], recent = [];
+  const alertGlow = new Map(); // id -> 期限(performance.now)
+  let lastSeq = 0, lastAlertSeq = 0, lastNow = 0, firstPoll = true, hover = null, drag = null;
+  let liveAlerts = 0, missedLive = 0;
+
+  // 再現モード
+  const R = {on: false, playing: false, events: [], links: [], alerts: [], start: 0, end: 0, t: 0,
+             idx: 0, aidx: 0, rate: new Map(), down: new Map(), rateAt: 0};
 
   function token() { try { return localStorage.getItem(SESSION_KEY) || ''; } catch (e) { return ''; } }
   function api(path, opts = {}) {
@@ -121,23 +188,20 @@
 
   // ── 傾いた床面への投影(NIRVANAの斜め見下ろし視点) ──
   function floor() {
-    // 狭い画面ではサイドパネルが下半分(42vh)を占めるので、床面を上に寄せる
     const wide = W > 760, side = wide ? 360 : 0;
-    const w = W - side, top = H * (wide ? 0.2 : 0.1), fh = H * (wide ? 0.62 : 0.38);
+    const w = W - side, top = H * (wide ? 0.17 : 0.09), fh = H * (wide ? 0.55 : 0.28);
     return {cx: w / 2, top, fh, R: Math.min(w * 0.46, fh * 1.3)};
   }
   function proj(fx, fy) {
-    const f = floor(), d = (fy + 1) / 2;          // 0=奥, 1=手前
-    const k = 0.62 + 0.45 * d;                     // 奥ほど小さく
+    const f = floor(), d = (fy + 1) / 2, k = 0.62 + 0.45 * d;
     return {x: f.cx + fx * f.R * k, y: f.top + d * f.fh, k};
   }
   function unproj(x, y) {
-    const f = floor(), d = Math.max(0, Math.min(1, (y - f.top) / f.fh));
-    const k = 0.62 + 0.45 * d;
+    const f = floor(), d = Math.max(0, Math.min(1, (y - f.top) / f.fh)), k = 0.62 + 0.45 * d;
     return {fx: Math.max(-1, Math.min(1, (x - f.cx) / (f.R * k))), fy: d * 2 - 1};
   }
 
-  // ── 色(流量の対数スケール) ──
+  // ── 色・書式 ──
   const STOPS = [[43, 92, 255], [25, 211, 255], [52, 255, 154], [255, 225, 77], [255, 90, 60]];
   function level(bps) { return bps <= 0 ? 0 : Math.max(0, Math.min(1, (Math.log10(bps) - 3) / 6)); }
   function color(l, a = 1) {
@@ -156,9 +220,15 @@
     while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
     return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${u[i]}`;
   }
+  const hhmmss = t => new Date(t * 1000).toLocaleTimeString('ja-JP', {hour12: false});
   const short = n => (nodes.get(n) || {}).hostname || n;
+  const linkKey = (a, b) => `${a}|${b}`;
+  function toLocalInput(t) {
+    const d = new Date(t * 1000), p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
 
-  // ── 初期配置: 保存位置 → なければ簡易フォースレイアウト ──
+  // ── 初期配置 ──
   function layout(newIds) {
     const saved = loadPos();
     newIds.forEach((id, i) => {
@@ -193,15 +263,14 @@
     savePos();
   }
 
-  // ── データ取得 ──
+  // ── ライブのデータ取得 ──
   async function poll() {
     try {
-      const r = await api(`/api/traffic/flowmap?since=${lastSeq}`);
+      const r = await api(`/api/traffic/flowmap?since=${lastSeq}&alert_since=${lastAlertSeq}`);
       if (r.status === 401) throw new Error('未ログインです。メイン画面でログインしてから開き直してください');
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      apply(data);
-      $('status').textContent = `更新 ${new Date().toLocaleTimeString()}`;
+      apply(await r.json());
+      $('status').textContent = R.on ? `再現中 (ライブ新着 ${missedLive} 件)` : `更新 ${new Date().toLocaleTimeString()}`;
       $('status').className = '';
     } catch (e) {
       $('status').textContent = String(e.message || e);
@@ -213,47 +282,54 @@
   function apply(data) {
     const dt = lastNow ? Math.max(0.5, data.now - lastNow) : 0;
     lastNow = data.now;
-    const newIds = [];
-    const seen = new Set();
+    const newIds = [], seen = new Set();
     data.nodes.forEach(n => {
       seen.add(n.id);
-      if (!nodes.has(n.id)) { nodes.set(n.id, {...n, bps: 0, pulse: 0}); newIds.push(n.id); }
+      if (!nodes.has(n.id)) { nodes.set(n.id, {...n, bps: 0}); newIds.push(n.id); }
       else Object.assign(nodes.get(n.id), {hostname: n.hostname, type: n.type});
     });
     [...nodes.keys()].forEach(id => { if (!seen.has(id)) nodes.delete(id); });
     const prev = new Map(links.map(l => [l.key, l]));
     links = data.links.map(l => {
-      const key = `${l.a}|${l.b}`, p = prev.get(key);
+      const key = linkKey(l.a, l.b), p = prev.get(key);
       const ab = p && dt ? Math.max(0, (l.ab_bytes - p.lastAB) * 8 / dt) : 0;
       const ba = p && dt ? Math.max(0, (l.ba_bytes - p.lastBA) * 8 / dt) : 0;
       return {...l, key, ab, ba, lastAB: l.ab_bytes, lastBA: l.ba_bytes};
     });
     if (newIds.length) layout(newIds);
-    nodes.forEach(n => { n.bps = 0; });
-    links.forEach(l => {
-      const a = nodes.get(l.a), b = nodes.get(l.b);
-      if (a) a.bps += l.ab + l.ba; if (b) b.bps += l.ab + l.ba;
-    });
     data.events.forEach(e => {
       lastSeq = Math.max(lastSeq, e.seq);
-      if (firstPoll) { logEvent(e); return; }   // 開いた時点の過去分はログだけ
+      if (R.on) { missedLive++; return; }
+      if (firstPoll) { logEvent(e); return; }     // 開いた時点の過去分はログだけ
       launch(e); logEvent(e); recent.push(performance.now());
     });
-    if (firstPoll && data.seq) lastSeq = data.seq;
+    (data.alerts || []).forEach(a => {
+      lastAlertSeq = Math.max(lastAlertSeq, a.seq);
+      liveAlerts++;
+      if (R.on) return;
+      addAlert(a, !firstPoll);
+    });
+    if (firstPoll) { lastSeq = Math.max(lastSeq, data.seq || 0); lastAlertSeq = Math.max(lastAlertSeq, data.alert_seq || 0); }
     firstPoll = false;
     renderSide();
     $('empty').style.display = nodes.size ? 'none' : 'block';
   }
 
+  // ── 流量・断の取得(ライブはカウンタ差分、再現は再生済みイベントから) ──
+  function rateOf(l) {
+    if (!R.on) return [l.ab, l.ba];
+    return [R.rate.get(linkKey(l.a, l.b)) || 0, R.rate.get(linkKey(l.b, l.a)) || 0];
+  }
+  function downOf(l) { return R.on ? !!(R.down.get(l.key) || R.down.get(linkKey(l.b, l.a))) : l.down; }
+
   function launch(e) {
     const path = e.path.filter(id => nodes.has(id));
     ripples.push({id: e.src, t: 0, color: e.ok ? '#4dffb8' : '#ff4d6a'});
     if (path.length < 2) return;
-    // バイト数が多いほど粒を多く・明るく(1発〜6発)
     const n = Math.min(6, 1 + Math.floor(Math.log10(Math.max(10, e.bytes)) - 2));
     for (let i = 0; i < n; i++) {
       comets.push({path, hop: 0, t: -i * 0.18, ok: e.ok, size: 2.5 + Math.min(3, Math.log10(e.bytes) / 2),
-                   dst: e.dst, back: false, reply: e.ok});
+                   back: false, reply: e.ok, alert: (e.alerts || []).length > 0});
     }
   }
 
@@ -262,31 +338,47 @@
     const ol = $('log').querySelector('ol');
     const li = document.createElement('li');
     if (!e.ok) li.className = 'ng';
-    const t = new Date(e.t * 1000).toLocaleTimeString().slice(0, 8);
     li.innerHTML = '<span class="t"></span><span class="s"></span><span class="r"></span><span class="p"></span>';
-    li.querySelector('.t').textContent = t;
+    li.querySelector('.t').textContent = hhmmss(e.t);
     li.querySelector('.s').textContent = `${short(e.src)} → ${e.dst ? short(e.dst) : e.dst_ip}`;
     li.querySelector('.r').textContent = e.ok ? fmtBytes(e.bytes) : '到達不可';
     li.querySelector('.p').textContent =
-      `${e.proto.toUpperCase()} ${e.pkts}発  経路: ${e.path.map(short).join(' › ') || '-'}`;
+      `${e.proto.toUpperCase()} ${e.pkts}発 x ${e.size}B  経路: ${e.path.map(short).join(' › ') || '-'}`;
     ol.prepend(li);
     while (ol.children.length > 60) ol.lastChild.remove();
+  }
+  function addAlert(a, glow) {
+    const ol = $('alerts').querySelector('ol');
+    const li = document.createElement('li');
+    li.dataset.seq = a.seq;
+    li.innerHTML = '<span class="dot"></span><span class="t"></span><span class="n"></span><span class="d"></span>';
+    li.querySelector('.dot').className = `dot sev-${a.severity}`;
+    li.querySelector('.t').textContent = hhmmss(a.t);
+    li.querySelector('.n').textContent = a.name;
+    li.querySelector('.d').textContent =
+      `${short(a.src)}${a.dst ? ' → ' + short(a.dst) : ''}  ${a.detail}`;
+    li.addEventListener('click', () => replayAround(a));
+    ol.prepend(li);
+    while (ol.children.length > 50) ol.lastChild.remove();
+    if (glow) {
+      alertGlow.set(a.src, performance.now() + 8000);
+      li.classList.add('hit'); setTimeout(() => li.classList.remove('hit'), 3000);
+    }
   }
   function renderSide() {
     $('s-nodes').textContent = nodes.size;
     $('s-links').textContent = links.length;
-    $('s-bps').textContent = fmtBps(links.reduce((s, l) => s + l.ab + l.ba, 0));
+    const rows = links.flatMap(l => { const [ab, ba] = rateOf(l); return [[l.a, l.b, ab], [l.b, l.a, ba]]; });
+    $('s-bps').textContent = fmtBps(rows.reduce((s, r) => s + r[2], 0));
     const now = performance.now();
     while (recent.length && now - recent[0] > 60000) recent.shift();
-    $('s-epm').textContent = recent.length;
+    $('s-epm').textContent = R.on ? '-' : recent.length;
+    $('s-alerts').textContent = R.on ? R.alerts.length : liveAlerts;
     const tb = $('top').querySelector('tbody');
     tb.textContent = '';
-    const rows = links.flatMap(l => [[l.a, l.b, l.ab], [l.b, l.a, l.ba]])
-      .filter(r => r[2] > 0).sort((x, y) => y[2] - x[2]).slice(0, 6);
-    if (!rows.length) {
-      tb.innerHTML = '<tr><td class="muted">流れている通信はありません</td><td></td></tr>';
-    }
-    rows.forEach(([a, b, v]) => {
+    const top = rows.filter(r => r[2] > 0).sort((x, y) => y[2] - x[2]).slice(0, 5);
+    if (!top.length) tb.innerHTML = '<tr><td class="muted">流れている通信はありません</td><td></td></tr>';
+    top.forEach(([a, b, v]) => {
       const tr = document.createElement('tr');
       tr.innerHTML = '<td></td><td></td>';
       tr.children[0].textContent = `${short(a)} → ${short(b)}`;
@@ -294,12 +386,16 @@
       tr.children[1].style.color = color(level(v));
       tb.appendChild(tr);
     });
-    const sel = $('g-src'), cur = sel.value;
     const ids = [...nodes.values()].sort((x, y) => x.hostname.localeCompare(y.hostname));
-    if (sel.options.length !== ids.length) {
-      sel.textContent = '';
-      ids.forEach(n => sel.add(new Option(`${n.hostname} (${n.type})`, n.id)));
-      if (cur) sel.value = cur;
+    for (const [sel, extra] of [[$('g-src'), 0], [$('r-src'), 1]]) {
+      if (sel.options.length !== ids.length + extra) {
+        const cur = sel.value;
+        while (sel.options.length > extra) sel.remove(extra);
+        ids.forEach(n => sel.add(new Option(`${n.hostname} (${n.type})`, n.id)));
+        // 以前の選択が無くなった(初回含む)ときは先頭を選ぶ。value='' を入れると
+        // 空欄表示になっていた
+        sel.value = [...sel.options].some(o => o.value === cur) ? cur : (sel.options[0] || {}).value || '';
+      }
     }
   }
 
@@ -313,10 +409,145 @@
       const r = await api('/api/cli', {method: 'POST',
         body: JSON.stringify({device_id: src, command: `ping ${dst} repeat ${rep} size ${size}`})});
       const out = (await r.json()).output || '';
-      const m = out.match(/Success rate is (\d+) percent \((\d+\/\d+)\)/) ||
-                out.match(/(\d+)% packet loss/);
+      const m = out.match(/Success rate is (\d+) percent \((\d+\/\d+)\)/) || out.match(/(\d+)% packet loss/);
       $('g-msg').textContent = m ? m[0] : out.split('\n').pop().slice(0, 60);
     } catch (e) { $('g-msg').textContent = String(e); }
+  });
+
+  // ── トラフィック再現 (CyNote のトラフィック再現機構に相当) ──
+  function setMode(on) {
+    R.on = on;
+    $('b-live').classList.toggle('on', !on); $('b-rep').classList.toggle('on', on);
+    $('replay').classList.toggle('active', on);
+    $('mode-badge').textContent = on ? 'REPLAY' : 'LIVE';
+    $('mode-badge').className = on ? 'replay' : '';
+    comets.length = 0; particles.length = 0;
+    if (!on) {
+      R.playing = false; missedLive = 0;
+      $('log').querySelector('ol').textContent = '';
+      $('alerts').querySelector('ol').textContent = '';
+      firstPoll = true; lastSeq = 0; lastAlertSeq = 0; liveAlerts = 0;   // 直近分を読み直す
+    }
+    renderSide();
+  }
+  function setRange(min) {
+    const now = Date.now() / 1000;
+    $('r-from').value = toLocalInput(now - min * 60);
+    $('r-to').value = toLocalInput(now);
+  }
+  async function loadReplay(opts = {}) {
+    const from = opts.start ?? (Date.parse($('r-from').value) / 1000);
+    const to = opts.end ?? (Date.parse($('r-to').value) / 1000);
+    if (!isFinite(from) || !isFinite(to) || from >= to) { $('r-msg').textContent = '期間が正しくありません'; return; }
+    const q = new URLSearchParams({start: from, end: to, result: $('r-res').value});
+    if ($('r-src').value) q.set('src', $('r-src').value);
+    if ($('r-dst').value.trim()) q.set('dst', $('r-dst').value.trim());
+    $('r-msg').textContent = '読み込み中…';
+    const r = await api(`/api/traffic/history?${q}`);
+    const data = await r.json();
+    if (!r.ok) { $('r-msg').textContent = data.error || `HTTP ${r.status}`; return; }
+    setMode(true);
+    Object.assign(R, {events: data.events, links: data.link_events, alerts: data.alerts,
+                      start: from, end: to, playing: true});
+    $('log').querySelector('ol').textContent = '';
+    const aol = $('alerts').querySelector('ol'); aol.textContent = '';
+    R.alerts.forEach(a => addAlert(a, false));
+    seek(opts.at ?? from);
+    $('b-play').textContent = '⏸';
+    $('r-msg').textContent = `${R.events.length} 件の通信 / アラート ${R.alerts.length} 件` +
+      (data.truncated ? '(多すぎるため新しい分のみ)' : '') +
+      (data.oldest && data.oldest > from ? ` ※記録は ${hhmmss(data.oldest)} 以降のみ` : '');
+    drawTimeline();
+  }
+  function replayAround(a) {
+    $('r-from').value = toLocalInput(a.t - 30); $('r-to').value = toLocalInput(a.t + 20);
+    loadReplay({start: a.t - 30, end: a.t + 20, at: a.t - 10});
+  }
+  function seek(t) {
+    R.t = Math.max(R.start, Math.min(R.end, t));
+    R.idx = R.events.findIndex(e => e.t > R.t); if (R.idx < 0) R.idx = R.events.length;
+    R.aidx = R.alerts.findIndex(a => a.t > R.t); if (R.aidx < 0) R.aidx = R.alerts.length;
+    comets.length = 0; particles.length = 0;
+    const ol = $('log').querySelector('ol'); ol.textContent = '';
+    R.events.slice(Math.max(0, R.idx - 40), R.idx).forEach(logEvent);
+    updateReplayState();
+  }
+  function updateReplayState() {
+    // リンク断: その時点までの最後の状態
+    R.down = new Map();
+    R.links.forEach(x => { if (x.t <= R.t) R.down.set(linkKey(x.a, x.b), x.state === 'down'); });
+    // 流量: 直近 RATE_WIN 秒に再生されたイベントの経路上のバイト数
+    R.rate = new Map();
+    for (let i = R.idx - 1; i >= 0 && R.events[i].t > R.t - RATE_WIN; i--) {
+      const e = R.events[i], p = e.path;
+      for (let k = 0; k + 1 < p.length; k++) {
+        const fwd = linkKey(p[k], p[k + 1]), rev = linkKey(p[k + 1], p[k]);
+        R.rate.set(fwd, (R.rate.get(fwd) || 0) + e.bytes * 8 / RATE_WIN);
+        if (e.ok) R.rate.set(rev, (R.rate.get(rev) || 0) + e.bytes * 8 / RATE_WIN);
+      }
+    }
+    nodes.forEach(n => { n.bps = 0; });
+    links.forEach(l => { const [ab, ba] = rateOf(l), s = ab + ba;
+      const a = nodes.get(l.a), b = nodes.get(l.b); if (a) a.bps += s; if (b) b.bps += s; });
+    $('r-time').textContent = `${new Date(R.t * 1000).toLocaleString('ja-JP', {hour12: false})}  ×${$('r-speed').value}`;
+  }
+  function replayTick(dt) {
+    if (!R.on || !R.playing) return;
+    const to = Math.min(R.end, R.t + dt * +$('r-speed').value);
+    while (R.idx < R.events.length && R.events[R.idx].t <= to) {
+      const e = R.events[R.idx++]; launch(e); logEvent(e);
+    }
+    while (R.aidx < R.alerts.length && R.alerts[R.aidx].t <= to) {
+      const a = R.alerts[R.aidx++];
+      alertGlow.set(a.src, performance.now() + 6000);
+      const li = $('alerts').querySelector(`li[data-seq="${a.seq}"]`);
+      if (li) { li.classList.add('hit'); li.scrollIntoView({block: 'nearest'}); setTimeout(() => li.classList.remove('hit'), 3000); }
+    }
+    R.t = to;
+    if (R.t >= R.end) { R.playing = false; $('b-play').textContent = '▶'; }
+  }
+
+  function drawTimeline() {
+    const c = $('tl'), w = c.clientWidth, h = c.clientHeight;
+    if (!w) return;
+    c.width = w * DPR; c.height = h * DPR;
+    const g = c.getContext('2d'); g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const span = Math.max(1, R.end - R.start), bins = new Array(Math.max(10, Math.floor(w / 4))).fill(0);
+    R.events.forEach(e => {
+      const i = Math.min(bins.length - 1, Math.floor((e.t - R.start) / span * bins.length));
+      if (i >= 0) bins[i] += e.bytes;
+    });
+    const mx = Math.max(1, ...bins.map(v => Math.log10(1 + v)));
+    bins.forEach((v, i) => {
+      const bh = Math.log10(1 + v) / mx * (h - 6);
+      g.fillStyle = color(level(v * 8 / (span / bins.length)), .75);
+      g.fillRect(i * w / bins.length, h - bh, Math.max(1, w / bins.length - 1), bh);
+    });
+    R.links.forEach(x => {
+      if (x.t < R.start || x.t > R.end || x.state !== 'down') return;
+      const xx = (x.t - R.start) / span * w; g.fillStyle = 'rgba(255,77,106,.5)'; g.fillRect(xx, 0, 2, h);
+    });
+    R.alerts.forEach(a => {
+      const xx = (a.t - R.start) / span * w;
+      g.fillStyle = a.severity === 'high' ? '#ff4d6a' : a.severity === 'medium' ? '#ffb02e' : '#5a8cff';
+      g.beginPath(); g.moveTo(xx, 0); g.lineTo(xx - 4, 7); g.lineTo(xx + 4, 7); g.fill();
+    });
+    const cx = (R.t - R.start) / span * w;
+    g.fillStyle = '#c58bff'; g.fillRect(cx - 1, 0, 2, h);
+  }
+
+  $('b-live').addEventListener('click', () => setMode(false));
+  $('b-rep').addEventListener('click', () => { if (!$('r-from').value) setRange(15); $('replay').classList.add('active'); loadReplay(); });
+  document.querySelectorAll('.quick').forEach(b => b.addEventListener('click', () => { setRange(+b.dataset.min); loadReplay(); }));
+  $('b-load').addEventListener('click', () => loadReplay());
+  $('b-play').addEventListener('click', () => {
+    if (!R.on) return;
+    if (!R.playing && R.t >= R.end) seek(R.start);
+    R.playing = !R.playing; $('b-play').textContent = R.playing ? '⏸' : '▶';
+  });
+  $('tl').addEventListener('click', ev => {
+    const r = $('tl').getBoundingClientRect();
+    seek(R.start + (ev.clientX - r.left) / r.width * (R.end - R.start));
   });
 
   // ── 描画 ──
@@ -326,34 +557,34 @@
     cv.width = W * DPR; cv.height = H * DPR;
     cv.style.width = W + 'px'; cv.style.height = H + 'px';
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (R.on) drawTimeline();
   }
   window.addEventListener('resize', resize);
 
   function drawFloor() {
-    const g = ctx.createRadialGradient(W * .4, H * .55, 10, W * .4, H * .55, Math.max(W, H) * .8);
-    g.addColorStop(0, '#071428'); g.addColorStop(1, '#02040a');
+    const g = ctx.createRadialGradient(W * .4, H * .5, 10, W * .4, H * .5, Math.max(W, H) * .8);
+    g.addColorStop(0, R.on ? '#120a24' : '#071428'); g.addColorStop(1, '#02040a');
     ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
     ctx.lineWidth = 1;
+    const tint = R.on ? '150, 100, 220' : '40, 110, 170';
     for (let i = -10; i <= 10; i++) {
       const v = i / 10;
       const a1 = proj(v, -1), a2 = proj(v, 1), b1 = proj(-1, v), b2 = proj(1, v);
-      ctx.strokeStyle = `rgba(40, 110, 170, ${i % 5 === 0 ? .22 : .09})`;
+      ctx.strokeStyle = `rgba(${tint}, ${i % 5 === 0 ? .22 : .09})`;
       ctx.beginPath(); ctx.moveTo(a1.x, a1.y); ctx.lineTo(a2.x, a2.y); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(b1.x, b1.y); ctx.lineTo(b2.x, b2.y); ctx.stroke();
     }
   }
-
   function linkPts(l) {
     const a = nodes.get(l.a), b = nodes.get(l.b);
     return a && b ? [proj(a.fx, a.fy), proj(b.fx, b.fy)] : null;
   }
-
   function drawLinks() {
     links.forEach(l => {
       const p = linkPts(l); if (!p) return;
-      const lv = level(Math.max(l.ab, l.ba));
+      const [ab, ba] = rateOf(l), lv = level(Math.max(ab, ba));
       ctx.save();
-      if (l.down) { ctx.setLineDash([6, 6]); ctx.strokeStyle = 'rgba(255,77,106,.7)'; ctx.lineWidth = 1.5; }
+      if (downOf(l)) { ctx.setLineDash([6, 6]); ctx.strokeStyle = 'rgba(255,77,106,.7)'; ctx.lineWidth = 1.5; }
       else {
         ctx.strokeStyle = color(lv, .35 + lv * .5); ctx.lineWidth = 1.2 + lv * 5;
         ctx.shadowColor = color(lv, .9); ctx.shadowBlur = 4 + lv * 14;
@@ -363,16 +594,15 @@
       if (hover && (hover === l.a || hover === l.b)) {
         const m = {x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2};
         ctx.fillStyle = '#e6f6ff'; ctx.font = '11px system-ui';
-        ctx.fillText(`${short(l.a)}→${short(l.b)} ${fmtBps(l.ab)} / ← ${fmtBps(l.ba)}`, m.x + 6, m.y - 6);
+        ctx.fillText(`${short(l.a)}→${short(l.b)} ${fmtBps(ab)} / ← ${fmtBps(ba)}`, m.x + 6, m.y - 6);
       }
     });
   }
-
-  // 常時の粒: リンクの方向ごとに流量(対数)に比例した数を流す
   function spawnParticles(dt) {
     links.forEach(l => {
-      if (l.down) return;
-      [['ab', l.ab], ['ba', l.ba]].forEach(([dir, bps]) => {
+      if (downOf(l)) return;
+      const [ab, ba] = rateOf(l);
+      [['ab', ab], ['ba', ba]].forEach(([dir, bps]) => {
         const lv = level(bps); if (lv <= 0) return;
         if (Math.random() < dt * (0.6 + lv * 9)) {
           particles.push({l, dir, t: 0, speed: 0.25 + lv * 0.5 + Math.random() * .1, color: color(lv)});
@@ -387,7 +617,6 @@
       const p = linkPts(q.l);
       if (!p || q.t >= 1 || !links.includes(q.l)) { particles.splice(i, 1); continue; }
       const [s, e] = q.dir === 'ab' ? p : [p[1], p[0]];
-      // 進行方向に対して少し横にずらし、往路と復路を別レーンにする
       const nx = -(e.y - s.y), ny = e.x - s.x, nl = Math.hypot(nx, ny) || 1, off = 3;
       const x = s.x + (e.x - s.x) * q.t + nx / nl * off, y = s.y + (e.y - s.y) * q.t + ny / nl * off;
       ctx.fillStyle = q.color; ctx.shadowColor = q.color; ctx.shadowBlur = 8;
@@ -395,27 +624,28 @@
     }
     ctx.shadowBlur = 0;
   }
-
-  // 通信イベント: 経路を1ホップずつたどる彗星。到達後はEcho Replyとして戻る
   function drawComets(dt) {
+    const speed = R.on ? Math.min(6, 1.6 * Math.sqrt(+$('r-speed').value)) : 1.6;
     for (let i = comets.length - 1; i >= 0; i--) {
-      const c = comets[i]; c.t += dt * 1.6;
+      const c = comets[i];
+      if (R.on && !R.playing) { /* 一時停止中は止める */ } else c.t += dt * speed;
       if (c.t < 0) continue;
+      let dead = false;
       while (c.t >= 1) {
         c.t -= 1; c.hop++;
         if (c.hop >= c.path.length - 1) {
           const end = c.path[c.path.length - 1];
           if (!c.back) ripples.push({id: end, t: 0, color: c.ok ? '#39d0ff' : '#ff4d6a'});
           if (!c.back && c.reply) { c.back = true; c.path = [...c.path].reverse(); c.hop = 0; }
-          else { comets.splice(i, 1); c.dead = true; break; }
+          else { dead = true; break; }
         }
       }
-      if (c.dead) continue;
+      if (dead) { comets.splice(i, 1); continue; }
       const a = nodes.get(c.path[c.hop]), b = nodes.get(c.path[c.hop + 1]);
       if (!a || !b) { comets.splice(i, 1); continue; }
       const s = proj(a.fx, a.fy), e = proj(b.fx, b.fy);
-      const col = !c.ok ? '255,77,106' : c.back ? '77,255,184' : '230,250,255';
-      for (let k = 0; k < 8; k++) {           // 尾
+      const col = !c.ok ? '255,77,106' : c.alert ? '255,176,46' : c.back ? '77,255,184' : '230,250,255';
+      for (let k = 0; k < 8; k++) {
         const tt = Math.max(0, c.t - k * 0.035);
         const x = s.x + (e.x - s.x) * tt, y = s.y + (e.y - s.y) * tt;
         ctx.fillStyle = `rgba(${col},${(1 - k / 8) * .9})`;
@@ -425,18 +655,22 @@
       ctx.shadowBlur = 0;
     }
   }
-
-  function drawNodes(dt) {
+  function drawNodes(now) {
     [...nodes.values()].sort((x, y) => x.fy - y.fy).forEach(n => {
       const p = proj(n.fx, n.fy), lv = level(n.bps);
-      const h = (14 + lv * 70) * p.k;              // 柱の高さ = 装置を通る流量
-      const w = 9 * p.k;
+      const h = (14 + lv * 70) * p.k, w = 9 * p.k;
       const g = ctx.createLinearGradient(p.x, p.y - h, p.x, p.y);
       g.addColorStop(0, color(lv, .05)); g.addColorStop(1, color(lv, .55));
       ctx.fillStyle = g; ctx.fillRect(p.x - w / 2, p.y - h, w, h);
+      const glow = (alertGlow.get(n.id) || 0) > now;
+      if (glow) {              // アラート発生装置: 赤く脈動するリング
+        const ph = (now % 900) / 900;
+        ctx.strokeStyle = `rgba(255,77,106,${1 - ph})`; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.ellipse(p.x, p.y, (14 + ph * 26) * p.k, (7 + ph * 13) * p.k, 0, 0, Math.PI * 2); ctx.stroke();
+      }
       ctx.save();
-      ctx.shadowColor = color(lv, 1); ctx.shadowBlur = 16 + lv * 20;
-      ctx.fillStyle = n.id === hover ? '#ffffff' : color(Math.max(lv, .25), .95);
+      ctx.shadowColor = glow ? '#ff4d6a' : color(lv, 1); ctx.shadowBlur = 16 + lv * 20;
+      ctx.fillStyle = n.id === hover ? '#ffffff' : glow ? '#ff4d6a' : color(Math.max(lv, .25), .95);
       ctx.beginPath(); ctx.ellipse(p.x, p.y, 11 * p.k, 5.5 * p.k, 0, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
       ctx.fillStyle = '#e6f6ff'; ctx.font = `${Math.round(11 + 2 * p.k)}px system-ui`;
@@ -447,7 +681,6 @@
       ctx.textAlign = 'start';
     });
   }
-
   function drawRipples(dt) {
     for (let i = ripples.length - 1; i >= 0; i--) {
       const r = ripples[i]; r.t += dt;
@@ -460,11 +693,16 @@
     }
   }
 
-  let last = performance.now();
+  let last = performance.now(), sideAt = 0;
   function frame(now) {
     const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    replayTick(dt);
+    if (R.on && now - R.rateAt > 200) { R.rateAt = now; updateReplayState(); drawTimeline(); }
+    if (R.on && now - sideAt > 1000) { sideAt = now; renderSide(); }
+    if (!R.on) nodes.forEach(n => { n.bps = 0; }), links.forEach(l => {
+      const a = nodes.get(l.a), b = nodes.get(l.b); if (a) a.bps += l.ab + l.ba; if (b) b.bps += l.ab + l.ba; });
     drawFloor(); drawLinks(); spawnParticles(dt); drawParticles(dt);
-    drawComets(dt); drawRipples(dt); drawNodes(dt);
+    drawComets(dt); drawRipples(dt); drawNodes(now);
     requestAnimationFrame(frame);
   }
 
@@ -482,6 +720,7 @@
   });
   cv.addEventListener('pointerup', () => { if (drag) savePos(); drag = null; });
 
+  setRange(15);
   resize();
   requestAnimationFrame(frame);
   poll();

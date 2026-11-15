@@ -2747,3 +2747,18 @@ CPU乱歩をポーリング回数ではなく時間ベースに(snmp_exporterだ
 pingで経路が送信元だけになり無関係リンクにカウンタが加算、宛先IPの持ち主を
 全装置から探して重複IPの別装置を拾う(`_owner_near`で経路終点→隣接→全体の順)。
 `tests/test_traffic_flow_view.py`。記録されるのはICMP(ping)のみ。
+
+**CyNote風 侵害検知 + トラフィック再現(`/traffic-flow`拡張)**: ユーザー依頼
+「トラフィック可視化アニメソフトお願いします」+ 構造計画研究所「CyNote」(NIRVANA改の
+セグメント侵害検知/トラフィック再現機構)の記事。新設`engine/traffic_analytics.py`
+(`FlowRecorder`、`recorder`シングルトン): フローイベント(最大20000件/24h)・
+リンクup/down・アラートをメモリに記録し、記録時に5ルール(スキャン/到達不可連続/
+フラッド/MTU超ICMP/リンク断、しきい値は`RULES`)で検知。app.pyの`_flow_events`は
+これに置き換え、shutdown/no shutdownの`_flap_targets`処理でリンクイベントを記録。
+API: `GET /api/traffic/history`(期間・src・dst・result、リンク状態はendまで全件)、
+`GET /api/traffic/alerts`、flowmapに`alert_since`/`alerts`。画面は右にアラート欄
+(クリックで発生時刻の前後を再現)、下に再現バー(期間・条件・再生速度・タイムライン)。
+詳細は`docs/traffic-flow-visualization.md`後半。`tests/test_traffic_analytics.py`。
+**見つけたが意図的に直していない**: 直結サブネット内の誰も持たないIPへのpingが成功
+する(実機はARP失敗)——`test_ping_same_segment`が「未登録のLAN上ホストも応答」を
+仕様として固定しているため、ラボ全体の挙動変更としてユーザー判断待ち。
