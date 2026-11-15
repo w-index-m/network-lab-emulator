@@ -2782,3 +2782,11 @@ API: `GET /api/traffic/history`(期間・src・dst・result、リンク状態は
 `SyslogDispatcher.emit`も送信先の有無に関わらず記録する(`%X-<n>-`の重要度優先、復旧メッセージは
 問題扱いしない、時刻プレフィックスを外して重複排除)。テストは`tests/test_router_links.py`/
 `tests/test_cyber_health.py`。
+追加(v3): Grafana/Lokiの表示部分を`/cyber-view`で担う。`LOKI_URL`があれば`engine/link_stats.loki_logs`
+(query_range)でsyslog観点と`GET /api/traffic/logs`(ログを装置上の六角プレートで浮かべる)を、
+`PROMETHEUS_URL`はリンクの方向ごとに優先(片側だけ監視なら`source: mixed`)。リンク状態は
+`classify`で断・使用率のみ(35Mbps/1Gbpsは正常。アラート/ping失敗は別表示)。画面は右脇の文字一覧を
+既定で隠し(LISTボタン)、リンク中点の六角柱+立体プレート(NORMAL/LINK DOWN+量)、IFごとの送受信タイル、
+ping結果(PING OK/NG)・ログ・通信中装置のプレートを立体表示。アラートの花は図9風(検知元ごとの花びら
+IDS/FW/SYSLOG/NET。FWは`threat_detection.shun_listeners`→`recorder.external_alert('fw_shun')`、
+SYSLOGは`record_log`でerror以上→`syslog_error`)。セキュリティ観点はIDS/FWのみ。横長画面前提。

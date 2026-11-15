@@ -38,6 +38,10 @@ DEFAULT_BURST_RATE = 10          # 接続/秒
 DEFAULT_SHUN_DURATION = 3600     # 秒(実機の既定値)
 
 
+# 新しくシャンした時に呼ぶ (key, src_ip, avg_rate, burst_rate)
+shun_listeners = []
+
+
 def default_config():
     """state.threat_detectionの初期値。DeviceState.__init__から呼ぶ。"""
     return {
@@ -120,6 +124,11 @@ class ThreatDetectionEngine:
         if cfg.get('shun') and (avg_rate >= cfg.get('average_rate', DEFAULT_AVERAGE_RATE)
                                  or burst_rate >= cfg.get('burst_rate', DEFAULT_BURST_RATE)):
             self._shunned[key][src_ip] = now
+            for cb in list(shun_listeners):     # 例: /cyber-view の FW アラート
+                try:
+                    cb(key, src_ip, avg_rate, burst_rate)
+                except Exception:  # noqa: BLE001 - 通知の失敗で遮断を止めない
+                    pass
             return True
         return False
 

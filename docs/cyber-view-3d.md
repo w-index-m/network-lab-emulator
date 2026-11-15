@@ -129,3 +129,52 @@ Esc で /32 → /24 に戻ることも確認。
 ![正常 ROUTER LINKS](images/cyber-view-v2-ok_links.png)
 ![異常 /24](images/cyber-view-v2-ng_24.png)
 ![異常 ROUTER LINKS](images/cyber-view-v2-ng_links.png)
+
+## Grafana / Grafana Loki の表示部分をこのビューで(v3)
+
+Grafana がやっている「Prometheus のメトリクスと Loki のログを画面に出す」部分を、この 3D ビューで
+行えるようにした。データの収集(snmp_exporter → Prometheus、`tools/device_log_to_loki.py` → Loki)は
+そのまま使い、表示だけを置き換える構成。
+
+```
+Cisco CR1/CR2/CR3 ─SNMP→ snmp_exporter → Prometheus ─┐ PROMETHEUS_URL (rate(ifHCOutOctets[1m])*8)
+                 └show logging→ device_log_to_loki → Loki ─┤ LOKI_URL (query_range {job=~".+"})
+                                                           ↓
+                                         エミュレータ /api/traffic/links・health・logs → /cyber-view
+```
+
+```bash
+PROMETHEUS_URL=http://127.0.0.1:9090 LOKI_URL=http://127.0.0.1:3100 python app.py
+```
+
+どちらも無い/繋がらない時は、同じ値を持つエミュレータ内のIFカウンタ・ログ記録で表示する
+(状態ボード下部に `METRICS: PROMETHEUS|IF COUNTER  LOGS: LOKI|INTERNAL` と出る)。
+Prometheus が片側のIFしか監視していないリンクは、監視外の方向だけ内部カウンタで補う(`source: mixed`)。
+
+### 画面内に立体で出すようにしたもの(右脇の文字一覧は既定で隠し、LIST ボタンで出せる)
+
+- **ROUTER LINKS**: リンクの中点に、通信量に比例した高さの六角柱と、その上の立体プレート
+  「NORMAL 7.3 Mbps」(状態: NORMAL / HIGH LOAD / CRITICAL / LINK DOWN)。リンク断は赤く脈動する
+  「LINK DOWN 停止」プレート + 火花。両端には**インタフェースごと**の送受信
+  (「Gi0/0/2 ↑3.9 Mbps ↓3.4 Mbps」)。真ん中のルータは、繋がるリンクごとに別のIFとして出る。
+- **リンクの状態はリンク自体(断・使用率)だけで決める**: 1Gbps に 35Mbps 流れているような
+  通常の通信は「NORMAL/正常」。両端装置のアラートや経由pingの失敗ではリンクを警告にしない
+  (アラートは「警」の六角形、pingの失敗は PING NG プレートで別に出す)。
+- **ping を打つと**、宛先の上に「PING OK 200/200・1500B」(緑)/「PING NG 0/5」(赤)の
+  六角プレートが立ち上がる。
+- **ログ**(Loki または内部記録)は、出した装置の上に「LOG ERROR %LINK-3-UPDOWN」(赤)/
+  「LOG WARN」(橙)/「RECOVER」(緑)のプレートで浮かぶ。
+- **NETWORK(/24 等)**: 直近30秒に通信のあった装置の上に「NORMAL 200 kbps」/「NG ×10」の
+  プレート(重ならないよう左右に振り分け)。
+- **アラートの花(図9風)**: 中央の赤い「警」、周りに検知元ごとの白い花びら
+  (IDS=侵入検知ルール、FW=ASA の threat-detection が送信元を shun、SYSLOG=error 以上のログ、
+  NET=リンク断)、黄色の多重六角、パネルまでのコイルの柱。実在製品のロゴは使わない。
+  セキュリティ観点の判定は IDS/FW のアラートだけで行う。
+
+ライブ検証(本物の Prometheus v2.54.1 + snmp_exporter + Loki 3.1.1 を起動、
+`device_log_to_loki.py` で CR1〜CR3 の `show logging` を Loki へ送り、ping でトラフィック):
+
+![正常 ROUTER LINKS(Prometheus/Loki)](images/cyber-view-v3-ok_links.png)
+![正常 /24](images/cyber-view-v3-ok_24.png)
+![異常 ROUTER LINKS(LINK DOWN、Loki のエラーログ)](images/cyber-view-v3-ng_links.png)
+![異常 /24(図9風のアラートの花)](images/cyber-view-v3-ng_24.png)

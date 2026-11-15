@@ -85,10 +85,13 @@ class TestSampler:
     def test_classify(self):
         assert classify(0.1, True, 0, []) == 'down'
         assert classify(0.85, False, 0, []) == 'crit'
-        assert classify(0.1, False, 0, [{'rule': 'flood'}]) == 'crit'
         assert classify(0.6, False, 0, []) == 'warn'
-        assert classify(0.0, False, 2, []) == 'warn'
         assert classify(0.0, False, 0, []) == 'ok'
+        # リンクの状態はリンク自体(断・使用率)だけで決める。35Mbps/1Gbps は正常、
+        # 両端のアラートや経由pingの失敗ではリンクを警告にしない(別表示)
+        assert classify(0.035, False, 0, []) == 'ok'
+        assert classify(0.1, False, 0, [{'rule': 'flood'}]) == 'ok'
+        assert classify(0.0, False, 2, []) == 'ok'
 
 
 class TestLinksApi:
@@ -119,13 +122,13 @@ class TestLinksApi:
         finally:
             _cli(c, r2, 'configure terminal', 'interface GigabitEthernet0/0/0', 'no shutdown', 'end')
 
-    def test_failed_ping_across_link_warns(self, lab):
+    def test_failed_ping_across_link_is_counted_but_link_stays_ok(self, lab):
         c, r1, r2, _pc = lab
         # r2 には 10.244.1.0/24 への戻り経路が無い → r1 から r2 経由の宛先は失敗
         _cli(c, r1, 'configure terminal', 'ip route 10.244.99.0 255.255.255.0 10.244.12.2', 'end')
         _cli(c, r1, 'ping 10.244.99.9')
         _d, ln = _link(c, r1, r2)
-        assert ln['flows_ng'] >= 1 and ln['state'] in ('warn', 'crit')
+        assert ln['flows_ng'] >= 1 and ln['state'] == 'ok'
 
     def test_window_is_clamped(self, lab):
         c, _r1, _r2, _pc = lab
@@ -165,8 +168,7 @@ class TestPrometheusSource:
             rev = ln['ba_bps'] if ln['a'] == r1 else ln['ab_bps']
             assert fwd == 600000000 and rev == 1000
             assert abs(ln['util'] - 0.6) < 1e-9
-            # 使用率60%なので少なくとも注意(直前のテストのリンク断アラートが残っていれば警告)
-            assert ln['state'] in ('warn', 'crit')
+            assert ln['state'] == 'warn'                  # 使用率60%
         finally:
             srv.shutdown()
 

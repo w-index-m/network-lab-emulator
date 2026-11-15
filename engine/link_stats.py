@@ -105,12 +105,40 @@ def prometheus_rates(url, timeout=3.0):
     return out
 
 
-def classify(util, down, ng, alerts):
-    """リンクの状態: down / crit / warn / ok / idle"""
+def classify(util, down, ng=0, alerts=()):
+    """リンクの状態: down / crit / warn / ok。
+
+    リンク自体の状態(断・使用率)だけで決める。両端装置のアラートや経由pingの失敗は
+    リンクの「量」の問題ではないので状態には入れない(画面では別の「警」表示で出す)。
+    1Gbps に 35Mbps 流れているような通常の通信は ok(正常)。
+    """
     if down:
         return 'down'
-    if util >= UTIL_CRIT or alerts:
+    if util >= UTIL_CRIT:
         return 'crit'
-    if util >= UTIL_WARN or ng:
+    if util >= UTIL_WARN:
         return 'warn'
     return 'ok'
+
+
+def loki_logs(url, start, end, limit=500, timeout=3.0):
+    """Loki から期間内のログ行を取る(tools/device_log_to_loki.py が送る job="netlab-device-log" 等、
+    job ラベルを持つ全ストリーム)。[{t, dev, host, msg}] を古い順で返す。失敗時は例外。"""
+    q = '{job=~".+"}'
+    full = (url.rstrip('/') + '/loki/api/v1/query_range?' + urllib.parse.urlencode(
+        {'query': q, 'start': str(int(start * 1e9)), 'end': str(int(end * 1e9)),
+         'limit': str(limit), 'direction': 'backward'}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(full, timeout=timeout) as r:
+        data = json.loads(r.read().decode())
+    if data.get('status') != 'success':
+        raise RuntimeError(data.get('error') or 'query failed')
+    out = []
+    for st in data['data']['result']:
+        lab = st.get('stream', {})
+        for ts, line in st.get('values', []):
+            out.append({'t': int(ts) / 1e9, 'dev': lab.get('device_id') or lab.get('host') or '',
+                        'host': lab.get('hostname') or lab.get('host') or lab.get('device_id') or '',
+                        'msg': line, 'job': lab.get('job', '')})
+    out.sort(key=lambda x: x['t'])
+    return out

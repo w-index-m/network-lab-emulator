@@ -42,7 +42,17 @@ RULES = {
     'link_down': {'name': 'リンク断', 'severity': 'medium',
                   'window': 0, 'threshold': 0, 'cooldown': 0,
                   'desc': 'インタフェースのshutdown等でリンクが落ちた'},
+    'fw_shun': {'name': 'FWがスキャン元を遮断(shun)', 'severity': 'high',
+                'window': 0, 'threshold': 0, 'cooldown': 30,
+                'desc': 'ASA の threat-detection scanning-threat shun が送信元を遮断した'},
+    'syslog_error': {'name': '装置が error 以上のログを出力', 'severity': 'medium',
+                     'window': 0, 'threshold': 3, 'cooldown': 60,
+                     'desc': 'syslog 重要度3(error)以下のメッセージ(復旧通知は除く)'},
 }
+# 検知元(センサー)。/cyber-view の六角形の花びらはこの単位でまとめる
+RULE_SOURCE = {'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
+               'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET'}
+SECURITY_SOURCES = {'IDS', 'FW'}
 _TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')
 # 復旧を知らせるメッセージ(実機のCiscoでは up も %LINK-3 なので重要度だけでは区別できない)
 RECOVERY = re.compile(r'state to up|to FULL|Established|Link ?Up|復旧', re.I)
@@ -101,7 +111,15 @@ class FlowRecorder:
                     return None
             ev = {'t': now, 'dev': dev, 'host': hostname, 'sev': int(severity), 'msg': msg}
             self.logs.append(ev)
+            if ev['sev'] <= RULES['syslog_error']['threshold'] and not RECOVERY.search(msg):
+                self._fire('syslog_error', dev, now, src=dev, dst=None, detail=msg[:160], related=[])
             return ev
+
+    def external_alert(self, rule, key, src, dst, detail, now=None):
+        """エンジン外の検知(FWのshun等)をアラートとして記録"""
+        now = time.time() if now is None else now
+        with self._lock:
+            return self._fire(rule, key, now, src=src, dst=dst, detail=detail, related=[])
 
     def logs_since(self, start):
         with self._lock:
@@ -122,6 +140,7 @@ class FlowRecorder:
         self._last_fired[(rule, key)] = now
         self.alert_seq += 1
         a = {'seq': self.alert_seq, 't': now, 'rule': rule, 'name': r['name'],
+             'source': RULE_SOURCE.get(rule, 'IDS'),
              'severity': r['severity'], 'src': src, 'dst': dst, 'detail': detail,
              'related': related}
         self.alerts.append(a)

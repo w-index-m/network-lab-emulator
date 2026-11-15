@@ -137,3 +137,73 @@ def test_recovery_messages_are_not_problems(clean):
     assert ups and all(x['sev'] == 3 for x in ups)
     assert len({x['msg'] for x in ups}) == len(ups)       # 時刻付き/無しの二重記録をしない
     assert cat['syslog']['state'] == 'ok'
+
+
+class _FakeLoki:
+    """Loki の /loki/api/v1/query_range を返すだけの簡易サーバ"""
+    def __init__(self, values):
+        import http.server
+        import json
+        import threading
+        body = json.dumps({'status': 'success', 'data': {'resultType': 'streams', 'result': [
+            {'stream': {'job': 'netlab-device-log', 'device_id': 'lk-r1', 'hostname': 'LK-R1'},
+             'values': values}]}}).encode()
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        self.srv = http.server.HTTPServer(('127.0.0.1', 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = f'http://127.0.0.1:{self.srv.server_port}'
+
+
+def test_syslog_from_loki_when_configured(clean, monkeypatch):
+    import time as _t
+    now_ns = int(_t.time() * 1e9)
+    fake = _FakeLoki([[str(now_ns - 5_000_000_000), '%OSPF-5-ADJCHG: Nbr 1.1.1.1 from FULL to DOWN'],
+                      [str(now_ns - 3_000_000_000), '%SYS-3-CPUHOG: Task ran for 2004 msec'],
+                      [str(now_ns - 1_000_000_000), '%LINK-3-UPDOWN: Interface Gi0/0/0, changed state to up']])
+    try:
+        monkeypatch.setenv('LOKI_URL', fake.url)
+        d, cat = _cat(clean)
+        assert cat['syslog']['source'] == 'loki' and d['sources']['logs'] == 'loki'
+        assert cat['syslog']['state'] == 'crit'                 # CPUHOG(3)。up は復旧なので数えない
+        assert any('CPUHOG' in x for x in cat['syslog']['details'])
+        logs = clean.get('/api/traffic/logs?since=0').json()
+        assert logs['source'] == 'loki' and [x['recovery'] for x in logs['logs']] == [False, False, True]
+        assert [x['sev'] for x in logs['logs']] == [5, 3, 3]
+    finally:
+        fake.srv.shutdown()
+
+
+def test_unreachable_loki_falls_back_to_internal(clean, monkeypatch):
+    monkeypatch.setenv('LOKI_URL', 'http://127.0.0.1:9')
+    _d, cat = _cat(clean)
+    assert cat['syslog']['source'] == 'internal' and cat['syslog']['source_error']
+
+
+def test_alert_sources_for_hex_petals(clean):
+    """六角形の花びらは検知元(IDS/FW/SYSLOG/NET)単位。FWのshunとerrorログもアラートになる"""
+    c = clean
+    r1, _r2 = _lab(c)
+    from engine.threat_detection import threat_detection_engine
+    st = app_module.device_sessions[r1]
+    cfg = {'enabled': True, 'shun': True, 'rate_interval': 10, 'average_rate': 1, 'burst_rate': 1,
+           'shun_duration': 60, 'shun_except': []}
+    for _ in range(30):
+        threat_detection_engine.record_connection_attempt(id(st), '10.245.77.7', cfg)
+    recorder.record_log(r1, 'HL-R1', 3, '%SYS-3-CPUHOG: Task ran for 2004 msec')
+    al = {a['rule']: a for a in recorder.alerts}
+    assert al['fw_shun']['source'] == 'FW' and al['fw_shun']['src'] == r1 and al['fw_shun']['dst'] == '10.245.77.7'
+    assert al['syslog_error']['source'] == 'SYSLOG'
+    _d, cat = _cat(c)
+    # セキュリティ観点は IDS/FW だけ(FWの遮断は high)。syslog の error は syslog 観点で数える
+    assert cat['security']['state'] == 'crit'
+    assert all('error' not in x for x in cat['security']['details'])
+    threat_detection_engine.clear_shun(id(st))

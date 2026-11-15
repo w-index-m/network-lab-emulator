@@ -83,7 +83,11 @@
   #linkpanel canvas { width: 100%; height: 26px; position: static; display: block; margin-top: 4px; cursor: inherit; }
   #linkpanel small { color: var(--dim); }
   body.links #alerts, body.links #filter, body.links #crumbs, body.links #card, body.links #session, body.links #legend { display: none !important; }
-  body.links #linkpanel, body.links #linkbar { display: block; }
+  body.links #linkbar { display: block; }
+  /* 右脇の文字リストは既定で隠し、画面内の立体表示で見せる(LIST ボタンで出せる) */
+  #alerts, #linkpanel { display: none !important; }
+  body.showlist:not(.links) #alerts { display: block !important; }
+  body.showlist.links #linkpanel { display: block !important; }
   #tip { position: fixed; z-index: 3; pointer-events: none; background: var(--panel); border: 1px solid var(--line);
     padding: 4px 8px; font-size: 12px; display: none; white-space: nowrap; }
   #empty { left: 50%; top: 58%; transform: translateX(-50%); color: var(--dim); font-size: 13px; text-align: center;
@@ -119,7 +123,7 @@
 </div>
 
 <div id="cidr" class="hud">0.0.0.0/0</div>
-<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button></div>
+<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button></div>
 <div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
   <option value="10">10秒</option><option value="60" selected>1分</option><option value="300">5分</option></select>
   ごと(平均区間も同じ) ・ 次回 <b id="lNext">--</b>秒 ・ 最終 <b id="lLast">--</b><span id="lSrc" class="src">--</span></div>
@@ -169,7 +173,7 @@
   let particles = [];
 
   const octets = (ip) => ip.split('.').map(Number);
-  const RULE_CODE = { scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK' };
+  const RULE_CODE = { scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR' };
   const SEV_COL = { high: '#ff3b4e', medium: '#ffab2e', low: '#ffe14d' };
 
   // ── 表示状態: prefix = 選んだオクテット列 (長さ0〜3) / host = ホストビュー ──
@@ -336,11 +340,25 @@
     }
     ctx.globalAlpha = 1;
     // アラートの花
+    // 隣り合うパネルの花が重ならないよう、高さを3段に振り分ける
+    let fi = 0;
     for (const p of panels) {
       const info = st[p.n];
-      if (info && info.alerts.length) drawFlower(p.x, p.z, info.alerts, t);
+      if (info && info.alerts.length) drawFlower(p.x, p.z, info.alerts, t, 4.6 + (fi++ % 3) * 2.8);
     }
     if (L === 3) { drawShell(t, subAlerts, true); drawSparks(t, subAlerts.length, subFlows); }
+    // 直近30秒に通信のあったブロック/装置の上に、状態と量の立体プレート(上位6件)
+    const busy = Object.entries(st).filter(([, v]) => v.bytes > 0).sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 6);
+    // 隣り合うパネルのプレートが重ならないよう、パネル番号順に左右へ扇状に振り分ける
+    const order = busy.map(([n]) => +n).sort((a, b) => a - b);
+    busy.forEach(([n, v], i) => {
+      const [x, z] = panelXZ(+n);
+      const ok = !v.ng, col = ok ? '#3dff9a' : '#ffab2e';
+      const top = L === 3 ? 0.32 + 0.4 + (v.bytes ? 2.2 * Math.log10(1 + v.bytes) / Math.log10(1 + maxB) : 0) : 0.4;
+      const k = order.indexOf(+n), ox = (k - (order.length - 1) / 2) * 190;
+      plate3d(x, top + 1.6 + (k % 2) * 0.7, z, col, ok ? 'NORMAL' : `NG ×${v.ng}`, fmtShort(v.bytes * 8 / 30), false, t,
+              L === 3 && v.hosts.length ? v.hosts[0].h.hostname : null, ox);
+    });
     document.getElementById('empty').style.display = Object.keys(st).length ? 'none' : 'block';
   }
 
@@ -497,7 +515,7 @@
     const x0 = 16, y0 = 150, w = 318, rowH = 70;
     // 奥へ少し傾けたホログラム板
     ctx.setTransform(DPR, -0.035 * DPR, 0, DPR, 0, 0);
-    const hgt = 34 + rowH * health.categories.length;
+    const hgt = 48 + rowH * health.categories.length;
     const g = ctx.createLinearGradient(x0, y0, x0 + w, y0);
     g.addColorStop(0, 'rgba(6,24,48,0.86)'); g.addColorStop(1, 'rgba(6,24,48,0.35)');
     ctx.fillStyle = g; ctx.fillRect(x0, y0, w, hgt);
@@ -507,6 +525,9 @@
     for (let yy = y0 + 2; yy < y0 + hgt; yy += 3) { ctx.fillStyle = 'rgba(255,255,255,0.018)'; ctx.fillRect(x0, yy, w, 1); }  // 走査線
     ctx.fillStyle = '#e8f7ff'; ctx.font = '600 12px monospace';
     ctx.fillText(`SYSTEM STATUS  ・ 直近${Math.round(health.window / 60)}分`, x0 + 10, y0 + 20);
+    const srcs = health.sources || {};
+    ctx.fillStyle = '#7fb2d0'; ctx.font = '10px monospace';
+    ctx.fillText(`METRICS: ${srcs.metrics === 'prometheus' ? 'PROMETHEUS' : 'IF COUNTER'}  LOGS: ${srcs.logs === 'loki' ? 'LOKI' : 'INTERNAL'}`, x0 + 10, y0 + hgt - 6);
     ctx.fillStyle = H_COL[health.overall]; ctx.font = '700 13px sans-serif';
     ctx.fillText('総合 ' + H_JA[health.overall], x0 + w - 74, y0 + 20);
     health.categories.forEach((c, i) => {
@@ -591,44 +612,109 @@
     }
   }
 
-  // 赤い「警」の六角形 + ルール別の花びら + パネルまでの螺旋の柱
-  function drawFlower(x, z, list, t, height) {
-    const H0 = height || 4.2;
-    for (let k = 0; k < 46; k++) {
-      const u = k / 45, a = u * Math.PI * 9 + t * 0.003;
-      const p = proj(x + Math.cos(a) * 0.38, u * H0, z + Math.sin(a) * 0.38);
-      if (!p) continue;
-      ctx.fillStyle = `rgba(255,${80 + 120 * u | 0},90,${0.35 + 0.6 * u})`;
-      ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+  // ── アラートの花(図9風): 中央の赤い「警」+ 検知元ごとの白い花びら + 黄色の多重六角 + コイルの柱 ──
+  const SOURCES = {
+    IDS: { label: 'IDS', sub: '侵入検知', col: '#1f6fd1' },
+    FW: { label: 'FW', sub: 'ファイアウォール', col: '#d8402a' },
+    SYSLOG: { label: 'SYSLOG', sub: 'ログ', col: '#3a4450' },
+    NET: { label: 'NET', sub: 'リンク監視', col: '#d98a00' },
+  };
+  const SOURCE_OF = { scan: 'IDS', unreach_burst: 'IDS', flood: 'IDS', large_icmp: 'IDS',
+    fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET' };
+  function drawIcon(src, x, y, s) {
+    const c = SOURCES[src].col;
+    ctx.save(); ctx.strokeStyle = c; ctx.fillStyle = c; ctx.lineWidth = Math.max(1.2, s * 0.09);
+    if (src === 'IDS') {                     // レーダー
+      for (const k of [1, 0.66, 0.33]) { ctx.beginPath(); ctx.arc(x, y, s * 0.5 * k, Math.PI, Math.PI * 2); ctx.stroke(); }
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + s * 0.35, y - s * 0.36); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x + s * 0.2, y - s * 0.2, s * 0.07, 0, Math.PI * 2); ctx.fill();
+    } else if (src === 'FW') {               // レンガの壁
+      const w = s * 0.9, h = s * 0.55, x0 = x - w / 2, y0 = y - h * 0.8;
+      ctx.lineWidth = Math.max(1, s * 0.06);
+      ctx.strokeRect(x0, y0, w, h);
+      for (let r = 1; r < 3; r++) { ctx.beginPath(); ctx.moveTo(x0, y0 + h * r / 3); ctx.lineTo(x0 + w, y0 + h * r / 3); ctx.stroke(); }
+      for (let r = 0; r < 3; r++) for (let k = 1; k < 3; k++) {
+        const bx = x0 + w * (k / 3 + (r % 2 ? 0.16 : 0)); ctx.beginPath(); ctx.moveTo(bx, y0 + h * r / 3); ctx.lineTo(bx, y0 + h * (r + 1) / 3); ctx.stroke();
+      }
+    } else if (src === 'SYSLOG') {           // ログの書類
+      const w = s * 0.6, h = s * 0.72, x0 = x - w / 2, y0 = y - h * 0.85;
+      ctx.lineWidth = Math.max(1, s * 0.06); ctx.strokeRect(x0, y0, w, h);
+      for (let r = 1; r <= 4; r++) { ctx.beginPath(); ctx.moveTo(x0 + w * 0.15, y0 + h * r / 5); ctx.lineTo(x0 + w * (r % 2 ? 0.85 : 0.6), y0 + h * r / 5); ctx.stroke(); }
+    } else {                                 // 切れたリンク
+      ctx.beginPath(); ctx.arc(x - s * 0.32, y - s * 0.2, s * 0.13, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + s * 0.32, y - s * 0.2, s * 0.13, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(x - s * 0.2, y - s * 0.2); ctx.lineTo(x - s * 0.06, y - s * 0.2);
+      ctx.moveTo(x + s * 0.06, y - s * 0.2); ctx.lineTo(x + s * 0.2, y - s * 0.2); ctx.stroke();
+      ctx.strokeStyle = '#e0202e'; ctx.beginPath(); ctx.moveTo(x - s * 0.09, y - s * 0.36); ctx.lineTo(x + s * 0.09, y - s * 0.04);
+      ctx.moveTo(x + s * 0.09, y - s * 0.36); ctx.lineTo(x - s * 0.09, y - s * 0.04); ctx.stroke();
     }
-    const c = proj(x, H0 + 0.4, z);
+    ctx.restore();
+  }
+  function drawFlower(x, z, list, t, height) {
+    const H0 = height || 4.6;
+    // コイル(重ねた輪)の柱でパネルと花を結ぶ
+    for (let k = 0, n = Math.max(6, Math.round(H0 / 0.28)); k <= n; k++) {
+      const y = k / n * H0, rr = 0.42;
+      ctx.beginPath(); let f = true;
+      for (let a = 0; a <= 360; a += 30) {
+        const p = proj(x + rr * Math.cos(a * Math.PI / 180), y, z + rr * Math.sin(a * Math.PI / 180));
+        if (!p) { f = true; continue; }
+        f ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); f = false;
+      }
+      const lit = Math.abs(((t * 0.0015) % 1) - k / n) < 0.08;
+      ctx.strokeStyle = lit ? 'rgba(255,255,255,0.95)' : 'rgba(120,220,255,0.45)'; ctx.lineWidth = lit ? 1.6 : 1; ctx.stroke();
+    }
+    const c = proj(x, H0 + 0.5, z);
     if (!c) return;
-    const r = Math.max(11, Math.min(30, c.s * 0.55));
-    const byRule = {};
-    for (const a of list) (byRule[a.rule] || (byRule[a.rule] = [])).push(a);
-    const rules = Object.keys(byRule).slice(0, 6);
-    rules.forEach((rule, i) => {
+    const r = Math.max(13, Math.min(46, c.s * 0.75));
+    // 検知元ごとにまとめる
+    const bySrc = {};
+    for (const a of list) { const sname = a.source || SOURCE_OF[a.rule] || 'IDS'; (bySrc[sname] = bySrc[sname] || []).push(a); }
+    const srcs = Object.keys(bySrc).sort((a, b) => bySrc[b].length - bySrc[a].length);
+    // 黄色の多重六角(ゆっくり脈動)
+    ctx.save();
+    for (let k = 0; k < 7; k++) {
+      hexPath(c.x, c.y, r * (2.75 + k * 0.09 + 0.03 * Math.sin(t * 0.003)));
+      ctx.strokeStyle = `rgba(235,215,70,${0.55 - k * 0.07})`; ctx.lineWidth = 1; ctx.stroke();
+    }
+    ctx.restore();
+    // 花びら(6枠。検知元が無い枠は暗い空き枠)
+    for (let i = 0; i < 6; i++) {
       const ang = -Math.PI / 2 + i * Math.PI / 3;
-      const px = c.x + Math.cos(ang) * r * 1.78, py = c.y + Math.sin(ang) * r * 1.78;
-      const sev = byRule[rule][0].severity;
-      hexPath(px, py, r * 0.88);
-      ctx.fillStyle = 'rgba(20,6,10,0.82)'; ctx.fill();
-      ctx.lineWidth = 2; ctx.strokeStyle = SEV_COL[sev] || '#ff3b4e'; ctx.stroke();
-      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.font = `600 ${Math.max(8, r * 0.36)}px monospace`;
-      ctx.fillText(RULE_CODE[rule] || rule, px, py - r * 0.14);
-      ctx.font = `${Math.max(8, r * 0.34)}px monospace`;
-      ctx.fillText('x' + byRule[rule].length, px, py + r * 0.3);
-    });
-    const pulse = 0.75 + 0.25 * Math.sin(t * 0.006);
+      const px = c.x + Math.cos(ang) * r * 1.76, py = c.y + Math.sin(ang) * r * 1.76;
+      const src = srcs[i];
+      hexPath(px, py, r * 0.96);
+      if (!src) { ctx.fillStyle = 'rgba(6,10,16,0.6)'; ctx.fill(); ctx.strokeStyle = 'rgba(120,140,160,0.25)'; ctx.lineWidth = 1; ctx.stroke(); continue; }
+      const items = bySrc[src];
+      const sev = items.some(a => a.severity === 'high') ? 'high' : items.some(a => a.severity === 'medium') ? 'medium' : 'low';
+      const g = ctx.createLinearGradient(px, py - r, px, py + r);
+      g.addColorStop(0, '#fbfcfd'); g.addColorStop(1, '#cdd5dd');
+      ctx.fillStyle = g; ctx.fill();
+      ctx.save(); ctx.shadowColor = SEV_COL[sev]; ctx.shadowBlur = 10; ctx.strokeStyle = SEV_COL[sev]; ctx.lineWidth = 2.2; ctx.stroke(); ctx.restore();
+      drawIcon(src, px, py - r * 0.12, r * 0.62);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#1b2430'; ctx.font = `800 ${Math.max(8, r * 0.27)}px sans-serif`;
+      ctx.fillText(SOURCES[src].label, px, py + r * 0.3);
+      if (r > 20) {
+        const rules = [...new Set(items.map(a => RULE_CODE[a.rule] || a.rule))].slice(0, 2).join('/');
+        ctx.fillStyle = '#56606c'; ctx.font = `600 ${Math.max(7, r * 0.18)}px monospace`;
+        ctx.fillText(`${rules} ×${items.length}`, px, py + r * 0.56);
+      }
+    }
+    // 中央の「警」
+    const pulse = 0.85 + 0.15 * Math.sin(t * 0.006);
     hexPath(c.x, c.y, r);
-    ctx.fillStyle = `rgba(230,20,45,${0.75 * pulse + 0.2})`; ctx.fill();
-    ctx.lineWidth = 2; ctx.strokeStyle = '#ffd0d6'; ctx.stroke();
-    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.font = `700 ${r * 0.8}px sans-serif`;
-    ctx.fillText('警', c.x, c.y - r * 0.08);
-    ctx.font = `600 ${Math.max(8, r * 0.32)}px monospace`;
-    ctx.fillText(list.length, c.x, c.y + r * 0.62);
+    const g = ctx.createRadialGradient(c.x, c.y - r * 0.3, r * 0.1, c.x, c.y, r);
+    g.addColorStop(0, `rgba(190,20,35,${pulse})`); g.addColorStop(1, 'rgba(70,0,8,0.96)');
+    ctx.fillStyle = g; ctx.fill();
+    ctx.save(); ctx.shadowColor = '#ff2a3a'; ctx.shadowBlur = 22 * pulse; ctx.strokeStyle = '#ff6a72'; ctx.lineWidth = 2.4; ctx.stroke(); ctx.restore();
+    hexPath(c.x, c.y, r * 0.86); ctx.strokeStyle = 'rgba(255,120,130,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `900 ${r * 0.98}px sans-serif`;
+    ctx.lineWidth = Math.max(1, r * 0.05); ctx.strokeStyle = 'rgba(255,200,205,0.7)'; ctx.strokeText('警', c.x, c.y - r * 0.06);
+    ctx.fillStyle = '#ff2236'; ctx.fillText('警', c.x, c.y - r * 0.06);
+    ctx.fillStyle = '#ffd9dc'; ctx.font = `700 ${Math.max(8, r * 0.24)}px monospace`;
+    ctx.fillText(list.length, c.x, c.y + r * 0.66);
     ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
   }
 
@@ -778,7 +864,7 @@
       const q = [st]; seen.add(st);
       while (q.length) { const v = q.shift(); order.push(v); for (const w of (adj[v] || []).sort()) if (!seen.has(w)) { seen.add(w); q.push(w); } }
     }
-    const R = Math.max(5, Math.min(11, order.length * 1.3));
+    const R = Math.max(9, Math.min(13, order.length * 2.2));
     linkPos = {};
     order.forEach((id, i) => { const a = i / order.length * Math.PI * 2 - Math.PI / 2; linkPos[id] = [Math.cos(a) * R, 0, Math.sin(a) * R]; });
     if (order.length === 1) linkPos[order[0]] = [0, 0, 0];
@@ -788,6 +874,7 @@
     try {
       const d = await api(`/api/traffic/links?window=${w}`);
       linkData = d; layoutRouters(d.links); renderLinkPanel();
+      pollHealth();
       document.getElementById('lLast').textContent = new Date(d.now * 1000).toTimeString().slice(0, 8);
       const src = document.getElementById('lSrc');
       src.textContent = d.source === 'prometheus' ? 'SOURCE: PROMETHEUS' : 'SOURCE: IF COUNTER' + (d.prometheus_error ? ' (Prometheus 不達)' : '');
@@ -839,6 +926,125 @@
       d.onclick = () => { selLink = selLink === d.dataset.k ? null : d.dataset.k; renderLinkPanel(); };
     });
   }
+  const STATE_EN = { ok: 'NORMAL', warn: 'HIGH LOAD', crit: 'CRITICAL', down: 'LINK DOWN' };
+  const fmtShort = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + ' Gbps' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' Mbps'
+    : b >= 1e3 ? (b / 1e3).toFixed(0) + ' kbps' : Math.round(b) + ' bps';
+  const shortIf = (n) => n.replace('GigabitEthernet', 'Gi').replace('TenGigabitEthernet', 'Te').replace('FastEthernet', 'Fa').replace('Ethernet', 'Eth');
+  // 床から立つ六角柱(高さ=量)
+  function hexColumn(x, y0, z, r, h, col, t) {
+    const ring = (y) => Array.from({ length: 6 }, (_, k) => { const a = k * Math.PI / 3; return proj(x + Math.cos(a) * r, y, z + Math.sin(a) * r); });
+    const bot = ring(y0), top = ring(y0 + h);
+    if (bot.some(v => !v) || top.some(v => !v)) return;
+    const faces = [0, 1, 2, 3, 4, 5].map(k => ({ k, d: (bot[k].d + bot[(k + 1) % 6].d) / 2 })).sort((a, b) => b.d - a.d);
+    for (const { k } of faces) {
+      const q = [bot[k], bot[(k + 1) % 6], top[(k + 1) % 6], top[k]];
+      const g = ctx.createLinearGradient(0, q[0].y, 0, q[3].y);
+      g.addColorStop(0, col + '22'); g.addColorStop(1, col + '88');
+      poly(q); ctx.fillStyle = g; ctx.fill(); ctx.strokeStyle = col + 'aa'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    poly(top); ctx.save(); ctx.shadowColor = col; ctx.shadowBlur = 16; ctx.fillStyle = col + 'cc'; ctx.fill(); ctx.restore();
+    // 中を昇る光
+    const u = (t * 0.0008) % 1, ly = proj(x, y0 + h * u, z);
+    if (ly) { ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.fillRect(ly.x - 2, ly.y - 2, 4, 4); }
+  }
+  // 押し出した横長の六角プレート(画面に正対、奥行き付き)。big=true は脈動+太字
+  function plateAt(cx, cy, sc, col, title, val, big, t, sub) {
+    ctx.font = `800 ${Math.round(17 * sc)}px monospace`;
+    const tw = Math.max(ctx.measureText(val).width, (ctx.font = `800 ${Math.round(13 * sc)}px sans-serif`, ctx.measureText(title).width));
+    const w = Math.max(118 * sc, tw + 46 * sc), h = 50 * sc, d = 9 * sc, cut = 18 * sc;
+    const shape = (ox, oy) => [[-w / 2 + cut, -h / 2], [w / 2 - cut, -h / 2], [w / 2, 0], [w / 2 - cut, h / 2], [-w / 2 + cut, h / 2], [-w / 2, 0]].map(([a, b]) => [cx + a + ox, cy + b + oy]);
+    const fr = shape(0, 0), bk = shape(d * 0.6, d);
+    ctx.save();
+    // 側面(厚み)
+    for (let k = 0; k < 6; k++) {
+      const a = fr[k], b = fr[(k + 1) % 6], c = bk[(k + 1) % 6], e = bk[k];
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.lineTo(e[0], e[1]); ctx.closePath();
+      ctx.fillStyle = col + '40'; ctx.fill();
+    }
+    ctx.beginPath(); fr.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
+    const pulse = big ? 0.6 + 0.4 * Math.abs(Math.sin(t * 0.005)) : 1;
+    const g = ctx.createLinearGradient(cx, cy - h / 2, cx, cy + h / 2);
+    g.addColorStop(0, `rgba(10,22,40,0.92)`); g.addColorStop(1, col + '55');
+    ctx.fillStyle = g; ctx.fill();
+    ctx.shadowColor = col; ctx.shadowBlur = (big ? 26 : 14) * pulse; ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
+    ctx.shadowBlur = 0;
+    for (let yy = cy - h / 2 + 3; yy < cy + h / 2; yy += 3) { ctx.fillStyle = 'rgba(255,255,255,0.03)'; ctx.fillRect(cx - w / 2 + cut * 0.6, yy, w - cut * 1.2, 1); }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = col; ctx.font = `800 ${Math.round(13 * sc)}px sans-serif`; ctx.fillText(title, cx, cy - h * 0.2);
+    ctx.fillStyle = '#ffffff'; ctx.font = `800 ${Math.round(17 * sc)}px monospace`;
+    ctx.shadowColor = col; ctx.shadowBlur = 8; ctx.fillText(val, cx, cy + h * 0.18); ctx.shadowBlur = 0;
+    if (sub && sc > 0.8) { ctx.fillStyle = '#9fc6dd'; ctx.font = `${Math.round(10 * sc)}px sans-serif`; ctx.fillText(sub, cx, cy + h / 2 + 10 * sc); }
+    ctx.restore();
+  }
+  function plate3d(x, y, z, col, title, val, big, t, sub, ox) {
+    const c = proj(x, y, z), b = proj(x, y - 0.9, z);
+    if (!c) return;
+    ox = ox || 0;
+    if (b) { ctx.strokeStyle = col + '88'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(c.x + ox, c.y); ctx.stroke(); ctx.setLineDash([]); }
+    plateAt(c.x + ox, c.y, Math.max(0.7, Math.min(1.5, c.s / 26)), col, title, val, big, t, sub);
+  }
+  function ifTile(x, y, z, col, name, val) {
+    const c = proj(x, y, z);
+    if (!c) return;
+    const sc = Math.max(0.6, Math.min(1.1, c.s / 34)), w = 96 * sc, h = 32 * sc;
+    hexPath(c.x - w / 2 + 4 * sc, c.y, 9 * sc); ctx.fillStyle = col + '66'; ctx.fill(); ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = 'rgba(4,14,30,0.82)'; ctx.fillRect(c.x - w / 2 + 14 * sc, c.y - h / 2, w, h);
+    ctx.fillStyle = col; ctx.fillRect(c.x - w / 2 + 14 * sc, c.y - h / 2, 2, h);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e8f7ff'; ctx.font = `700 ${Math.round(11 * sc)}px monospace`; ctx.fillText(name, c.x - w / 2 + 20 * sc, c.y - h * 0.22);
+    ctx.fillStyle = '#9fe9ff'; ctx.font = `${Math.round(10 * sc)}px monospace`; ctx.fillText(val, c.x - w / 2 + 20 * sc, c.y + h * 0.24);
+    ctx.textBaseline = 'alphabetic';
+  }
+  // リンク断などの火花
+  function sparksAt(x, y, z, t, col) {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (let k = 0; k < 18; k++) {
+      const ph = (t * 0.001 + k * 0.137) % 1, a = k * 2.399;
+      const p = proj(x + Math.cos(a) * ph * 1.4, y + ph * 1.6 - ph * ph * 1.2, z + Math.sin(a) * ph * 1.4);
+      if (!p) continue;
+      const r = 3 * (1 - ph) + 1;
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 3);
+      g.addColorStop(0, 'rgba(255,230,140,0.95)'); g.addColorStop(0.4, col + 'aa'); g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g; ctx.fillRect(p.x - r * 3, p.y - r * 3, r * 6, r * 6);
+    }
+    ctx.restore();
+  }
+
+  // ── 立ち上がるポップアップ(ping の結果・ログ) ──
+  let popups = [];
+  function popup(pos, col, title, val, ttl) {
+    if (!pos) return;
+    popups.push({ pos: pos.slice(), col, title, val, born: performance.now(), ttl: ttl || 3600 });
+    if (popups.length > 40) popups.splice(0, popups.length - 40);
+  }
+  function drawPopups(t) {
+    const now = performance.now();
+    popups = popups.filter(p => now - p.born < p.ttl);
+    // 同じ場所(または近く)に出るものは縦に積む
+    const placed = [];
+    for (const p of popups) {
+      const u = (now - p.born) / p.ttl;
+      const c = proj(p.pos[0], p.pos[1] + 1.2 + u * 2.2, p.pos[2]);
+      if (!c) continue;
+      let y = c.y;
+      while (placed.some(q => Math.abs(q.x - c.x) < 160 && Math.abs(q.y - y) < 48)) y -= 50;
+      placed.push({ x: c.x, y });
+      ctx.save(); ctx.globalAlpha = u < 0.1 ? u * 10 : u > 0.75 ? (1 - u) * 4 : 1;
+      plateAt(c.x + (mode === 'net' && !hostView ? -230 : 0), y, 0.82, p.col, p.title, p.val, false, t);
+      ctx.restore();
+    }
+  }
+  function posForDevice(dev) {
+    if (mode === 'link') { const P = linkPos[dev]; return P ? [P[0], 2.2, P[2]] : null; }
+    if (hostView) { if (dev === hostView.id) return [0, 1, 0]; return peerPos[dev] || null; }
+    const ip = devIp(dev); return ip ? posForIp(ip) : null;
+  }
+  function popupForFlow(e) {
+    const dstPos = mode === 'link' ? posForDevice(e.dst || (e.path || []).slice(-1)[0] || e.src) : hostView ? (posForDevice(e.dst) || posForDevice(e.src)) : posForIp(e.dst_ip);
+    const okN = e.ok ? e.pkts : 0;
+    popup(dstPos, e.ok ? '#3dff9a' : '#ff3b4e', e.ok ? 'PING OK' : 'PING NG', `${okN}/${e.pkts} ・ ${e.size}B`);
+  }
+
   function drawLinks(t) {
     if (!linkData) return;
     // 床のリング
@@ -881,27 +1087,24 @@
           }
         }
       }
-      // 中点のラベル
-      const m = proj((A[0] + B[0]) / 2, Y + 0.9, (A[2] + B[2]) / 2);
-      if (m) {
-        // 断のリンクは区間平均に断前の通信が残るので、速度ではなく停止と出す
-        const lines = l.down ? ['→ 停止', '← 停止'] : [`→ ${fmtBps(l.ab_bps)}`, `← ${fmtBps(l.ba_bps)}`];
-        ctx.font = '12px monospace';
-        const w = Math.max(...lines.map(x => ctx.measureText(x).width)) + 54;
-        ctx.fillStyle = 'rgba(4,14,30,0.82)'; ctx.fillRect(m.x - w / 2, m.y - 22, w, 36);
-        ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.strokeRect(m.x - w / 2, m.y - 22, w, 36);
-        ctx.fillStyle = col; ctx.font = '700 11px monospace'; ctx.fillText(STATE_JA[l.state], m.x - w / 2 + 6, m.y - 2);
-        ctx.fillStyle = '#e8f7ff'; ctx.font = '12px monospace';
-        ctx.fillText(lines[0], m.x - w / 2 + 46, m.y - 8); ctx.fillText(lines[1], m.x - w / 2 + 46, m.y + 8);
-        if (l.state === 'down') {
-          ctx.strokeStyle = '#ff3b4e'; ctx.lineWidth = 4;
-          ctx.beginPath(); ctx.moveTo(m.x - 10, m.y + 22); ctx.lineTo(m.x + 10, m.y + 42); ctx.moveTo(m.x + 10, m.y + 22); ctx.lineTo(m.x - 10, m.y + 42); ctx.stroke();
-        }
-        if (l.alerts.length) {
-          hexPath(m.x + w / 2 + 14, m.y - 4, 12); ctx.fillStyle = '#e6142d'; ctx.fill();
-          ctx.fillStyle = '#fff'; ctx.font = '700 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-          ctx.fillText('警', m.x + w / 2 + 14, m.y - 4); ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
-        }
+      // 中点: 通信量に比例した高さの六角柱 + その上に状態と量の立体プレート(右脇の文字ではなく画面内に)
+      const mx = (A[0] + B[0]) / 2, mz = (A[2] + B[2]) / 2, tot2 = l.down ? 0 : l.ab_bps + l.ba_bps;
+      const colH = 0.4 + Math.min(3.2, Math.log10(1 + tot2) * 0.42);
+      if (!l.down) hexColumn(mx, Y, mz, 0.42, colH, col, t);
+      const title = l.down ? 'LINK DOWN' : STATE_EN[l.state];
+      const val = l.down ? '停止' : fmtShort(tot2);
+      plate3d(mx, Y + colH + 0.9, mz, col, title, val, l.down || l.state === 'crit', t, `使用率 ${(l.util * 100).toFixed(1)}%`);
+      if (l.down) sparksAt(mx, Y + 0.3, mz, t, '#ff3b4e');
+      if (l.alerts.length) {
+        const ap = proj(mx, Y + colH + 2.6, mz);
+        if (ap) { hexPath(ap.x, ap.y, 13); ctx.fillStyle = '#e6142d'; ctx.fill(); ctx.strokeStyle = '#ffb0b8'; ctx.stroke();
+          ctx.fillStyle = '#fff'; ctx.font = '700 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText('警', ap.x, ap.y); ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic'; }
+      }
+      // 両端: 装置のインタフェースごとの送受信(真ん中のルータはリンクごとに別のIFとして出る)
+      for (const [P, Q, ifn, out, inn] of [[A, B, l.iface_a, l.ab_bps, l.ba_bps], [B, A, l.iface_b, l.ba_bps, l.ab_bps]]) {
+        const u = 0.24, ix = P[0] + (Q[0] - P[0]) * u, iz = P[2] + (Q[2] - P[2]) * u;
+        ifTile(ix, Y + 0.95, iz, col, shortIf(ifn || '?'), l.down ? '↑停止 ↓停止' : `↑${fmtShort(out)} ↓${fmtShort(inn)}`);
       }
     }
     // ルータ(六角柱)
@@ -934,12 +1137,13 @@
     document.getElementById('mLink').classList.toggle('on', m === 'link');
     document.body.classList.toggle('links', m === 'link');
     particles = [];
-    if (m === 'link') { cam.tdist = 30; cam.pitch = 0.85; document.getElementById('cidr').textContent = 'ROUTER LINKS'; pollLinks(); }
+    if (m === 'link') { cam.tdist = 36; cam.pitch = 0.8; document.getElementById('cidr').textContent = 'ROUTER LINKS'; pollLinks(); }
     else update();
     try { history.replaceState(null, '', m === 'link' ? '?view=links' : location.pathname); } catch (e) { /* 無くても動く */ }
   }
   document.getElementById('mNet').onclick = () => setMode('net');
   document.getElementById('mLink').onclick = () => setMode('link');
+  document.getElementById('mList').onclick = (e) => { document.body.classList.toggle('showlist'); e.target.classList.toggle('on'); };
 
   // ── メインループ ─────────────────────────────
   function frame(t) {
@@ -955,6 +1159,7 @@
     drawGroundRing(t);
     if (mode === 'link') drawLinks(t);
     else { if (hostView) { alertLevel = 0; drawHost(t); } else drawNetwork(t, nowSec); drawParticles(t); }
+    drawPopups(t);
     drawBoard(t);
     requestAnimationFrame(frame);
   }
@@ -1088,6 +1293,7 @@
       if (primed && fresh.length) {
         const newest = fresh[fresh.length - 1].t;
         for (const e of fresh) spawn(e, Math.max(0, Math.min(1800, 1800 - (newest - e.t) * 1000)));
+        fresh.slice(-6).forEach(e => { if (match(fSrc.value, e.src_ip, e.src) && match(fDst.value, e.dst_ip, e.dst)) popupForFlow(e); });
       }
       events = events.concat(fresh).slice(-3000);
       alerts = alerts.concat(d.alerts || []).slice(-400);
@@ -1130,6 +1336,24 @@
   setInterval(pollFlows, 2000);
   setInterval(pollHosts, 5000);
   pollHealth(); setInterval(pollHealth, 10000);
+  // ログ(Loki または内部記録)を、出した装置の上に六角プレートで浮かべる
+  let logSince = Date.now() / 1000;
+  async function pollLogs() {
+    try {
+      const d = await api(`/api/traffic/logs?since=${logSince}&limit=8`);
+      logSrc = d.source;
+      for (const r of d.logs) {
+        logSince = Math.max(logSince, r.t);
+        if (r.sev > 5) continue;
+        const m = r.msg.match(/%[\w-]+-\d-[\w]+/);
+        const col = r.recovery ? '#3dff9a' : r.sev <= 3 ? '#ff3b4e' : r.sev === 4 ? '#ffab2e' : '#7fb2ff';
+        const title = r.recovery ? 'RECOVER' : r.sev <= 3 ? 'LOG ERROR' : r.sev === 4 ? 'LOG WARN' : 'LOG';
+        popup(posForDevice(r.dev), col, title, (m ? m[0] : r.msg).slice(0, 22), 5200);
+      }
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  let logSrc = 'internal';
+  setInterval(pollLogs, 4000);
   update();
   requestAnimationFrame(frame);
 })();

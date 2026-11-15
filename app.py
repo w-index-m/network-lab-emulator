@@ -6919,6 +6919,20 @@ def _handle_nat_config(device_id: str, command: str, state: DeviceState):
 from engine.traffic_analytics import recorder as _flow_recorder
 
 
+def _on_fw_shun(key, src_ip, avg_rate, burst_rate):
+    """ASA threat-detection が送信元をシャンした → /cyber-view の FW アラート"""
+    dev = next((d for d, st in list(device_sessions.items()) if id(st) == key), None)
+    if dev:
+        _flow_recorder.external_alert(
+            'fw_shun', f'{dev}|{src_ip}', dev, src_ip,
+            f'{src_ip} を遮断 (平均 {avg_rate:.1f}/s, バースト {burst_rate:.1f}/s)')
+
+
+from engine import threat_detection as _td_mod  # noqa: E402
+if _on_fw_shun not in _td_mod.shun_listeners:
+    _td_mod.shun_listeners.append(_on_fw_shun)
+
+
 def _owner_near(dev_id: str, ip: str):
     """ip を持つ装置を、dev_id 自身 → その隣接 → 全体 の順で探す。
     同じIPが別の場所(未接続の装置等)にもあると、全体検索だけでは
@@ -9615,13 +9629,13 @@ async def traffic_links(window: int = 60, routers_only: bool = True):
         if routers_only and (nodes[a]['type'] in _NON_ROUTER_TYPES or nodes[b]['type'] in _NON_ROUTER_TYPES):
             continue
         pa, pb = _prom_bps(a, ln['iface_a']), _prom_bps(b, ln['iface_b'])
-        if pa is not None or pb is not None:
-            src = 'prometheus'
-            ab, ba = pa or 0.0, pb or 0.0
-        else:
-            src = 'internal'
-            r = sampler.rate((a, b), window, now)
-            ab, ba = r if r else (0.0, 0.0)
+        r = sampler.rate((a, b), window, now)
+        ia, ib = r if r else (0.0, 0.0)
+        # 方向ごとに、Prometheus で取れた側はそれを、監視対象外の側は内部カウンタを使う
+        ab = pa if pa is not None else ia
+        ba = pb if pb is not None else ib
+        src = ('prometheus' if pa is not None and pb is not None
+               else 'mixed' if pa is not None or pb is not None else 'internal')
         ok = ng = 0
         for e in hist['events']:
             p = e['path']
@@ -9696,7 +9710,8 @@ async def traffic_health(window: int = 300):
                  'details': det})
 
     # セキュリティ: 侵害検知のアラート
-    al = hist['alerts']
+    from engine.traffic_analytics import SECURITY_SOURCES
+    al = [a for a in hist['alerts'] if a.get('source', 'IDS') in SECURITY_SOURCES]
     hi = [a for a in al if a['severity'] == 'high']
     st = 'crit' if hi else 'warn' if al else 'ok'
     by = {}
@@ -9708,17 +9723,49 @@ async def traffic_health(window: int = 300):
 
     # syslog: 装置が出したログの重要度(3以下=error以上は異常、4=warningは注意)
     from engine.traffic_analytics import RECOVERY
-    logs = _flow_recorder.logs_since(now - window)
+    logs, log_src, log_err = await _health_logs(now - window, now)
     bad = [x for x in logs if not RECOVERY.search(x['msg'])]
     err = [x for x in bad if x['sev'] <= 3]
     warn = [x for x in bad if x['sev'] == 4]
     st = 'crit' if err else 'warn' if warn else 'ok'
-    cats.append({'key': 'syslog', 'label': 'syslog', 'state': st,
+    cats.append({'key': 'syslog', 'label': 'syslog', 'state': st, 'source': log_src,
+                 'source_error': log_err,
                  'summary': f'error以上 {len(err)} ・ warning {len(warn)} ・ 全 {len(logs)}件',
                  'details': [f"{x['host']}: {x['msg'][:90]}" for x in (err + warn)[-4:]]})
 
     overall = max((c['state'] for c in cats), key=lambda v: rank[v])
-    return {'overall': overall, 'categories': cats, 'window': window, 'now': now}
+    return {'overall': overall, 'categories': cats, 'window': window, 'now': now,
+            'sources': {'metrics': 'prometheus' if os.environ.get('PROMETHEUS_URL', '').strip() else 'internal',
+                        'logs': log_src}}
+
+
+async def _health_logs(start, end):
+    """syslog 観点のログ。LOKI_URL があれば Loki(Grafana Loki と同じデータ)から、
+    無い/繋がらなければエミュレータ内の記録から取る。重要度はログ行から推定する。"""
+    url = os.environ.get('LOKI_URL', '').strip()
+    if url:
+        from engine.link_stats import loki_logs
+        try:
+            rows = await asyncio.to_thread(loki_logs, url, start, end)
+            for r in rows:
+                r['sev'] = _guess_severity(r['msg'])
+            return rows, 'loki', None
+        except Exception as e:  # noqa: BLE001 - Loki 不達は内部記録で補う
+            return _flow_recorder.logs_since(start), 'internal', str(e)[:200]
+    return _flow_recorder.logs_since(start), 'internal', None
+
+
+@app.get("/api/traffic/logs")
+async def traffic_logs(since: float = 0, limit: int = 30):
+    """/cyber-view でログを六角形で浮かべるための直近ログ(Loki か内部記録)。"""
+    now = time.time()
+    start = since if since > 0 else now - 300
+    rows, src, err = await _health_logs(start, now)
+    from engine.traffic_analytics import RECOVERY
+    out = [{'t': r['t'], 'dev': r.get('dev', ''), 'host': r.get('host', ''), 'sev': r['sev'],
+            'recovery': bool(RECOVERY.search(r['msg'])), 'msg': r['msg'][:200]}
+           for r in rows if r['t'] > since][-max(1, min(int(limit), 200)):]
+    return {'logs': out, 'source': src, 'error': err, 'now': now}
 
 
 async def _link_sample_loop():
