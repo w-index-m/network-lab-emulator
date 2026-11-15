@@ -1,0 +1,668 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cyber View</title>
+<style>
+  :root {
+    --bg: #02060f; --ink: #bfe9ff; --dim: #4f7896; --cyan: #33d6ff; --red: #ff3b4e;
+    --orange: #ffab2e; --panel: rgba(6, 20, 40, .72); --line: rgba(51, 214, 255, .35);
+  }
+  /* 3Dビューは常に暗い背景で描くため、ライトモードでも同じ配色を使う */
+  :root[data-theme="light"], :root[data-theme="dark"] { --bg: #02060f; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg: #02060f; } }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); overflow: hidden;
+    font-family: "SFMono-Regular", Consolas, "Menlo", "Noto Sans Mono CJK JP", monospace; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  canvas.drag { cursor: grabbing; }
+  .hud { position: fixed; pointer-events: none; z-index: 2; }
+  .hud * { pointer-events: auto; }
+  #status { top: 12px; left: 16px; font-size: 13px; line-height: 1.55; text-shadow: 0 0 6px #000; }
+  #status b { color: #fff; font-weight: 600; }
+  #status .brand { font-size: 15px; letter-spacing: .32em; color: var(--cyan); }
+  #status a { color: var(--dim); text-decoration: none; margin-right: 10px; }
+  #status a:hover { color: var(--cyan); }
+  #cidr { top: 6px; right: 18px; text-align: right; font-size: clamp(26px, 5.4vw, 64px); font-weight: 700;
+    color: transparent; -webkit-text-stroke: 1.4px #e8f7ff; letter-spacing: .02em; white-space: nowrap; }
+  #crumbs { top: clamp(44px, 7vw, 82px); right: 18px; font-size: 12px; color: var(--dim); text-align: right; }
+  #crumbs span { cursor: pointer; color: var(--cyan); }
+  #crumbs span:hover { text-decoration: underline; }
+  #crumbs button { margin-left: 8px; background: transparent; color: var(--ink); border: 1px solid var(--line);
+    font: inherit; padding: 2px 8px; cursor: pointer; }
+  #filter { left: 16px; bottom: 14px; font-size: clamp(18px, 3.2vw, 30px); font-weight: 700; display: flex;
+    align-items: center; gap: 10px; }
+  #filter input { width: 7.5em; background: transparent; border: 0; border-bottom: 1px solid var(--line);
+    color: #fff; font: inherit; padding: 0 2px; }
+  #filter input::placeholder { color: #e8f7ff; opacity: .95; }
+  #filter .arrow { color: var(--cyan); }
+  #legend { left: 16px; bottom: clamp(52px, 7vw, 66px); font-size: 11px; color: var(--dim); }
+  #legend i { display: inline-block; width: 10px; height: 10px; margin: 0 4px 0 10px; vertical-align: -1px; }
+  #alerts { top: 120px; right: 16px; width: min(300px, 44vw); font-size: 12px; }
+  #alerts .a { background: var(--panel); border-left: 3px solid var(--red); padding: 5px 8px; margin-bottom: 5px;
+    cursor: pointer; }
+  #alerts .a.medium { border-color: var(--orange); }
+  #alerts .a.low { border-color: #ffe14d; }
+  #alerts .a small { color: var(--dim); display: block; }
+  #card { left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(420px, 88vw);
+    background: rgba(4, 14, 30, .86); border: 1px solid var(--cyan); box-shadow: 0 0 24px rgba(51, 214, 255, .35);
+    padding: 12px 14px; font-size: 12px; display: none; }
+  #card h2 { margin: 0 0 4px; font-size: 18px; color: #fff; letter-spacing: .04em; }
+  #card .sub { color: var(--dim); margin-bottom: 8px; }
+  #card table { width: 100%; border-collapse: collapse; }
+  #card td { padding: 2px 4px; border-top: 1px solid rgba(51, 214, 255, .12); white-space: nowrap; }
+  #card td.up { color: #5dffa8; } #card td.down { color: var(--red); }
+  #card .stat { display: flex; justify-content: space-between; margin-top: 8px; color: var(--dim); }
+  #card .stat b { color: #fff; }
+  #session { right: 16px; bottom: 14px; width: min(600px, calc(100vw - 32px)); display: none;
+    background: rgba(4, 14, 30, .8); border: 1px solid var(--line); font-size: 12px; }
+  #session .hd { padding: 4px 10px; background: rgba(51, 214, 255, .14); color: #fff; letter-spacing: .1em; }
+  #session .row { display: grid; grid-template-columns: 70px 1fr 1fr 70px 40px; gap: 6px; padding: 2px 10px; }
+  #session .row .ng { color: var(--red); } #session .row .ok { color: #5dffa8; }
+  #tip { position: fixed; z-index: 3; pointer-events: none; background: var(--panel); border: 1px solid var(--line);
+    padding: 4px 8px; font-size: 12px; display: none; white-space: nowrap; }
+  #empty { left: 50%; top: 58%; transform: translateX(-50%); color: var(--dim); font-size: 13px; text-align: center;
+    display: none; }
+  @media (max-width: 640px) {
+    #status { font-size: 11px; } #status .links { display: none; }
+    #alerts { top: auto; bottom: 108px; right: 8px; width: 60vw; max-height: 30vh; overflow: hidden; }
+    #alerts .a:nth-child(n+3) { display: none; }
+    #legend { display: none; }
+    #session .row { grid-template-columns: 56px 1fr 1fr 44px; } #session .row .bytes { display: none; }
+    #card { top: 44%; }
+    #session { bottom: 64px; }
+    body.host #filter, body.host #alerts { display: none; }
+    #crumbs { top: 74px; }
+    #card td:last-child { display: none; }
+    body.host #session { bottom: 14px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="status" class="hud">
+  <div class="brand">CYBER VIEW</div>
+  <div>AlertDB:[<b id="sAlerts">0</b>] Flows:[<b id="sFlows">0</b>] Hosts:[<b id="sHosts">0</b>] Links:[<b id="sLinks">0</b>]</div>
+  <div id="sTime">--</div>
+  <div class="links"><a href="/traffic-flow">2D フロー表示</a><a href="/dashboard">リソース</a><a href="/">CLI</a></div>
+</div>
+
+<div id="cidr" class="hud">0.0.0.0/0</div>
+<div id="crumbs" class="hud"></div>
+<div id="alerts" class="hud"></div>
+<div id="card" class="hud"></div>
+<div id="session" class="hud"><div class="hd">SESSION</div><div id="sessRows"></div></div>
+<div id="empty" class="hud">このブロックには装置もトラフィックもありません</div>
+
+<div id="legend" class="hud">
+  <i style="background:#33d6ff"></i>到達 <i style="background:#ff3b4e"></i>到達不可
+  <i style="background:#ffab2e"></i>アラート関連 ・ ドラッグで回転 / ホイールで拡大 / パネルをクリックで掘り下げ / Escで戻る
+</div>
+<div id="filter" class="hud">
+  <input id="fSrc" placeholder="ANY" aria-label="送信元フィルタ" autocomplete="off">
+  <span class="arrow">-&gt;</span>
+  <input id="fDst" placeholder="ANY" aria-label="宛先フィルタ" autocomplete="off">
+</div>
+<div id="tip"></div>
+
+<script>
+(() => {
+  'use strict';
+  const SESSION_KEY = 'netlabToken_v1';      // index.html / dashboard.html と同じキー
+  let token = null;
+  try { token = localStorage.getItem(SESSION_KEY); } catch (e) { token = null; }
+  const api = (path) => fetch(path, { headers: token ? { 'X-Session-Token': token } : {} })
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = W * DPR; cv.height = H * DPR;
+  }
+  window.addEventListener('resize', resize); resize();
+
+  // ── データ ─────────────────────────────────────
+  const S = 1.15, HALF = 0.5;              // パネル間隔とパネル半幅
+  let hosts = [], hostById = {}, ipOwner = {}, links = [];
+  let events = [];                          // 直近のフロー(最大3000)
+  let alerts = [];                          // 直近のアラート
+  let seq = 0, alertSeq = 0, primed = false, flowTotal = 0;
+  let particles = [];
+
+  const octets = (ip) => ip.split('.').map(Number);
+  const RULE_CODE = { scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK' };
+  const SEV_COL = { high: '#ff3b4e', medium: '#ffab2e', low: '#ffe14d' };
+
+  // ── 表示状態: prefix = 選んだオクテット列 (長さ0〜3) / host = ホストビュー ──
+  let prefix = [], hostView = null;          // hostView = {id, ip}
+  const cam = { yaw: -0.55, pitch: 0.72, dist: 33, tdist: 33 };
+  let lastInput = performance.now();
+
+  function levelCidr() {
+    if (hostView) return hostView.ip + '/32';
+    const o = prefix.concat([0, 0, 0, 0]).slice(0, 4);
+    return o.join('.') + '/' + (prefix.length * 8);
+  }
+  function inBlock(ip) {
+    const o = octets(ip);
+    for (let i = 0; i < prefix.length; i++) if (o[i] !== prefix[i]) return false;
+    return true;
+  }
+  function panelXZ(n) {                      // 0..255 → 床面の座標(0が奥の左)
+    const i = n % 16, j = Math.floor(n / 16);
+    return [(i - 7.5) * S, (7.5 - j) * S];
+  }
+  function hash(s) { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; }
+  function outsidePoint(ip) {                // 今のブロック外の相手は外周の上空から飛んでくる
+    const a = (hash(ip.split('.').slice(0, prefix.length + 1).join('.')) % 360) * Math.PI / 180;
+    return [Math.cos(a) * 15, 6.5, Math.sin(a) * 15];
+  }
+  function posForIp(ip) {
+    if (!ip) return null;
+    if (hostView) return null;
+    if (!inBlock(ip)) return outsidePoint(ip);
+    const [x, z] = panelXZ(octets(ip)[prefix.length]);
+    return [x, prefix.length === 3 ? 0.9 : 0.15, z];
+  }
+  function devIp(dev) { const h = hostById[dev]; return h ? h.interfaces[0].ip : null; }
+
+  // ── 描画の基本: 透視投影 ─────────────────────────
+  function proj(x, y, z) {
+    const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw), cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+    const x1 = x * cy - z * sy, z1 = x * sy + z * cy;
+    const y2 = y * cp + z1 * sp, z2 = -y * sp + z1 * cp;
+    const d = z2 + cam.dist;
+    if (d < 0.5) return null;
+    const f = Math.min(W, H * 1.25) * 1.05, s = f / d;
+    return { x: W / 2 + x1 * s, y: H * 0.54 - y2 * s, s, d };
+  }
+  function poly(pts) { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.closePath(); }
+  function hexPath(cx, cy, r) {
+    ctx.beginPath();
+    for (let k = 0; k < 6; k++) { const a = Math.PI / 6 + k * Math.PI / 3; const px = cx + r * Math.cos(a), py = cy + r * Math.sin(a); k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+    ctx.closePath();
+  }
+
+  // ── パネル集計(装置数・直近の通信量・アラート) ──
+  function panelStats(now) {
+    const st = {};
+    const get = (n) => st[n] || (st[n] = { hosts: [], bytes: 0, ng: 0, alerts: [] });
+    const L = prefix.length;
+    for (const h of hosts) for (const itf of h.interfaces) {
+      if (inBlock(itf.ip)) get(octets(itf.ip)[L]).hosts.push({ h, itf });
+    }
+    for (const e of events) {
+      if (now - e.t > 30) continue;
+      for (const ip of [e.src_ip, e.dst_ip]) {
+        if (ip && inBlock(ip)) { const p = get(octets(ip)[L]); p.bytes += e.bytes; if (!e.ok) p.ng++; }
+      }
+    }
+    for (const a of alerts) {
+      if (now - a.t > 600) continue;
+      const ip = devIp(a.src) || (a.dst && /^\d+\.\d+\.\d+\.\d+$/.test(a.dst) ? a.dst : devIp(a.dst));
+      if (ip && inBlock(ip)) get(octets(ip)[L]).alerts.push(a);
+    }
+    return st;
+  }
+
+  // ── Network View (/0〜/24) ───────────────────────
+  let pickables = [];
+  function drawNetwork(t, nowSec) {
+    const L = prefix.length;
+    const st = panelStats(nowSec);
+    const maxB = Math.max(1, ...Object.values(st).map(p => p.bytes));
+    const panels = [];
+    for (let n = 0; n < 256; n++) {
+      const [x, z] = panelXZ(n);
+      const c = proj(x, 0, z);
+      if (c) panels.push({ n, x, z, d: c.d });
+    }
+    panels.sort((a, b) => b.d - a.d);
+    pickables = [];
+
+    if (L === 3) drawSphere(13.6, t, 'rgba(51,214,255,0.13)', 0, 0);   // サブネットを球で囲む(NIRVANA改 図2)
+
+    for (const p of panels) {
+      const info = st[p.n];
+      const corners = [[-HALF, HALF], [HALF, HALF], [HALF, -HALF], [-HALF, -HALF]]
+        .map(([dx, dz]) => proj(p.x + dx, 0, p.z + dz));
+      if (corners.some(c => !c)) continue;
+      let fill = 'rgba(30,110,220,0.07)', stroke = 'rgba(51,214,255,0.22)';
+      if (info && info.hosts.length) { fill = 'rgba(40,150,255,0.30)'; stroke = 'rgba(120,230,255,0.85)'; }
+      if (info && info.bytes) {
+        const k = Math.min(1, 0.25 + Math.log10(1 + info.bytes) / Math.log10(1 + maxB) * 0.75);
+        fill = `rgba(${Math.round(60 + 160 * k)},${Math.round(190 + 60 * k)},255,${0.25 + 0.45 * k})`;
+      }
+      if (info && info.alerts.length) { stroke = '#ff3b4e'; fill = 'rgba(255,40,70,0.35)'; }
+      poly(corners); ctx.fillStyle = fill; ctx.fill();
+      ctx.lineWidth = 1; ctx.strokeStyle = stroke; ctx.stroke();
+      pickables.push({ n: p.n, poly: corners, info });
+
+      // パネルのラベル(オクテット)を床面に貼る
+      const c0 = corners[0], c1 = corners[1], c3 = corners[3];
+      if (Math.abs(c1.x - c0.x) + Math.abs(c1.y - c0.y) > 16) {
+        ctx.save();
+        ctx.setTransform(DPR * (c1.x - c0.x) / 100, DPR * (c1.y - c0.y) / 100,
+                         DPR * (c3.x - c0.x) / 100, DPR * (c3.y - c0.y) / 100, DPR * c0.x, DPR * c0.y);
+        ctx.fillStyle = info && info.hosts.length ? '#ffffff' : 'rgba(150,200,230,0.55)';
+        ctx.font = '600 30px monospace'; ctx.textBaseline = 'top';
+        ctx.fillText(String(p.n), 8, 6);
+        if (L === 3 && info && info.hosts.length) {
+          ctx.font = '22px monospace'; ctx.fillStyle = '#bfe9ff';
+          ctx.fillText(info.hosts[0].h.hostname.slice(0, 7), 8, 44);
+        } else if (info && info.hosts.length) {
+          ctx.font = '20px monospace'; ctx.fillStyle = '#bfe9ff';
+          ctx.fillText(info.hosts.length + ' host', 8, 58);
+        }
+        ctx.restore();
+      }
+      // /24では装置を柱で立てる(高さ=直近の通信量)
+      if (L === 3 && info && info.hosts.length) {
+        const h = 0.4 + (info.bytes ? 2.2 * Math.log10(1 + info.bytes) / Math.log10(1 + maxB) : 0);
+        const top = [[-0.3, 0.3], [0.3, 0.3], [0.3, -0.3], [-0.3, -0.3]].map(([dx, dz]) => proj(p.x + dx, h, p.z + dz));
+        const bot = [[-0.3, 0.3], [0.3, 0.3], [0.3, -0.3], [-0.3, -0.3]].map(([dx, dz]) => proj(p.x + dx, 0, p.z + dz));
+        if (!top.some(v => !v)) {
+          ctx.strokeStyle = info.alerts.length ? 'rgba(255,80,100,0.9)' : 'rgba(140,235,255,0.85)';
+          ctx.fillStyle = info.alerts.length ? 'rgba(255,60,80,0.18)' : 'rgba(60,200,255,0.16)';
+          for (let k = 0; k < 4; k++) {
+            const q = [bot[k], bot[(k + 1) % 4], top[(k + 1) % 4], top[k]];
+            poly(q); ctx.fill(); ctx.stroke();
+          }
+          poly(top); ctx.fill(); ctx.stroke();
+        }
+      }
+    }
+    // アラートの花
+    for (const p of panels) {
+      const info = st[p.n];
+      if (info && info.alerts.length) drawFlower(p.x, p.z, info.alerts, t);
+    }
+    document.getElementById('empty').style.display = Object.keys(st).length ? 'none' : 'block';
+  }
+
+  function drawSphere(R, t, color, cx, cz) {
+    ctx.strokeStyle = color; ctx.lineWidth = 1;
+    for (let lat = -60; lat <= 60; lat += 30) {
+      const y = R * Math.sin(lat * Math.PI / 180), r = R * Math.cos(lat * Math.PI / 180);
+      ctx.beginPath(); let first = true;
+      for (let a = 0; a <= 360; a += 8) {
+        const p = proj(cx + r * Math.cos(a * Math.PI / 180), y, cz + r * Math.sin(a * Math.PI / 180));
+        if (!p) { first = true; continue; }
+        first ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); first = false;
+      }
+      ctx.stroke();
+    }
+    for (let k = 0; k < 12; k++) {
+      const lon = k * Math.PI / 6 + t * 0.00008;
+      ctx.beginPath(); let first = true;
+      for (let a = -90; a <= 90; a += 8) {
+        const r = R * Math.cos(a * Math.PI / 180), y = R * Math.sin(a * Math.PI / 180);
+        const p = proj(cx + r * Math.cos(lon), y, cz + r * Math.sin(lon));
+        if (!p) { first = true; continue; }
+        first ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); first = false;
+      }
+      ctx.stroke();
+    }
+  }
+
+  // 赤い「警」の六角形 + ルール別の花びら + パネルまでの螺旋の柱
+  function drawFlower(x, z, list, t, height) {
+    const H0 = height || 4.2;
+    for (let k = 0; k < 46; k++) {
+      const u = k / 45, a = u * Math.PI * 9 + t * 0.003;
+      const p = proj(x + Math.cos(a) * 0.38, u * H0, z + Math.sin(a) * 0.38);
+      if (!p) continue;
+      ctx.fillStyle = `rgba(255,${80 + 120 * u | 0},90,${0.35 + 0.6 * u})`;
+      ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+    }
+    const c = proj(x, H0 + 0.4, z);
+    if (!c) return;
+    const r = Math.max(11, Math.min(30, c.s * 0.55));
+    const byRule = {};
+    for (const a of list) (byRule[a.rule] || (byRule[a.rule] = [])).push(a);
+    const rules = Object.keys(byRule).slice(0, 6);
+    rules.forEach((rule, i) => {
+      const ang = -Math.PI / 2 + i * Math.PI / 3;
+      const px = c.x + Math.cos(ang) * r * 1.78, py = c.y + Math.sin(ang) * r * 1.78;
+      const sev = byRule[rule][0].severity;
+      hexPath(px, py, r * 0.88);
+      ctx.fillStyle = 'rgba(20,6,10,0.82)'; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = SEV_COL[sev] || '#ff3b4e'; ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = `600 ${Math.max(8, r * 0.36)}px monospace`;
+      ctx.fillText(RULE_CODE[rule] || rule, px, py - r * 0.14);
+      ctx.font = `${Math.max(8, r * 0.34)}px monospace`;
+      ctx.fillText('x' + byRule[rule].length, px, py + r * 0.3);
+    });
+    const pulse = 0.75 + 0.25 * Math.sin(t * 0.006);
+    hexPath(c.x, c.y, r);
+    ctx.fillStyle = `rgba(230,20,45,${0.75 * pulse + 0.2})`; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = '#ffd0d6'; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `700 ${r * 0.8}px sans-serif`;
+    ctx.fillText('警', c.x, c.y - r * 0.08);
+    ctx.font = `600 ${Math.max(8, r * 0.32)}px monospace`;
+    ctx.fillText(list.length, c.x, c.y + r * 0.62);
+    ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+  }
+
+  // ── Host View (/32) ─────────────────────────────
+  const SPHERE_R = 7.5;
+  let peerPos = {};
+  function hostPeers(id) {
+    const h = hostById[id];
+    const set = new Map();
+    (h ? h.peers : []).forEach(p => set.set(p, { id: p, label: (hostById[p] || {}).hostname || p, ip: devIp(p) }));
+    for (const e of events) {
+      if (e.src === id) {
+        const k = e.dst || e.dst_ip;
+        if (!set.has(k)) set.set(k, { id: k, label: e.dst ? ((hostById[e.dst] || {}).hostname || e.dst) : 'unknown', ip: e.dst_ip });
+      } else if (e.dst === id && e.src && !set.has(e.src)) {
+        set.set(e.src, { id: e.src, label: (hostById[e.src] || {}).hostname || e.src, ip: e.src_ip });
+      }
+    }
+    return [...set.values()].slice(0, 40);
+  }
+  function drawHost(t) {
+    const id = hostView.id;
+    drawSphere(SPHERE_R, t, 'rgba(51,214,255,0.22)', 0, 0);
+    const peers = hostPeers(id);
+    peerPos = {};
+    const N = Math.max(peers.length, 1), ga = Math.PI * (3 - Math.sqrt(5));
+    const list = peers.map((p, i) => {
+      const y = 1 - (i + 0.5) / N * 1.6, r = Math.sqrt(1 - y * y), a = i * ga + 0.6;
+      const pos = [Math.cos(a) * r * SPHERE_R, y * SPHERE_R * 0.8, Math.sin(a) * r * SPHERE_R];
+      peerPos[p.id] = pos; if (p.ip) peerPos[p.ip] = pos;
+      return { p, pos, c: proj(...pos) };
+    }).filter(v => v.c).sort((a, b) => b.c.d - a.c.d);
+    const o = proj(0, 0, 0);
+    for (const { p, c } of list) {
+      ctx.strokeStyle = 'rgba(51,214,255,0.28)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(o.x, o.y); ctx.lineTo(c.x, c.y); ctx.stroke();
+      const s = Math.max(5, c.s * 0.42);
+      ctx.fillStyle = 'rgba(40,150,255,0.35)'; ctx.strokeStyle = '#8fe8ff';
+      ctx.fillRect(c.x - s, c.y - s * 0.7, s * 2, s * 1.4); ctx.strokeRect(c.x - s, c.y - s * 0.7, s * 2, s * 1.4);
+      ctx.fillStyle = '#fff'; ctx.font = `${Math.max(10, Math.min(13, c.s * 0.4))}px monospace`;
+      ctx.fillText(p.label, c.x + s + 4, c.y - 2);
+      ctx.fillStyle = '#7fb2d0'; ctx.fillText(p.ip || '', c.x + s + 4, c.y + 12);
+    }
+    const mine = alerts.filter(a => (a.src === id || a.dst === id || a.dst === hostView.ip) && Date.now() / 1000 - a.t < 600);
+    if (mine.length) drawFlower(0, -SPHERE_R * 0.95, mine, t, SPHERE_R * 1.05);
+    pickables = [];
+  }
+
+  function renderCard() {
+    const card = document.getElementById('card'), sess = document.getElementById('session');
+    if (!hostView) { card.style.display = sess.style.display = 'none'; return; }
+    const h = hostById[hostView.id];
+    if (!h) { card.style.display = 'none'; return; }
+    const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const fmt = (b) => b > 1e9 ? (b / 1e9).toFixed(1) + 'G' : b > 1e6 ? (b / 1e6).toFixed(1) + 'M' : b > 1e3 ? (b / 1e3).toFixed(1) + 'k' : String(b);
+    const mine = events.filter(e => e.src === h.id || e.dst === h.id || (e.path || []).includes(h.id));
+    const ng = mine.filter(e => !e.ok).length;
+    card.innerHTML = `<h2>${esc(h.hostname)}</h2><div class="sub">${esc(h.type)} ・ ${esc(h.id)}</div>
+      <table>${h.interfaces.map(i => `<tr><td>${esc(i.name)}</td><td>${esc(i.ip)}/${i.prefix}</td>
+        <td class="${i.up ? 'up' : 'down'}">${i.up ? 'UP' : 'DOWN'}</td>
+        <td>in ${fmt(i.in_bytes)} / out ${fmt(i.out_bytes)}</td></tr>`).join('')}</table>
+      <div class="stat"><span>Flows <b>${mine.length}</b></span><span>NG <b>${ng}</b></span><span>Peers <b>${h.peers.length}</b></span></div>`;
+    card.style.display = 'block';
+    const rows = mine.slice(-7).reverse().map(e => {
+      const tm = new Date(e.t * 1000).toTimeString().slice(0, 8);
+      return `<div class="row"><span>${tm}</span><span>${esc(e.src_ip || e.src)}</span><span>${esc(e.dst_ip)}</span>
+        <span class="bytes">${fmt(e.bytes)}B</span><span class="${e.ok ? 'ok' : 'ng'}">${e.ok ? 'OK' : 'NG'}</span></div>`;
+    }).join('') || '<div class="row"><span>-</span><span>このホストの通信はまだありません</span></div>';
+    document.getElementById('sessRows').innerHTML = rows;
+    sess.style.display = 'block';
+  }
+
+  // ── フローの粒(三角形のダーツ) ───────────────────
+  const fSrc = document.getElementById('fSrc'), fDst = document.getElementById('fDst');
+  function match(q, ip, dev) {
+    q = q.trim().toLowerCase();
+    if (!q || q === 'any') return true;
+    return (ip && ip.startsWith(q)) || (dev && ((hostById[dev] || {}).hostname || dev).toLowerCase().includes(q));
+  }
+  function spawn(e, delay) {
+    if (!match(fSrc.value, e.src_ip, e.src) || !match(fDst.value, e.dst_ip, e.dst)) return;
+    const col = e.alerts && e.alerts.length ? '#ffab2e' : e.ok ? '#33d6ff' : '#ff3b4e';
+    const n = Math.min(7, 1 + Math.round(Math.log10(1 + e.bytes) / 1.2));
+    const segs = [];
+    if (hostView) {
+      const id = hostView.id, path = e.path || [];
+      const i = path.indexOf(id);
+      if (e.src === id) segs.push([[0, 0, 0], peerPos[e.dst] || peerPos[e.dst_ip]]);
+      else if (e.dst === id) segs.push([peerPos[e.src], [0, 0, 0]]);
+      else if (i > 0) { segs.push([peerPos[path[i - 1]], [0, 0, 0]]); if (path[i + 1]) segs.push([[0, 0, 0], peerPos[path[i + 1]]]); }
+    } else {
+      const a = posForIp(e.src_ip || devIp(e.src)), b = posForIp(e.dst_ip);
+      if (a && b && !(inBlock(e.src_ip || '') === false && !inBlock(e.dst_ip))) segs.push([a, b]);
+    }
+    segs.forEach((sg, k) => {
+      if (!sg[0] || !sg[1]) return;
+      for (let j = 0; j < n; j++) {
+        particles.push({ a: sg[0], b: sg[1], born: performance.now() + delay + k * 900 + j * 110,
+          dur: 1500 + Math.random() * 300, col, fail: !e.ok, lift: hostView ? 0.8 : 2 + Math.random() * 1.5 });
+      }
+    });
+    if (particles.length > 1500) particles.splice(0, particles.length - 1500);
+  }
+  function drawParticles(t) {
+    const keep = [];
+    for (const p of particles) {
+      const u = (t - p.born) / p.dur;
+      if (u < 0) { keep.push(p); continue; }
+      // 到達不可の通信は途中で消える
+      if (u > (p.fail ? 0.72 : 1)) continue;
+      keep.push(p);
+      const at = (v) => {
+        const x = p.a[0] + (p.b[0] - p.a[0]) * v, z = p.a[2] + (p.b[2] - p.a[2]) * v;
+        const y = p.a[1] + (p.b[1] - p.a[1]) * v + Math.sin(Math.PI * v) * p.lift;
+        return proj(x, y, z);
+      };
+      const c = at(u), c2 = at(Math.min(1, u + 0.02));
+      if (!c || !c2) continue;
+      const ang = Math.atan2(c2.y - c.y, c2.x - c.x), sz = Math.max(3, Math.min(9, c.s * 0.22));
+      ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(ang);
+      ctx.beginPath(); ctx.moveTo(sz * 1.6, 0); ctx.lineTo(-sz, sz * 0.7); ctx.lineTo(-sz, -sz * 0.7); ctx.closePath();
+      ctx.fillStyle = p.col; ctx.shadowColor = p.col; ctx.shadowBlur = 8; ctx.fill();
+      ctx.restore();
+      if (p.fail && u > 0.62) {               // 途切れる地点に×
+        ctx.strokeStyle = '#ff3b4e'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(c.x - 5, c.y - 5); ctx.lineTo(c.x + 5, c.y + 5);
+        ctx.moveTo(c.x + 5, c.y - 5); ctx.lineTo(c.x - 5, c.y + 5); ctx.stroke();
+      }
+    }
+    particles = keep;
+  }
+
+  // ── メインループ ─────────────────────────────
+  function frame(t) {
+    if (performance.now() - lastInput > 6000) cam.yaw += 0.0009;      // 操作が無い時はゆっくり回る
+    cam.dist += (cam.tdist - cam.dist) * 0.08;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const g = ctx.createRadialGradient(W / 2, H * 0.55, 10, W / 2, H * 0.55, Math.max(W, H) * 0.75);
+    g.addColorStop(0, '#071a33'); g.addColorStop(1, '#02060f');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    const nowSec = Date.now() / 1000;
+    if (hostView) drawHost(t); else drawNetwork(t, nowSec);
+    drawParticles(t);
+    requestAnimationFrame(frame);
+  }
+
+  // ── 操作 ─────────────────────────────────────
+  let down = null;
+  cv.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, yaw: cam.yaw, pitch: cam.pitch, moved: false }; cv.setPointerCapture(e.pointerId); lastInput = performance.now(); });
+  cv.addEventListener('pointermove', (e) => {
+    lastInput = performance.now();
+    if (down) {
+      const dx = e.clientX - down.x, dy = e.clientY - down.y;
+      if (Math.abs(dx) + Math.abs(dy) > 5) { down.moved = true; cv.classList.add('drag'); }
+      if (down.moved) {
+        cam.yaw = down.yaw + dx * 0.006;
+        cam.pitch = Math.max(0.12, Math.min(1.45, down.pitch + dy * 0.004));
+      }
+      return;
+    }
+    hover(e.clientX, e.clientY);
+  });
+  cv.addEventListener('pointerup', (e) => {
+    cv.classList.remove('drag');
+    if (down && !down.moved) click(e.clientX, e.clientY);
+    down = null;
+  });
+  cv.addEventListener('wheel', (e) => { e.preventDefault(); lastInput = performance.now(); cam.tdist = Math.max(12, Math.min(70, cam.tdist * (e.deltaY > 0 ? 1.1 : 0.9))); }, { passive: false });
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === 'Escape' || e.key === 'Backspace') up();
+  });
+
+  function inPoly(x, y, pts) {
+    let inside = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      if ((pts[i].y > y) !== (pts[j].y > y) && x < (pts[j].x - pts[i].x) * (y - pts[i].y) / (pts[j].y - pts[i].y) + pts[i].x) inside = !inside;
+    }
+    return inside;
+  }
+  function pick(x, y) {
+    for (let k = pickables.length - 1; k >= 0; k--) if (inPoly(x, y, pickables[k].poly)) return pickables[k];
+    return null;
+  }
+  const tip = document.getElementById('tip');
+  function hover(x, y) {
+    const p = hostView ? null : pick(x, y);
+    if (!p) { tip.style.display = 'none'; return; }
+    const o = prefix.concat([p.n]);
+    const cidr = o.concat([0, 0, 0]).slice(0, 4).join('.') + '/' + (o.length * 8);
+    const info = p.info;
+    let txt = prefix.length === 3 ? o.join('.') : cidr;
+    if (info && info.hosts.length) txt += ' ・ ' + (prefix.length === 3 ? info.hosts[0].h.hostname + ' (' + info.hosts[0].itf.name + ')' : info.hosts.length + ' host');
+    if (info && info.alerts.length) txt += ' ・ アラート ' + info.alerts.length;
+    tip.textContent = txt; tip.style.display = 'block';
+    tip.style.left = Math.min(x + 14, W - tip.offsetWidth - 4) + 'px'; tip.style.top = (y + 14) + 'px';
+  }
+  function click(x, y) {
+    if (hostView) return;
+    const p = pick(x, y);
+    if (!p) return;
+    if (prefix.length === 3) {
+      if (p.info && p.info.hosts.length) openHost(p.info.hosts[0].h.id, p.info.hosts[0].itf.ip);
+      return;
+    }
+    if (!p.info) return;                       // 何も無いブロックには入らない
+    prefix = prefix.concat([p.n]);
+    dive();
+  }
+  function openHost(id, ip) {
+    hostView = { id, ip: ip || devIp(id) }; particles = []; cam.dist = 10; cam.tdist = 26; cam.pitch = 0.35;
+    update();
+  }
+  function viewDist() { return prefix.length === 3 ? 40 : 33; }
+  function dive() { particles = []; cam.dist = 11; cam.tdist = viewDist(); update(); }
+  function up() {
+    if (hostView) hostView = null;
+    else if (prefix.length) prefix = prefix.slice(0, -1);
+    else return;
+    particles = []; cam.dist = 55; cam.tdist = viewDist(); cam.pitch = Math.max(cam.pitch, 0.6);
+    update();
+  }
+  function goTo(len) { hostView = null; prefix = prefix.slice(0, len); particles = []; cam.dist = 50; cam.tdist = viewDist(); update(); }
+
+  function update() {
+    tip.style.display = 'none';
+    if (!hostView) cam.tdist = viewDist();
+    document.getElementById('cidr').textContent = levelCidr();
+    const cr = document.getElementById('crumbs');
+    const parts = ['/0'];
+    for (let i = 0; i < prefix.length; i++) parts.push('/' + (i + 1) * 8);
+    cr.innerHTML = parts.map((p, i) => `<span data-l="${i}">${p}</span>`).join(' &rsaquo; ') +
+      (hostView ? ' &rsaquo; /32' : '') + ((prefix.length || hostView) ? '<button id="upBtn">&uarr; 戻る</button>' : '');
+    cr.querySelectorAll('span').forEach(s => s.onclick = () => goTo(+s.dataset.l));
+    const ub = document.getElementById('upBtn'); if (ub) ub.onclick = up;
+    // 装置もトラフィックも1か所にまとまっている時は最初から絞り込む
+    document.body.classList.toggle('host', !!hostView);
+    renderCard();
+    try { localStorage.setItem('cyberView.prefix', JSON.stringify(prefix)); } catch (e) { /* 保存できなくても動く */ }
+  }
+
+  function renderAlerts() {
+    const box = document.getElementById('alerts');
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    box.innerHTML = alerts.slice(-6).reverse().map(a => {
+      const tm = new Date(a.t * 1000).toTimeString().slice(0, 8);
+      const src = (hostById[a.src] || {}).hostname || a.src;
+      return `<div class="a ${a.severity}" data-src="${esc(a.src)}"><b>${esc(a.name)}</b>
+        <small>${tm} ・ ${esc(src)}${a.dst ? ' → ' + esc(a.dst) : ''} ・ ${esc(a.detail)}</small></div>`;
+    }).join('');
+    box.querySelectorAll('.a').forEach(d => d.onclick = () => { if (hostById[d.dataset.src]) { prefix = octets(devIp(d.dataset.src)).slice(0, 3); openHost(d.dataset.src); } });
+  }
+
+  // ── ポーリング ───────────────────────────────
+  async function pollHosts() {
+    try {
+      const d = await api('/api/traffic/hosts');
+      hosts = d.hosts; hostById = {}; ipOwner = {};
+      for (const h of hosts) { hostById[h.id] = h; for (const i of h.interfaces) ipOwner[i.ip] = h.id; }
+      document.getElementById('sHosts').textContent = hosts.length;
+      if (hostView) renderCard();
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  async function pollFlows() {
+    try {
+      const d = await api(`/api/traffic/flowmap?since=${seq}&alert_since=${alertSeq}`);
+      links = d.links;
+      const fresh = d.events || [];
+      if (primed && fresh.length) {
+        const newest = fresh[fresh.length - 1].t;
+        for (const e of fresh) spawn(e, Math.max(0, Math.min(1800, 1800 - (newest - e.t) * 1000)));
+      }
+      events = events.concat(fresh).slice(-3000);
+      alerts = alerts.concat(d.alerts || []).slice(-400);
+      flowTotal = d.seq; seq = d.seq; alertSeq = d.alert_seq;
+      document.getElementById('sFlows').textContent = flowTotal;
+      document.getElementById('sAlerts').textContent = alerts.length;
+      document.getElementById('sLinks').textContent = links.length;
+      if (fresh.length || (d.alerts || []).length || !primed) { renderAlerts(); if (hostView) renderCard(); }
+      if (!primed) { primed = true; autoFocus(); }
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  // 起動時、前回のブロックか、装置が1つのブロックにまとまっていればそこまで降りる
+  function autoFocus() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem('cyberView.prefix') || 'null'); } catch (e) { saved = null; }
+    if (Array.isArray(saved) && saved.length <= 3 && saved.every(n => Number.isInteger(n) && n >= 0 && n < 256)) {
+      prefix = saved;
+    } else {
+      const ips = hosts.flatMap(h => h.interfaces.map(i => i.ip));
+      while (prefix.length < 2 && ips.length) {
+        const s = new Set(ips.map(ip => octets(ip)[prefix.length]));
+        if (s.size !== 1) break;
+        prefix.push([...s][0]);
+      }
+    }
+    update();
+  }
+  setInterval(() => { document.getElementById('sTime').textContent = new Date().toLocaleString('ja-JP'); }, 1000);
+  fSrc.addEventListener('input', () => { particles = []; });
+  fDst.addEventListener('input', () => { particles = []; });
+
+  // 自動テスト(Playwright)用: パネル n の画面上の中心
+  window.__cvParticles = () => particles.filter(p => performance.now() >= p.born).length;
+  window.__cvPanel = (n) => {
+    const k = pickables.find(p => p.n === n);
+    return k ? { x: k.poly.reduce((a, c) => a + c.x, 0) / 4, y: k.poly.reduce((a, c) => a + c.y, 0) / 4 } : null;
+  };
+
+  pollHosts().then(pollFlows);
+  setInterval(pollFlows, 2000);
+  setInterval(pollHosts, 5000);
+  update();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

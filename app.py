@@ -1047,7 +1047,7 @@ def _valid_token(token: str) -> bool:
 # パスホワイトリスト（認証不要）
 # ルート "/" と各種静的アセットはHTML/ログインJSを返すため公開し、
 # 認証はAPI（/api/*）とWebSocket側で行う。
-_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico", "/dashboard", "/pentest", "/traffic-flow",
+_NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico", "/dashboard", "/pentest", "/traffic-flow", "/cyber-view",
                   "/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
 
 @app.middleware("http")
@@ -6931,7 +6931,19 @@ def _record_flow_event(src_id: str, dest_ip: str, path: list, ping_result: dict,
                        count: int, size: int, proto: str = 'icmp'):
     dst_dev = _owner_near(path[-1] if path else src_id, dest_ip)
     _flow_recorder.record_flow(src_id, dest_ip, dst_dev, [d for d in path if d],
-                               bool(ping_result.get('reachable')), count, size, proto)
+                               bool(ping_result.get('reachable')), count, size, proto,
+                               src_ip=_src_ip_toward(src_id, path))
+
+
+def _src_ip_toward(src_id: str, path: list):
+    """送信元IP = 経路の次ホップへ向くIFのIP(無ければ最初のIP)"""
+    st = device_sessions.get(src_id)
+    ifs = getattr(st, 'interfaces', {}) or {}
+    if len(path) > 1:
+        ifn = vnet.interface_links.get(src_id, {}).get(path[1])
+        if ifn and (ifs.get(ifn) or {}).get('ip'):
+            return ifs[ifn]['ip']
+    return next((i['ip'] for i in ifs.values() if isinstance(i, dict) and i.get('ip')), None)
 
 
 def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict,
@@ -9506,6 +9518,38 @@ async def traffic_alerts(since: int = 0):
     return {'alerts': alerts, 'alert_seq': alert_seq,
             'rules': {k: {x: v[x] for x in ('name', 'severity', 'window', 'threshold', 'desc')}
                       for k, v in RULES.items()}}
+
+
+@app.get("/api/traffic/hosts")
+async def traffic_hosts():
+    """Cyber View(/cyber-view)用: 全装置のIP・IF状態・IFカウンタ。
+    IPアドレス空間のパネルに装置を配置し、ホストビューの中央カードに出す。"""
+    hosts = []
+    for dev_id, st in device_sessions.items():
+        down = {vnet._norm_iface(x) for x in vnet.down_interfaces.get(dev_id, set())}
+        ifs = []
+        for name, info in (getattr(st, 'interfaces', {}) or {}).items():
+            if not isinstance(info, dict) or not info.get('ip') or str(info['ip']).startswith('127.'):
+                continue
+            c = dp_engine.get_counter(dev_id, name)
+            ifs.append({'name': name, 'ip': info['ip'], 'prefix': int(info.get('prefix') or 24),
+                        'desc': info.get('desc') or info.get('description') or '',
+                        'up': vnet._norm_iface(name) not in down and
+                        info.get('status') not in ('administratively down', 'down', 'disabled'),
+                        'in_bytes': c.get('in_bytes', 0), 'out_bytes': c.get('out_bytes', 0)})
+        if ifs:
+            hosts.append({'id': dev_id, 'hostname': st.hostname, 'type': st.device_type,
+                          'interfaces': ifs, 'peers': sorted(vnet.links.get(dev_id, set()))})
+    return {'hosts': hosts, 'now': time.time()}
+
+
+@app.get("/cyber-view")
+async def cyber_view_page():
+    """NIRVANA改風の3Dビュー(IPアドレス空間のドリルダウン・アラートの花・ホストビュー)"""
+    page = static_dir / "cyber_view.html"
+    if page.exists():
+        return HTMLResponse(page.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>cyber_view.html が見つかりません</h1>")
 
 
 @app.get("/traffic-flow")

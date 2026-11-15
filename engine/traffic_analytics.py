@@ -58,11 +58,11 @@ class FlowRecorder:
         self._last_fired = {}                      # (rule, key) -> t
 
     # ── 記録 ──────────────────────────────────────
-    def record_flow(self, src, dst_ip, dst, path, ok, pkts, size, proto='icmp', now=None):
+    def record_flow(self, src, dst_ip, dst, path, ok, pkts, size, proto='icmp', now=None, src_ip=None):
         now = time.time() if now is None else now
         with self._lock:
             self.seq += 1
-            ev = {'seq': self.seq, 't': now, 'proto': proto, 'src': src, 'dst_ip': dst_ip,
+            ev = {'seq': self.seq, 't': now, 'proto': proto, 'src': src, 'src_ip': src_ip, 'dst_ip': dst_ip,
                   'dst': dst, 'path': list(path), 'ok': bool(ok), 'pkts': pkts,
                   'size': size, 'bytes': pkts * size, 'alerts': []}
             self.events.append(ev)

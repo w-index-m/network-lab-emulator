@@ -2762,3 +2762,14 @@ API: `GET /api/traffic/history`(期間・src・dst・result、リンク状態は
 **見つけたが意図的に直していない**: 直結サブネット内の誰も持たないIPへのpingが成功
 する(実機はARP失敗)——`test_ping_same_segment`が「未登録のLAN上ホストも応答」を
 仕様として固定しているため、ラボ全体の挙動変更としてユーザー判断待ち。
+
+**NIRVANA改風 3Dビュー(`/cyber-view`)**: ユーザー依頼(NICT NIRVANA改の論文図を見せて)
+「ユーザーインターフェースをカッコよく作ってほしい」。`static/cyber_view.html`(Canvas 2D+自前の
+透視投影、外部ライブラリ無し、`_NO_AUTH_PATHS`+`netlabToken_v1`)。IPアドレス空間を16×16パネルで
+/0→/8→/16→/24とクリックで掘り下げ、/24はサブネットをワイヤーフレーム球で囲み装置を柱で立てる、
+/32はHost View(球の中央に装置カード、球面に通信相手、SESSION行)。フローは三角形の粒、アラートは
+赤い「警」の六角形+ルール別花びら+螺旋柱。名前・ロゴは独自(NIRVANA/実在ベンダーのマークは不使用)。
+データ: 新設`GET /api/traffic/hosts`(全装置のIP・IF UP/DOWN・カウンタ・リンク相手、127.x除外)、
+フローイベントに`src_ip`(次ホップ側IFのIP、`_src_ip_toward`)を追加。Playwright用に
+`window.__cvPanel(n)`/`__cvParticles()`フックあり。詳細・スクリーンショットは
+`docs/cyber-view-3d.md`、テストは`tests/test_cyber_view.py`。自動遮断は未実装(表示のみ)。
