@@ -243,6 +243,12 @@ class SyslogDispatcher:
         return es <= tl
 
     async def emit(self, device_id: str, hostname: str, severity: str, msg: str):
+        # 送信先の設定有無にかかわらず、装置が出したログとして記録(/cyber-view の syslog 観点)
+        try:
+            from engine.traffic_analytics import recorder
+            recorder.record_log(device_id, hostname, SEVERITY.get(severity, 6), msg)
+        except Exception:  # noqa: BLE001
+            pass
         targets = self._targets.get(device_id, [])
         if not targets:
             return

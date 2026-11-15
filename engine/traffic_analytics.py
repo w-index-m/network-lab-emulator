@@ -14,6 +14,7 @@ NICT の NIRVANA改 を補強する構造計画研究所の「CyNote」が持つ
 保存はプロセス内メモリのみ(件数と保持時間で上限)。再起動すると消える。
 """
 
+import re
 import threading
 import time
 from collections import defaultdict, deque
@@ -21,6 +22,7 @@ from collections import defaultdict, deque
 MAX_EVENTS = 20000
 MAX_LINK_EVENTS = 5000
 MAX_ALERTS = 2000
+MAX_LOGS = 5000
 RETENTION_SEC = 24 * 3600
 
 # 検知ルールのしきい値 (window 秒の間に threshold 以上で発報、cooldown 秒は同じ組を再発報しない)
@@ -41,6 +43,7 @@ RULES = {
                   'window': 0, 'threshold': 0, 'cooldown': 0,
                   'desc': 'インタフェースのshutdown等でリンクが落ちた'},
 }
+_CISCO_SEV = re.compile(r'%[\w-]+?-([0-7])-\w+')
 SEVERITY_ORDER = {'low': 0, 'medium': 1, 'high': 2}
 
 
@@ -50,6 +53,7 @@ class FlowRecorder:
         self.events = deque(maxlen=MAX_EVENTS)
         self.link_events = deque(maxlen=MAX_LINK_EVENTS)
         self.alerts = deque(maxlen=MAX_ALERTS)
+        self.logs = deque(maxlen=MAX_LOGS)          # 装置が出したsyslog相当のメッセージ
         self.seq = 0
         self.alert_seq = 0
         # 検知用の作業領域
@@ -79,9 +83,29 @@ class FlowRecorder:
                 self._fire('link_down', f'{a}|{iface}', now, src=a, dst=b,
                            detail=f'{iface} が down ({a} - {b})', related=[])
 
+    def record_log(self, dev, hostname, severity, msg, now=None):
+        """syslog相当のメッセージを記録(severity は syslog の 0=emerg 〜 7=debug)。
+        同じ装置・同じ文面が1秒以内に重なったら1件にまとめる(同じ事象を
+        実syslog送信とCLI通知の両方で拾うため)。"""
+        now = time.time() if now is None else now
+        m = _CISCO_SEV.search(msg)
+        if m:                      # %FAC-<sev>-MNEMONIC の重要度を優先(実機のsyslog重要度と同じ)
+            severity = int(m.group(1))
+        with self._lock:
+            for x in list(self.logs)[-20:]:
+                if x['dev'] == dev and x['msg'] == msg and now - x['t'] < 1:
+                    return None
+            ev = {'t': now, 'dev': dev, 'host': hostname, 'sev': int(severity), 'msg': msg}
+            self.logs.append(ev)
+            return ev
+
+    def logs_since(self, start):
+        with self._lock:
+            return [x for x in self.logs if x['t'] >= start]
+
     def _expire(self, now):
         cutoff = now - RETENTION_SEC
-        for dq in (self.events, self.link_events, self.alerts):
+        for dq in (self.events, self.link_events, self.alerts, self.logs):
             while dq and dq[0]['t'] < cutoff:
                 dq.popleft()
 
@@ -182,7 +206,7 @@ class FlowRecorder:
 
     def clear(self):
         with self._lock:
-            self.events.clear(); self.link_events.clear(); self.alerts.clear()
+            self.events.clear(); self.link_events.clear(); self.alerts.clear(); self.logs.clear()
             self._by_src.clear(); self._by_pair.clear(); self._last_fired.clear()
 
 

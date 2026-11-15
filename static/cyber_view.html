@@ -271,9 +271,22 @@
 
     for (const p of panels) {
       const info = st[p.n];
-      const corners = [[-HALF, HALF], [HALF, HALF], [HALF, -HALF], [-HALF, -HALF]]
-        .map(([dx, dz]) => proj(p.x + dx, 0, p.z + dz));
-      if (corners.some(c => !c)) continue;
+      // 立体感: パネルを厚みのある板にする(装置のいるパネルは厚く)、遠いものは霧で薄く
+      const TH = info && info.hosts.length ? 0.32 : 0.1;
+      const SQ = [[-HALF, HALF], [HALF, HALF], [HALF, -HALF], [-HALF, -HALF]];
+      const corners = SQ.map(([dx, dz]) => proj(p.x + dx, TH, p.z + dz));
+      const base = SQ.map(([dx, dz]) => proj(p.x + dx, 0, p.z + dz));
+      if (corners.some(c => !c) || base.some(c => !c)) continue;
+      ctx.globalAlpha = fog(p.d);
+      const sides = [0, 1, 2, 3].map(k => ({ q: [base[k], base[(k + 1) % 4], corners[(k + 1) % 4], corners[k]],
+        d: (base[k].d + base[(k + 1) % 4].d) / 2 })).sort((a, b) => b.d - a.d);
+      const hot = info && info.alerts.length, occ = info && info.hosts.length;
+      for (const sd of sides) {
+        poly(sd.q);
+        ctx.fillStyle = hot ? 'rgba(110,10,25,0.75)' : occ ? 'rgba(20,80,150,0.8)' : 'rgba(8,30,60,0.55)';
+        ctx.fill();
+        ctx.strokeStyle = hot ? 'rgba(255,60,80,0.35)' : 'rgba(51,214,255,0.12)'; ctx.lineWidth = 0.6; ctx.stroke();
+      }
       let fill = 'rgba(30,110,220,0.07)', stroke = 'rgba(51,214,255,0.22)';
       if (info && info.hosts.length) { fill = 'rgba(40,150,255,0.30)'; stroke = 'rgba(120,230,255,0.85)'; }
       if (info && info.bytes) {
@@ -306,8 +319,8 @@
       // /24では装置を柱で立てる(高さ=直近の通信量)
       if (L === 3 && info && info.hosts.length) {
         const h = 0.4 + (info.bytes ? 2.2 * Math.log10(1 + info.bytes) / Math.log10(1 + maxB) : 0);
-        const top = [[-0.3, 0.3], [0.3, 0.3], [0.3, -0.3], [-0.3, -0.3]].map(([dx, dz]) => proj(p.x + dx, h, p.z + dz));
-        const bot = [[-0.3, 0.3], [0.3, 0.3], [0.3, -0.3], [-0.3, -0.3]].map(([dx, dz]) => proj(p.x + dx, 0, p.z + dz));
+        const top = [[-0.3, 0.3], [0.3, 0.3], [0.3, -0.3], [-0.3, -0.3]].map(([dx, dz]) => proj(p.x + dx, TH + h, p.z + dz));
+        const bot = [[-0.3, 0.3], [0.3, 0.3], [0.3, -0.3], [-0.3, -0.3]].map(([dx, dz]) => proj(p.x + dx, TH, p.z + dz));
         if (!top.some(v => !v)) {
           ctx.strokeStyle = info.alerts.length ? 'rgba(255,80,100,0.9)' : 'rgba(140,235,255,0.85)';
           ctx.fillStyle = info.alerts.length ? 'rgba(255,60,80,0.18)' : 'rgba(60,200,255,0.16)';
@@ -319,6 +332,7 @@
         }
       }
     }
+    ctx.globalAlpha = 1;
     // アラートの花
     for (const p of panels) {
       const info = st[p.n];
@@ -430,6 +444,116 @@
       g.addColorStop(0.35, hot ? 'rgba(255,140,30,0.55)' : 'rgba(51,214,255,0.3)');
       g.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = g; ctx.fillRect(p.x - rad * 3, p.y - rad * 3, rad * 6, rad * 6);
+    }
+    ctx.restore();
+  }
+
+  function fog(d) { return Math.max(0.3, Math.min(1, 1.35 - (d - cam.dist) / (cam.dist * 0.75))); }
+
+  // ── 状態ボード: ネットワーク / トラフィック / セキュリティ / syslog ──
+  let health = null;
+  const H_COL = { ok: '#3dff9a', warn: '#ffab2e', crit: '#ff3b4e' };
+  const H_JA = { ok: '正常', warn: '注意', crit: '異常' };
+  const H_ICON = { network: 'NET', traffic: 'TRF', security: 'SEC', syslog: 'LOG' };
+  async function pollHealth() {
+    try { health = await api('/api/traffic/health?window=300'); } catch (e) { /* 次の周期で再試行 */ }
+  }
+  function hexPrism(cx, cy, r, col, t) {
+    // 押し出した六角柱(上面+手前の側面)で立体に見せる
+    const depth = r * 0.45;
+    const pts = Array.from({ length: 6 }, (_, k) => { const a = k * Math.PI / 3; return [cx + r * Math.cos(a), cy + r * Math.sin(a) * 0.62]; });
+    for (let k = 0; k < 6; k++) {
+      const a = pts[k], b = pts[(k + 1) % 6];
+      if (a[1] + b[1] < 2 * cy) continue;               // 手前側の面だけ
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(b[0], b[1] + depth); ctx.lineTo(a[0], a[1] + depth); ctx.closePath();
+      ctx.fillStyle = col + '55'; ctx.fill(); ctx.strokeStyle = col + 'aa'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
+    ctx.fillStyle = col + '33'; ctx.fill();
+    ctx.save(); ctx.shadowColor = col; ctx.shadowBlur = 12 + 6 * Math.sin(t * 0.004); ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
+  }
+  function drawBoard(t) {
+    if (!health) return;
+    const compact = W < 640;
+    ctx.save();
+    if (compact) {
+      const y0 = 78, w = (W - 24) / 4;
+      health.categories.forEach((c, i) => {
+        const x = 12 + i * w, col = H_COL[c.state];
+        ctx.fillStyle = 'rgba(4,14,30,0.78)'; ctx.fillRect(x + 2, y0, w - 4, 40);
+        ctx.fillStyle = col; ctx.fillRect(x + 2, y0, w - 4, 3);
+        ctx.fillStyle = '#9fc6dd'; ctx.font = '10px monospace'; ctx.fillText(c.label, x + 6, y0 + 16);
+        ctx.fillStyle = col; ctx.font = '700 15px sans-serif'; ctx.fillText(H_JA[c.state], x + 6, y0 + 34);
+      });
+      ctx.restore(); return;
+    }
+    const x0 = 16, y0 = 150, w = 318, rowH = 70;
+    // 奥へ少し傾けたホログラム板
+    ctx.setTransform(DPR, -0.035 * DPR, 0, DPR, 0, 0);
+    const hgt = 34 + rowH * health.categories.length;
+    const g = ctx.createLinearGradient(x0, y0, x0 + w, y0);
+    g.addColorStop(0, 'rgba(6,24,48,0.86)'); g.addColorStop(1, 'rgba(6,24,48,0.35)');
+    ctx.fillStyle = g; ctx.fillRect(x0, y0, w, hgt);
+    ctx.fillStyle = 'rgba(51,214,255,0.10)'; ctx.fillRect(x0 + w, y0 + 6, 6, hgt);            // 板の厚み
+    ctx.fillRect(x0 + 6, y0 + hgt, w, 6);
+    ctx.strokeStyle = H_COL[health.overall]; ctx.lineWidth = 1.2; ctx.strokeRect(x0, y0, w, hgt);
+    for (let yy = y0 + 2; yy < y0 + hgt; yy += 3) { ctx.fillStyle = 'rgba(255,255,255,0.018)'; ctx.fillRect(x0, yy, w, 1); }  // 走査線
+    ctx.fillStyle = '#e8f7ff'; ctx.font = '600 12px monospace';
+    ctx.fillText(`SYSTEM STATUS  ・ 直近${Math.round(health.window / 60)}分`, x0 + 10, y0 + 20);
+    ctx.fillStyle = H_COL[health.overall]; ctx.font = '700 13px sans-serif';
+    ctx.fillText('総合 ' + H_JA[health.overall], x0 + w - 74, y0 + 20);
+    health.categories.forEach((c, i) => {
+      const y = y0 + 34 + i * rowH, col = H_COL[c.state];
+      hexPrism(x0 + 30, y + 22, 17, col, t + i * 300);
+      ctx.fillStyle = '#fff'; ctx.font = '700 10px monospace'; ctx.textAlign = 'center';
+      ctx.fillText(H_ICON[c.key] || '', x0 + 30, y + 26); ctx.textAlign = 'start';
+      ctx.fillStyle = '#bfe9ff'; ctx.font = '12px sans-serif'; ctx.fillText(c.label, x0 + 60, y + 14);
+      ctx.fillStyle = col; ctx.font = '700 22px sans-serif'; ctx.fillText(H_JA[c.state], x0 + 60, y + 38);
+      ctx.fillStyle = '#9fc6dd'; ctx.font = '11px sans-serif';
+      const sum = c.summary.length > 30 ? c.summary.slice(0, 29) + '…' : c.summary;
+      ctx.fillText(sum, x0 + 118, y + 30);
+      if (c.details && c.details.length && c.state !== 'ok') {
+        ctx.fillStyle = col; ctx.font = '10px sans-serif';
+        const d = c.details[c.details.length - 1].trim();
+        ctx.fillText(d.length > 36 ? d.slice(0, 35) + '…' : d, x0 + 118, y + 46);
+      }
+      if (i < health.categories.length - 1) { ctx.fillStyle = 'rgba(51,214,255,0.12)'; ctx.fillRect(x0 + 10, y + rowH - 6, w - 20, 1); }
+    });
+    ctx.restore();
+  }
+  // 床に描く総合状態のリング(シーンの中に「正常/注意/異常」を出す)
+  function drawGroundRing(t) {
+    if (!health) return;
+    const col = H_COL[health.overall], R = 16.5;
+    ctx.save();
+    for (const [rr, w, a] of [[R, 3, 0.85], [R + 0.6, 1, 0.4], [R - 0.6, 1, 0.4]]) {
+      ctx.beginPath(); let f = true;
+      for (let k = 0; k <= 120; k++) {
+        const ang = k / 120 * Math.PI * 2 + (rr === R ? t * 0.0002 : 0);
+        const p = proj(Math.cos(ang) * rr, 0.01, Math.sin(ang) * rr);
+        if (!p) { f = true; continue; }
+        f ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); f = false;
+      }
+      ctx.strokeStyle = col; ctx.globalAlpha = a; ctx.lineWidth = w; ctx.shadowColor = col; ctx.shadowBlur = 14; ctx.stroke();
+    }
+    // 目盛り
+    ctx.globalAlpha = 0.7; ctx.lineWidth = 2;
+    for (let k = 0; k < 48; k++) {
+      const ang = k / 48 * Math.PI * 2 - t * 0.0002;
+      const a = proj(Math.cos(ang) * (R + 0.9), 0.01, Math.sin(ang) * (R + 0.9)), b = proj(Math.cos(ang) * (R + 1.5), 0.01, Math.sin(ang) * (R + 1.5));
+      if (a && b) { ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
+    }
+    // リングの手前に床に貼った文字
+    const ang = Math.PI / 2 - cam.yaw;   // 常にカメラ側
+    const c = [Math.cos(ang) * (R + 3.2), Math.sin(ang) * (R + 3.2)];
+    const tx = [-Math.sin(ang), Math.cos(ang)], nx = [Math.cos(ang), Math.sin(ang)];
+    const p0 = proj(c[0], 0.02, c[1]), p1 = proj(c[0] + tx[0], 0.02, c[1] + tx[1]), p2 = proj(c[0] + nx[0], 0.02, c[1] + nx[1]);
+    if (p0 && p1 && p2) {
+      ctx.globalAlpha = 0.95; ctx.shadowBlur = 18;
+      ctx.setTransform(-DPR * (p1.x - p0.x) / 20, -DPR * (p1.y - p0.y) / 20, DPR * (p2.x - p0.x) / 20, DPR * (p2.y - p0.y) / 20, DPR * p0.x, DPR * p0.y);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = col;
+      ctx.font = '800 22px sans-serif';
+      ctx.fillText(`SYSTEM ${H_JA[health.overall]}`, 0, 0);
     }
     ctx.restore();
   }
@@ -819,8 +943,10 @@
     ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
     drawFloor();
     const nowSec = Date.now() / 1000;
+    drawGroundRing(t);
     if (mode === 'link') drawLinks(t);
     else { if (hostView) { alertLevel = 0; drawHost(t); } else drawNetwork(t, nowSec); drawParticles(t); }
+    drawBoard(t);
     requestAnimationFrame(frame);
   }
 
@@ -994,6 +1120,7 @@
   pollHosts().then(pollFlows).then(() => { if (new URLSearchParams(location.search).get('view') === 'links') setMode('link'); });
   setInterval(pollFlows, 2000);
   setInterval(pollHosts, 5000);
+  pollHealth(); setInterval(pollHealth, 10000);
   update();
   requestAnimationFrame(frame);
 })();

@@ -8288,7 +8288,75 @@ async def sync_links(body: dict):
 
 
 # CLIコマンドでプロトコルが起動したとき、表示用ログを溜めるバッファ
-proto_log_buffer: Dict[str, list] = {}
+_SYSLOG_SEV = {'emergencies': 0, 'alerts': 1, 'critical': 2, 'errors': 3, 'warnings': 4,
+               'notifications': 5, 'informational': 6, 'debugging': 7,
+               'EMERG': 0, 'ALERT': 1, 'CRIT': 2, 'ERROR': 3, 'ERR': 3, 'WARN': 4, 'WARNING': 4,
+               'NOTICE': 5, 'INFO': 6, 'DEBUG': 7}
+
+
+def _guess_severity(msg: str, level=None) -> int:
+    """%FAC-<sev>-MNEMONIC(Cisco系)/level欄/文面から syslog の重要度を推定"""
+    m = re.search(r'%[\w-]+?-([0-7])-[\w]+', msg)
+    if m:
+        return int(m.group(1))
+    if level and str(level).upper() in _SYSLOG_SEV:
+        return _SYSLOG_SEV[str(level).upper()]
+    low = msg.lower()
+    if any(w in low for w in ('error', 'fail', 'denied', 'mismatch', 'invalid', 'エラー', '失敗')):
+        return 3
+    if any(w in low for w in (' down', 'dead', 'lost', 'timeout', 'expired', '切断', 'ダウン')):
+        return 4
+    return 6
+
+
+def _tap_log(dev_id, item):
+    try:
+        if isinstance(item, dict):
+            msg, level = item.get('message') or '', item.get('level')
+        else:
+            msg, level = str(item), None
+        if not msg:
+            return
+        st = device_sessions.get(dev_id)
+        for line in str(msg).splitlines():
+            if line.strip():
+                _flow_recorder.record_log(dev_id, getattr(st, 'hostname', dev_id),
+                                          _guess_severity(line, level), line.strip())
+    except Exception:  # noqa: BLE001 - ログ記録の失敗で本処理を止めない
+        pass
+
+
+class _TapList(list):
+    """プロトコルログのバッファ。積まれた行を /cyber-view の syslog 観点にも記録する
+    (バッファ自体はフロントの取得でクリアされるため、別に残す)"""
+    def __init__(self, dev_id, items=()):
+        super().__init__(items)
+        self.dev_id = dev_id
+
+    def append(self, item):
+        super().append(item)
+        _tap_log(self.dev_id, item)
+
+    def extend(self, items):
+        items = list(items)
+        super().extend(items)
+        for it in items:
+            _tap_log(self.dev_id, it)
+
+
+class _TapDict(dict):
+    def __setitem__(self, k, v):
+        if isinstance(v, list) and not isinstance(v, _TapList):
+            v = _TapList(k, v)
+        super().__setitem__(k, v)
+
+    def setdefault(self, k, default=None):
+        if k not in self:
+            self[k] = default if default is not None else []
+        return self[k]
+
+
+proto_log_buffer: Dict[str, list] = _TapDict()
 
 # Si-R システムログバッファ（show logging syslog 用）
 sir_syslog: Dict[str, list] = {}
@@ -9576,6 +9644,79 @@ async def traffic_links(window: int = 60, routers_only: bool = True):
             'source': 'prometheus' if prom else 'internal',
             'prometheus_url': prom_url or None, 'prometheus_error': prom_err,
             'sample_interval': 10}
+
+
+@app.get("/api/traffic/health")
+async def traffic_health(window: int = 300):
+    """/cyber-view の状態ボード: ネットワーク・トラフィック・セキュリティ・syslog の4観点で
+    問題の有無を返す。state は ok(正常) / warn(注意) / crit(異常)。"""
+    from engine.link_stats import sampler, LINK_SPEED_BPS, UTIL_WARN, UTIL_CRIT
+    window = max(30, min(int(window), 86400))
+    now = time.time()
+    rank = {'ok': 0, 'warn': 1, 'crit': 2}
+    links, nodes = _collect_links()
+    routers = [ln for ln in links
+               if nodes[ln['a']]['type'] not in _NON_ROUTER_TYPES and nodes[ln['b']]['type'] not in _NON_ROUTER_TYPES]
+    cats = []
+
+    # ネットワーク: リンク断(ルータ間は異常、端末側は注意)
+    down_r = [f"{nodes[x['a']]['hostname']} ⇄ {nodes[x['b']]['hostname']}" for x in routers if x['down']]
+    down_t = [f"{nodes[x['a']]['hostname']} ⇄ {nodes[x['b']]['hostname']}" for x in links
+              if x['down'] and x not in routers]
+    st = 'crit' if down_r else 'warn' if down_t else 'ok'
+    cats.append({'key': 'network', 'label': 'ネットワーク', 'state': st,
+                 'summary': (f'リンク断 {len(down_r) + len(down_t)}本' if st != 'ok'
+                             else f'リンク {len(links)}本 すべて up'),
+                 'details': [f'断: {x}' for x in down_r + down_t][:5]})
+
+    # トラフィック: 1分平均の使用率と、期間内のpingの到達率
+    peak, peak_name = 0.0, ''
+    for x in links:
+        r = sampler.rate((x['a'], x['b']), 60, now)
+        if r and max(r) / LINK_SPEED_BPS > peak:
+            peak = max(r) / LINK_SPEED_BPS
+            peak_name = f"{nodes[x['a']]['hostname']} ⇄ {nodes[x['b']]['hostname']}"
+    hist = _flow_recorder.query(start=now - window, end=now)
+    evs = hist['events']
+    ng = [e for e in evs if not e['ok']]
+    ratio = len(ng) / len(evs) if evs else 0.0
+    st = ('crit' if peak >= UTIL_CRIT or (len(evs) >= 4 and ratio >= 0.5)
+          else 'warn' if peak >= UTIL_WARN or ng else 'ok')
+    det = []
+    if peak_name:
+        det.append(f'最大使用率 {peak * 100:.1f}% ({peak_name})')
+    if ng:
+        det.append(f'到達不可 {len(ng)}/{len(evs)} 件')
+        for e in ng[-3:]:
+            det.append(f"  {(device_sessions[e['src']].hostname if e['src'] in device_sessions else e['src'])}"
+                       f" → {e['dst_ip']}")
+    cats.append({'key': 'traffic', 'label': 'トラフィック', 'state': st,
+                 'summary': (f'通信 {len(evs)}件 ・ 到達率 {100 - ratio * 100:.0f}% ・ 最大使用率 {peak * 100:.1f}%'
+                             if evs else f'最大使用率 {peak * 100:.1f}% ・ 通信なし'),
+                 'details': det})
+
+    # セキュリティ: 侵害検知のアラート
+    al = hist['alerts']
+    hi = [a for a in al if a['severity'] == 'high']
+    st = 'crit' if hi else 'warn' if al else 'ok'
+    by = {}
+    for a in al:
+        by[a['name']] = by.get(a['name'], 0) + 1
+    cats.append({'key': 'security', 'label': 'セキュリティ', 'state': st,
+                 'summary': f'アラート {len(al)}件 (高 {len(hi)})' if al else 'アラートなし',
+                 'details': [f'{k} ×{v}' for k, v in sorted(by.items(), key=lambda kv: -kv[1])][:5]})
+
+    # syslog: 装置が出したログの重要度(3以下=error以上は異常、4=warningは注意)
+    logs = _flow_recorder.logs_since(now - window)
+    err = [x for x in logs if x['sev'] <= 3]
+    warn = [x for x in logs if x['sev'] == 4]
+    st = 'crit' if err else 'warn' if warn else 'ok'
+    cats.append({'key': 'syslog', 'label': 'syslog', 'state': st,
+                 'summary': f'error以上 {len(err)} ・ warning {len(warn)} ・ 全 {len(logs)}件',
+                 'details': [f"{x['host']}: {x['msg'][:90]}" for x in (err + warn)[-4:]]})
+
+    overall = max((c['state'] for c in cats), key=lambda v: rank[v])
+    return {'overall': overall, 'categories': cats, 'window': window, 'now': now}
 
 
 async def _link_sample_loop():
