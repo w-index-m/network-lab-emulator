@@ -121,3 +121,19 @@ def test_protocol_log_buffer_is_recorded_with_severity():
     assert [x['sev'] for x in logs] == [5, 3]
     assert app_module._guess_severity('x', level='WARN') == 4
     assert app_module._guess_severity('normal info') == 6
+
+
+def test_recovery_messages_are_not_problems(clean):
+    c = clean
+    r1, _r2 = _lab(c)
+    _cli(c, r1, 'configure terminal', 'interface GigabitEthernet0/0/0', 'shutdown', 'no shutdown', 'end')
+    recorder.clear()
+    # 実機同様 up も %LINK-3 だが、復旧なので syslog 観点では問題にしない
+    _cli(c, r1, 'configure terminal', 'interface GigabitEthernet0/0/0', 'shutdown', 'end')
+    recorder.clear()
+    _cli(c, r1, 'configure terminal', 'interface GigabitEthernet0/0/0', 'no shutdown', 'end')
+    _d, cat = _cat(c)
+    ups = [x for x in recorder.logs if '%LINK-3-UPDOWN' in x['msg'] and 'state to up' in x['msg']]
+    assert ups and all(x['sev'] == 3 for x in ups)
+    assert len({x['msg'] for x in ups}) == len(ups)       # 時刻付き/無しの二重記録をしない
+    assert cat['syslog']['state'] == 'ok'

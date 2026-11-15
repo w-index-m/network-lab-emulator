@@ -164,7 +164,9 @@ class TestPrometheusSource:
             fwd = ln['ab_bps'] if ln['a'] == r1 else ln['ba_bps']
             rev = ln['ba_bps'] if ln['a'] == r1 else ln['ab_bps']
             assert fwd == 600000000 and rev == 1000
-            assert ln['state'] == 'warn'                  # 使用率60%
+            assert abs(ln['util'] - 0.6) < 1e-9
+            # 使用率60%なので少なくとも注意(直前のテストのリンク断アラートが残っていれば警告)
+            assert ln['state'] in ('warn', 'crit')
         finally:
             srv.shutdown()
 

@@ -95,8 +95,10 @@
     #legend { display: none; }
     #session .row { grid-template-columns: 56px 1fr 1fr 44px; } #session .row .bytes { display: none; }
     #card { top: 44%; }
-    #modes { top: auto; bottom: 14px; }
-    #linkbar { top: auto; bottom: 48px; font-size: 11px; }
+    #modes { top: 126px; }
+    #linkbar { top: 158px; font-size: 10px; white-space: normal; width: calc(100vw - 16px); text-align: center; }
+    #modes button { padding: 5px 8px; letter-spacing: .06em; }
+    #alerts { bottom: 60px; }
     #linkpanel { top: auto; bottom: 80px; right: 8px; left: 8px; width: auto; max-height: 34vh; }
     #session { bottom: 64px; }
     body.host #filter, body.host #alerts { display: none; }
@@ -472,6 +474,11 @@
     ctx.fillStyle = col + '33'; ctx.fill();
     ctx.save(); ctx.shadowColor = col; ctx.shadowBlur = 12 + 6 * Math.sin(t * 0.004); ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
   }
+  function fit(text, maxW) {
+    if (ctx.measureText(text).width <= maxW) return text;
+    while (text.length > 1 && ctx.measureText(text + '…').width > maxW) text = text.slice(0, -1);
+    return text + '…';
+  }
   function drawBoard(t) {
     if (!health) return;
     const compact = W < 640;
@@ -510,12 +517,11 @@
       ctx.fillStyle = '#bfe9ff'; ctx.font = '12px sans-serif'; ctx.fillText(c.label, x0 + 60, y + 14);
       ctx.fillStyle = col; ctx.font = '700 22px sans-serif'; ctx.fillText(H_JA[c.state], x0 + 60, y + 38);
       ctx.fillStyle = '#9fc6dd'; ctx.font = '11px sans-serif';
-      const sum = c.summary.length > 30 ? c.summary.slice(0, 29) + '…' : c.summary;
-      ctx.fillText(sum, x0 + 118, y + 30);
+      ctx.fillText(fit(c.summary, w - 128), x0 + 118, y + 30);
       if (c.details && c.details.length && c.state !== 'ok') {
         ctx.fillStyle = col; ctx.font = '10px sans-serif';
         const d = c.details[c.details.length - 1].trim();
-        ctx.fillText(d.length > 36 ? d.slice(0, 35) + '…' : d, x0 + 118, y + 46);
+        ctx.fillText(fit(d, w - 128), x0 + 118, y + 46);
       }
       if (i < health.categories.length - 1) { ctx.fillStyle = 'rgba(51,214,255,0.12)'; ctx.fillRect(x0 + 10, y + rowH - 6, w - 20, 1); }
     });
@@ -544,13 +550,15 @@
       if (a && b) { ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
     }
     // リングの手前に床に貼った文字
-    const ang = Math.PI / 2 - cam.yaw;   // 常にカメラ側
-    const c = [Math.cos(ang) * (R + 3.2), Math.sin(ang) * (R + 3.2)];
-    const tx = [-Math.sin(ang), Math.cos(ang)], nx = [Math.cos(ang), Math.sin(ang)];
+    // 画面の右方向へ文字が流れ、下がカメラ側を向くように床に貼る
+    const sy = Math.sin(cam.yaw), cy = Math.cos(cam.yaw);
+    const nx = [-sy, -cy], tx = [cy, -sy];
+    // 手前側は画面外に出やすいので、奥側のリングの外に(カメラ向きで読める向きに)置く
+    const c = [-nx[0] * (R + 3.4), -nx[1] * (R + 3.4)];
     const p0 = proj(c[0], 0.02, c[1]), p1 = proj(c[0] + tx[0], 0.02, c[1] + tx[1]), p2 = proj(c[0] + nx[0], 0.02, c[1] + nx[1]);
     if (p0 && p1 && p2) {
       ctx.globalAlpha = 0.95; ctx.shadowBlur = 18;
-      ctx.setTransform(-DPR * (p1.x - p0.x) / 20, -DPR * (p1.y - p0.y) / 20, DPR * (p2.x - p0.x) / 20, DPR * (p2.y - p0.y) / 20, DPR * p0.x, DPR * p0.y);
+      ctx.setTransform(DPR * (p1.x - p0.x) / 20, DPR * (p1.y - p0.y) / 20, DPR * (p2.x - p0.x) / 20, DPR * (p2.y - p0.y) / 20, DPR * p0.x, DPR * p0.y);
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = col;
       ctx.font = '800 22px sans-serif';
       ctx.fillText(`SYSTEM ${H_JA[health.overall]}`, 0, 0);
@@ -821,7 +829,7 @@
       return `<div class="l ${l.state}${selLink === lkey(l) ? ' sel' : ''}" data-k="${esc(lkey(l))}">
         <div class="top"><span>${esc(l.host_a)} ⇄ ${esc(l.host_b)}</span><span class="st ${l.state}">${STATE_JA[l.state]}</span></div>
         <small>${esc(l.iface_a || '?')} ⇄ ${esc(l.iface_b || '?')}</small>
-        <div class="bps"><span>→ ${fmtBps(l.ab_bps)}</span><span>← ${fmtBps(l.ba_bps)}</span></div>
+        <div class="bps">${l.down ? '<span>→ 停止</span><span>← 停止</span>' : `<span>→ ${fmtBps(l.ab_bps)}</span><span>← ${fmtBps(l.ba_bps)}</span>`}</div>
         <div class="bar"><i style="width:${Math.min(100, Math.max(l.util * 100, l.ab_bps + l.ba_bps ? 1 : 0))}%;background:${STATE_COL[l.state]}"></i></div>
         <canvas></canvas>
         <small>${why.length ? esc(why.join(' / ')) : `問題なし ・ 経由ping ${l.flows_ok}件`}</small></div>`;
@@ -876,7 +884,8 @@
       // 中点のラベル
       const m = proj((A[0] + B[0]) / 2, Y + 0.9, (A[2] + B[2]) / 2);
       if (m) {
-        const lines = [`→ ${fmtBps(l.ab_bps)}`, `← ${fmtBps(l.ba_bps)}`];
+        // 断のリンクは区間平均に断前の通信が残るので、速度ではなく停止と出す
+        const lines = l.down ? ['→ 停止', '← 停止'] : [`→ ${fmtBps(l.ab_bps)}`, `← ${fmtBps(l.ba_bps)}`];
         ctx.font = '12px monospace';
         const w = Math.max(...lines.map(x => ctx.measureText(x).width)) + 54;
         ctx.fillStyle = 'rgba(4,14,30,0.82)'; ctx.fillRect(m.x - w / 2, m.y - 22, w, 36);
@@ -1046,7 +1055,7 @@
     // 装置もトラフィックも1か所にまとまっている時は最初から絞り込む
     document.body.classList.toggle('host', !!hostView);
     renderCard();
-    try { localStorage.setItem('cyberView.prefix', JSON.stringify(prefix)); } catch (e) { /* 保存できなくても動く */ }
+    if (primed) try { localStorage.setItem('cyberView.prefix', JSON.stringify(prefix)); } catch (e) { /* 保存できなくても動く */ }
   }
 
   function renderAlerts() {

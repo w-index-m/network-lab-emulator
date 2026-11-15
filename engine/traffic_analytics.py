@@ -43,6 +43,9 @@ RULES = {
                   'window': 0, 'threshold': 0, 'cooldown': 0,
                   'desc': 'インタフェースのshutdown等でリンクが落ちた'},
 }
+_TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')
+# 復旧を知らせるメッセージ(実機のCiscoでは up も %LINK-3 なので重要度だけでは区別できない)
+RECOVERY = re.compile(r'state to up|to FULL|Established|Link ?Up|復旧', re.I)
 _CISCO_SEV = re.compile(r'%[\w-]+?-([0-7])-\w+')
 SEVERITY_ORDER = {'low': 0, 'medium': 1, 'high': 2}
 
@@ -88,6 +91,7 @@ class FlowRecorder:
         同じ装置・同じ文面が1秒以内に重なったら1件にまとめる(同じ事象を
         実syslog送信とCLI通知の両方で拾うため)。"""
         now = time.time() if now is None else now
+        msg = _TS_PREFIX.sub('', msg)          # 装置側の時刻プレフィックスは重複判定の邪魔なので外す
         m = _CISCO_SEV.search(msg)
         if m:                      # %FAC-<sev>-MNEMONIC の重要度を優先(実機のsyslog重要度と同じ)
             severity = int(m.group(1))

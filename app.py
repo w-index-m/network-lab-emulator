@@ -9707,9 +9707,11 @@ async def traffic_health(window: int = 300):
                  'details': [f'{k} ×{v}' for k, v in sorted(by.items(), key=lambda kv: -kv[1])][:5]})
 
     # syslog: 装置が出したログの重要度(3以下=error以上は異常、4=warningは注意)
+    from engine.traffic_analytics import RECOVERY
     logs = _flow_recorder.logs_since(now - window)
-    err = [x for x in logs if x['sev'] <= 3]
-    warn = [x for x in logs if x['sev'] == 4]
+    bad = [x for x in logs if not RECOVERY.search(x['msg'])]
+    err = [x for x in bad if x['sev'] <= 3]
+    warn = [x for x in bad if x['sev'] == 4]
     st = 'crit' if err else 'warn' if warn else 'ok'
     cats.append({'key': 'syslog', 'label': 'syslog', 'state': st,
                  'summary': f'error以上 {len(err)} ・ warning {len(warn)} ・ 全 {len(logs)}件',

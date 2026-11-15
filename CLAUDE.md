@@ -2773,3 +2773,12 @@ API: `GET /api/traffic/history`(期間・src・dst・result、リンク状態は
 フローイベントに`src_ip`(次ホップ側IFのIP、`_src_ip_toward`)を追加。Playwright用に
 `window.__cvPanel(n)`/`__cvParticles()`フックあり。詳細・スクリーンショットは
 `docs/cyber-view-3d.md`、テストは`tests/test_cyber_view.py`。自動遮断は未実装(表示のみ)。
+追加(同日): `/cyber-view`に**ROUTER LINKS**モード(`GET /api/traffic/links?window=`、`engine/link_stats.py`。
+起動時から10秒ごとにIFカウンタをサンプリングしwindow平均のbps、`PROMETHEUS_URL`があれば
+`rate(ifHCOutOctets[1m])*8`を優先・不達なら内部へフォールバック。状態=IF断/使用率50・80%/経由ping失敗/
+両端アラート、断のリンクは「停止」表示)と、**SYSTEM STATUS**ボード(`GET /api/traffic/health`、
+ネットワーク/トラフィック/セキュリティ/syslogの4観点で正常/注意/異常)。syslog観点のため、
+`proto_log_buffer`を`_TapDict`/`_TapList`にして積まれた行を`recorder.record_log`へも記録し、
+`SyslogDispatcher.emit`も送信先の有無に関わらず記録する(`%X-<n>-`の重要度優先、復旧メッセージは
+問題扱いしない、時刻プレフィックスを外して重複排除)。テストは`tests/test_router_links.py`/
+`tests/test_cyber_health.py`。
