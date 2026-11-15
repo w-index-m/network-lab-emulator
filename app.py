@@ -6906,7 +6906,8 @@ def _handle_nat_config(device_id: str, command: str, state: DeviceState):
     return None
 
 
-def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict):
+def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict,
+                     count: int = 5, size: int = 100):
     """
     通信成立時、経路上のスイッチがMACを学習し、各IFのカウンタを更新する。
     （実データプレーンの簡易モデル）
@@ -6929,18 +6930,37 @@ def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict):
                 return 1
         return 1
 
-    # 直結スイッチに src の MAC を学習させ、カウンタを更新
+    # カウンタ: 経路(trace_pathのホップ列)上の各リンクにだけ載せる。
+    # 以前は経路と無関係に送信元の全リンクへ加算しており、LAN側に別の装置が
+    # 繋がっていると、WAN向けのpingでLAN側IFのカウンタまで増えていた。
+    path = [src_id] + [h['device'] for h in ping_result.get('hops', [])
+                       if h.get('device') and not h.get('timeout')]
+    path = [d for i, d in enumerate(path) if i == 0 or d != path[i - 1]]
+    links = [(x, y) for x, y in zip(path, path[1:]) if y in vnet.links.get(x, set())]
+    if not links:
+        # ホップ情報が無い(同一セグメント直結など)場合は従来どおり直結リンクへ
+        links = [(src_id, p) for p in vnet.links.get(src_id, set())]
+    for x, y in links:
+        x_port = vnet.interface_links.get(x, {}).get(y)
+        y_port = vnet.interface_links.get(y, {}).get(x)
+        if x_port:
+            dp_engine.bump(x, x_port, 'out', pkts=count, size=size)
+        if y_port:
+            dp_engine.bump(y, y_port, 'in', pkts=count, size=size)
+        # Echo Reply(復路)。以前は往路しか数えず、送信側のin/受信側のoutが
+        # pingで一切増えなかった
+        if ping_result.get('reachable'):
+            if y_port:
+                dp_engine.bump(y, y_port, 'out', pkts=count, size=size)
+            if x_port:
+                dp_engine.bump(x, x_port, 'in', pkts=count, size=size)
+
+    # 直結スイッチに src の MAC を学習させる
     for peer in list(vnet.links.get(src_id, set())):
-        # src 側の送信カウンタ
-        src_port = vnet.interface_links.get(src_id, {}).get(peer)
-        if src_port:
-            dp_engine.bump(src_id, src_port, 'out', pkts=5)
         peer_type = vnet.device_types.get(peer, '')
         peer_port = vnet.interface_links.get(peer, {}).get(src_id)
-        if peer_port:
-            dp_engine.bump(peer, peer_port, 'in', pkts=5)
-            if peer_type in switch_types:
-                dp_engine.learn(peer, src_mac, peer_port, _port_vlan(peer, peer_port))
+        if peer_port and peer_type in switch_types:
+            dp_engine.learn(peer, src_mac, peer_port, _port_vlan(peer, peer_port))
 
     # 応答が返る場合、宛先デバイスのMACも経路スイッチが学習
     if ping_result.get('reachable'):
@@ -7121,19 +7141,28 @@ async def handle_icmp(device_id: str, command: str, state: DeviceState):
         result = ipv6_engine.ping(device_id, dest, count=5)
         return _format_ping(dest, result, state.device_type)
 
-    # ping
+    # ping  (IOS: ping <dest> [repeat <n>] [size <bytes>])
     m = re.match(r'^ping\s+([\d.]+)', c)
     if m:
         dest = m.group(1)
+        # 実機IOSの repeat/size を反映する。以前は常に 5 x 100byte 固定で、
+        # インタフェースカウンタ(SNMP ifHCInOctets等)を意図した量だけ動かす
+        # 手段が無かった(Prometheus/Grafanaでのトラフィック監視で必要)
+        m_rep = re.search(r'\brepeat\s+(\d+)', c)
+        m_size = re.search(r'\bsize\s+(\d+)', c)
+        # 実機は最大2147483647だが、応答は1コマンド1レスポンスでRTTを件数分
+        # 作るので現実的な上限で抑える
+        count = min(max(int(m_rep.group(1)), 1), 100000) if m_rep else 5
+        size = min(max(int(m_size.group(1)), 36), 18024) if m_size else 100
         _register_icmp(device_id)
         # 送出前ARP（同一セグメントは宛先、別セグメントはデフォゲ）
         await _arp_before_send(device_id, dest, state)
-        result = icmp_engine.ping(device_id, dest, count=5)
+        result = icmp_engine.ping(device_id, dest, count=count)
         # 経路上のNATルーターで送信元アドレス変換を適用
         _apply_nat_on_path(device_id, dest, result, proto='icmp')
         # データプレーン: MAC学習 + カウンタ更新
-        _learn_dataplane(device_id, dest, result)
-        return _format_ping(dest, result, state.device_type)
+        _learn_dataplane(device_id, dest, result, count=count, size=size)
+        return _format_ping(dest, result, state.device_type, count=count, size=size)
 
     # traceroute / tracert (IPv6)
     m6t = re.match(r'^(?:traceroute|tracert)\s+(?:ipv6\s+)?([0-9A-Fa-f:]+:[0-9A-Fa-f:]*)', c)
@@ -7239,19 +7268,25 @@ async def handle_nc(device_id: str, command: str, state: DeviceState):
 
 
 
-def _format_ping(dest: str, result: dict, device_type: str) -> str:
+def _ios_marks(ch: str, count: int) -> str:
+    """IOSは ! / . を1行70個で折り返す"""
+    return '\n'.join(ch * min(70, count - i) for i in range(0, count, 70))
+
+
+def _format_ping(dest: str, result: dict, device_type: str,
+                 count: int = 5, size: int = 100) -> str:
     """ping結果を実機風フォーマットで整形"""
     if result['reachable']:
         rtts = result['rtts']
         ttl = result['ttl']
         if device_type in ('catalyst', 'cisco'):
             # Cisco形式: 成功は感嘆符
-            success = '!!!!!'
+            success = _ios_marks('!', count)
             mn, av, mx = min(rtts), sum(rtts)/len(rtts), max(rtts)
             return (f"Type escape sequence to abort.\n"
-                    f"Sending 5, 100-byte ICMP Echos to {dest}, timeout is 2 seconds:\n"
+                    f"Sending {count}, {size}-byte ICMP Echos to {dest}, timeout is 2 seconds:\n"
                     f"{success}\n"
-                    f"Success rate is 100 percent (5/5), "
+                    f"Success rate is 100 percent ({count}/{count}), "
                     f"round-trip min/avg/max = {mn:.0f}/{av:.0f}/{mx:.0f} ms")
         else:
             # Si-R / 汎用 形式
@@ -7268,9 +7303,9 @@ def _format_ping(dest: str, result: dict, device_type: str) -> str:
         reason = result.get('reason', 'unreachable')
         if device_type in ('catalyst', 'cisco'):
             return (f"Type escape sequence to abort.\n"
-                    f"Sending 5, 100-byte ICMP Echos to {dest}, timeout is 2 seconds:\n"
-                    f".....\n"
-                    f"Success rate is 0 percent (0/5)")
+                    f"Sending {count}, {size}-byte ICMP Echos to {dest}, timeout is 2 seconds:\n"
+                    f"{_ios_marks('.', count)}\n"
+                    f"Success rate is 0 percent (0/{count})")
         else:
             lines = [f"PING {dest} ({dest}): 56 data bytes"]
             for i in range(5):
@@ -7665,6 +7700,11 @@ def _register_icmp(device_id: str):
                         community=_comm,
                         communities=_ro + _rw,   # RWでも読み取りはできる
                         rw_communities=_rw)
+    # ifXTable の ifAlias(= interface の description)
+    if device_id in snmp_agent.devices:
+        snmp_agent.devices[device_id]['if_alias'] = {
+            n: (i.get('desc') or i.get('description') or '')
+            for n, i in (getattr(state, 'interfaces', {}) or {}).items()}
     # 実UDP SNMPエージェント（snmpget/snmpwalkに応答する側）を動的起動する。
     # start_all_snmp_agents はアプリ起動時に存在した装置しか対象にしないため、
     # これが無いとアプリ起動後に追加した装置はWalk/Getに応答しなかった。

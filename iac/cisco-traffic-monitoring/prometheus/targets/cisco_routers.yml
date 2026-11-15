@@ -1,0 +1,6 @@
+# 監視対象の Cisco ルータ(SNMPの待ち受けIP = 装置の管理IP)
+# lab/provision_cisco_lab.sh で作るラボ構成に合わせてある
+- targets: [10.240.12.1]
+  labels: {router: CR1, site: tokyo}
+- targets: [10.240.12.2]
+  labels: {router: CR2, site: osaka}

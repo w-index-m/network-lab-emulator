@@ -26,6 +26,7 @@ TAG_IPADDRESS = 0x40
 TAG_COUNTER32 = 0x41
 TAG_GAUGE32 = 0x42
 TAG_TIMETICKS = 0x43
+TAG_COUNTER64 = 0x46
 TAG_NO_SUCH_OBJECT = 0x80
 TAG_NO_SUCH_INSTANCE = 0x81
 TAG_END_OF_MIB_VIEW = 0x82
@@ -96,7 +97,10 @@ def _encode_value(vtype: str, value) -> bytes:
     if vtype == 'Timeticks':
         return _encode_int(int(value), TAG_TIMETICKS)
     if vtype == 'Counter32':
-        return _encode_int(int(value), TAG_COUNTER32)
+        # 実機同様 2^32 で折り返す(折り返さないと5バイト以上になり不正なBERになる)
+        return _encode_int(int(value) % (1 << 32), TAG_COUNTER32)
+    if vtype == 'Counter64':
+        return _encode_int(int(value) % (1 << 64), TAG_COUNTER64)
     if vtype == 'Gauge32':
         return _encode_int(int(value), TAG_GAUGE32)
     if vtype == 'IpAddress':

@@ -1,0 +1,718 @@
+{
+  "uid": "cisco-traffic",
+  "title": "Cisco ルータ トラフィック監視",
+  "tags": [
+    "cisco",
+    "snmp",
+    "traffic"
+  ],
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "schemaVersion": 39,
+  "editable": false,
+  "templating": {
+    "list": [
+      {
+        "name": "router",
+        "label": "ルータ",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ctm-prometheus"
+        },
+        "query": {
+          "query": "label_values(up{job=\"cisco-snmp\"}, router)",
+          "refId": "r"
+        },
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2
+      },
+      {
+        "name": "ifname",
+        "label": "インタフェース",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ctm-prometheus"
+        },
+        "query": {
+          "query": "label_values(ifHCInOctets{job=\"cisco-snmp\",router=~\"$router\"}, ifName)",
+          "refId": "i"
+        },
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "SNMP到達性",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ctm-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "A",
+          "expr": "up{job=\"cisco-snmp\",router=~\"$router\"}",
+          "legendFormat": "{{router}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Uptime",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ctm-prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "A",
+          "expr": "sysUpTime{job=\"cisco-snmp\",router=~\"$router\"} / 100",
+          "legendFormat": "{{router}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "CPU (5min)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ctm-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "A",
+          "expr": "cpmCPUTotal5minRev{job=\"cisco-snmp\",router=~\"$router\"}",
+          "legendFormat": "{{router}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "IF down (admin up / oper down)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ctm-prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "A",
+          "expr": "count by (router) (ifAdminStatus{job=\"cisco-snmp\",router=~\"$router\"} == 1 and ifOperStatus{job=\"cisco-snmp\",router=~\"$router\"} == 2) or count by (router) (up{job=\"cisco-snmp\",router=~\"$router\"}) * 0",
+          "legendFormat": "{{router}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "受信トラフィック (bps)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ctm-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "A",
+          "expr": "rate(ifHCInOctets{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}[$__rate_interval]) * 8",
+          "legendFormat": "{{router}} {{ifName}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "送信トラフィック (bps)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ctm-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "A",
+          "expr": "rate(ifHCOutOctets{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}[$__rate_interval]) * 8",
+          "legendFormat": "{{router}} {{ifName}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "In / Out (bps, Out を下向きに表示)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ctm-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "A",
+          "expr": "rate(ifHCInOctets{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}[$__rate_interval]) * 8",
+          "legendFormat": "in {{router}} {{ifName}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "B",
+          "expr": "-rate(ifHCOutOctets{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}[$__rate_interval]) * 8",
+          "legendFormat": "out {{router}} {{ifName}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "帯域使用率 % (in/out の大きい方)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ctm-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "A",
+          "expr": "100 * 8 * (rate(ifHCInOctets{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}[$__rate_interval]) > rate(ifHCOutOctets{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}[$__rate_interval]) or rate(ifHCOutOctets{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}[$__rate_interval])) / (ifHighSpeed{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"} * 1e6)",
+          "legendFormat": "{{router}} {{ifName}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "パケット/秒 (in + out)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ctm-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 21,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "A",
+          "expr": "rate(ifHCInUcastPkts{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}[$__rate_interval]) + rate(ifHCOutUcastPkts{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}[$__rate_interval])",
+          "legendFormat": "{{router}} {{ifName}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "インタフェース一覧",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ctm-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "A",
+          "expr": "ifOperStatus{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "B",
+          "expr": "rate(ifHCInOctets{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}[5m]) * 8",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ctm-prometheus"
+          },
+          "refId": "C",
+          "expr": "rate(ifHCOutOctets{job=\"cisco-snmp\",router=~\"$router\",ifName=~\"$ifname\"}[5m]) * 8",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "ifIndex": true,
+              "site": true
+            },
+            "renameByName": {
+              "Value #A": "Oper",
+              "Value #B": "In bps (5m)",
+              "Value #C": "Out bps (5m)",
+              "ifAlias": "Description"
+            },
+            "indexByName": {
+              "router": 0,
+              "ifName": 1,
+              "ifAlias": 2,
+              "Value #A": 3,
+              "Value #B": 4,
+              "Value #C": 5
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Oper"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "up",
+                        "color": "green"
+                      },
+                      "2": {
+                        "text": "down",
+                        "color": "red"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*bps.*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bps"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

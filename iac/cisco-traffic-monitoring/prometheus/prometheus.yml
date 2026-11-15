@@ -1,0 +1,39 @@
+# Prometheus: snmp_exporter 経由で Cisco ルータの IF-MIB をポーリングする
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+scrape_configs:
+  # 監視対象のCiscoルータ。targets/cisco_routers.yml にIPを足すだけで増やせる
+  # (file_sd なので Prometheus の再起動・reload は不要)
+  - job_name: cisco-snmp
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /snmp
+    params:
+      module: [cisco_if]
+      auth: [netlab_v2]
+    file_sd_configs:
+      - files: [/etc/prometheus/targets/*.yml]
+        refresh_interval: 30s
+    relabel_configs:
+      # 標準的な snmp_exporter のパターン:
+      # 対象ルータのIPを ?target= に入れ、実際のscrape先はsnmp_exporterにする
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9116
+
+  # snmp_exporter 自身の稼働状況
+  - job_name: snmp-exporter
+    static_configs:
+      - targets: [127.0.0.1:9116]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: [127.0.0.1:9090]

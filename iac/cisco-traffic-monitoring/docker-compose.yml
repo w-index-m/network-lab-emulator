@@ -1,0 +1,66 @@
+# Cisco ルータのトラフィック監視スタック (Prometheus + snmp_exporter + Grafana)
+#
+#   Cisco(エミュレータ, 実SNMP UDP/161) <─ SNMP GETBULK ─ snmp_exporter :9116
+#                                                         ^ /snmp?target=...
+#                                         Prometheus :9090 ┘   (15秒ごとにscrape)
+#                                              ^
+#                                         Grafana :3000 (データソース/ダッシュボードはprovisioning)
+#
+# エミュレータの各装置は管理IPをホストのループバックにエイリアスとして載せて
+# SNMPを待ち受けるため、コンテナは host ネットワークで動かす(ブリッジだと
+# 10.240.x.x のような装置IPへ届かない)。
+#
+# 起動: ./deploy.sh up      停止: ./deploy.sh down
+name: cisco-traffic-monitoring
+
+services:
+  snmp-exporter:
+    image: prom/snmp-exporter:v0.28.0
+    container_name: ctm-snmp-exporter
+    network_mode: host
+    command:
+      - --config.file=/etc/snmp_exporter/snmp.yml
+      - --web.listen-address=:${SNMP_EXPORTER_PORT:-9116}
+    volumes:
+      - ./snmp_exporter/snmp.yml:/etc/snmp_exporter/snmp.yml:ro
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: ctm-prometheus
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROM_RETENTION:-7d}
+      - --web.listen-address=:${PROM_PORT:-9090}
+      - --web.enable-lifecycle          # 設定を書き換えたら POST /-/reload で反映
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - ./prometheus/targets:/etc/prometheus/targets:ro
+      - prometheus-data:/prometheus
+    depends_on: [snmp-exporter]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: ctm-grafana
+    network_mode: host
+    environment:
+      GF_SERVER_HTTP_PORT: ${GRAFANA_PORT:-3000}
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/cisco-traffic.json
+      PROM_URL: http://127.0.0.1:${PROM_PORT:-9090}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [prometheus]
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

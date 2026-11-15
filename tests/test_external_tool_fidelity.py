@@ -135,7 +135,9 @@ class TestOspfMultiAreaAbr:
              'interface GigabitEthernet0/0/0', 'ip address 10.229.12.2 255.255.255.252', 'no shutdown', 'exit',
              'interface GigabitEthernet0/0/1', 'ip address 10.229.2.1 255.255.255.0', 'no shutdown', 'exit',
              'router ospf 1', 'network 10.229.12.0 0.0.0.3 area 0', 'network 10.229.2.0 0.0.0.255 area 1', 'end')
-        ok = _wait(lambda: '10.229.2.0/24' in _cli(client, o1, 'show ip route'))
+        # 両方向の収束を待つ(片側だけ待つと反対側の経路表示が間に合わず不安定)
+        ok = _wait(lambda: '10.229.2.0/24' in _cli(client, o1, 'show ip route')
+                   and '10.229.1.0/24' in _cli(client, o2, 'show ip route'))
         assert ok, _cli(client, o1, 'show ip ospf neighbor')
         return client
 

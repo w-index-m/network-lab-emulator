@@ -1,0 +1,10 @@
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: ctm-prometheus
+    type: prometheus
+    access: proxy
+    url: ${PROM_URL}
+    isDefault: true
+    jsonData:
+      timeInterval: 15s      # scrape_interval と合わせる($__rate_interval の計算に使われる)

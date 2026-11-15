@@ -6579,6 +6579,16 @@ dp_engine = DataPlaneEngine()
 # SNMP エージェント（polling応答 / MIB-II）
 #   仮想SNMPポーリングマシンからの snmpget/snmpwalk に応答する
 # ══════════════════════════════════════════
+def _snmp_if_name(ifn: str) -> str:
+    """ifName は実機Ciscoでは短縮名(GigabitEthernet0/0/0 -> Gi0/0/0)"""
+    for long, short in (('TenGigabitEthernet', 'Te'), ('GigabitEthernet', 'Gi'),
+                        ('FastEthernet', 'Fa'), ('Loopback', 'Lo'), ('Port-channel', 'Po'),
+                        ('Vlan', 'Vl'), ('Tunnel', 'Tu')):
+        if ifn.startswith(long):
+            return short + ifn[len(long):]
+    return ifn
+
+
 class SnmpAgent:
     """
     各装置の状態から標準MIB-II（system / interfaces / ip グループ）を生成し、
@@ -6614,18 +6624,27 @@ class SnmpAgent:
         self.devices: Dict[str, dict] = {}
         # device_id -> 直近のCPU使用率（緩やかなランダムウォークで遷移させる）
         self._cpu_state: Dict[str, float] = {}
+        self._cpu_last: Dict[str, float] = {}
 
     def _cpu_percent(self, device_id: str, dtype: str) -> Optional[float]:
         """CISCO-PROCESS-MIB相当のCPU使用率を、緩やかな乱歩で遷移させながら返す。
         Cisco系（cisco/catalyst/nexus/asa）以外はNone（当該MIB非対応）。"""
         if dtype not in self._CISCO_MIB_TYPES:
             return None
+        # 乱歩は「時間」で進める(5秒に1歩)。以前はMIBを組み立てるたびに
+        # 1歩進めていたため、snmp_exporter のように1回のscrapeで何度も
+        # GETBULKを投げるポーラだと数分で95%に張り付いた
+        now = time.time()
         cur = self._cpu_state.get(device_id)
+        last = self._cpu_last.get(device_id, 0.0)
         if cur is None:
             cur = random.uniform(8, 25)
-        else:
+        elif now - last >= 5.0:
             cur = max(2.0, min(95.0, cur + random.uniform(-4, 4)))
+        else:
+            return round(cur, 1)
         self._cpu_state[device_id] = cur
+        self._cpu_last[device_id] = now
         return round(cur, 1)
 
     def register(self, device_id: str, device_type: str, hostname: str,
@@ -6730,8 +6749,21 @@ class SnmpAgent:
             mib.append((f'1.3.6.1.2.1.2.2.1.8.{i}', 'INTEGER', status))            # ifOperStatus
             # ifInOctets / ifOutOctets（データプレーンカウンタ由来）
             c = dp_engine.get_counter(device_id, ifn)
-            mib.append((f'1.3.6.1.2.1.2.2.1.10.{i}', 'Counter32', str(c['in_bytes'])))
-            mib.append((f'1.3.6.1.2.1.2.2.1.16.{i}', 'Counter32', str(c['out_bytes'])))
+            mib.append((f'1.3.6.1.2.1.2.2.1.10.{i}', 'Counter32', str(c['in_bytes'] % (1 << 32))))
+            mib.append((f'1.3.6.1.2.1.2.2.1.16.{i}', 'Counter32', str(c['out_bytes'] % (1 << 32))))
+            # ── ifXTable (IF-MIB 1.3.6.1.2.1.31.1.1.1) ──
+            # 実機Ciscoの監視(Prometheus snmp_exporterのif_mib等)は折り返しの
+            # 速いCounter32ではなく64bitの ifHCIn/OutOctets と ifName/ifAlias を使う。
+            # 以前はifXTableが丸ごと無く、ifName等のラベルが空になっていた。
+            _desc = (d.get('if_alias') or {}).get(ifn, '')
+            xt = '1.3.6.1.2.1.31.1.1.1'
+            mib.append((f'{xt}.1.{i}', 'STRING', _snmp_if_name(ifn)))              # ifName
+            mib.append((f'{xt}.6.{i}', 'Counter64', str(c['in_bytes'])))          # ifHCInOctets
+            mib.append((f'{xt}.7.{i}', 'Counter64', str(c.get('in_pkts', 0))))    # ifHCInUcastPkts
+            mib.append((f'{xt}.10.{i}', 'Counter64', str(c['out_bytes'])))        # ifHCOutOctets
+            mib.append((f'{xt}.11.{i}', 'Counter64', str(c.get('out_pkts', 0))))  # ifHCOutUcastPkts
+            mib.append((f'{xt}.15.{i}', 'Gauge32', '1000'))                       # ifHighSpeed(Mbps)
+            mib.append((f'{xt}.18.{i}', 'STRING', _desc))                         # ifAlias
         # ── ip group: ipAdEntAddr (1.3.6.1.2.1.4.20.1.1.<ip>) ──
         for ip in info.get('ips', {}):
             mib.append((f'1.3.6.1.2.1.4.20.1.1.{ip}', 'IpAddress', ip))

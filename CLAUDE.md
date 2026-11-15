@@ -2715,3 +2715,20 @@ Live-verified: Catalyst1⇔Catalyst2をOSPF area 0で接続
   saved_config.jsonからの復元で前回の同名装置が混ざるのを避ける。
   conftestのautouse `_cleanup`がテストごとにOSPF等を止めるので、
   OSPFラボはテストごとに別IDで組み直す)。
+
+**Ciscoルータのトラフィック監視IaC(`iac/cisco-traffic-monitoring/`)**: ユーザー依頼
+「Ciscoルータのトラフィック監視をPrometheusが行いgrafanaに表示して欲しい。
+その際のpromethiusとgrafanaの起動に利用するiacスクリプトを表示して欲しい」。
+既存の`tools/setup_monitoring_stack.sh`(アプリ内部API経由の自作exporter)とは
+別に、実機監視と同じ**Prometheus公式snmp_exporterがCiscoの実SNMP(UDP/161)を
+叩く**構成をdocker compose(host network)+Grafana provisioningで作った。
+`deploy.sh up|status|down|destroy`、`lab/provision_cisco_lab.sh`(CR1/CR2と
+`snmp-server community netlab-ro RO`)、`lab/traffic_gen.sh`。詳細・ライブ検証・
+スクリーンショットは`docs/cisco-traffic-monitoring-iac.md`。
+直したエミュレータ側の問題: IF-MIB ifXTable(ifName短縮名/ifHCIn・OutOctets/
+ifHighSpeed/ifAlias)とBER Counter64の追加、Counter32の2^32折り返し、
+`ping X repeat N size S`の反映(以前は5×100byte固定)・Echo Reply(復路)の
+カウント・カウンタを経路上のリンクだけに載せる(以前は送信元の全リンク)、
+CPU乱歩をポーリング回数ではなく時間ベースに(snmp_exporterだと数分で95%に
+張り付いていた)。`tests/test_cisco_traffic_monitoring.py`(IaC定義同士の
+整合チェック含む)。dockerの起動自体は手動ライブ検証(`nohup dockerd &`)。

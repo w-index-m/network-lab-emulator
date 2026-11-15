@@ -1,0 +1,40 @@
+groups:
+  - name: cisco-traffic
+    rules:
+      # SNMPで取れない(ルータ停止/コミュニティ不一致/ACL等)
+      - alert: CiscoSnmpUnreachable
+        expr: up{job="cisco-snmp"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.router }} ({{ $labels.instance }}) にSNMPで到達できない"
+
+      # 管理上 up なのに運用状態が down (ケーブル断・対向shutdown等)
+      - alert: CiscoInterfaceDown
+        expr: ifAdminStatus{job="cisco-snmp"} == 1 and ifOperStatus{job="cisco-snmp"} == 2
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.router }} {{ $labels.ifName }} が down"
+
+      # 帯域使用率 80% 超(ifHighSpeed は Mbps。同じラベル集合同士なので on() 不要)
+      - alert: CiscoInterfaceHighUtilizationIn
+        expr: 100 * 8 * rate(ifHCInOctets{job="cisco-snmp"}[2m]) / (ifHighSpeed{job="cisco-snmp"} * 1e6) > 80
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.router }} {{ $labels.ifName }} 受信使用率 {{ $value | printf \"%.1f\" }}%"
+      - alert: CiscoInterfaceHighUtilizationOut
+        expr: 100 * 8 * rate(ifHCOutOctets{job="cisco-snmp"}[2m]) / (ifHighSpeed{job="cisco-snmp"} * 1e6) > 80
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.router }} {{ $labels.ifName }} 送信使用率 {{ $value | printf \"%.1f\" }}%"
+
+      # CPU 5分平均 90% 超
+      - alert: CiscoHighCpu
+        expr: cpmCPUTotal5minRev{job="cisco-snmp"} > 90
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.router }} のCPU使用率が {{ $value }}%"
