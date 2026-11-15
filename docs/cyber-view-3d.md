@@ -178,3 +178,39 @@ Prometheus が片側のIFしか監視していないリンクは、監視外の�
 ![正常 /24](images/cyber-view-v3-ok_24.png)
 ![異常 ROUTER LINKS(LINK DOWN、Loki のエラーログ)](images/cyber-view-v3-ng_links.png)
 ![異常 /24(図9風のアラートの花)](images/cyber-view-v3-ng_24.png)
+
+## link down の検知経路(STATE / SYSLOG / TRAP / POLL)(v4)
+
+link down は、どの経路で気づいても同じ「LINK DOWN」表示になる。LINK DOWN プレートの下に
+4つの検知経路のチップが並び、**点灯 = その経路が断を示している / 暗い = up を示している /
+破線 = その経路のデータが無い** で、どれで気づいたか・全部一致しているかが分かる。
+
+| 経路 | データ | 断/復旧の判定 |
+|---|---|---|
+| STATE | エミュレータ自身の IF 状態(ラボ内の装置のみ) | shutdown・リンク断 |
+| SYSLOG | `LOKI_URL` があれば Loki(直近1時間)、無ければ内部記録 | `Interface X, changed state to (administratively) down/up`、Si-R の `X Link Down/Up` |
+| TRAP | `SNMP_TRAP_LISTEN=0.0.0.0:1162` でアプリが受信した linkDown/linkUp | sysDescr(`host: IF down`)か ifDescr/ifName の varbind と送信元IPで装置・IFを特定 |
+| POLL | `PROMETHEUS_URL` の snmp_exporter `ifOperStatus` | 2(down)/7(lowerLayerDown)=断、1=up、その他は判定に使わない |
+
+リンク両端のどちらかの IF について、どれか1経路でも「最後に見た状態が down」ならリンクは断。
+`/api/traffic/links` の各リンクに `evidence`(経路ごとの up/down/null)と `down_sources`、
+状態ボードのネットワーク観点に「検知: CR2 ⇄ CR3 = STATE / SYSLOG / TRAP / POLL」が出る。
+実機監視で trap だけ/syslog だけの環境でも、その経路のチップだけが点いて同じ LINK DOWN になる。
+
+```bash
+SNMP_TRAP_LISTEN=0.0.0.0:1162 PROMETHEUS_URL=http://127.0.0.1:9090 LOKI_URL=http://127.0.0.1:3100 python app.py
+# 装置側: trap の送信先をこのアプリにする(エミュレータの Cisco)
+snmp-server host 127.0.0.1 udp-port 1162 traps public
+```
+
+ライブ検証(本物の Prometheus + snmp_exporter + Loki + trap 受信): CR2 で
+`snmp-server host 127.0.0.1 udp-port 1162 traps public` → `interface Gi0/0/2` → `shutdown`。
+約35秒後(Prometheus の scrape 後)に4経路すべてが DOWN、`no shutdown` で全経路 up に戻り NORMAL。
+
+![4経路すべてが断を示す LINK DOWN](images/cyber-view-v4-linkdown-4sources.png)
+![復旧後](images/cyber-view-v4-recovered.png)
+
+この作業で見つけて直した問題: syslog の重複除外(同じ出来事を実 syslog 送信と CLI 通知の両方で
+拾うための1秒以内の同文除外)が、`shutdown`→`no shutdown` を1秒以内に繰り返すと最後の
+「changed state to up」を重複として捨ててしまい、復旧したのに断のまま残っていた。
+間に同じ IF の逆の状態変化が挟まる場合は別の出来事として残すようにした。

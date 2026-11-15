@@ -106,9 +106,19 @@ class FlowRecorder:
         if m:                      # %FAC-<sev>-MNEMONIC の重要度を優先(実機のsyslog重要度と同じ)
             severity = int(m.group(1))
         with self._lock:
-            for x in list(self.logs)[-20:]:
-                if x['dev'] == dev and x['msg'] == msg and now - x['t'] < 1:
+            # 同じ装置・同文・1秒以内は重複(実syslog送信とCLI通知の両方で拾うため)。
+            # ただし間に同じIFの逆の状態変化が挟まっていれば別の出来事なので残す
+            # (shutdown→no shutdown を素早く繰り返しても最後の up を落とさない)
+            from engine.link_evidence import parse_log_link_event, norm_if
+            me = parse_log_link_event(msg)
+            for x in reversed(list(self.logs)[-50:]):
+                if x['dev'] != dev or now - x['t'] >= 1:
+                    continue
+                if x['msg'] == msg:
                     return None
+                ev = parse_log_link_event(x['msg'])
+                if me and ev and norm_if(ev[0]) == norm_if(me[0]) and ev[1] != me[1]:
+                    break
             ev = {'t': now, 'dev': dev, 'host': hostname, 'sev': int(severity), 'msg': msg}
             self.logs.append(ev)
             if ev['sev'] <= RULES['syslog_error']['threshold'] and not RECOVERY.search(msg):

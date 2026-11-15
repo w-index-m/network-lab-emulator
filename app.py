@@ -951,6 +951,13 @@ async def lifespan(app: FastAPI):
     # 定期自動保存タスク（60秒ごと）
     auto_save_task = asyncio.create_task(_auto_save_loop())
     link_sample_task = asyncio.create_task(_link_sample_loop())
+    # SNMP linkDown/linkUp trap の受信(/cyber-view の LINK DOWN 判定に使う)。例: 0.0.0.0:1162
+    if os.environ.get('SNMP_TRAP_LISTEN', '').strip():
+        from engine.link_evidence import traps as _traps
+        try:
+            print(f"[trap] 受信開始 {_traps.start(os.environ['SNMP_TRAP_LISTEN'].strip())}")
+        except OSError as e:
+            print(f"[trap] 受信を開始できません: {e}")
     # 実SNMP(UDP/161, v2c)エージェントを各装置ごとに起動
     from engine.snmp_udp_agent import start_all_snmp_agents
     from engine.protocols import snmp_agent as _snmp_agent_instance
@@ -9590,6 +9597,58 @@ def _collect_links():
 _NON_ROUTER_TYPES = {'pc', 'netattest', 'alb'}
 
 
+_EVIDENCE_ORDER = ('STATE', 'SYSLOG', 'TRAP', 'POLL')
+
+
+async def _annotate_link_evidence(links, nodes, now):
+    """各リンクに、どの経路(STATE/SYSLOG/TRAP/POLL)が断を示しているかを付ける。
+    どれか1つでも「最後に見た状態が down」ならリンクは断(ln['down']=True)。"""
+    from engine.link_evidence import traps, parse_log_link_event, norm_if, prometheus_oper_status
+    logs, _src, _err = await _health_logs(now - 3600, now)
+    host_to_dev = {n['hostname']: d for d, n in nodes.items()}
+    ip_to_dev = {}
+    for d in nodes:
+        for itf in (getattr(device_sessions.get(d), 'interfaces', {}) or {}).values():
+            if isinstance(itf, dict) and itf.get('ip'):
+                ip_to_dev.setdefault(itf['ip'], d)
+    seen = {}            # (source, dev, norm_if) -> (t, state)
+
+    def note(src, dev, ifn, t, st):
+        if dev in nodes and ifn:
+            k = (src, dev, norm_if(ifn))
+            if k not in seen or t >= seen[k][0]:
+                seen[k] = (t, st)
+    for r in logs:
+        ev = parse_log_link_event(r.get('msg', ''))
+        if ev:
+            dev = r.get('dev') if r.get('dev') in nodes else host_to_dev.get(r.get('host', ''))
+            note('SYSLOG', dev, ev[0], r['t'], ev[1])
+    for e in traps.snapshot():
+        dev = host_to_dev.get(e['host']) or ip_to_dev.get(e['src_ip'])
+        note('TRAP', dev, e['iface'], e['t'], e['state'])
+    poll = {}
+    prom_url = os.environ.get('PROMETHEUS_URL', '').strip()
+    if prom_url:
+        try:
+            poll = await asyncio.to_thread(prometheus_oper_status, prom_url)
+        except Exception:  # noqa: BLE001 - 取れなければ POLL 無しで判定
+            poll = {}
+    for (inst, ifn), st in poll.items():
+        note('POLL', ip_to_dev.get(inst), ifn, now, st)
+    for ln in links:
+        ev = {k: None for k in _EVIDENCE_ORDER}
+        ev['STATE'] = 'down' if ln['down'] else 'up'
+        for src in ('SYSLOG', 'TRAP', 'POLL'):
+            states = [seen[(src, d, norm_if(i))][1] for d, i in ((ln['a'], ln['iface_a']), (ln['b'], ln['iface_b']))
+                      if i and (src, d, norm_if(i)) in seen]
+            if states:
+                ev[src] = 'down' if 'down' in states else 'up'
+        ln['evidence'] = ev
+        ln['down_sources'] = [k for k in _EVIDENCE_ORDER if ev[k] == 'down']
+        ln['down'] = bool(ln['down_sources'])
+    return links
+
+
 @app.get("/api/traffic/links")
 async def traffic_links(window: int = 60, routers_only: bool = True):
     """ルータ間リンクのトラフィックと状態(/cyber-view の LINK VIEW)。
@@ -9603,6 +9662,7 @@ async def traffic_links(window: int = 60, routers_only: bool = True):
     links, nodes = _collect_links()
     sampler.sample(links)
     now = time.time()
+    await _annotate_link_evidence(links, nodes, now)
     prom, prom_err = {}, None
     prom_url = os.environ.get('PROMETHEUS_URL', '').strip()
     if prom_url:
@@ -9657,7 +9717,12 @@ async def traffic_links(window: int = 60, routers_only: bool = True):
     return {'links': out, 'window': window, 'now': now,
             'source': 'prometheus' if prom else 'internal',
             'prometheus_url': prom_url or None, 'prometheus_error': prom_err,
-            'sample_interval': 10}
+            'sample_interval': 10, 'trap_listen': _link_traps_listen()}
+
+
+def _link_traps_listen():
+    from engine.link_evidence import traps
+    return traps.listen
 
 
 @app.get("/api/traffic/health")
@@ -9669,6 +9734,7 @@ async def traffic_health(window: int = 300):
     now = time.time()
     rank = {'ok': 0, 'warn': 1, 'crit': 2}
     links, nodes = _collect_links()
+    await _annotate_link_evidence(links, nodes, now)
     routers = [ln for ln in links
                if nodes[ln['a']]['type'] not in _NON_ROUTER_TYPES and nodes[ln['b']]['type'] not in _NON_ROUTER_TYPES]
     cats = []
@@ -9681,7 +9747,9 @@ async def traffic_health(window: int = 300):
     cats.append({'key': 'network', 'label': 'ネットワーク', 'state': st,
                  'summary': (f'リンク断 {len(down_r) + len(down_t)}本' if st != 'ok'
                              else f'リンク {len(links)}本 すべて up'),
-                 'details': [f'断: {x}' for x in down_r + down_t][:5]})
+                 'details': [f'断: {x}' for x in down_r + down_t][:5] +
+                            [f"検知: {nodes[x['a']]['hostname']} ⇄ {nodes[x['b']]['hostname']} = "
+                             f"{' / '.join(x['down_sources'])}" for x in links if x['down']][:3]})
 
     # トラフィック: 1分平均の使用率と、期間内のpingの到達率
     peak, peak_name = 0.0, ''

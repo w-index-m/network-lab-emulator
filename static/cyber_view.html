@@ -930,6 +930,39 @@
   const fmtShort = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + ' Gbps' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' Mbps'
     : b >= 1e3 ? (b / 1e3).toFixed(0) + ' kbps' : Math.round(b) + ' bps';
   const shortIf = (n) => n.replace('GigabitEthernet', 'Gi').replace('TenGigabitEthernet', 'Te').replace('FastEthernet', 'Fa').replace('Ethernet', 'Eth');
+  // 断を示している検知経路のチップ: 点灯=down を示している / 暗い=up / 破線=データ無し
+  const EV_COL = { STATE: '#9fb4c8', SYSLOG: '#ff5a6a', TRAP: '#c58bff', POLL: '#33d6ff' };
+  const EV_LABEL = { STATE: 'STATE', SYSLOG: 'SYSLOG', TRAP: 'TRAP', POLL: 'POLL' };
+  function evidenceChips(x, y, z, ev, t) {
+    const c = proj(x, y, z);
+    if (!c) return;
+    const keys = ['STATE', 'SYSLOG', 'TRAP', 'POLL'], w = 62, gap = 6;
+    const x0 = c.x - (keys.length * w + (keys.length - 1) * gap) / 2, y0 = c.y + 54;
+    ctx.save();
+    ctx.fillStyle = '#ffb0b8'; ctx.font = '700 10px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('検知経路', c.x, y0 - 6);
+    keys.forEach((k, i) => {
+      const cx = x0 + i * (w + gap) + w / 2, cy = y0 + 12, st = ev[k], col = EV_COL[k];
+      ctx.beginPath();
+      const pts = [[-w / 2 + 8, -11], [w / 2 - 8, -11], [w / 2, 0], [w / 2 - 8, 11], [-w / 2 + 8, 11], [-w / 2, 0]];
+      pts.forEach(([a, b], j) => j ? ctx.lineTo(cx + a, cy + b) : ctx.moveTo(cx + a, cy + b)); ctx.closePath();
+      if (st === 'down') {
+        const p = 0.65 + 0.35 * Math.abs(Math.sin(t * 0.006 + i));
+        ctx.fillStyle = col; ctx.globalAlpha = p; ctx.shadowColor = col; ctx.shadowBlur = 14; ctx.fill();
+        ctx.globalAlpha = 1; ctx.shadowBlur = 0; ctx.fillStyle = '#10060a';
+      } else {
+        ctx.fillStyle = 'rgba(4,14,30,0.85)'; ctx.fill();
+        if (!st) ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = st === 'up' ? col + '88' : 'rgba(150,170,190,0.45)'; ctx.lineWidth = 1.2; ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = st === 'up' ? col + 'aa' : 'rgba(150,170,190,0.55)';
+      }
+      ctx.font = '800 10px monospace'; ctx.textBaseline = 'middle';
+      ctx.fillText(EV_LABEL[k], cx, cy - 2);
+      ctx.font = '8px monospace';
+      ctx.fillText(st === 'down' ? 'DOWN' : st === 'up' ? 'up' : '—', cx, cy + 7);
+    });
+    ctx.restore();
+  }
   // 床から立つ六角柱(高さ=量)
   function hexColumn(x, y0, z, r, h, col, t) {
     const ring = (y) => Array.from({ length: 6 }, (_, k) => { const a = k * Math.PI / 3; return proj(x + Math.cos(a) * r, y, z + Math.sin(a) * r); });
@@ -1093,7 +1126,8 @@
       if (!l.down) hexColumn(mx, Y, mz, 0.42, colH, col, t);
       const title = l.down ? 'LINK DOWN' : STATE_EN[l.state];
       const val = l.down ? '停止' : fmtShort(tot2);
-      plate3d(mx, Y + colH + 0.9, mz, col, title, val, l.down || l.state === 'crit', t, `使用率 ${(l.util * 100).toFixed(1)}%`);
+      plate3d(mx, Y + colH + 0.9, mz, col, title, val, l.down || l.state === 'crit', t, l.down ? null : `使用率 ${(l.util * 100).toFixed(1)}%`);
+      if (l.down || (l.down_sources || []).length) evidenceChips(mx, Y + colH + 0.9, mz, l.evidence || {}, t);
       if (l.down) sparksAt(mx, Y + 0.3, mz, t, '#ff3b4e');
       if (l.alerts.length) {
         const ap = proj(mx, Y + colH + 2.6, mz);

@@ -2790,3 +2790,9 @@ API: `GET /api/traffic/history`(期間・src・dst・result、リンク状態は
 ping結果(PING OK/NG)・ログ・通信中装置のプレートを立体表示。アラートの花は図9風(検知元ごとの花びら
 IDS/FW/SYSLOG/NET。FWは`threat_detection.shun_listeners`→`recorder.external_alert('fw_shun')`、
 SYSLOGは`record_log`でerror以上→`syslog_error`)。セキュリティ観点はIDS/FWのみ。横長画面前提。
+追加(v4): link downの検知経路を統合(`engine/link_evidence.py`、`app._annotate_link_evidence`)。
+STATE(vnet)/SYSLOG(`parse_log_link_event`、Loki直近1h or 内部)/TRAP(`SNMP_TRAP_LISTEN`で
+アプリが受信、`traps.start`)/POLL(Prometheus `ifOperStatus` 2/7=断)のどれか1つでもIF端の
+最新がdownならリンク断、`evidence`/`down_sources`を返し、画面はLINK DOWN下に4経路チップ。
+`recorder.record_log`の重複除外は、間に同IFの逆の状態変化が挟まれば残す(素早いflapで最後の
+upが落ちて断のまま残る実バグを修正)。テストは`tests/test_link_evidence.py`。
