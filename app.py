@@ -950,6 +950,7 @@ async def lifespan(app: FastAPI):
     _load_config()
     # 定期自動保存タスク（60秒ごと）
     auto_save_task = asyncio.create_task(_auto_save_loop())
+    link_sample_task = asyncio.create_task(_link_sample_loop())
     # 実SNMP(UDP/161, v2c)エージェントを各装置ごとに起動
     from engine.snmp_udp_agent import start_all_snmp_agents
     from engine.protocols import snmp_agent as _snmp_agent_instance
@@ -978,6 +979,7 @@ async def lifespan(app: FastAPI):
           f"({', '.join(ospf_responders.keys())})")
 
     yield
+    link_sample_task.cancel()
     auto_save_task.cancel()
     try:
         await auto_save_task
@@ -9468,6 +9470,14 @@ async def traffic_flowmap(since: int = 0, alert_since: int = 0):
       ifHCIn/OutOctets と同じ値)。bps は呼び出し側が前回値との差分で出す
     - events: since より新しいフローイベント(pingごとの経路・バイト数・成否)
     """
+    links, nodes = _collect_links()
+    events, alerts, seq, alert_seq = _flow_recorder.since(since, alert_since)
+    return {'nodes': list(nodes.values()), 'links': links, 'events': events,
+            'alerts': alerts, 'seq': seq, 'alert_seq': alert_seq, 'now': time.time()}
+
+
+def _collect_links():
+    """vnet のリンクと両端IFの累積バイト・断の有無(flowmap / link view / サンプラ共通)"""
     nodes, links, seen = {}, [], set()
     down = {d: {vnet._norm_iface(x) for x in s}
             for d, s in vnet.down_interfaces.items()}
@@ -9491,9 +9501,92 @@ async def traffic_flowmap(since: int = 0, alert_since: int = 0):
             for d in key:
                 st = device_sessions[d]
                 nodes[d] = {'id': d, 'hostname': st.hostname, 'type': st.device_type}
-    events, alerts, seq, alert_seq = _flow_recorder.since(since, alert_since)
-    return {'nodes': list(nodes.values()), 'links': links, 'events': events,
-            'alerts': alerts, 'seq': seq, 'alert_seq': alert_seq, 'now': time.time()}
+    return links, nodes
+
+
+# ルータ間リンク表示から外す装置(端末・管理系)
+_NON_ROUTER_TYPES = {'pc', 'netattest', 'alb'}
+
+
+@app.get("/api/traffic/links")
+async def traffic_links(window: int = 60, routers_only: bool = True):
+    """ルータ間リンクのトラフィックと状態(/cyber-view の LINK VIEW)。
+
+    bps は window 秒間の平均。PROMETHEUS_URL があれば snmp_exporter 経由の
+    rate(ifHCOutOctets[1m]) を優先し、無い/取れないリンクは内部カウンタで出す。
+    状態は IF 断・使用率(50%/80%)・リンクを通ったpingの失敗・両端装置のアラートで決める。
+    """
+    from engine.link_stats import sampler, prometheus_rates, classify, LINK_SPEED_BPS
+    window = max(10, min(int(window), 3600))
+    links, nodes = _collect_links()
+    sampler.sample(links)
+    now = time.time()
+    prom, prom_err = {}, None
+    prom_url = os.environ.get('PROMETHEUS_URL', '').strip()
+    if prom_url:
+        try:
+            prom = await asyncio.to_thread(prometheus_rates, prom_url)
+        except Exception as e:  # noqa: BLE001 - 不達は内部カウンタで補う
+            prom_err = str(e)[:200]
+    from engine.protocols import _snmp_if_name
+
+    def _prom_bps(dev, ifn):
+        if not prom or not ifn:
+            return None
+        for itf in (getattr(device_sessions.get(dev), 'interfaces', {}) or {}).values():
+            if isinstance(itf, dict) and itf.get('ip'):
+                v = prom.get((itf['ip'], _snmp_if_name(ifn)))
+                if v is not None:
+                    return v
+        return None
+
+    hist = _flow_recorder.query(start=now - window, end=now)
+    out = []
+    for ln in links:
+        a, b = ln['a'], ln['b']
+        if routers_only and (nodes[a]['type'] in _NON_ROUTER_TYPES or nodes[b]['type'] in _NON_ROUTER_TYPES):
+            continue
+        pa, pb = _prom_bps(a, ln['iface_a']), _prom_bps(b, ln['iface_b'])
+        if pa is not None or pb is not None:
+            src = 'prometheus'
+            ab, ba = pa or 0.0, pb or 0.0
+        else:
+            src = 'internal'
+            r = sampler.rate((a, b), window, now)
+            ab, ba = r if r else (0.0, 0.0)
+        ok = ng = 0
+        for e in hist['events']:
+            p = e['path']
+            if any({p[i], p[i + 1]} == {a, b} for i in range(len(p) - 1)):
+                if e['ok']:
+                    ok += 1
+                else:
+                    ng += 1
+        al = [x for x in hist['alerts'] if x['src'] in (a, b) or x['dst'] in (a, b)]
+        util = max(ab, ba) / LINK_SPEED_BPS
+        out.append({**ln, 'host_a': nodes[a]['hostname'], 'host_b': nodes[b]['hostname'],
+                    'type_a': nodes[a]['type'], 'type_b': nodes[b]['type'],
+                    'ab_bps': round(ab), 'ba_bps': round(ba), 'util': util,
+                    'flows_ok': ok, 'flows_ng': ng,
+                    'alerts': [{'rule': x['rule'], 'name': x['name'], 'severity': x['severity'],
+                                't': x['t']} for x in al[-5:]],
+                    'state': classify(util, ln['down'], ng, al), 'source': src,
+                    'series': sampler.series((a, b), 3600, 60)})
+    return {'links': out, 'window': window, 'now': now,
+            'source': 'prometheus' if prom else 'internal',
+            'prometheus_url': prom_url or None, 'prometheus_error': prom_err,
+            'sample_interval': 10}
+
+
+async def _link_sample_loop():
+    """ルータ間リンクのカウンタを10秒ごとに記録(画面を開く前から1分平均を出せるように)"""
+    from engine.link_stats import sampler, SAMPLE_INTERVAL
+    while True:
+        try:
+            sampler.sample(_collect_links()[0])
+        except Exception as e:  # noqa: BLE001
+            print(f"[link-sampler] {e}")
+        await asyncio.sleep(SAMPLE_INTERVAL)
 
 
 @app.get("/api/traffic/history")

@@ -60,6 +60,30 @@
   #session .hd { padding: 4px 10px; background: rgba(51, 214, 255, .14); color: #fff; letter-spacing: .1em; }
   #session .row { display: grid; grid-template-columns: 70px 1fr 1fr 70px 40px; gap: 6px; padding: 2px 10px; }
   #session .row .ng { color: var(--red); } #session .row .ok { color: #5dffa8; }
+  #modes { top: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 0; font-size: 12px; }
+  #modes button { background: rgba(4,14,30,.7); color: var(--dim); border: 1px solid var(--line); padding: 5px 14px;
+    font: inherit; letter-spacing: .14em; cursor: pointer; }
+  #modes button.on { color: #02060f; background: var(--cyan); border-color: var(--cyan); font-weight: 700; }
+  #linkbar { top: 46px; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--dim); display: none;
+    white-space: nowrap; }
+  #linkbar select { background: #061428; color: var(--ink); border: 1px solid var(--line); font: inherit; }
+  #linkbar .src { color: #fff; border: 1px solid var(--line); padding: 1px 6px; margin-left: 6px; }
+  #linkbar .src.prom { color: #ffab2e; border-color: #ffab2e; }
+  #linkpanel { top: 120px; right: 16px; width: min(380px, 46vw); max-height: calc(100vh - 150px); overflow: auto;
+    display: none; font-size: 12px; }
+  #linkpanel .l { background: var(--panel); border-left: 4px solid #5dffa8; padding: 6px 8px; margin-bottom: 6px; cursor: pointer; }
+  #linkpanel .l.warn { border-color: #ffab2e; } #linkpanel .l.crit, #linkpanel .l.down { border-color: #ff3b4e; }
+  #linkpanel .l.sel { outline: 1px solid var(--cyan); }
+  #linkpanel .top { display: flex; justify-content: space-between; color: #fff; }
+  #linkpanel .st { font-weight: 700; letter-spacing: .08em; }
+  #linkpanel .st.ok { color: #5dffa8; } #linkpanel .st.warn { color: #ffab2e; } #linkpanel .st.crit, #linkpanel .st.down { color: #ff3b4e; }
+  #linkpanel .bps { display: grid; grid-template-columns: 1fr 1fr; color: var(--ink); margin-top: 3px; }
+  #linkpanel .bar { height: 4px; background: rgba(51,214,255,.15); margin-top: 4px; }
+  #linkpanel .bar i { display: block; height: 100%; background: var(--cyan); }
+  #linkpanel canvas { width: 100%; height: 26px; position: static; display: block; margin-top: 4px; cursor: inherit; }
+  #linkpanel small { color: var(--dim); }
+  body.links #alerts, body.links #filter, body.links #crumbs, body.links #card, body.links #session, body.links #legend { display: none !important; }
+  body.links #linkpanel, body.links #linkbar { display: block; }
   #tip { position: fixed; z-index: 3; pointer-events: none; background: var(--panel); border: 1px solid var(--line);
     padding: 4px 8px; font-size: 12px; display: none; white-space: nowrap; }
   #empty { left: 50%; top: 58%; transform: translateX(-50%); color: var(--dim); font-size: 13px; text-align: center;
@@ -71,6 +95,9 @@
     #legend { display: none; }
     #session .row { grid-template-columns: 56px 1fr 1fr 44px; } #session .row .bytes { display: none; }
     #card { top: 44%; }
+    #modes { top: auto; bottom: 14px; }
+    #linkbar { top: auto; bottom: 48px; font-size: 11px; }
+    #linkpanel { top: auto; bottom: 80px; right: 8px; left: 8px; width: auto; max-height: 34vh; }
     #session { bottom: 64px; }
     body.host #filter, body.host #alerts { display: none; }
     #crumbs { top: 74px; }
@@ -90,6 +117,11 @@
 </div>
 
 <div id="cidr" class="hud">0.0.0.0/0</div>
+<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button></div>
+<div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
+  <option value="10">10秒</option><option value="60" selected>1分</option><option value="300">5分</option></select>
+  ごと(平均区間も同じ) ・ 次回 <b id="lNext">--</b>秒 ・ 最終 <b id="lLast">--</b><span id="lSrc" class="src">--</span></div>
+<div id="linkpanel" class="hud"></div>
 <div id="crumbs" class="hud"></div>
 <div id="alerts" class="hud"></div>
 <div id="card" class="hud"></div>
@@ -225,7 +257,17 @@
     panels.sort((a, b) => b.d - a.d);
     pickables = [];
 
-    if (L === 3) drawSphere(13.6, t, 'rgba(51,214,255,0.13)', 0, 0);   // サブネットを球で囲む(NIRVANA改 図2)
+    // サブネットを球で囲む(NIRVANA改 図2): 裏側のタイルと球の枠はパネルより先に描く
+    let subAlerts = [], subFlows = 0;
+    if (L === 3) {
+      for (const k in st) { subAlerts = subAlerts.concat(st[k].alerts); }
+      subFlows = events.filter(e => nowSec - e.t < 30 && ((e.src_ip && inBlock(e.src_ip)) || inBlock(e.dst_ip))).length;
+      alertLevel = subAlerts.length;
+      drawSphere(SUB_R, t, subAlerts.length ? 'rgba(255,60,60,0.16)' : 'rgba(51,214,255,0.13)', 0, 0);
+      drawShell(t, subAlerts, false);
+    } else {
+      alertLevel = Object.values(st).reduce((a, p) => a + p.alerts.length, 0);
+    }
 
     for (const p of panels) {
       const info = st[p.n];
@@ -282,7 +324,114 @@
       const info = st[p.n];
       if (info && info.alerts.length) drawFlower(p.x, p.z, info.alerts, t);
     }
+    if (L === 3) { drawShell(t, subAlerts, true); drawSparks(t, subAlerts.length, subFlows); }
     document.getElementById('empty').style.display = Object.keys(st).length ? 'none' : 'block';
+  }
+
+  // ── 図2の雰囲気: 地平線までの床グリッド・球面の六角タイル・球内の火の粉 ──
+  const SUB_R = 13.6;
+  let alertLevel = 0;
+  function drawFloor() {
+    const E = 70, step = 2.3;
+    for (let k = -E; k <= E; k += step) {
+      for (const horiz of [true, false]) {
+        const a = horiz ? proj(-E, -0.02, k) : proj(k, -0.02, -E), b = horiz ? proj(E, -0.02, k) : proj(k, -0.02, E);
+        if (!a || !b) continue;
+        ctx.strokeStyle = `rgba(120,140,160,${Math.max(0.03, Math.min(0.16, 3 / (a.d + b.d) * 2))})`;
+        ctx.lineWidth = 0.7;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+    }
+  }
+  // 球面を覆う六角タイル(フィボナッチ球で配置)。アラート1件ごとに重要度に応じた枚数を赤く灯す
+  const TILES = (() => {
+    const N = 120, out = [], ga = Math.PI * (3 - Math.sqrt(5));
+    for (let i = 0; i < N; i++) {
+      const y = 1 - (i + 0.5) / N * 2, r = Math.sqrt(1 - y * y), a = i * ga;
+      const n = [Math.cos(a) * r, y, Math.sin(a) * r];
+      let u = [-n[2], 0, n[0]]; const ul = Math.hypot(u[0], u[2]) || 1; u = [u[0] / ul, 0, u[2] / ul];
+      const v = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
+      out.push({ n, u, v });
+    }
+    return out;
+  })();
+  function litTiles(list) {
+    const lit = new Map();
+    const per = { high: 7, medium: 4, low: 2 };
+    for (const a of list) {
+      let h = hash(String(a.seq) + a.rule);
+      for (let k = 0; k < (per[a.severity] || 3); k++) {
+        const idx = h % TILES.length;
+        if (!lit.has(idx)) lit.set(idx, a);
+        h = Math.imul(h ^ (h >>> 13), 2654435761) >>> 0;
+      }
+    }
+    return lit;
+  }
+  function drawShell(t, list, front) {
+    const lit = litTiles(list), o = proj(0, 0, 0);
+    if (!o) return;
+    const r = SUB_R * 0.16;
+    TILES.forEach((tl, i) => {
+      const c = [tl.n[0] * SUB_R, tl.n[1] * SUB_R, tl.n[2] * SUB_R];
+      const pc = proj(...c);
+      if (!pc || (pc.d < o.d) !== front) return;
+      const a = lit.get(i);
+      if (!a && !list.length) return;
+      const pts = [];
+      for (let k = 0; k < 6; k++) {
+        const ang = Math.PI / 6 + k * Math.PI / 3, cs = Math.cos(ang) * r, sn = Math.sin(ang) * r;
+        const p = proj(c[0] + tl.u[0] * cs + tl.v[0] * sn, c[1] + tl.u[1] * cs + tl.v[1] * sn, c[2] + tl.u[2] * cs + tl.v[2] * sn);
+        if (!p) return;
+        pts.push(p);
+      }
+      const k = front ? 1 : 0.45;
+      poly(pts);
+      if (a) {
+        const pulse = 0.75 + 0.25 * Math.sin(t * 0.004 + i);
+        ctx.fillStyle = `rgba(200,20,30,${0.22 * k * pulse})`; ctx.fill();
+        ctx.strokeStyle = `rgba(255,70,70,${0.75 * k})`; ctx.lineWidth = 1.4; ctx.stroke();
+        // タイルの面に「警」とルール名を貼る
+        const ex = proj(c[0] + tl.u[0] * r * 0.6, c[1] + tl.u[1] * r * 0.6, c[2] + tl.u[2] * r * 0.6);
+        const ey = proj(c[0] - tl.v[0] * r * 0.6, c[1] - tl.v[1] * r * 0.6, c[2] - tl.v[2] * r * 0.6);
+        if (ex && ey && Math.hypot(ex.x - pc.x, ex.y - pc.y) > 6) {
+          ctx.save();
+          ctx.setTransform(DPR * (ex.x - pc.x) / 50, DPR * (ex.y - pc.y) / 50, DPR * (ey.x - pc.x) / 50, DPR * (ey.y - pc.y) / 50, DPR * pc.x, DPR * pc.y);
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillStyle = `rgba(255,60,60,${0.9 * k})`; ctx.font = '700 46px sans-serif'; ctx.fillText('警', 0, -12);
+          ctx.fillStyle = `rgba(255,140,140,${0.9 * k})`; ctx.font = '600 17px monospace'; ctx.fillText(RULE_CODE[a.rule] || a.rule, 0, 30);
+          ctx.restore();
+        }
+      } else {
+        ctx.strokeStyle = `rgba(255,60,60,${0.07 * k})`; ctx.lineWidth = 1; ctx.stroke();
+      }
+    });
+  }
+  // 球の中を漂う火の粉。数はアラートと直近の通信量で増える
+  let sparks = [];
+  function drawSparks(t, nAlerts, nFlows) {
+    const want = Math.min(260, 25 + nAlerts * 30 + nFlows * 4);
+    while (sparks.length < want) {
+      const u = Math.random() * 2 - 1, a = Math.random() * Math.PI * 2, rr = Math.cbrt(Math.random()) * SUB_R * 0.92, q = Math.sqrt(1 - u * u);
+      sparks.push({ x: Math.cos(a) * q * rr, y: u * rr, z: Math.sin(a) * q * rr,
+        vx: (Math.random() - 0.5) * 0.01, vy: 0.004 + Math.random() * 0.01, vz: (Math.random() - 0.5) * 0.01, ph: Math.random() * 6 });
+    }
+    if (sparks.length > want) sparks.length = want;
+    const hot = nAlerts > 0;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (const sp of sparks) {
+      sp.x += sp.vx; sp.y += sp.vy; sp.z += sp.vz;
+      if (sp.x * sp.x + sp.y * sp.y + sp.z * sp.z > SUB_R * SUB_R * 0.85) { sp.y = -SUB_R * 0.6; sp.x *= 0.5; sp.z *= 0.5; }
+      const p = proj(sp.x, sp.y, sp.z);
+      if (!p) continue;
+      const rad = Math.max(1.2, Math.min(5, p.s * 0.09)) * (0.7 + 0.3 * Math.sin(t * 0.005 + sp.ph));
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rad * 3);
+      g.addColorStop(0, hot ? 'rgba(255,220,120,0.95)' : 'rgba(170,240,255,0.7)');
+      g.addColorStop(0.35, hot ? 'rgba(255,140,30,0.55)' : 'rgba(51,214,255,0.3)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g; ctx.fillRect(p.x - rad * 3, p.y - rad * 3, rad * 6, rad * 6);
+    }
+    ctx.restore();
   }
 
   function drawSphere(R, t, color, cx, cz) {
@@ -480,17 +629,198 @@
     particles = keep;
   }
 
+  // ── LINK VIEW: ルータ間リンクのトラフィックと状態 ─────────
+  let mode = 'net', linkData = null, linkPos = {}, selLink = null, nextPoll = 0;
+  const STATE_COL = { ok: '#5dffa8', warn: '#ffab2e', crit: '#ff3b4e', down: '#ff3b4e' };
+  const STATE_JA = { ok: '正常', warn: '注意', crit: '警告', down: '断' };
+  const fmtBps = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + ' Gbps' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' Mbps'
+    : b >= 1e3 ? (b / 1e3).toFixed(1) + ' kbps' : Math.round(b) + ' bps';
+  const lkey = (l) => l.a + '|' + l.b;
+  function layoutRouters(links) {
+    // リンクで繋がった順(BFS)に円周へ並べる
+    const adj = {};
+    links.forEach(l => { (adj[l.a] = adj[l.a] || []).push(l.b); (adj[l.b] = adj[l.b] || []).push(l.a); });
+    const ids = Object.keys(adj).sort(), order = [], seen = new Set();
+    for (const st of ids) {
+      if (seen.has(st)) continue;
+      const q = [st]; seen.add(st);
+      while (q.length) { const v = q.shift(); order.push(v); for (const w of (adj[v] || []).sort()) if (!seen.has(w)) { seen.add(w); q.push(w); } }
+    }
+    const R = Math.max(5, Math.min(11, order.length * 1.3));
+    linkPos = {};
+    order.forEach((id, i) => { const a = i / order.length * Math.PI * 2 - Math.PI / 2; linkPos[id] = [Math.cos(a) * R, 0, Math.sin(a) * R]; });
+    if (order.length === 1) linkPos[order[0]] = [0, 0, 0];
+  }
+  async function pollLinks() {
+    const w = +document.getElementById('lInt').value;
+    try {
+      const d = await api(`/api/traffic/links?window=${w}`);
+      linkData = d; layoutRouters(d.links); renderLinkPanel();
+      document.getElementById('lLast').textContent = new Date(d.now * 1000).toTimeString().slice(0, 8);
+      const src = document.getElementById('lSrc');
+      src.textContent = d.source === 'prometheus' ? 'SOURCE: PROMETHEUS' : 'SOURCE: IF COUNTER' + (d.prometheus_error ? ' (Prometheus 不達)' : '');
+      src.className = 'src' + (d.source === 'prometheus' ? ' prom' : '');
+      src.title = d.prometheus_error || (d.prometheus_url || 'PROMETHEUS_URL 未設定: エミュレータのIFカウンタ(SNMPのifHCOctetsと同じ値)');
+    } catch (e) { /* 次の周期で再試行 */ }
+    nextPoll = Date.now() + w * 1000;
+  }
+  setInterval(() => {
+    if (mode !== 'link') return;
+    const left = Math.max(0, Math.ceil((nextPoll - Date.now()) / 1000));
+    document.getElementById('lNext').textContent = left;
+    if (left <= 0) { nextPoll = Date.now() + 60000; pollLinks(); }
+  }, 500);
+  document.getElementById('lInt').addEventListener('change', pollLinks);
+
+  function spark(cv, series, col) {
+    const c = cv.getContext('2d'), w = cv.width = cv.clientWidth * DPR, h = cv.height = 26 * DPR;
+    c.clearRect(0, 0, w, h);
+    if (series.length < 2) { c.fillStyle = '#4f7896'; c.font = `${10 * DPR}px monospace`; c.fillText('履歴の蓄積中…', 2, h * 0.7); return; }
+    const mx = Math.max(1, ...series);
+    c.beginPath();
+    series.forEach((v, i) => { const x = i / (series.length - 1) * w, y = h - 2 - v / mx * (h - 4); i ? c.lineTo(x, y) : c.moveTo(x, y); });
+    c.strokeStyle = col; c.lineWidth = 1.5 * DPR; c.stroke();
+    c.lineTo(w, h); c.lineTo(0, h); c.closePath(); c.fillStyle = col + '22'; c.fill();
+  }
+  function renderLinkPanel() {
+    const box = document.getElementById('linkpanel');
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const order = { down: 0, crit: 1, warn: 2, ok: 3 };
+    const ls = [...linkData.links].sort((x, y) => order[x.state] - order[y.state] || (y.ab_bps + y.ba_bps) - (x.ab_bps + x.ba_bps));
+    if (!ls.length) { box.innerHTML = '<div class="l"><small>ルータ同士のリンクがありません。メイン画面でルータ同士をリンクしてください。</small></div>'; return; }
+    box.innerHTML = ls.map(l => {
+      const why = [];
+      if (l.down) why.push('IF断');
+      if (l.util >= 0.5) why.push(`使用率 ${(l.util * 100).toFixed(0)}%`);
+      if (l.flows_ng) why.push(`経由pingの失敗 ${l.flows_ng}`);
+      l.alerts.forEach(a => why.push('警 ' + a.name));
+      return `<div class="l ${l.state}${selLink === lkey(l) ? ' sel' : ''}" data-k="${esc(lkey(l))}">
+        <div class="top"><span>${esc(l.host_a)} ⇄ ${esc(l.host_b)}</span><span class="st ${l.state}">${STATE_JA[l.state]}</span></div>
+        <small>${esc(l.iface_a || '?')} ⇄ ${esc(l.iface_b || '?')}</small>
+        <div class="bps"><span>→ ${fmtBps(l.ab_bps)}</span><span>← ${fmtBps(l.ba_bps)}</span></div>
+        <div class="bar"><i style="width:${Math.min(100, Math.max(l.util * 100, l.ab_bps + l.ba_bps ? 1 : 0))}%;background:${STATE_COL[l.state]}"></i></div>
+        <canvas></canvas>
+        <small>${why.length ? esc(why.join(' / ')) : `問題なし ・ 経由ping ${l.flows_ok}件`}</small></div>`;
+    }).join('');
+    box.querySelectorAll('.l[data-k]').forEach((d, i) => {
+      spark(d.querySelector('canvas'), ls[i].series, STATE_COL[ls[i].state]);
+      d.onclick = () => { selLink = selLink === d.dataset.k ? null : d.dataset.k; renderLinkPanel(); };
+    });
+  }
+  function drawLinks(t) {
+    if (!linkData) return;
+    // 床のリング
+    ctx.strokeStyle = 'rgba(51,214,255,0.12)';
+    for (const R of [4, 8, 12]) {
+      ctx.beginPath(); let f = true;
+      for (let a = 0; a <= 360; a += 6) { const p = proj(R * Math.cos(a * Math.PI / 180), 0, R * Math.sin(a * Math.PI / 180)); if (!p) continue; f ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); f = false; }
+      ctx.stroke();
+    }
+    const Y = 1.6;
+    const items = linkData.links.map(l => ({ l, A: linkPos[l.a], B: linkPos[l.b] })).filter(x => x.A && x.B);
+    for (const { l, A, B } of items) {
+      const col = STATE_COL[l.state], sel = selLink === lkey(l);
+      const pa = proj(A[0], Y, A[2]), pb = proj(B[0], Y, B[2]);
+      if (!pa || !pb) continue;
+      const tot = l.ab_bps + l.ba_bps;
+      const wdt = 2 + Math.min(14, Math.log10(1 + tot) * 1.6) * (pa.s + pb.s) / 60;
+      ctx.save();
+      if (l.state === 'down') { ctx.setLineDash([10, 8]); ctx.globalAlpha = 0.5 + 0.5 * Math.abs(Math.sin(t * 0.004)); }
+      ctx.strokeStyle = col; ctx.lineWidth = wdt + (sel ? 3 : 0); ctx.shadowColor = col; ctx.shadowBlur = l.state === 'ok' ? 6 : 18;
+      ctx.globalAlpha *= l.state === 'ok' && !tot ? 0.35 : 0.8;
+      ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+      ctx.restore();
+      // 方向別に粒を流す(量に応じて本数と間隔)
+      if (l.state !== 'down') {
+        for (const [from, to, bps, off] of [[A, B, l.ab_bps, 0.35], [B, A, l.ba_bps, -0.35]]) {
+          if (bps <= 0) continue;
+          const n = Math.min(12, 1 + Math.round(Math.log10(1 + bps) - 2));
+          for (let k = 0; k < n; k++) {
+            const u = ((t / 2200) + k / n) % 1;
+            const dx = to[2] - from[2], dz = -(to[0] - from[0]), dl = Math.hypot(dx, dz) || 1;
+            const x = from[0] + (to[0] - from[0]) * u + dx / dl * off, z = from[2] + (to[2] - from[2]) * u + dz / dl * off;
+            const c = proj(x, Y, z), c2 = proj(x + (to[0] - from[0]) * 0.01, Y, z + (to[2] - from[2]) * 0.01);
+            if (!c || !c2) continue;
+            const ang = Math.atan2(c2.y - c.y, c2.x - c.x), sz = Math.max(3, Math.min(8, c.s * 0.2));
+            ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(ang);
+            ctx.beginPath(); ctx.moveTo(sz * 1.6, 0); ctx.lineTo(-sz, sz * 0.7); ctx.lineTo(-sz, -sz * 0.7); ctx.closePath();
+            ctx.fillStyle = l.state === 'ok' ? '#33d6ff' : col; ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 8; ctx.fill();
+            ctx.restore();
+          }
+        }
+      }
+      // 中点のラベル
+      const m = proj((A[0] + B[0]) / 2, Y + 0.9, (A[2] + B[2]) / 2);
+      if (m) {
+        const lines = [`→ ${fmtBps(l.ab_bps)}`, `← ${fmtBps(l.ba_bps)}`];
+        ctx.font = '12px monospace';
+        const w = Math.max(...lines.map(x => ctx.measureText(x).width)) + 54;
+        ctx.fillStyle = 'rgba(4,14,30,0.82)'; ctx.fillRect(m.x - w / 2, m.y - 22, w, 36);
+        ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.strokeRect(m.x - w / 2, m.y - 22, w, 36);
+        ctx.fillStyle = col; ctx.font = '700 11px monospace'; ctx.fillText(STATE_JA[l.state], m.x - w / 2 + 6, m.y - 2);
+        ctx.fillStyle = '#e8f7ff'; ctx.font = '12px monospace';
+        ctx.fillText(lines[0], m.x - w / 2 + 46, m.y - 8); ctx.fillText(lines[1], m.x - w / 2 + 46, m.y + 8);
+        if (l.state === 'down') {
+          ctx.strokeStyle = '#ff3b4e'; ctx.lineWidth = 4;
+          ctx.beginPath(); ctx.moveTo(m.x - 10, m.y + 22); ctx.lineTo(m.x + 10, m.y + 42); ctx.moveTo(m.x + 10, m.y + 22); ctx.lineTo(m.x - 10, m.y + 42); ctx.stroke();
+        }
+        if (l.alerts.length) {
+          hexPath(m.x + w / 2 + 14, m.y - 4, 12); ctx.fillStyle = '#e6142d'; ctx.fill();
+          ctx.fillStyle = '#fff'; ctx.font = '700 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText('警', m.x + w / 2 + 14, m.y - 4); ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+        }
+      }
+    }
+    // ルータ(六角柱)
+    const worst = {};
+    const rank = { ok: 0, warn: 1, crit: 2, down: 3 };
+    items.forEach(({ l }) => { for (const d of [l.a, l.b]) if (!(d in worst) || rank[l.state] > rank[worst[d]]) worst[d] = l.state; });
+    const names = {};
+    linkData.links.forEach(l => { names[l.a] = l.host_a; names[l.b] = l.host_b; });
+    Object.entries(linkPos).map(([id, P]) => ({ id, P, c: proj(...P) })).filter(x => x.c).sort((a, b) => b.c.d - a.c.d).forEach(({ id, P }) => {
+      const col = STATE_COL[worst[id] || 'ok'];
+      const ring = (y) => Array.from({ length: 6 }, (_, k) => { const a = Math.PI / 6 + k * Math.PI / 3; return proj(P[0] + Math.cos(a) * 0.8, y, P[2] + Math.sin(a) * 0.8); });
+      const bot = ring(0), top = ring(Y + 0.4);
+      if (bot.some(v => !v) || top.some(v => !v)) return;
+      ctx.fillStyle = 'rgba(40,150,255,0.18)'; ctx.strokeStyle = col; ctx.lineWidth = 1.2;
+      for (let k = 0; k < 6; k++) { poly([bot[k], bot[(k + 1) % 6], top[(k + 1) % 6], top[k]]); ctx.fill(); ctx.stroke(); }
+      poly(top); ctx.fillStyle = 'rgba(60,200,255,0.35)'; ctx.fill(); ctx.stroke();
+      const lp = proj(P[0], Y + 1.2, P[2]);
+      if (lp) {
+        ctx.fillStyle = '#fff'; ctx.font = '600 14px monospace'; ctx.textAlign = 'center';
+        ctx.fillText(names[id] || id, lp.x, lp.y);
+        const ip = devIp(id); if (ip) { ctx.fillStyle = '#7fb2d0'; ctx.font = '11px monospace'; ctx.fillText(ip, lp.x, lp.y + 14); }
+        ctx.textAlign = 'start';
+      }
+    });
+    document.getElementById('empty').style.display = 'none';
+  }
+  function setMode(m) {
+    mode = m;
+    document.getElementById('mNet').classList.toggle('on', m === 'net');
+    document.getElementById('mLink').classList.toggle('on', m === 'link');
+    document.body.classList.toggle('links', m === 'link');
+    particles = [];
+    if (m === 'link') { cam.tdist = 30; cam.pitch = 0.85; document.getElementById('cidr').textContent = 'ROUTER LINKS'; pollLinks(); }
+    else update();
+    try { history.replaceState(null, '', m === 'link' ? '?view=links' : location.pathname); } catch (e) { /* 無くても動く */ }
+  }
+  document.getElementById('mNet').onclick = () => setMode('net');
+  document.getElementById('mLink').onclick = () => setMode('link');
+
   // ── メインループ ─────────────────────────────
   function frame(t) {
     if (performance.now() - lastInput > 6000) cam.yaw += 0.0009;      // 操作が無い時はゆっくり回る
     cam.dist += (cam.tdist - cam.dist) * 0.08;
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     const g = ctx.createRadialGradient(W / 2, H * 0.55, 10, W / 2, H * 0.55, Math.max(W, H) * 0.75);
-    g.addColorStop(0, '#071a33'); g.addColorStop(1, '#02060f');
+    // アラートがある階層では背景ごと赤く染まる
+    g.addColorStop(0, mode !== 'link' && alertLevel ? '#2a0608' : '#071a33'); g.addColorStop(1, '#020306');
     ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    drawFloor();
     const nowSec = Date.now() / 1000;
-    if (hostView) drawHost(t); else drawNetwork(t, nowSec);
-    drawParticles(t);
+    if (mode === 'link') drawLinks(t);
+    else { if (hostView) { alertLevel = 0; drawHost(t); } else drawNetwork(t, nowSec); drawParticles(t); }
     requestAnimationFrame(frame);
   }
 
@@ -534,6 +864,7 @@
   }
   const tip = document.getElementById('tip');
   function hover(x, y) {
+    if (mode === 'link') return;
     const p = hostView ? null : pick(x, y);
     if (!p) { tip.style.display = 'none'; return; }
     const o = prefix.concat([p.n]);
@@ -546,6 +877,7 @@
     tip.style.left = Math.min(x + 14, W - tip.offsetWidth - 4) + 'px'; tip.style.top = (y + 14) + 'px';
   }
   function click(x, y) {
+    if (mode === 'link') return;
     if (hostView) return;
     const p = pick(x, y);
     if (!p) return;
@@ -564,6 +896,7 @@
   function viewDist() { return prefix.length === 3 ? 40 : 33; }
   function dive() { particles = []; cam.dist = 11; cam.tdist = viewDist(); update(); }
   function up() {
+    if (mode === 'link') return;
     if (hostView) hostView = null;
     else if (prefix.length) prefix = prefix.slice(0, -1);
     else return;
@@ -573,6 +906,7 @@
   function goTo(len) { hostView = null; prefix = prefix.slice(0, len); particles = []; cam.dist = 50; cam.tdist = viewDist(); update(); }
 
   function update() {
+    if (mode === 'link') return;
     tip.style.display = 'none';
     if (!hostView) cam.tdist = viewDist();
     document.getElementById('cidr').textContent = levelCidr();
@@ -627,7 +961,7 @@
       document.getElementById('sAlerts').textContent = alerts.length;
       document.getElementById('sLinks').textContent = links.length;
       if (fresh.length || (d.alerts || []).length || !primed) { renderAlerts(); if (hostView) renderCard(); }
-      if (!primed) { primed = true; autoFocus(); }
+      if (!primed) { primed = true; if (mode !== 'link') autoFocus(); }
     } catch (e) { /* 次の周期で再試行 */ }
   }
   // 起動時、前回のブロックか、装置が1つのブロックにまとまっていればそこまで降りる
@@ -657,7 +991,7 @@
     return k ? { x: k.poly.reduce((a, c) => a + c.x, 0) / 4, y: k.poly.reduce((a, c) => a + c.y, 0) / 4 } : null;
   };
 
-  pollHosts().then(pollFlows);
+  pollHosts().then(pollFlows).then(() => { if (new URLSearchParams(location.search).get('view') === 'links') setMode('link'); });
   setInterval(pollFlows, 2000);
   setInterval(pollHosts, 5000);
   update();
