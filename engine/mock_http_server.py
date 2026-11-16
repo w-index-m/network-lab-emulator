@@ -59,3 +59,13 @@ def stop_mock_http_server(ip: str, port: int) -> bool:
         return False
     srv.shutdown()
     return True
+
+
+def stop_mock_http_servers_for_ips(ips) -> int:
+    """装置を削除したとき、その装置のIPで動いている http.server を止める(止めた数を返す)。
+    残すと、消したはずのサーバーがヘルスチェックに応答し続ける。"""
+    ips = set(ips)
+    n = 0
+    for ip, port in [k for k in _servers if k[0] in ips]:
+        n += stop_mock_http_server(ip, port)
+    return n

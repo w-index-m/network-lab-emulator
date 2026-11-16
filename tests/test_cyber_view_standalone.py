@@ -150,6 +150,8 @@ def test_prometheus_and_loki(fake):
     h = {x['key']: x for x in c.get('/api/traffic/health').json()['categories']}
     assert h['network']['state'] == 'crit' and 'リンク断 1本' in h['network']['summary']
     assert h['syslog']['state'] == 'crit' and 'フラップ' in h['syslog']['summary']
+    # 画面上の呼び名: Prometheus は「ヴァルハラ」(API の source 値は prometheus のまま)
+    assert '取得元 ヴァルハラ' in h['traffic']['summary']
     logs = c.get('/api/traffic/logs?since=0&limit=10').json()
     assert logs['source'] == 'loki' and logs['logs'][-1]['host'] == 'R2'
     hosts = c.get('/api/traffic/hosts').json()['hosts']
@@ -206,3 +208,8 @@ def test_auth_token(fake):
     c = TestClient(sa_server.create_app(cfg, start_collector=False))
     assert c.get('/api/traffic/hosts').status_code == 401
     assert c.get('/api/traffic/hosts', headers={'X-Session-Token': 'secret'}).status_code == 200
+
+
+def test_prometheus_is_displayed_as_valhalla():
+    html = open(os.path.join(ROOT, 'static', 'cyber_view.html'), encoding='utf-8').read()
+    assert "SRC_DISPLAY = { prometheus: 'VALHALLA'" in html and 'ヴァルハラ 不達' in html

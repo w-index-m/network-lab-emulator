@@ -7,6 +7,8 @@ commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
 |---|---|---|---|
+| 08:55 | 画面上の Prometheus の呼び名を **ヴァルハラ(VALHALLA)** に(表示だけ。`PROMETHEUS_URL` や API 項目名は変えない) | 標準版・スタンドアロン版とも | [cyber-view-3d.md](cyber-view-3d.md) の「ヴァルハラ」 |
+| 08:30 | **CI の立て直し**: lint の未使用 import 3件、BIG-IP シナリオを本物の http.server で、装置削除時に http.server も止める、CI を作業ブランチでも実行 | main の CI は lint と BIG-IP シナリオで失敗が続いていた | `.github/workflows/` |
 | 07:45 | **背景の切り替え**(標準 / 金魚鉢 / 富士山、右の操作ボタン列の一番下。選択は記憶、`?bg=` でも指定) | Canvas で描画(画像ファイル無し)。スマホでは富士山が状態表示に隠れたので地平線を下げた | [cyber-view-3d.md](cyber-view-3d.md) の「背景の切り替え」 |
 | 07:05 | **OSPF ボタン**: 隣接ごとの状態と Dead タイマーの残り、エリアの色分けと ABR、宛先を選ぶと最短経路ツリー(矢印)、SPF 再計算の波紋 | 3台の三角形で、片側 shutdown → 経路の迂回 → 対向が Dead タイマー(40秒)切れで Down → 復旧まで画面で追えた | [cyber-view-3d.md](cyber-view-3d.md) の「OSPF モード」 |
 

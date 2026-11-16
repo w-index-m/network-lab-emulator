@@ -8133,7 +8133,6 @@ Configuration Revision            : 5"""
         そのものなので、他の装置の「実機CLI」扱いと同じ精神でaws-cli
         構文を部分再現する。実ヘルスチェック/実L7トラフィック分散は
         engine/alb_lb.py が担当する。"""
-        import json as _json
         body = cmd.strip()
         if not body:
             return ''

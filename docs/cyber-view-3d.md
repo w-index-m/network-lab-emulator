@@ -462,3 +462,16 @@ NETWORK / ROUTER LINKS / OSPF のどのモードでも使える。
 ![富士山 + OSPF](images/cyber-view-bg-fuji-ospf.png)
 ![スマホ(金魚鉢)](images/cyber-view-bg-goldfish-phone.png)
 ![スマホ(富士山)](images/cyber-view-bg-fuji-phone.png)
+
+## メトリクス収集基盤の呼び名「ヴァルハラ」(v14)
+
+依頼: 「Prometheus のネーミングをヴァルハラにしよう」。Cyber View の画面上では、メトリクス収集基盤(Prometheus)を
+**ヴァルハラ / VALHALLA** と呼ぶ。
+
+- 変わるのは画面の表示だけ: `SOURCE: VALHALLA`、状態ボードの `METRICS: VALHALLA`、不達時の「(ヴァルハラ 不達)」、
+  スタンドアロン版の状態ボード「取得元 ヴァルハラ」。両方を混ぜて使っている場合は `VALHALLA+IF COUNTER`。
+- 変えていないもの: 接続先の実体(本物の Prometheus)、環境変数 `PROMETHEUS_URL`、設定ファイルの `sources.prometheus`、
+  API の `source: "prometheus"` / `prometheus_url` / `prometheus_error`。既存の設定やスクリプトはそのまま動く。
+- `SOURCE:` にマウスを乗せると「ヴァルハラ(Prometheus): <URL>」と中身が分かるようにしている。
+
+![VALHALLA 表示](images/cyber-view-valhalla-label.png)

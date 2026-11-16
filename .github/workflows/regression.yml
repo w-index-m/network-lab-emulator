@@ -5,7 +5,8 @@ name: regression
 # distribute-list の各シナリオを検証する。
 on:
   push:
-    branches: [main]
+    # 作業ブランチ(claude/...)への push でも回す。main に入る前に CI で確認できるように
+    branches: [main, 'claude/**']
   pull_request:
   workflow_dispatch:
 
@@ -30,8 +31,11 @@ jobs:
         env:
           NETLAB_AUTH_DISABLE: '1'
           NETLAB_FAST_TIMERS: '1'
+        # BIG-IP シナリオのバックエンド(pc の http.server)や SSH 等は装置IP(例 10.90.0.1)で
+        # 待ち受けるため、engine/loopback_alias.py が lo に IP を足す。これには root が要る
+        # (pytest.yml と同じ理由)。一般ユーザーだと bind できずヘルスチェックが全部 down になる
         run: |
-          nohup python -m uvicorn app:app --port 8099 > server.log 2>&1 &
+          sudo -E env "PATH=$PATH" nohup python -m uvicorn app:app --port 8099 > server.log 2>&1 &
           echo "server started (pid $!)"
 
       - name: Wait for server to be ready

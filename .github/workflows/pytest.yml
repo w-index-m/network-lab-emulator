@@ -5,7 +5,8 @@ name: pytest
 # 担当するのに対し、こちらはFastAPI TestClientベースの単体テストを担当する。
 on:
   push:
-    branches: [main]
+    # 作業ブランチ(claude/...)への push でも回す。main に入る前に CI で確認できるように
+    branches: [main, 'claude/**']
   pull_request:
   workflow_dispatch:
 

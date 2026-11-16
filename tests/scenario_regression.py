@@ -354,11 +354,13 @@ def scenario_gre_tunnel():
 def scenario_bigip_ltm():
     print("== シナリオ10: F5 BIG-IP LTM (プール/仮想サーバ/ヘルスモニター自動判定) ==")
     device("bigip1", "bigip")
-    # バックエンド実サーバ（PC）3台。monitor http はこれらの疎通でup/downを自動判定
+    # バックエンド実サーバ（PC）3台。monitor http は実際に HTTP GET を送って判定するので、
+    # 各PCで本物の http.server を動かす(ポート80は権限が要るので8080)
     for i in (1, 2, 3):
         device2(f"bsrv{i}", "pc", ip=f"10.90.0.{i}", gateway="10.90.0.254")
+        cli(f"bsrv{i}", "python3 -m http.server 8080")
     cli("bigip1", "tmsh create ltm pool web_pool { members add "
-                  "{ 10.90.0.1:80 10.90.0.2:80 10.90.0.3:80 } "
+                  "{ 10.90.0.1:8080 10.90.0.2:8080 10.90.0.3:8080 } "
                   "monitor http load-balancing-mode least-connections-member }")
     cli("bigip1", "tmsh create ltm virtual vs_web { destination 192.0.2.10:80 "
                   "pool web_pool profiles add { http tcp } }")
@@ -373,12 +375,12 @@ def scenario_bigip_ltm():
         urllib.request.Request(BASE + "/api/device/bsrv2", method="DELETE"))
     p2 = cli("bigip1", "show ltm pool web_pool")
     check("サーバ撤去でモニター自動down(up:2 down:1)", "up: 2, down: 1" in p2, p2)
-    check("該当メンバーがoffline(red)", "10.90.0.2:80   offline (red)" in p2, p2)
+    check("該当メンバーがoffline(red)", "10.90.0.2:8080   offline (red)" in p2, p2)
     v2 = cli("bigip1", "show ltm virtual vs_web")
     check("仮想サーバのMembers upが2に減少", "Members up   : 2" in v2, v2)
     # 管理up/down: 別メンバーを user-down → さらに1台down
     cli("bigip1", "modify ltm pool web_pool members modify "
-                  "{ 10.90.0.1:80 { state user-down } }")
+                  "{ 10.90.0.1:8080 { state user-down } }")
     p3 = cli("bigip1", "show ltm pool web_pool")
     check("user-downで up:1 down:2", "up: 1, down: 2" in p3, p3)
 

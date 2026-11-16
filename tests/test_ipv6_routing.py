@@ -31,7 +31,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from fastapi.testclient import TestClient
 
 import app as app_module
-from engine.protocols import ipv6_engine, vnet
 
 client = TestClient(app_module.app)
 

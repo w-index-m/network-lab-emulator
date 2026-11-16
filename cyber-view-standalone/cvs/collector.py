@@ -15,6 +15,9 @@ from . import sources as S
 from .analytics import FLAP_RULE_IDS, RECOVERY, Analytics
 from .link_evidence import norm_if, parse_log_link_event, traps
 
+# 画面に出す呼び名(メトリクス収集基盤 Prometheus は Cyber View では「ヴァルハラ」と呼ぶ)
+DISPLAY_NAME = {'prometheus': 'ヴァルハラ'}
+
 EVIDENCE_ORDER = ('STATE', 'SYSLOG', 'TRAP', 'POLL')
 UTIL_WARN, UTIL_CRIT = 0.5, 0.8
 
@@ -331,7 +334,7 @@ class Collector:
         pu = peak['util'] if peak else 0.0
         st = 'crit' if pu >= UTIL_CRIT else 'warn' if pu >= UTIL_WARN else 'ok'
         cats.append({'key': 'traffic', 'label': 'トラフィック', 'state': st,
-                     'summary': f'最大使用率 {pu * 100:.1f}%' + (f" ・ 取得元 {'+'.join(snap['sources_used'])}"
+                     'summary': f'最大使用率 {pu * 100:.1f}%' + (f" ・ 取得元 {'+'.join(DISPLAY_NAME.get(x, x) for x in snap['sources_used'])}"
                                                             if snap['sources_used'] else ' ・ 取得元なし'),
                      'details': [f"最大使用率 {pu * 100:.1f}% ({peak['host_a']} ⇄ {peak['host_b']})"] if peak else []})
         sec = [a for a in al if a['source'] in ('IDS', 'FW')]

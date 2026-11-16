@@ -8088,6 +8088,16 @@ def _stop_real_listeners(dev_id: str):
 @app.delete("/api/device/{dev_id}")
 async def remove_device(dev_id: str):
     """装置を削除。関連する各エンジンの登録も掃除する。"""
+    # その装置のIPで動いている http.server(pc の `python3 -m http.server`)も止める。
+    # 残すと、撤去したはずのサーバーが BIG-IP/ALB のヘルスチェックに応答し続ける
+    try:
+        from engine.mock_http_server import stop_mock_http_servers_for_ips
+        _st = device_sessions.get(dev_id)
+        _ips = {i.get('ip') for i in (getattr(_st, 'interfaces', {}) or {}).values() if isinstance(i, dict)}
+        _ips |= set((icmp_engine.device_ips.get(dev_id) or {}).get('ips', {}))
+        stop_mock_http_servers_for_ips({i for i in _ips if i})
+    except Exception:
+        pass
     if dev_id in device_sessions:
         del device_sessions[dev_id]
     # 実リスナー（NETCONF/gNMI/SNMP/OSPF）を止めてポートを解放する。

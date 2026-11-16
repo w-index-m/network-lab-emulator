@@ -189,6 +189,10 @@
     const qt = new URLSearchParams(location.search).get('token');
     if (qt) { token = qt; try { localStorage.setItem(SESSION_KEY, qt); } catch (e) { /* 保存できなくても使う */ } }
   } catch (e) { /* 古いブラウザ */ }
+  // データ元の画面上の呼び名。メトリクス収集基盤(Prometheus)はこの画面では「ヴァルハラ」と呼ぶ
+  // (接続先・環境変数 PROMETHEUS_URL・API の項目名は Prometheus のまま)
+  const SRC_DISPLAY = { prometheus: 'VALHALLA', mixed: 'VALHALLA+IF COUNTER' };
+  const dispSrc = (v) => String(v).split('+').map(x => SRC_DISPLAY[x] || x.toUpperCase()).join('+');
   const api = (path) => fetch(path, { headers: token ? { 'X-Session-Token': token } : {} })
     .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
 
@@ -580,7 +584,7 @@
     const srcs = health.sources || {};
     ctx.fillStyle = '#7fb2d0'; ctx.font = '10px monospace';
     // ラボ版は internal(エミュレータの IF カウンタ/内部ログ)、スタンドアロン版は prometheus/zabbix/loki 等
-    const srcName = (v, internal) => !v || v === 'internal' ? internal : String(v).toUpperCase();
+    const srcName = (v, internal) => !v || v === 'internal' ? internal : dispSrc(v);
     ctx.fillText(`METRICS: ${srcName(srcs.metrics, 'IF COUNTER')}  LOGS: ${srcName(srcs.logs, 'INTERNAL')}`, x0 + 10, y0 + hgt - 6);
     ctx.fillStyle = H_COL[health.overall]; ctx.font = '700 13px sans-serif';
     ctx.fillText('総合 ' + H_JA[health.overall], x0 + w - 74, y0 + 20);
@@ -956,10 +960,11 @@
       pollHealth();
       document.getElementById('lLast').textContent = new Date(d.now * 1000).toTimeString().slice(0, 8);
       const src = document.getElementById('lSrc');
-      src.textContent = (!d.source || d.source === 'internal' ? 'SOURCE: IF COUNTER' : 'SOURCE: ' + String(d.source).toUpperCase())
-        + (d.prometheus_error ? ' (Prometheus 不達)' : '') + (d.zabbix_error ? ' (Zabbix 不達)' : '');
+      src.textContent = (!d.source || d.source === 'internal' ? 'SOURCE: IF COUNTER' : 'SOURCE: ' + dispSrc(d.source))
+        + (d.prometheus_error ? ' (ヴァルハラ 不達)' : '') + (d.zabbix_error ? ' (Zabbix 不達)' : '');
       src.className = 'src' + (d.source && d.source !== 'internal' ? ' prom' : '');
-      src.title = d.prometheus_error || (d.prometheus_url || 'PROMETHEUS_URL 未設定: エミュレータのIFカウンタ(SNMPのifHCOctetsと同じ値)');
+      src.title = d.prometheus_error || (d.prometheus_url ? 'ヴァルハラ(Prometheus): ' + d.prometheus_url
+        : 'ヴァルハラ(Prometheus)未接続 — PROMETHEUS_URL 未設定: エミュレータのIFカウンタ(SNMPのifHCOctetsと同じ値)');
     } catch (e) { /* 次の周期で再試行 */ }
     nextPoll = Date.now() + w * 1000;
   }
