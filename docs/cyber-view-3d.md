@@ -270,3 +270,38 @@ nmap は同じホスト上から実行したので、Source が装置自身のIP
 
 ![応答なし(消失)](images/cyber-view-v5-no-response.png)
 ![スキャン・総当たりの検知(IDS / SYSLOG の花びらと NO RESPONSE)](images/cyber-view-v5-scan-login-block.png)
+
+## 攻撃を受けたときの見え方(ライブ確認)
+
+### ポートスキャン(nmap -sT -sV)
+
+CR2(10.240.12.2)の SSH を有効にし、本物の nmap で `nmap -Pn -sT -sV -p 1-1024 10.240.12.2` を5回実行した。
+実リスナーへの accept 数から IDS ルール `conn_scan` が発火する
+(`cr2 10.240.12.2 から 30秒間に 10 回接続 (port 22)`)。
+
+- CR2 の柱の上に赤い「警」六角形(IDS の花びら・PSCAN)と螺旋柱
+- 状態ボード: セキュリティ「異常 / 短時間の大量接続(ポートスキャン/総当たりの疑い)」、他の3観点は正常のまま
+- Host View(/32)の上部にも「警 ×1 PSCAN」
+
+SYN スキャン(`-sS`)は接続が成立しないため数えない(実機の IOS と同じ)。
+
+![ポートスキャン /24](images/cyber-view-v6-portscan.png)
+![ポートスキャン Host View](images/cyber-view-v6-portscan-host.png)
+
+### SSH 総当たり + login block-for
+
+```
+login block-for 60 attempts 3 within 30
+login on-failure log
+login on-success log
+```
+
+を入れた CR2 に `nmap -p 22 --script ssh-brute` を実行。3回失敗で `%SEC_LOGIN-1-QUIET_MODE_ON`、
+`show login` は `Router presently in Quiet-Mode`、以降は正しいパスワードでも接続を即切断。
+画面では CR2 上に LOG ERROR(QUIET_MODE)/ LOG WARN(LOGIN_FAILED)/ LOG(LOGIN_SUCCESS)の
+プレートが立ち、状態ボードは syslog「異常」になる。
+
+ライブ確認中に、ボードが最大10秒古いまま(ログは浮かんでいるのに「正常」)になる表示ずれを見つけた。
+新しいアラートや warning 以上のログを受け取った時点でボードも即時更新するよう修正済み。
+
+![SSH 総当たり](images/cyber-view-v7-ssh-brute.png)

@@ -1351,6 +1351,7 @@
       document.getElementById('sAlerts').textContent = alerts.length;
       document.getElementById('sLinks').textContent = links.length;
       if (fresh.length || (d.alerts || []).length || !primed) { renderAlerts(); if (hostView) renderCard(); }
+      if (primed && (d.alerts || []).length) pollHealth();   // 新しいアラートはボードにもすぐ反映
       if (!primed) { primed = true; if (mode !== 'link') autoFocus(); }
     } catch (e) { /* 次の周期で再試行 */ }
   }
@@ -1399,6 +1400,7 @@
         const title = r.recovery ? 'RECOVER' : r.sev <= 3 ? 'LOG ERROR' : r.sev === 4 ? 'LOG WARN' : 'LOG';
         popup(posForDevice(r.dev), col, title, (m ? m[0] : r.msg).slice(0, 22), 5200);
       }
+      if (d.logs.some(r => r.sev <= 4 || r.recovery)) pollHealth();   // ログの浮上とボードを揃える
     } catch (e) { /* 次の周期で再試行 */ }
   }
   let logSrc = 'internal';
