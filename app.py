@@ -956,6 +956,7 @@ async def lifespan(app: FastAPI):
     # 定期自動保存タスク（60秒ごと）
     auto_save_task = asyncio.create_task(_auto_save_loop())
     link_sample_task = asyncio.create_task(_link_sample_loop())
+    route_watch_task = asyncio.create_task(_route_watch_loop())
     # SNMP linkDown/linkUp trap の受信(/cyber-view の LINK DOWN 判定に使う)。例: 0.0.0.0:1162
     if os.environ.get('SNMP_TRAP_LISTEN', '').strip():
         from engine.link_evidence import traps as _traps
@@ -992,6 +993,7 @@ async def lifespan(app: FastAPI):
 
     yield
     link_sample_task.cancel()
+    route_watch_task.cancel()
     auto_save_task.cancel()
     try:
         await auto_save_task
@@ -9894,6 +9896,52 @@ async def _link_sample_loop():
         except Exception as e:  # noqa: BLE001
             print(f"[link-sampler] {e}")
         await asyncio.sleep(SAMPLE_INTERVAL)
+
+
+ROUTE_WATCH_INTERVAL = 3
+
+
+def _route_watch_tick(now=None):
+    """全装置の最良経路を取り、前回との差分(経路の追加・削除・変更)を記録する"""
+    from engine.route_watch import watcher
+    new = []
+    for dev_id, st in list(device_sessions.items()):
+        try:
+            routes = rib_engine.get_best_routes(dev_id)
+        except Exception:  # noqa: BLE001 - 1台の失敗で他の装置を止めない
+            continue
+        fixed = []
+        for r in routes:
+            # OSPF/BGP 等の次ホップは内部的に router-id のことがあるので、show ip route と同じく実IPへ
+            if r.get('source') not in ('connected', 'static'):
+                try:
+                    nh = icmp_engine.resolve_learned_next_hop(dev_id, r.get('next_hop', ''))
+                except Exception:  # noqa: BLE001
+                    nh = None
+                if nh:
+                    r = {**r, 'next_hop': nh}
+            fixed.append(r)
+        new += watcher.observe(dev_id, getattr(st, 'hostname', dev_id), fixed, now=now)
+    watcher.forget(set(device_sessions))
+    return new
+
+
+async def _route_watch_loop():
+    while True:
+        try:
+            _route_watch_tick()
+        except Exception as e:  # noqa: BLE001
+            print(f"[route-watch] {e}")
+        await asyncio.sleep(ROUTE_WATCH_INTERVAL)
+
+
+@app.get("/api/traffic/routes")
+async def traffic_routes(since: int = 0, limit: int = 100):
+    """/cyber-view の Info 表示用: 経路の追加・削除・変更(since=<seq> 以降)。"""
+    from engine.route_watch import watcher, describe
+    evs = watcher.since(since, max(1, min(int(limit), 500)))
+    return {'events': [{**e, 'text': describe(e)} for e in evs], 'seq': watcher.seq,
+            'interval': ROUTE_WATCH_INTERVAL}
 
 
 @app.get("/api/traffic/history")

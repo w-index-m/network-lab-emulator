@@ -44,6 +44,8 @@
     cursor: pointer; }
   #alerts .a.medium { border-color: var(--orange); }
   #alerts .a.low { border-color: #ffe14d; }
+  #alerts .a.info { border-color: #33d6ff; }
+  #alerts .a.info b { color: #33d6ff; }
   #alerts .a small { color: var(--dim); display: block; }
   #card { left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(420px, 88vw);
     background: rgba(4, 14, 30, .86); border: 1px solid var(--cyan); box-shadow: 0 0 24px rgba(51, 214, 255, .35);
@@ -1312,6 +1314,7 @@
     if (primed) try { localStorage.setItem('cyberView.prefix', JSON.stringify(prefix)); } catch (e) { /* 保存できなくても動く */ }
   }
 
+  let routeLog = [];
   function renderAlerts() {
     const box = document.getElementById('alerts');
     const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -1320,6 +1323,11 @@
       const src = (hostById[a.src] || {}).hostname || a.src;
       return `<div class="a ${a.severity}" data-src="${esc(a.src)}"><b>${esc(a.name)}</b>
         <small>${tm} ・ ${esc(src)}${a.dst ? ' → ' + esc(a.dst) : ''} ・ ${esc(a.detail)}</small></div>`;
+    }).join('');
+    box.innerHTML += routeLog.slice(-6).reverse().map(e => {
+      const tm = new Date(e.t * 1000).toTimeString().slice(0, 8);
+      return `<div class="a info"><b>INFO 経路${{ add: '追加', del: '削除', change: '変更' }[e.kind] || ''}</b>
+        <small>${tm} ・ ${esc(e.host || e.dev)} ・ ${esc(e.text)}</small></div>`;
     }).join('');
     box.querySelectorAll('.a').forEach(d => d.onclick = () => { if (hostById[d.dataset.src]) { prefix = octets(devIp(d.dataset.src)).slice(0, 3); openHost(d.dataset.src); } });
   }
@@ -1405,6 +1413,30 @@
   }
   let logSrc = 'internal';
   setInterval(pollLogs, 4000);
+  // 経路の追加・削除・変更を、その装置の上に INFO プレートで浮かべる
+  let routeSeq = -1;
+  const ROUTE_STYLE = { add: ['#33d6ff', 'INFO ROUTE ADD'], del: ['#9aa4b8', 'INFO ROUTE DEL'], change: ['#7fb2ff', 'INFO ROUTE CHG'] };
+  async function pollRoutes() {
+    try {
+      const d = await api(`/api/traffic/routes?since=${Math.max(0, routeSeq)}&limit=200`);
+      const first = routeSeq < 0;
+      routeSeq = d.seq;
+      if (first) return;                  // 開いた時点より前の変化は出さない
+      const byDev = {};
+      for (const e of d.events) (byDev[e.dev] = byDev[e.dev] || []).push(e);
+      for (const [dev, evs] of Object.entries(byDev)) {
+        const pos = posForDevice(dev);
+        evs.slice(0, 3).forEach(e => {
+          const [col, title] = ROUTE_STYLE[e.kind] || ROUTE_STYLE.add;
+          popup(pos, col, title, `${e.code} ${e.prefix}`, 6000);
+        });
+        if (evs.length > 3) popup(pos, '#33d6ff', 'INFO ROUTES', `他 ${evs.length - 3} 件`, 6000);
+      }
+      routeLog = routeLog.concat(d.events).slice(-50);
+      if (d.events.length) renderAlerts();
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  setInterval(pollRoutes, 3000); pollRoutes();
   update();
   requestAnimationFrame(frame);
 })();
