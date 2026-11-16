@@ -96,7 +96,10 @@ def test_recovery_clears_syslog_evidence(triangle):
                 return ln
     # 「断でない」と「SYSLOG の根拠が up」は別々の経路で届くので、両方そろうまで待つ(CI の遅い環境で前者だけ先に来た)
     ln = _wait(lambda: (lambda x: x if x and not x['down'] and x['evidence'].get('SYSLOG') == 'up' else None)(link()), 20)
-    assert ln and not ln['down'] and ln['evidence']['SYSLOG'] == 'up', link()
+    if not ln:     # 失敗時に原因が分かるよう、根拠とログを出す
+        x = link() or {}
+        logs = [(round(r['t'], 2), r['dev'], r['msg']) for r in recorder.logs if r['dev'] in (a, b)]
+        pytest.fail(f"down={x.get('down')} evidence={x.get('evidence')} logs={logs}")
 
 
 def test_blocking_log_is_not_repeated(triangle):
