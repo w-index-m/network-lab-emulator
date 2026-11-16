@@ -14,6 +14,7 @@ NICT の NIRVANA改 を補強する構造計画研究所の「CyNote」が持つ
 保存はプロセス内メモリのみ(件数と保持時間で上限)。再起動すると消える。
 """
 
+import collections
 import re
 import threading
 import time
@@ -51,6 +52,9 @@ RULES = {
     'syslog_error': {'name': '装置が error 以上のログを出力', 'severity': 'medium',
                      'window': 0, 'threshold': 3, 'cooldown': 60,
                      'desc': 'syslog 重要度3(error)以下のメッセージ(復旧通知は除く)'},
+    'valhalla': {'name': 'ヴァルハラ(Prometheus)の警報', 'severity': 'medium',
+                 'window': 0, 'threshold': 0, 'cooldown': 0,
+                 'desc': 'ヴァルハラの alert ルールが発報(firing)した。重要度は severity ラベルに従う'},
 }
 # フラップ(状態の繰り返し)は「警告」扱い。ルールの中身は engine/flap_rules.py
 from engine.flap_rules import FLAP_RULES as _FLAP_RULES, ROUTE_FLAP as _ROUTE_FLAP  # noqa: E402
@@ -61,7 +65,7 @@ for _r in _FLAP_RULES + [_ROUTE_FLAP]:
 FLAP_RULE_IDS = {_r['id'] for _r in _FLAP_RULES + [_ROUTE_FLAP]}
 # 検知元(センサー)。/cyber-view の六角形の花びらはこの単位でまとめる
 RULE_SOURCE = {**{_k: 'SYSLOG' for _k in FLAP_RULE_IDS}, 'route_flap': 'NET', 'conn_scan': 'IDS', 'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
-               'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET'}
+               'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'valhalla': 'VALHALLA'}
 SECURITY_SOURCES = {'IDS', 'FW'}
 _TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')
 # 復旧を知らせるメッセージ(実機のCiscoでは up も %LINK-3 なので重要度だけでは区別できない)
@@ -79,6 +83,7 @@ class FlowRecorder:
         self.logs = deque(maxlen=MAX_LOGS)          # 装置が出したsyslog相当のメッセージ
         self.seq = 0
         self.alert_seq = 0
+        self.alert_counts = collections.Counter()   # (rule, severity, source) -> 起動からの件数
         # 検知用の作業領域
         self._by_src = defaultdict(deque)          # src -> deque[(t, dst_ip, ok)]
         self._by_pair = defaultdict(deque)         # (src, dst_ip) -> deque[(t, bytes)]
@@ -203,11 +208,20 @@ class FlowRecorder:
                                   related=[])
         return None
 
-    def external_alert(self, rule, key, src, dst, detail, now=None):
-        """エンジン外の検知(FWのshun等)をアラートとして記録"""
+    def external_alert(self, rule, key, src, dst, detail, now=None, severity=None, name=None):
+        """エンジン外の検知(FWのshun・ヴァルハラの警報等)をアラートとして記録。
+        severity / name を渡すとルールの既定値の代わりに使う(ヴァルハラの警報は alertname と severity ラベルを持つ)"""
         now = time.time() if now is None else now
         with self._lock:
-            return self._fire(rule, key, now, src=src, dst=dst, detail=detail, related=[])
+            a = self._fire(rule, key, now, src=src, dst=dst, detail=detail, related=[])
+            if a is not None:
+                if severity:
+                    self.alert_counts[(rule, a['severity'], a['source'])] -= 1
+                    a['severity'] = severity if severity in SEVERITY_ORDER else a['severity']
+                    self.alert_counts[(rule, a['severity'], a['source'])] += 1
+                if name:
+                    a['name'] = name
+            return a
 
     def logs_since(self, start):
         with self._lock:
@@ -232,6 +246,7 @@ class FlowRecorder:
              'severity': r['severity'], 'src': src, 'dst': dst, 'detail': detail,
              'related': related}
         self.alerts.append(a)
+        self.alert_counts[(rule, a['severity'], a['source'])] += 1   # /metrics 用(起動からの累計)
         return a
 
     def _detect_flow(self, ev):

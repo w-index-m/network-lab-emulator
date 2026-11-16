@@ -2844,3 +2844,10 @@ SPF 波紋(`_recalc_routes` で `spf_runs`/`last_spf` を記録)、差分ポッ�
 追加(v13): `/cyber-view` の背景を 標準/金魚鉢/富士山 で切り替え(`#zBg` ボタン、`localStorage cvBg`、`?bg=goldfish|fuji`。`drawBackdrop`→`drawGoldfishBowl`/`drawFuji`、Canvas 描画で画像ファイル無し)。
 追加(v14): `/cyber-view` の画面上の Prometheus の呼び名を「ヴァルハラ / VALHALLA」に(`SRC_DISPLAY`/`dispSrc`、スタンドアロン版は `collector.DISPLAY_NAME`)。表示だけで、`PROMETHEUS_URL`・`sources.prometheus`・API の `source:"prometheus"` は変えない。
 CI(v14): `pytest.yml`/`regression.yml` は `claude/**` への push でも動く。regression のサーバーは root(`sudo -E env PATH=$PATH`)で起動(装置IPを lo に足すため)。BIG-IP シナリオは各 pc で `python3 -m http.server 8080` を立てて実ヘルスチェック。装置削除時はその装置の http.server も止める(`stop_mock_http_servers_for_ips`)。
+追加(v15): ヴァルハラ(Prometheus)× ニルヴァーナの双方向連携(`docs/valhalla-nirvana.md`)。`GET /metrics`(`engine/valhalla.render_metrics`、
+`netlab_link_state/bps/util`・`netlab_health_state`・`netlab_ospf_*`・`netlab_alerts_total`・`netlab_route_changes_total`。認証は
+`NETLAB_METRICS_TOKEN` の Bearer か通常トークン)、`/api/valhalla/status|replay|forecast`(`PROMETHEUS_URL` 無しは 404)、
+`_valhalla_alert_loop`(15秒、firing を新規分だけ `external_alert('valhalla')`、花びら VALHALLA)。SnmpAgent に OSPF-MIB
+(ospfRouterId・ospfNbrTable、index は相手 IF の IP)。IaC は `netlab-nirvana` ジョブ・`valhalla-nirvana` ルール群・snmp.yml に OSPF。
+スタンドアロン版は `cvs/valhalla_views.py`(snmp_exporter の生メトリクスから再生・予測・OSPF、`AlertImporter`)。
+`engine/valhalla.py` と `cyber-view-standalone/cvs/valhalla.py` は同一(テストで検出)。テストは `tests/test_valhalla_nirvana.py`。

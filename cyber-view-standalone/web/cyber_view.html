@@ -103,6 +103,18 @@
   #linkpanel small { color: var(--dim); }
   body.links #alerts, body.links #filter, body.links #crumbs, body.links #card, body.links #session, body.links #legend { display: none !important; }
   body.links #linkbar { display: block; }
+  /* ヴァルハラの再生バー */
+  #vhOpen { margin-left: 8px; background: #2a1a55; color: #e6dcff; border: 1px solid #8f6dff; font: inherit; padding: 1px 8px; cursor: pointer; }
+  #vhbar { display: none; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(980px, calc(100vw - 24px));
+    background: rgba(14,8,34,.86); border: 1px solid #8f6dff; padding: 8px 12px; font-size: 12px; color: #e6dcff; }
+  body.vhopen.links:not(.ospf) #vhbar { display: block; }
+  #vhbar select, #vhbar button { background: #1d1240; color: #e6dcff; border: 1px solid #6f55c8; font: inherit; padding: 1px 6px; }
+  #vhSlider { width: min(360px, 40vw); vertical-align: middle; accent-color: #b69bff; }
+  #vhState { color: #b9a8ee; margin-top: 4px; }
+  #vhEvents button { margin: 4px 4px 0 0; font-size: 11px; }
+  #vhEvents button.bad { border-color: #ff3b4e; color: #ffb0b8; } #vhEvents button.good { border-color: #5dffa8; color: #b6ffd8; }
+  body.replaying #cidr { color: #c8b3ff; }
+  body.replaying canvas { filter: hue-rotate(25deg) saturate(1.1); }
   /* OSPF モード: 宛先の選択と凡例 */
   body.ospf #linkbar { display: none !important; }
   #ospfbar { top: 46px; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--dim); display: none;
@@ -156,8 +168,18 @@
 <div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
 <div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
   <option value="10">10秒</option><option value="60" selected>1分</option><option value="300">5分</option></select>
-  ごと(平均区間も同じ) ・ 次回 <b id="lNext">--</b>秒 ・ 最終 <b id="lLast">--</b><span id="lSrc" class="src">--</span></div>
+  ごと(平均区間も同じ) ・ 次回 <b id="lNext">--</b>秒 ・ 最終 <b id="lLast">--</b><span id="lSrc" class="src">--</span><button id="vhOpen" style="display:none" title="ヴァルハラ(Prometheus)の記録から過去を3Dで再生">⏪ 再生</button></div>
 <div id="linkpanel" class="hud"></div>
+<div id="vhbar" class="hud"><b>⏪ VALHALLA 再生</b>
+  <select id="vhRange" aria-label="期間"><option value="900">直近15分</option><option value="3600" selected>直近1時間</option><option value="21600">直近6時間</option><option value="86400">直近24時間</option></select>
+  <button id="vhLoad" title="読み込み直す">⟳</button>
+  <button id="vhPlay" title="再生/一時停止">❚❚</button>
+  <select id="vhSpeed" aria-label="速さ"><option value="1">×1</option><option value="2">×2</option><option value="5">×5</option></select>
+  <input id="vhSlider" type="range" min="0" max="0" value="0" aria-label="時刻">
+  <span id="vhTime">--</span> <button id="vhClose" title="再生を終えて現在に戻る">✕ 現在に戻る</button>
+  <div id="vhState"></div><div id="vhEvents"></div>
+  <select id="vhFit" aria-label="予測に使う期間" title="予測(FORECAST)に使う直近の期間"><option value="15m">予測: 直近15分の傾き</option><option value="1h" selected>予測: 直近1時間の傾き</option><option value="6h">予測: 直近6時間の傾き</option></select>
+</div>
 <div id="ospfbar" class="hud"><b id="oSum" style="color:#fff"></b>宛先 <select id="oDest" aria-label="最短経路ツリーの宛先"></select>
   <span class="lg"><i style="background:#ffd166"></i>最短経路<i style="background:#5dffa8"></i>FULL<i style="background:#ffab2e"></i>確立中<i style="background:#ff3b4e"></i>DOWN</span>
   <span class="areas" id="oAreas"></span></div>
@@ -215,7 +237,7 @@
   let particles = [];
 
   const octets = (ip) => ip.split('.').map(Number);
-  const RULE_CODE = { conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR',
+  const RULE_CODE = { valhalla: 'VH', conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR',
     if_flap: 'IF FLAP', ospf_flap: 'OSPF FLAP', bgp_flap: 'BGP FLAP', eigrp_flap: 'EIGRP FLAP', fhrp_flap: 'FHRP FLAP',
     stp_tc_flap: 'STP TC', stp_root_flap: 'STP ROOT', mac_flap: 'MAC FLAP', errdisable_flap: 'ERRDIS', route_flap: 'RT FLAP' };
   const SEV_COL = { high: '#ff3b4e', medium: '#ffab2e', warning: '#ffab2e', low: '#ffe14d' };
@@ -676,9 +698,10 @@
     FW: { label: 'FW', sub: 'ファイアウォール', col: '#d8402a' },
     SYSLOG: { label: 'SYSLOG', sub: 'ログ', col: '#3a4450' },
     NET: { label: 'NET', sub: 'リンク監視', col: '#d98a00' },
+    VALHALLA: { label: 'VALHALLA', sub: 'ヴァルハラの警報', col: '#6b3fd0' },
   };
   const SOURCE_OF = { conn_scan: 'IDS', scan: 'IDS', unreach_burst: 'IDS', flood: 'IDS', large_icmp: 'IDS',
-    fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET', route_flap: 'NET' };
+    fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET', route_flap: 'NET', valhalla: 'VALHALLA' };
   function drawIcon(src, x, y, s) {
     const c = SOURCES[src].col;
     ctx.save(); ctx.strokeStyle = c; ctx.fillStyle = c; ctx.lineWidth = Math.max(1.2, s * 0.09);
@@ -694,6 +717,12 @@
       for (let r = 0; r < 3; r++) for (let k = 1; k < 3; k++) {
         const bx = x0 + w * (k / 3 + (r % 2 ? 0.16 : 0)); ctx.beginPath(); ctx.moveTo(bx, y0 + h * r / 3); ctx.lineTo(bx, y0 + h * (r + 1) / 3); ctx.stroke();
       }
+    } else if (src === 'VALHALLA') {         // 館(三角屋根と柱)
+      const w = s * 0.82, h = s * 0.62, x0 = x - w / 2, y0 = y - h * 0.55;
+      ctx.lineWidth = Math.max(1, s * 0.07);
+      ctx.beginPath(); ctx.moveTo(x0 - s * 0.05, y0); ctx.lineTo(x, y0 - s * 0.32); ctx.lineTo(x0 + w + s * 0.05, y0); ctx.closePath(); ctx.fill();
+      for (let k = 0; k < 4; k++) { const bx = x0 + w * (0.12 + k * 0.25); ctx.fillRect(bx - s * 0.04, y0 + s * 0.04, s * 0.08, h * 0.72); }
+      ctx.fillRect(x0 - s * 0.05, y0 + h * 0.8, w + s * 0.1, s * 0.08);
     } else if (src === 'SYSLOG') {           // ログの書類
       const w = s * 0.6, h = s * 0.72, x0 = x - w / 2, y0 = y - h * 0.85;
       ctx.lineWidth = Math.max(1, s * 0.06); ctx.strokeRect(x0, y0, w, h);
@@ -953,6 +982,7 @@
     }
   }
   async function pollLinks() {
+    if (typeof vh !== 'undefined' && vh.active) return;     // ヴァルハラの再生中は現在値で上書きしない
     const w = +document.getElementById('lInt').value;
     try {
       const d = await api(`/api/traffic/links?window=${w}`);
@@ -1261,6 +1291,7 @@
   }
   setInterval(pollNetLinks, 10000); setTimeout(pollNetLinks, 1500);
 
+  const plateScr = {};    // リンク中点プレートの画面位置(予測プレートをその上に積む)
   function drawLinks(t) {
     if (!linkData) return;
     // 床のリング
@@ -1295,8 +1326,13 @@
       if (!l.down && l.state !== 'lost') hexColumn(mx, Y, mz, 0.42, colH, col, t);
       const title = l.down ? 'LINK DOWN' : STATE_EN[l.state];
       const val = l.down ? '停止' : l.state === 'lost' ? '不明' : fmtShort(tot2);
-      plate3d(mx, Y + colH + 0.9, mz, col, title, val, l.down || l.state === 'crit', t, l.down ? null : `使用率 ${(l.util * 100).toFixed(1)}%`);
-      if (l.down || l.state === 'lost' || (l.down_sources || []).length) evidenceChips(mx, Y + colH + 0.9, mz, l.evidence || {}, t);
+      // ③ ヴァルハラの予測: 別のプレートを重ねず、このプレートの下段に「80%まで N日」を足す(他のリンクと重ならないように)
+      const fc = !vh.active && vh.fc[lkey(l)], soon = fc && fc.days_to_alert != null && fc.days_to_alert < 30;
+      const fcTxt = soon ? ` ・ 予測 80%まで ${fc.days_to_alert < 1 ? (fc.days_to_alert * 24).toFixed(1) + '時間' : fc.days_to_alert.toFixed(1) + '日'}` : '';
+      plate3d(mx, Y + colH + 0.9, mz, col, title, val, l.down || l.state === 'crit', t, l.down ? null : `使用率 ${(l.util * 100).toFixed(1)}%${fcTxt}`);
+      plateScr[lkey(l)] = proj(mx, Y + colH + 0.9, mz);
+      // 再生中は検知経路(その時刻の根拠)を持っていないので出さない
+      if (!vh.active && (l.down || l.state === 'lost' || (l.down_sources || []).length)) evidenceChips(mx, Y + colH + 0.9, mz, l.evidence || {}, t);
       if (l.down) sparksAt(mx, Y + 0.3, mz, t, '#ff3b4e');
       if (l.alerts.length) {
         const ap = proj(mx, Y + colH + 2.6, mz);
@@ -1348,7 +1384,7 @@
   const TREE_COL = '#ffd166';
   const areaIdx = {};
   const areaCol = (a) => { if (!(a in areaIdx)) areaIdx[a] = Object.keys(areaIdx).length; return AREA_COLS[areaIdx[a] % AREA_COLS.length]; };
-  const areaName = (a) => { const p = String(a).split('.'); return p.length === 4 ? 'AREA ' + ((+p[0] << 24 >>> 0) + (+p[1] << 16) + (+p[2] << 8) + +p[3]) : 'AREA ' + a; };
+  const areaName = (a) => { if (a === '' || a == null) return 'OSPF'; const p = String(a).split('.'); return p.length === 4 ? 'AREA ' + ((+p[0] << 24 >>> 0) + (+p[1] << 16) + (+p[2] << 8) + +p[3]) : 'AREA ' + a; };
   const ST_SHORT = { Full: 'FULL', Down: 'DOWN', Init: 'INIT', TwoWay: '2WAY', ExStart: 'EXSTART', Exchange: 'EXCHANGE', Loading: 'LOADING' };
   async function pollOspf() {
     if (mode !== 'ospf') return;
@@ -1552,7 +1588,7 @@
         ctx.fillStyle = '#fff'; ctx.font = '600 14px monospace'; ctx.fillText(x.hostname, lp.x, lp.y);
         ctx.fillStyle = '#7fb2d0'; ctx.font = '11px monospace'; ctx.fillText('RID ' + x.router_id, lp.x, lp.y + 14);
         ctx.fillStyle = '#9fc6dd'; ctx.font = '10px monospace';
-        if (!small) ctx.fillText(`LSDB ${x.lsdb} ・ 経路 ${x.routes} ・ SPF ${x.spf_runs}回`, lp.x, lp.y + 27);
+        if (!small && x.lsdb != null) ctx.fillText(`LSDB ${x.lsdb} ・ 経路 ${x.routes} ・ SPF ${x.spf_runs}回`, lp.x, lp.y + 27);
         if (x.abr) {
           const bx = lp.x, by = lp.y - 24;
           hexPath(bx, by, 12); ctx.fillStyle = '#c58bff'; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
@@ -1563,7 +1599,117 @@
     });
   }
   window.__cvOspf = () => ospfData;
+  // ── ヴァルハラ連携: ② 過去の再生 / ③ 予測・いつもと違う ─────────────
+  // /api/valhalla/status で PROMETHEUS_URL(ヴァルハラ)に繋がっているときだけ「⏪ 再生」ボタンを出す
+  const vh = { configured: false, active: false, playing: false, frames: [], events: [], i: 0, speed: 1, fc: {}, fcAt: 0, saved: null };
+  api('/api/valhalla/status').then(d => {
+    vh.configured = !!(d && d.configured && d.reachable);
+    document.getElementById('vhOpen').style.display = vh.configured ? '' : 'none';
+    if (vh.configured) pollForecast();
+  }).catch(() => { /* ヴァルハラ無し: ボタンは出さない */ });
+  const fmtT = (t) => new Date(t * 1000).toTimeString().slice(0, 8);
+  async function loadReplay() {
+    const range = +document.getElementById('vhRange').value, end = Date.now() / 1000;
+    const st = document.getElementById('vhState');
+    st.textContent = '読み込み中…';
+    try {
+      const d = await api(`/api/valhalla/replay?start=${end - range}&end=${end}&step=${Math.max(15, Math.round(range / 300))}`);
+      vh.frames = d.frames || []; vh.events = d.events || [];
+      if (!vh.frames.length) { st.textContent = 'この期間の記録がヴァルハラにありません'; return; }
+      if (mode !== 'link') setMode('link');
+      if (!vh.active) vh.saved = linkData;
+      vh.active = true; vh.playing = true; vh.i = 0;
+      document.body.classList.add('replaying');
+      const sl = document.getElementById('vhSlider'); sl.max = vh.frames.length - 1; sl.value = 0;
+      document.getElementById('vhEvents').innerHTML = vh.events.slice(-8).map((e, k) =>
+        `<button data-t="${e.t}" class="${e.to === 'down' || e.to === 'crit' ? 'bad' : e.to === 'ok' ? 'good' : ''}">${fmtT(e.t)} ${e.text}</button>`).join('');
+      document.querySelectorAll('#vhEvents button').forEach(b => { b.onclick = () => { vh.playing = false; applyFrame(vh.frames.findIndex(f => f.t >= +b.dataset.t) - 2); }; });
+      st.textContent = `${vh.frames.length} コマ ・ 状態の変化 ${vh.events.length} 件`;
+      applyFrame(0);
+    } catch (e) { st.textContent = 'ヴァルハラから読めませんでした: ' + e.message; }
+  }
+  function applyFrame(i) {
+    if (!vh.frames.length) return;
+    const prevT = vh.frames[Math.max(0, Math.min(vh.i, vh.frames.length - 1))].t;
+    vh.i = Math.max(0, Math.min(vh.frames.length - 1, i));
+    const f = vh.frames[vh.i];
+    const ifs = {};      // IF 名は記録に無いので、現在のリンク一覧から引く
+    for (const l of ((vh.saved || {}).links || [])) ifs[l.a + '|' + l.b] = l;
+    linkData = { links: f.links.map(l => ({ iface_a: (ifs[l.a + '|' + l.b] || {}).iface_a || '', iface_b: (ifs[l.a + '|' + l.b] || {}).iface_b || '', alerts: [], evidence: {}, down_sources: [], flows_ok: 0, flows_ng: 0,
+      series: [], util_ab: (l.ab_bps || 0) / 1e9, util_ba: (l.ba_bps || 0) / 1e9, ...l })), unreachable: [], now: f.t, source: 'valhalla' };
+    layoutRouters(linkData.links);
+    document.getElementById('vhSlider').value = vh.i;
+    document.getElementById('vhTime').textContent = new Date(f.t * 1000).toLocaleString();
+    document.getElementById('cidr').textContent = 'REPLAY ' + fmtT(f.t);
+    // 再生中に通り過ぎた状態変化をポップアップで出す
+    for (const e of vh.events) {
+      if (e.t > prevT && e.t <= f.t) {
+        const A = linkPos[e.a], B = linkPos[e.b];
+        const bad = e.to === 'down' || e.to === 'crit';
+        popup(A && B ? [(A[0] + B[0]) / 2, 3.4, (A[2] + B[2]) / 2] : null, bad ? '#ff3b4e' : '#5dffa8', 'VALHALLA ' + fmtT(e.t), `${e.from} → ${e.to}`, 4200, bad ? '警' : '情');
+      }
+    }
+  }
+  function closeReplay() {
+    vh.active = false; vh.playing = false;
+    document.body.classList.remove('replaying');
+    document.getElementById('cidr').textContent = 'ROUTER LINKS';
+    if (vh.saved) linkData = vh.saved;
+    pollLinks();
+  }
+  setInterval(() => {
+    if (!vh.active || !vh.playing) return;
+    if (vh.i >= vh.frames.length - 1) { vh.playing = false; document.getElementById('vhPlay').textContent = '▶'; return; }
+    applyFrame(vh.i + vh.speed);
+  }, 400);
+  document.getElementById('vhOpen').onclick = () => { document.body.classList.add('vhopen'); loadReplay(); };
+  document.getElementById('vhLoad').onclick = loadReplay;
+  document.getElementById('vhPlay').onclick = (e) => { vh.playing = !vh.playing; e.target.textContent = vh.playing ? '❚❚' : '▶'; if (vh.playing && vh.i >= vh.frames.length - 1) vh.i = 0; };
+  document.getElementById('vhSpeed').onchange = (e) => { vh.speed = +e.target.value; };
+  document.getElementById('vhSlider').oninput = (e) => { vh.playing = false; document.getElementById('vhPlay').textContent = '▶'; applyFrame(+e.target.value); };
+  document.getElementById('vhClose').onclick = () => { document.body.classList.remove('vhopen'); closeReplay(); };
+  window.__cvReplay = () => ({ active: vh.active, i: vh.i, n: vh.frames.length, events: vh.events.length, t: vh.frames[vh.i] && vh.frames[vh.i].t });
+
+  // ③ 予測(このままだと何日で使用率80%)と、平常時とのずれ(z)
+  async function pollForecast() {
+    if (!vh.configured) return;
+    try {
+      const d = await api('/api/valhalla/forecast?fit_window=' + encodeURIComponent(document.getElementById('vhFit').value));
+      vh.fc = {}; (d.links || []).forEach(r => { vh.fc[r.a + '|' + r.b] = r; });
+      vh.fcAt = Date.now();
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  setInterval(pollForecast, 60000);
+  window.__cvForecast = () => vh.fc;
+  function drawForecast(t) {
+    if (!linkData || vh.active) return;
+    for (const l of linkData.links) {
+      const f = vh.fc[l.a + '|' + l.b], A = linkPos[l.a], B = linkPos[l.b];
+      if (!f || !A || !B) continue;
+      const mx = (A[0] + B[0]) / 2, mz = (A[2] + B[2]) / 2;
+      const soon = f.days_to_alert != null && f.days_to_alert < 30;
+      const odd = f.z != null && Math.abs(f.z) >= 3;
+      if (soon) {
+        // 予測はプレート下段の文字に出す。ここではプレートの左に「予」の印だけ
+        const base = plateScr[l.a + '|' + l.b];
+        if (base) {
+          const sc = Math.max(0.6, Math.min(1.1, base.s / 30));
+          ctx.save(); ctx.globalAlpha = 0.75 + 0.25 * Math.sin(t * 0.004);
+          markHex(base.x - 128 * sc, base.y, 13, '#ffab2e', '予', t); ctx.restore();
+        }
+      }
+      if (odd) {
+        const c = proj(mx + 0.9, 3.0, mz);
+        if (c) {
+          markHex(c.x, c.y, 14, '#ffab2e', '注', t);
+          ctx.fillStyle = '#ffd08a'; ctx.font = '700 11px sans-serif'; ctx.textAlign = 'left';
+          ctx.fillText(`いつもと違う ${f.z > 0 ? '+' : ''}${f.z.toFixed(1)}σ`, c.x + 18, c.y + 4); ctx.textAlign = 'start';
+        }
+      }
+    }
+  }
   function setMode(m) {
+    if (m !== 'link' && vh.active) { document.body.classList.remove('vhopen'); vh.active = false; document.body.classList.remove('replaying'); }
     mode = m;
     document.getElementById('mNet').classList.toggle('on', m === 'net');
     document.getElementById('mLink').classList.toggle('on', m === 'link');
@@ -1796,7 +1942,7 @@
     drawFloor();
     const nowSec = Date.now() / 1000;
     drawGroundRing(t);
-    if (mode === 'link') drawLinks(t);
+    if (mode === 'link') { drawLinks(t); drawForecast(t); }
     else if (mode === 'ospf') { drawOspf(t); drawParticles(t); }
     else { if (hostView) { alertLevel = 0; drawHost(t); } else { drawNetwork(t, nowSec); drawNetFlows(t); } drawParticles(t); }
     drawPopups(t);

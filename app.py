@@ -957,6 +957,7 @@ async def lifespan(app: FastAPI):
     auto_save_task = asyncio.create_task(_auto_save_loop())
     link_sample_task = asyncio.create_task(_link_sample_loop())
     route_watch_task = asyncio.create_task(_route_watch_loop())
+    valhalla_task = asyncio.create_task(_valhalla_alert_loop())
     # SNMP linkDown/linkUp trap の受信(/cyber-view の LINK DOWN 判定に使う)。例: 0.0.0.0:1162
     if os.environ.get('SNMP_TRAP_LISTEN', '').strip():
         from engine.link_evidence import traps as _traps
@@ -994,6 +995,7 @@ async def lifespan(app: FastAPI):
     yield
     link_sample_task.cancel()
     route_watch_task.cancel()
+    valhalla_task.cancel()
     auto_save_task.cancel()
     try:
         await auto_save_task
@@ -1064,6 +1066,7 @@ def _valid_token(token: str) -> bool:
 # ルート "/" と各種静的アセットはHTML/ログインJSを返すため公開し、
 # 認証はAPI（/api/*）とWebSocket側で行う。
 _NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico", "/dashboard", "/pentest", "/traffic-flow", "/cyber-view",
+                  "/metrics",   # Prometheus 用。認証は metrics() の中で行う(Bearer トークン)
                   "/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
 
 @app.middleware("http")
@@ -9995,6 +9998,150 @@ async def traffic_ospf(dest: str = None):
     links, _nodes = _collect_links()
     hostnames = {d: s.hostname for d, s in device_sessions.items()}
     return snapshot(ospf_engine, vnet, icmp_engine, links, hostnames, dest=dest or None)
+
+
+# ── ヴァルハラ(Prometheus)との連携 ─────────────────────────────
+# ① GET /metrics: ニルヴァーナの判断(リンク状態・状態ボード・OSPF隣接・警報・経路変化)をメトリクスで出す
+# ② GET /api/valhalla/replay: ① の履歴から過去の各時刻のリンク状態を返す(3D 再生)
+# ③ GET /api/valhalla/forecast: 使用率の予測(あと何日で80%)と、平常時とのずれ
+# ⑤ _valhalla_alert_loop: ヴァルハラで発報中の警報をニルヴァーナの警報(花びら VALHALLA)に取り込む
+def _prom_url():
+    return os.environ.get('PROMETHEUS_URL', '').strip()
+
+
+@app.get("/metrics")
+async def metrics(request: Request):
+    """Prometheus がスクレイプする口。認証: NETLAB_METRICS_TOKEN を設定していれば
+    `Authorization: Bearer <トークン>`、無ければ通常のセッショントークン(認証無効時は不要)。"""
+    from engine.valhalla import render_metrics
+    from engine.route_watch import watcher
+    mt = os.environ.get('NETLAB_METRICS_TOKEN', '').strip()
+    auth = request.headers.get('Authorization', '')
+    ok = _AUTH_DISABLED or (mt and auth == f'Bearer {mt}') or _valid_token(request.headers.get('X-Session-Token', ''))
+    if not ok:
+        return _Response(status_code=401, content='認証が必要です(Authorization: Bearer <NETLAB_METRICS_TOKEN>)')
+    links = (await traffic_links(window=60))['links']
+    health = await traffic_health(window=300)
+    ospf = await traffic_ospf()
+    counts = {k: v for k, v in _flow_recorder.alert_counts.items() if v > 0}
+    text = render_metrics(links, health, ospf, counts, dict(watcher.counts))
+    return _Response(content=text, media_type='text/plain; version=0.0.4; charset=utf-8')
+
+
+@app.get("/api/valhalla/status")
+async def valhalla_status():
+    """ヴァルハラ(PROMETHEUS_URL)に繋がるか・① のメトリクスが届いているか"""
+    url = _prom_url()
+    if not url:
+        return {'configured': False}
+    from engine.valhalla import query
+    try:
+        n = await asyncio.to_thread(query, url, 'count(netlab_link_state)')
+        up = await asyncio.to_thread(query, url, 'up{job="netlab-nirvana"}')
+        return {'configured': True, 'reachable': True, 'url': url,
+                'recording': bool(n and n[0][1] > 0), 'scrape_up': bool(up and up[0][1] == 1)}
+    except Exception as e:  # noqa: BLE001
+        return {'configured': True, 'reachable': False, 'url': url, 'error': str(e)[:200]}
+
+
+@app.get("/api/valhalla/replay")
+async def valhalla_replay(start: float = None, end: float = None, step: int = 15):
+    """ヴァルハラに記録したリンク状態(①)から、start〜end の各時刻のリンク状態を返す。既定は直近1時間"""
+    url = _prom_url()
+    if not url:
+        return JSONResponse({'error': 'PROMETHEUS_URL が未設定です(ヴァルハラに繋がっていません)'}, status_code=404)
+    from engine.valhalla import replay_frames_lab
+    end = end or time.time()
+    start = start or end - 3600
+    step = max(5, int(step), int((end - start) / 600))     # 1回で返すフレームは最大600程度
+    try:
+        d = await asyncio.to_thread(replay_frames_lab, url, start, end, step)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({'error': f'ヴァルハラ不達: {str(e)[:200]}'}, status_code=502)
+    return {**d, 'start': start, 'end': end, 'step': step, 'source': 'valhalla'}
+
+
+@app.get("/api/valhalla/forecast")
+async def valhalla_forecast(fit_window: str = '1h', base_window: str = '1d', horizon_days: float = 7):
+    """リンク使用率(① の netlab_link_util)の予測と、平常時とのずれ"""
+    url = _prom_url()
+    if not url:
+        return JSONResponse({'error': 'PROMETHEUS_URL が未設定です'}, status_code=404)
+    import re as _re
+    if not _re.fullmatch(r'\d+[smhd]', fit_window) or not _re.fullmatch(r'\d+[smhd]', base_window):
+        return JSONResponse({'error': 'fit_window / base_window は 30m・1h・1d の形で指定してください'}, status_code=400)
+    from engine.valhalla import forecast, UTIL_ALERT
+    try:
+        rows = await asyncio.to_thread(forecast, url, 'max by (a, b, host_a, host_b) (netlab_link_util)',
+                                       ('a', 'b'), horizon_days, fit_window, base_window)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({'error': f'ヴァルハラ不達: {str(e)[:200]}'}, status_code=502)
+    return {'links': rows, 'alert_util': UTIL_ALERT, 'fit_window': fit_window, 'base_window': base_window,
+            'horizon_days': horizon_days, 'now': time.time()}
+
+
+_valhalla_seen = {}   # 発報中のヴァルハラ警報(指紋 -> 取り込んだ時刻)
+
+
+def _valhalla_import_alerts(alerts, now=None):
+    """ヴァルハラの firing 警報を、新しく出たものだけニルヴァーナの警報として記録する。
+    同じ警報が発報し続けている間は二重に記録しない(解消して再発したら再び記録する)"""
+    now = now or time.time()
+    host_to_dev = {getattr(s, 'hostname', d): d for d, s in device_sessions.items()}
+    ip_to_dev = {}
+    for d, s in device_sessions.items():
+        for itf in (getattr(s, 'interfaces', {}) or {}).values():
+            if isinstance(itf, dict) and itf.get('ip'):
+                ip_to_dev.setdefault(itf['ip'], d)
+    sev_map = {'critical': 'high', 'high': 'high', 'warning': 'warning', 'info': 'low', 'low': 'low', 'medium': 'medium'}
+    current = set()
+    out = []
+    for a in alerts:
+        fp = a['name'] + '|' + '|'.join(f'{k}={v}' for k, v in sorted(a['labels'].items()))
+        current.add(fp)
+        if fp in _valhalla_seen:
+            continue
+        _valhalla_seen[fp] = now
+        lab = a['labels']
+        dev = None
+        for k in ('device', 'host_a', 'host', 'hostname', 'a'):
+            if lab.get(k) in host_to_dev:
+                dev = host_to_dev[lab[k]]
+                break
+            if lab.get(k) in device_sessions:
+                dev = lab[k]
+                break
+        if dev is None and lab.get('instance'):
+            dev = ip_to_dev.get(lab['instance'].split(':')[0])
+        peer = None
+        for k in ('neighbor', 'host_b', 'b'):
+            v = lab.get(k)
+            if v in host_to_dev:
+                peer = host_to_dev[v]
+            elif v in device_sessions:
+                peer = v
+        detail = a['annotations'].get('summary') or a['annotations'].get('description') or a['name']
+        rec = _flow_recorder.external_alert('valhalla', fp, dev, peer, f"{a['name']}: {detail}"[:200], now=now,
+                                            severity=sev_map.get(str(a['severity']).lower(), 'medium'),
+                                            name=f"ヴァルハラ: {a['name']}")
+        if rec:
+            out.append(rec)
+    for fp in list(_valhalla_seen):
+        if fp not in current:
+            _valhalla_seen.pop(fp, None)
+    return out
+
+
+async def _valhalla_alert_loop():
+    from engine.valhalla import firing_alerts
+    while True:
+        url = _prom_url()
+        if url:
+            try:
+                _valhalla_import_alerts(await asyncio.to_thread(firing_alerts, url))
+            except Exception as e:  # noqa: BLE001
+                print(f"[valhalla] 警報の取得に失敗: {str(e)[:120]}")
+        await asyncio.sleep(15)
 
 
 @app.get("/api/traffic/flap-rules")

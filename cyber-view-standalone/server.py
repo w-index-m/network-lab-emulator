@@ -105,6 +105,66 @@ def create_app(cfg, start_collector=True):
         check(x_session_token)
         return {'events': [], 'seq': 0, 'interval': cfg['poll_interval']}
 
+    # ── ヴァルハラ(Prometheus)連携: ② 再生 ③ 予測 ④ OSPF ──
+    from cvs import valhalla_views as VV
+    from cvs.collector import classify
+    prom_cfg = (cfg.get('sources') or {}).get('prometheus') or {}
+
+    def need_prom():
+        if not col.prom:
+            raise HTTPException(status_code=404, detail='sources.prometheus が未設定です(ヴァルハラに繋がっていません)')
+        return col.prom.url, prom_cfg.get('job', 'snmp')
+
+    @app.get('/api/valhalla/status')
+    def valhalla_status(x_session_token: str = Header(None)):
+        check(x_session_token)
+        if not col.prom:
+            return {'configured': False}
+        try:
+            n = VV.V.query(col.prom.url, f'count(up{{job="{prom_cfg.get("job", "snmp")}"}})')
+            return {'configured': True, 'reachable': True, 'url': col.prom.url, 'recording': bool(n and n[0][1] > 0)}
+        except Exception as e:  # noqa: BLE001
+            return {'configured': True, 'reachable': False, 'url': col.prom.url, 'error': str(e)[:200]}
+
+    @app.get('/api/valhalla/replay')
+    def valhalla_replay(start: float = None, end: float = None, step: int = 15, x_session_token: str = Header(None)):
+        check(x_session_token)
+        url, job = need_prom()
+        end = end or time.time()
+        start = start or end - 3600
+        step = max(5, int(step), int((end - start) / 600))
+        try:
+            d = VV.replay(url, job, cfg, start, end, step, classify)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f'ヴァルハラ不達: {str(e)[:200]}')
+        return {**d, 'start': start, 'end': end, 'step': step, 'source': 'valhalla'}
+
+    @app.get('/api/valhalla/forecast')
+    def valhalla_forecast(fit_window: str = '1h', base_window: str = '1d', horizon_days: float = 7,
+                          x_session_token: str = Header(None)):
+        check(x_session_token)
+        import re
+        if not re.fullmatch(r'\d+[smhd]', fit_window) or not re.fullmatch(r'\d+[smhd]', base_window):
+            raise HTTPException(status_code=400, detail='fit_window / base_window は 30m・1h・1d の形で指定')
+        url, job = need_prom()
+        try:
+            rows = VV.forecast(url, job, cfg, fit_window, base_window, horizon_days)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f'ヴァルハラ不達: {str(e)[:200]}')
+        return {'links': rows, 'alert_util': VV.V.UTIL_ALERT, 'fit_window': fit_window, 'base_window': base_window,
+                'horizon_days': horizon_days, 'now': time.time()}
+
+    @app.get('/api/traffic/ospf')
+    def ospf(dest: str = None, x_session_token: str = Header(None)):
+        """④ 実機の OSPF 隣接(OSPF-MIB を snmp_exporter → ヴァルハラ経由で)"""
+        check(x_session_token)
+        url, job = need_prom()
+        try:
+            d = VV.ospf(url, job, cfg, col.dev_of)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f'ヴァルハラ不達: {str(e)[:200]}')
+        return {**d, 'now': time.time()}
+
     @app.get('/api/demo/status')
     def demo_status():
         """デモはラボ専用。画面はこれを見て DEMO ボタンを隠す"""

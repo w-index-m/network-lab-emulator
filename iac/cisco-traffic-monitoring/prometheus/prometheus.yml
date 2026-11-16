@@ -29,6 +29,19 @@ scrape_configs:
       - target_label: __address__
         replacement: 127.0.0.1:9116
 
+  # ニルヴァーナ(Cyber View)の判断(① netlab_*)。エミュレータの /metrics を読む。
+  # エミュレータを認証付きで動かす場合は NETLAB_METRICS_TOKEN を決めて、deploy.sh が
+  # nirvana.token に書き出す(認証無効なら空のままでよい)
+  - job_name: netlab-nirvana
+    scrape_interval: 15s
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/nirvana.token
+    file_sd_configs:
+      # deploy.sh が EMU_URL(既定 http://localhost:8000)から host:port を書き出す
+      - files: [/etc/prometheus/nirvana_targets/*.yml]
+
   # snmp_exporter 自身の稼働状況
   - job_name: snmp-exporter
     static_configs:

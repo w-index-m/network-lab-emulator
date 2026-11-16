@@ -68,6 +68,17 @@ ZABBIX_TOKEN=xxxx docker compose up -d --build
   Zabbix で検出ルールを「今すぐ実行」するか、検出間隔を短くする。
 - 流量は Zabbix の取得間隔(Cisco テンプレートは 1 分ごとの SNMP walk)で更新される。
 
+### ヴァルハラ(Prometheus)からの再生・予測・OSPF・警報
+
+`sources.prometheus` があれば次も使える(詳細は `docs/valhalla-nirvana.md`):
+
+- ROUTER LINKS の「⏪ 再生」: `rate(ifHC*Octets)` と `ifOperStatus` の履歴から過去の各時刻を 3D で再生
+- 予測: IF の使用率(`rate / ifHighSpeed`)から「このままだと何日で 80%」と、平常時とのずれ
+- OSPF ボタン: snmp_exporter で OSPF-MIB(`ospfRouterId` / `ospfNbrState`)を取っていれば、設定ファイルのリンクごとの
+  隣接状態を出す(最短経路ツリーと Dead タイマーは SNMP では取れないので出さない)。snmp_exporter の設定例は
+  リポジトリの `iac/cisco-traffic-monitoring/snmp_exporter/snmp.yml`
+- ヴァルハラで発報中の警報を、警報の花に「VALHALLA」の花びらで出す(新しく出たものだけ)
+
 ## ラボ版との違い
 
 - ラボ専用のもの(ping の経路の粒、ポートスキャン検知、経路の変化「情」、DEMO)は無い。DEMO ボタンは自動で隠れる。

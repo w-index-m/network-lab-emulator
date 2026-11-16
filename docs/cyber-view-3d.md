@@ -475,3 +475,12 @@ NETWORK / ROUTER LINKS / OSPF のどのモードでも使える。
 - `SOURCE:` にマウスを乗せると「ヴァルハラ(Prometheus): <URL>」と中身が分かるようにしている。
 
 ![VALHALLA 表示](images/cyber-view-valhalla-label.png)
+
+## ヴァルハラとの連携(再生・予測・OSPF-MIB・警報の取り込み)(v15)
+
+ニルヴァーナの判断を `/metrics` でヴァルハラに貯め、その記録から過去を 3D で再生する(ROUTER LINKS の「⏪ 再生」)、
+使用率の予測と「いつもと違う」をリンクのプレートに出す、ヴァルハラの警報を花の「VALHALLA」花びらで出す、
+エミュレータの SNMP に OSPF-MIB を足してスタンドアロン版でも実機の OSPF 隣接を表示する。詳細とライブ確認は
+[valhalla-nirvana.md](valhalla-nirvana.md)。
+
+![ヴァルハラの記録から再生](images/cyber-view-valhalla-replay.png)

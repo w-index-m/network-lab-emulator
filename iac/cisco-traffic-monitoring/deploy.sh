@@ -26,6 +26,11 @@ case "${1:-up}" in
     docker info >/dev/null 2>&1 || { log "docker デーモンが動いていません (systemd が無い環境は: nohup dockerd &)"; exit 1; }
     wait_http "$EMU/api/health" "emulator" 5 || { log "先にエミュレータを起動してください: NETLAB_AUTH_DISABLE=1 python app.py"; exit 1; }
     ./lab/provision_cisco_lab.sh
+    # ニルヴァーナの /metrics をヴァルハラ(Prometheus)が読む先と、認証トークン(無ければ空)
+    mkdir -p prometheus/nirvana_targets
+    hp="${EMU#*://}"; hp="${hp%%/*}"
+    printf -- '- targets: [%s]\n  labels: {component: nirvana}\n' "$hp" > prometheus/nirvana_targets/nirvana.yml
+    printf '%s' "${NETLAB_METRICS_TOKEN:-}" > prometheus/nirvana.token
     docker compose up -d
     wait_http "$EXPORTER/-/healthy" "snmp_exporter"
     wait_http "$PROM/-/ready" "prometheus"
@@ -33,6 +38,7 @@ case "${1:-up}" in
     log "Grafana:    $GRAFANA/d/cisco-traffic  (admin/admin)"
     log "Prometheus: $PROM/targets"
     log "トラフィックを流す: ./lab/traffic_gen.sh"
+    log "ニルヴァーナ側: PROMETHEUS_URL=$PROM でエミュレータを起動すると 再生・予測・警報の取り込みが有効になる"
     ;;
   status)
     docker compose ps

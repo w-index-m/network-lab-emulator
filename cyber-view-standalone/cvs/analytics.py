@@ -20,6 +20,7 @@ RULES = {
     'link_down': {'name': 'リンク断', 'severity': 'medium', 'cooldown': 0, 'source': 'NET'},
     'syslog_error': {'name': '装置が error 以上のログを出力', 'severity': 'medium', 'cooldown': 60, 'source': 'SYSLOG'},
     'zabbix_problem': {'name': 'Zabbix の問題', 'severity': 'medium', 'cooldown': 0, 'source': 'NET'},
+    'valhalla': {'name': 'ヴァルハラ(Prometheus)の警報', 'severity': 'medium', 'cooldown': 0, 'source': 'VALHALLA'},
 }
 for _r in FLAP_RULES + [ROUTE_FLAP]:
     RULES.setdefault(_r['id'], {'name': _r['name'], 'severity': 'warning', 'window': _r['window'],

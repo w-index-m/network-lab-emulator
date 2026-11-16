@@ -38,3 +38,50 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "{{ $labels.router }} のCPU使用率が {{ $value }}%"
+
+      # OSPF 隣接が Full でない(OSPF-MIB ospfNbrState。表にあって Full 以外 = 確立途中/切れかけ)
+      - alert: CiscoOspfNeighborNotFull
+        expr: ospfNbrState{job="cisco-snmp"} < 8
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.router }} の OSPF 隣接 {{ $labels.ospfNbrRtrId }} ({{ $labels.ospfNbrIpAddr }}) が Full でない"
+
+  # ── ヴァルハラ × ニルヴァーナ ──────────────────────────────
+  # ニルヴァーナ(Cyber View)が /metrics で出す判断(netlab_*)を使う。発報した警報は
+  # ニルヴァーナが取り込み、「警」の花に VALHALLA の花びらで出す(⑤)。
+  - name: valhalla-nirvana
+    rules:
+      # 予測・平常時とのずれ(③)を軽くするための記録ルール
+      - record: netlab:link_util:max
+        expr: max by (a, b, host_a, host_b) (netlab_link_util)
+      - record: netlab:link_util:avg1h
+        expr: avg_over_time(netlab:link_util:max[1h])
+
+      # ニルヴァーナが LINK DOWN と判断した状態が 1 分続いた
+      - alert: NirvanaLinkDown
+        expr: netlab_link_state == 3
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.host_a }} ⇄ {{ $labels.host_b }} がリンク断(ニルヴァーナ判定)"
+      # 状態ボードのどれかの観点が異常のまま 5 分
+      - alert: NirvanaHealthCritical
+        expr: netlab_health_state{category!="overall"} == 2
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "状態ボード {{ $labels.category }} が異常のまま 5 分"
+      # このままの増え方だと 7 日以内に使用率 80% に届く
+      - alert: NirvanaLinkCapacityForecast
+        expr: predict_linear(netlab:link_util:max[1h], 7 * 86400) > 0.8 and netlab:link_util:max < 0.8
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.host_a }} ⇄ {{ $labels.host_b }} の使用率が 7 日以内に 80% に届く見込み"
+      # OSPF の SPF 計算が 5 分で 5 回以上(経路が落ち着かない)
+      - alert: NirvanaOspfSpfChurn
+        expr: increase(netlab_ospf_spf_runs_total[5m]) >= 5
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.device }} で SPF 計算が頻発({{ $value | printf \"%.0f\" }} 回/5分)"

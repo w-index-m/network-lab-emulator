@@ -39,6 +39,8 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - ./prometheus/targets:/etc/prometheus/targets:ro
+      - ./prometheus/nirvana_targets:/etc/prometheus/nirvana_targets:ro
+      - ./prometheus/nirvana.token:/etc/prometheus/nirvana.token:ro
       - prometheus-data:/prometheus
     depends_on: [snmp-exporter]
     restart: unless-stopped

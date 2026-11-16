@@ -40,6 +40,7 @@ class RouteWatcher:
         self._prev = {}                    # device_id -> snapshot
         self.events = deque(maxlen=maxlen)
         self.seq = 0
+        self.counts = {}                   # (装置, add/del/change) -> 起動からの件数(/metrics 用)
 
     def observe(self, device_id, hostname, routes, now=None):
         """1台分の現在の最良経路を渡す。新しく出たイベントのリストを返す"""
@@ -63,6 +64,7 @@ class RouteWatcher:
                 if kind == 'change':
                     ev['old'] = {'code': a[0], 'next_hop': a[1], 'iface': a[2]}
                 self.events.append(ev)
+                self.counts[(hostname or device_id, kind)] = self.counts.get((hostname or device_id, kind), 0) + 1
                 new.append(ev)
         return new
 

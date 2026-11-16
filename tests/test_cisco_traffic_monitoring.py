@@ -171,6 +171,9 @@ class TestIacDefinitions:
 
     def test_queried_metrics_are_exported(self, snmp_cfg):
         defined = {m['name'] for m in snmp_cfg['modules']['cisco_if']['metrics']} | {'up'}
+        # netlab_* は emulator の GET /metrics(engine/valhalla.render_metrics)が出す
+        src = open(os.path.join(ROOT, 'engine', 'valhalla.py'), encoding='utf-8').read()
+        defined |= set(re.findall(r"head\('(netlab_\w+)'", src))
         used = set()
         for e in self._exprs():
             used |= set(re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\{', e))

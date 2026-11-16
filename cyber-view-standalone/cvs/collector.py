@@ -14,6 +14,8 @@ from collections import defaultdict, deque
 from . import sources as S
 from .analytics import FLAP_RULE_IDS, RECOVERY, Analytics
 from .link_evidence import norm_if, parse_log_link_event, traps
+from . import valhalla as V
+from .valhalla_views import AlertImporter
 
 # 画面に出す呼び名(メトリクス収集基盤 Prometheus は Cyber View では「ヴァルハラ」と呼ぶ)
 DISPLAY_NAME = {'prometheus': 'ヴァルハラ'}
@@ -54,6 +56,9 @@ class Collector:
         self._zbx_hosts = {}
         self._prev_down = {}
         self.hist = defaultdict(lambda: deque(maxlen=400))
+        self.valhalla_alerts = AlertImporter()
+        if self.prom and not self.prom.use_proxy:
+            V.OPENER = S._opener(False)     # 構内の監視基盤へは直接(sources と同じ扱い)
         self._stop = threading.Event()
 
     # ── 装置の特定 ──
@@ -245,9 +250,20 @@ class Collector:
         return out[-60:]
 
     # ── 定期処理(ログ取り込み・アラート判定・履歴) ──
+    def poll_valhalla_alerts(self):
+        """⑤ ヴァルハラで発報中の警報を取り込む"""
+        if not self.prom:
+            return
+        try:
+            self.valhalla_alerts.run(V.firing_alerts(self.prom.url), self.analytics, self.dev_of)
+            self.errors.pop('valhalla_alerts', None)
+        except Exception as e:  # noqa: BLE001
+            self.errors['valhalla_alerts'] = str(e)[:200]
+
     def tick(self):
         self.poll_logs()
         self.poll_zabbix_problems()
+        self.poll_valhalla_alerts()
         snap = self.snapshot(60)
         now = snap['now']
         for ln in snap['links']:

@@ -3,6 +3,12 @@
 新しいものが上。各項目の「詳細」に、その時の検証記録(実際のコマンド・出力・画面)がある。
 commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 
+## 2026-11-16(夜)— ヴァルハラ × ニルヴァーナ
+
+| 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
+|---|---|---|---|
+| 11:55 | ① `/metrics`(ニルヴァーナの判断をヴァルハラへ)+警報ルール、② 記録からの 3D 再生、③ 予測と「いつもと違う」、④ OSPF-MIB(エミュレータの SNMP → snmp_exporter → スタンドアロン版の OSPF 表示)、⑤ ヴァルハラの警報を VALHALLA の花びらで | 本物の Prometheus/snmp_exporter で確認。リンク断で `NirvanaLinkDown` が発報 → 花に取り込み、再生に断と復旧が出た。予測値が 100% を超える・予測プレートが隣と重なる・再生中の IF 名が「?」を直した | [valhalla-nirvana.md](valhalla-nirvana.md) |
+
 ## 2026-11-16(夕方)— Cyber View の OSPF モード
 
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |

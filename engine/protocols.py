@@ -6836,6 +6836,34 @@ class SnmpAgent:
             mib.append((f'{xt}.11.{i}', 'Counter64', str(c.get('out_pkts', 0))))  # ifHCOutUcastPkts
             mib.append((f'{xt}.15.{i}', 'Gauge32', '1000'))                       # ifHighSpeed(Mbps)
             mib.append((f'{xt}.18.{i}', 'STRING', _desc))                         # ifAlias
+        # ── OSPF-MIB (RFC 1850, 1.3.6.1.2.1.14) ──
+        # 監視基盤(snmp_exporter → ヴァルハラ)から OSPF の隣接を読めるようにする。
+        # ospfRouterId / ospfAdminStat と、ospfNbrTable(index = 隣接のIPアドレス.0)の
+        # ospfNbrIpAddr / ospfNbrAddressLessIndex / ospfNbrRtrId / ospfNbrState(1=down … 8=full)
+        on = ospf_engine.nodes.get(device_id)
+        if on is not None:
+            mib.append(('1.3.6.1.2.1.14.1.1.0', 'IpAddress', on.get('router_id', '0.0.0.0')))
+            mib.append(('1.3.6.1.2.1.14.1.2.0', 'INTEGER', '1' if on.get('enabled') else '2'))
+            if on.get('enabled'):
+                st_num = {'Down': 1, 'Attempt': 2, 'Init': 3, 'TwoWay': 4, 'ExStart': 5,
+                          'Exchange': 6, 'Loading': 7, 'Full': 8}
+                for peer, nb in list(on.get('neighbors', {}).items()):
+                    if peer not in vnet.device_types and peer not in icmp_engine.device_ips:
+                        continue          # 実UDPエージェント側の Router-ID キーの重複登録は除く
+                    pif = vnet.interface_links.get(peer, {}).get(device_id)
+                    pinfo = icmp_engine.device_ips.get(peer, {}).get('interfaces', {})
+                    nip = None
+                    if pif:
+                        norm = {vnet._norm_iface(k): v for k, v in pinfo.items()}
+                        e = norm.get(vnet._norm_iface(pif))
+                        nip = e.get('ip') if isinstance(e, dict) else None
+                    nip = nip or nb.router_id
+                    nb_oid = '1.3.6.1.2.1.14.10.1'
+                    idx = f'{nip}.0'
+                    mib.append((f'{nb_oid}.1.{idx}', 'IpAddress', nip))             # ospfNbrIpAddr
+                    mib.append((f'{nb_oid}.2.{idx}', 'INTEGER', '0'))               # ospfNbrAddressLessIndex
+                    mib.append((f'{nb_oid}.3.{idx}', 'IpAddress', nb.router_id))    # ospfNbrRtrId
+                    mib.append((f'{nb_oid}.6.{idx}', 'INTEGER', str(st_num.get(nb.state, 1))))  # ospfNbrState
         # ── ip group: ipAdEntAddr (1.3.6.1.2.1.4.20.1.1.<ip>) ──
         for ip in info.get('ips', {}):
             mib.append((f'1.3.6.1.2.1.4.20.1.1.{ip}', 'IpAddress', ip))
