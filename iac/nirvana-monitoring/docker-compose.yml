@@ -1,0 +1,86 @@
+# ニルヴァーナ(Cyber View)を中心にした監視スタック(Grafana の代わりにニルヴァーナで見る)
+#
+#   Cisco / Nexus(エミュレータ, 実 SNMP UDP/161) <─ SNMP ─ snmp_exporter :9117
+#                                                            ^
+#                       ヴァルハラ(Prometheus) :9091 ─────────┘ (15秒ごと)
+#   装置の syslog ─UDP/5515─▶ syslog-bridge ─▶ Loki :3101
+#   装置の sFlow ─UDP/6343─┐
+#   装置の NetFlow ─UDP/2055┼─▶ ニルヴァーナ :8090(スタンドアロン版)
+#                          │   ヴァルハラ・Loki を読む / SNMP で経路と CPU / ping で回線チェック
+#                          └── ATT&CK・ダークネット・複数拠点(ネクサス)
+#
+# 既存の Grafana 版(../cisco-traffic-monitoring)と同時に動かせるよう、ポートをずらしてある。
+# エミュレータの装置は管理 IP をホストの lo に載せるので、全コンテナ host ネットワーク。
+# 起動: ./deploy.sh up      停止: ./deploy.sh down
+name: nirvana-monitoring
+
+services:
+  snmp-exporter:
+    image: prom/snmp-exporter:v0.28.0
+    container_name: nvm-snmp-exporter
+    network_mode: host
+    command:
+      - --config.file=/etc/snmp_exporter/snmp.yml
+      - --web.listen-address=:9117
+    volumes:
+      # SNMP のモジュール(IF-MIB・CPU・OSPF-MIB)は Grafana 版と同じファイルを使う
+      - ../cisco-traffic-monitoring/snmp_exporter/snmp.yml:/etc/snmp_exporter/snmp.yml:ro
+    restart: unless-stopped
+
+  valhalla:
+    image: prom/prometheus:v2.54.1
+    container_name: nvm-valhalla
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROM_RETENTION:-7d}
+      - --web.listen-address=:9091
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../cisco-traffic-monitoring/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - ./prometheus/targets:/etc/prometheus/targets:ro
+      - valhalla-data:/prometheus
+    depends_on: [snmp-exporter]
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.1.1
+    container_name: nvm-loki
+    network_mode: host
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  syslog-bridge:
+    image: python:3.11-slim
+    container_name: nvm-syslog-bridge
+    network_mode: host
+    # 装置の syslog(UDP)を受けて Loki へ。リポジトリの tools/syslog_to_loki.py をそのまま使う(標準ライブラリだけ)
+    command: python3 /tools/syslog_to_loki.py --syslog-port 5515 --loki-url http://127.0.0.1:3101
+    volumes:
+      - ../../tools:/tools:ro
+    depends_on: [loki]
+    restart: unless-stopped
+
+  nirvana:
+    build: ../../cyber-view-standalone
+    container_name: nvm-nirvana
+    network_mode: host
+    environment:
+      - NIRVANA_BOARD_PATH=/data/nirvana_board.json
+      - CYBER_VIEW_TOKEN=${CYBER_VIEW_TOKEN:-}
+      - NEXUS_TOKEN=${NEXUS_TOKEN:-}
+    command: ["python", "server.py", "-c", "/config/config.yaml", "--port", "8090"]
+    volumes:
+      - ./nirvana/config.yaml:/config/config.yaml:ro
+      - ./nirvana/data:/data
+    depends_on: [valhalla, loki]
+    restart: unless-stopped
+
+volumes:
+  valhalla-data:
+  loki-data:

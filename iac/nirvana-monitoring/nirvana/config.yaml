@@ -1,0 +1,45 @@
+# ニルヴァーナ(スタンドアロン版)の設定。lab/provision_nirvana_lab.sh の装置に合わせてある。
+# 実機を見るときは devices / links と prometheus/targets/devices.yml を書き換える
+# (書き方は ../../cyber-view-standalone/config.example.yaml と docs/real-catalyst-registration.md)
+title: ニルヴァーナ監視(IaC)
+poll_interval: 10
+devices:
+  - id: cr1
+    hostname: CR1
+    type: cisco
+    mgmt_ip: 10.240.12.1
+    interfaces:
+      - {name: GigabitEthernet0/0/0, ip: 10.240.12.1, prefix: 30}
+      - {name: GigabitEthernet0/0/1, ip: 10.240.1.1, prefix: 24}
+  - id: cr2
+    hostname: CR2
+    type: cisco
+    mgmt_ip: 10.240.12.2
+    interfaces:
+      - {name: GigabitEthernet0/0/0, ip: 10.240.12.2, prefix: 30}
+      - {name: GigabitEthernet0/0/1, ip: 10.240.2.1, prefix: 24}
+      - {name: GigabitEthernet0/0/2, ip: 10.240.23.1, prefix: 30}
+  - id: nx1
+    hostname: NX1
+    type: nexus
+    mgmt_ip: 10.240.23.2
+    interfaces:
+      - {name: Ethernet1/1, ip: 10.240.23.2, prefix: 30}
+links:
+  - {a: cr1, a_if: GigabitEthernet0/0/0, b: cr2, b_if: GigabitEthernet0/0/0, speed: 1000000000}
+  - {a: cr2, a_if: GigabitEthernet0/0/2, b: nx1, b_if: Ethernet1/1, speed: 1000000000}
+sources:
+  prometheus: {url: http://127.0.0.1:9091, job: cisco-snmp}           # ヴァルハラ
+  loki:
+    url: http://127.0.0.1:3101
+    query: '{job="netlab-syslog"}'
+    device_labels: [source_ip, host, hostname, instance]
+  snmp: {community: netlab-ro, interval: 30, cpu: {high: 80, jump: 20, hold: 2}}   # 経路と CPU の情・注
+  flow: {sflow: 6343, netflow: 2055}                                  # 装置の sFlow / NetFlow
+  darknet: {prefixes: [10.250.0.0/24]}                                # 使っていない帯(届いたフローを分類)
+  wan_probe:                                                          # 回線チェック(本物の ping)
+    - {name: CR1 東京, target: 10.240.12.1}
+    - {name: CR2 大阪, target: 10.240.12.2}
+    - {name: NX1 大阪DC, target: 10.240.23.2}
+  wan_probe_interval: 10
+  nexus: {site: TOKYO-HQ, token: '${NEXUS_TOKEN}'}                    # この画面を複数拠点の中央にする(拠点側は url を書く)
