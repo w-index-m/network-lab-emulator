@@ -102,9 +102,13 @@ def create_app(cfg, start_collector=True):
 
     @app.get('/api/traffic/routes')
     def routes(since: int = 0, limit: int = 100, x_session_token: str = Header(None)):
-        """経路の変化(情)はラボ専用。実機版では未対応(空を返す)"""
+        """経路の変化と CPU の変化(情)。sources.snmp があれば実機から SNMP で定期取得した経路表の差分"""
         check(x_session_token)
-        return {'events': [], 'seq': 0, 'interval': cfg['poll_interval']}
+        from cvs.route_watch import describe
+        w = col.snmp.watch
+        evs = w.since(since, max(1, min(int(limit), 500)))
+        return {'events': [{**e, 'text': describe(e)} for e in evs],
+                'seq': w.seq, 'interval': col.snmp.interval if col.snmp.enabled else None}
 
     # ── ヴァルハラ(Prometheus)連携: ② 再生 ③ 予測 ④ OSPF ──
     from cvs import valhalla_views as VV

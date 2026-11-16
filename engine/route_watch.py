@@ -68,6 +68,17 @@ class RouteWatcher:
                 new.append(ev)
         return new
 
+    def note(self, device_id, hostname, kind, text, code='CPU', now=None):
+        """経路以外の「情」(CPU の上昇・回復など)を同じ流れに積む。text は prefix 欄に入る"""
+        now = time.time() if now is None else now
+        with self._lock:
+            self.seq += 1
+            ev = {'seq': self.seq, 't': now, 'dev': device_id, 'host': hostname, 'kind': kind,
+                  'prefix': text, 'code': code, 'next_hop': '', 'iface': ''}
+            self.events.append(ev)
+            self.counts[(hostname or device_id, kind)] = self.counts.get((hostname or device_id, kind), 0) + 1
+        return ev
+
     def forget(self, keep_ids):
         """もう存在しない装置の基準を捨てる"""
         with self._lock:
@@ -88,6 +99,8 @@ class RouteWatcher:
 
 def describe(ev):
     """1行の説明(一覧表示用)"""
+    if ev.get('code') == 'CPU':
+        return f"CPU {ev['prefix']}"
     via = f" via {ev['next_hop']}" if ev['next_hop'] else ''
     on = f" [{ev['iface']}]" if ev['iface'] else ''
     if ev['kind'] == 'change':
@@ -95,6 +108,45 @@ def describe(ev):
         return (f"{ev['code']} {ev['prefix']}{via}{on} (変更前: {o['code']}"
                 f"{' via ' + o['next_hop'] if o['next_hop'] else ''})")
     return f"{ev['code']} {ev['prefix']}{via}{on}"
+
+
+class CpuWatch:
+    """CPU 使用率の変化を「情」と「注」にする(ラボ版・スタンドアロン版で共通)。
+
+    - 前回から jump ポイント以上上がった → 情 `cpu_up`
+    - hold 回続けて high% 以上 → fire(装置ID, ホスト名, 値, 説明, now)(注 = 警告)
+    - 高負荷から high% 未満に戻った → 情 `cpu_ok`
+    """
+
+    def __init__(self, watcher, fire, high=80.0, jump=20.0, hold=2):
+        self.watcher, self.fire = watcher, fire
+        self.high, self.jump, self.hold = float(high), float(jump), max(1, int(hold))
+        self.state = {}
+
+    def observe(self, device_id, hostname, v, now=None):
+        if v is None:
+            return []
+        now = time.time() if now is None else now
+        st = self.state.setdefault(device_id, {'v': None, 'over': 0, 'high': False})
+        evs = []
+        prev = st['v']
+        if prev is not None and v - prev >= self.jump:
+            evs.append(self.watcher.note(device_id, hostname, 'cpu_up', f'{v:.0f}% (+{v - prev:.0f})', now=now))
+        st['over'] = st['over'] + 1 if v >= self.high else 0
+        if st['over'] >= self.hold and not st['high']:
+            st['high'] = True
+            self.fire(device_id, hostname, v,
+                      f"{hostname} の CPU が {v:.0f}%({self.hold}回連続で {self.high:.0f}% 以上)", now)
+        elif st['high'] and v < self.high:
+            st['high'] = False
+            evs.append(self.watcher.note(device_id, hostname, 'cpu_ok', f'{v:.0f}% に戻った', now=now))
+        st['v'] = v
+        return evs
+
+    def forget(self, keep_ids):
+        for d in list(self.state):
+            if d not in keep_ids:
+                self.state.pop(d, None)
 
 
 watcher = RouteWatcher()

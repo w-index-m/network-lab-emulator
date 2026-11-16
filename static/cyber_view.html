@@ -2151,7 +2151,7 @@
     }).join('');
     box.innerHTML += routeLog.slice(-6).reverse().map(e => {
       const tm = new Date(e.t * 1000).toTimeString().slice(0, 8);
-      return `<div class="a info"><b>情 INFO 経路${{ add: '追加', del: '削除', change: '変更' }[e.kind] || ''}</b>
+      return `<div class="a info"><b>情 INFO ${{ add: '経路追加', del: '経路削除', change: '経路変更', cpu_up: 'CPU 上昇', cpu_ok: 'CPU 回復' }[e.kind] || ''}</b>
         <small>${tm} ・ ${esc(e.host || e.dev)} ・ ${esc(e.text)}</small></div>`;
     }).join('');
     box.querySelectorAll('.a').forEach(d => d.onclick = () => { if (hostById[d.dataset.src]) { prefix = octets(devIp(d.dataset.src)).slice(0, 3); openHost(d.dataset.src); } });
@@ -2243,7 +2243,8 @@
   setInterval(pollLogs, 4000);
   // 経路の追加・削除・変更を、その装置の上に INFO プレートで浮かべる
   let routeSeq = -1;
-  const ROUTE_STYLE = { add: ['#33d6ff', 'INFO ROUTE ADD'], del: ['#9aa4b8', 'INFO ROUTE DEL'], change: ['#7fb2ff', 'INFO ROUTE CHG'] };
+  const ROUTE_STYLE = { add: ['#33d6ff', 'INFO ROUTE ADD'], del: ['#9aa4b8', 'INFO ROUTE DEL'], change: ['#7fb2ff', 'INFO ROUTE CHG'],
+    cpu_up: ['#ffab2e', 'INFO CPU UP'], cpu_ok: ['#3dff9a', 'INFO CPU OK'] };
   async function pollRoutes() {
     try {
       const d = await api(`/api/traffic/routes?since=${Math.max(0, routeSeq)}&limit=200`);

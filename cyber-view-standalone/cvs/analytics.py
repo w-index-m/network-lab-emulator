@@ -22,6 +22,7 @@ RULES = {
     'zabbix_problem': {'name': 'Zabbix の問題', 'severity': 'medium', 'cooldown': 0, 'source': 'NET'},
     'valhalla': {'name': 'ヴァルハラ(Prometheus)の警報', 'severity': 'medium', 'cooldown': 0, 'source': 'VALHALLA'},
     'nirvana_rule': {'name': 'ニルヴァーナのアラートルール', 'severity': 'medium', 'cooldown': 0, 'source': 'RULE'},
+    'cpu_high': {'name': 'CPU 高負荷', 'severity': 'warning', 'cooldown': 300, 'source': 'NET'},
 }
 for _r in FLAP_RULES + [ROUTE_FLAP]:
     RULES.setdefault(_r['id'], {'name': _r['name'], 'severity': 'warning', 'window': _r['window'],

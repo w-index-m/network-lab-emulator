@@ -113,9 +113,16 @@ sources:
     url: http://127.0.0.1:3100
     query: '{job="netlab-syslog"}'
     device_labels: [source_ip, host, hostname, instance]   # source_ip で装置を特定する
+  snmp:                             # 経路表と CPU を直接定期取得(経路の変化・CPU の情/注)
+    community: netlab-ro
+    interval: 60
+    cpu: {high: 80, jump: 20, hold: 2}
   # snmp_trap:
   #   listen: 0.0.0.0:1162          # 1 の trap を設定した場合
 ```
+
+`sources.snmp` はニルヴァーナのサーバーから Catalyst へ直接 SNMP で問い合わせるので、1 の `SNMP-RO` の ACL に
+そのサーバーの IP も入れておく(監視サーバーと同じ 10.10.0.50 に置くなら追加は不要)。詳細は `docs/snmp-route-cpu-info.md`。
 
 起動:
 
@@ -136,6 +143,7 @@ python3 server.py -c config.yaml --port 8090
 | 試しに片側の Gi1/0/48 を shutdown | 線が LINK DOWN、下に検知経路 POLL / SYSLOG(trap を入れていれば TRAP)が点く |
 | OSPF ボタン | Catalyst で OSPF を動かしていれば隣接が Full で出る |
 | BOARD | 「…」→「JSON を取り込む」で `iac/.../grafana/dashboards/cisco-traffic.json` を入れると、ルータ・IF を選べるトラフィック画面になる |
+| `ip route` を1本足して消す(`sources.snmp` を書いた場合) | 次の取得で「情 INFO 経路追加 / 経路削除」 |
 | `http://10.10.0.50:8090/api/health` | `errors` が空(Prometheus・Loki に届いている) |
 
 ## よくあるつまずき

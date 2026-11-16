@@ -2857,4 +2857,10 @@ CI(v14): `pytest.yml`/`regression.yml` は `claude/**` への push でも動く�
 `InternalTSDB` が /metrics の値を5秒ごとに6時間分保持、小さな PromQL 評価器、`BoardStore`=`nirvana_board.json`/`NIRVANA_BOARD_PATH`、`AlertEvaluator`
 normal→pending→firing、webhook)と `engine/nirvana_board_api.py`(`/api/nirvana/*`、Grafana JSON の取り込み変換 `from_grafana`)。発報は
 `external_alert('nirvana_rule')`(花びら RULES)。スタンドアロン版は同じ2ファイルと js を `cvs/`・`web/` にコピー(ずれは `tests/test_nirvana_board.py` が検出)。
+追加(v19): 経路と CPU の「情」「注」(`docs/snmp-route-cpu-info.md`)。SnmpAgent に IP-FORWARD-MIB(`_route_mib`: inetCidrRouteTable/
+ipCidrRouteTable/経路数)。cpmCPUTotal5minRev は `.8`(以前 `.7` と誤っていた。エミュレータ・snmp.yml・app.py を修正)。
+`engine/route_watch.CpuWatch`(+jump で情 cpu_up、high が hold 回で `cpu_high` 警告、戻ると情 cpu_ok)。ラボ版は `_route_watch_tick` で
+`snmp_agent._cpu_percent` を見る(しきい値 `NETLAB_CPU_HIGH/JUMP/HOLD`)、大きな ping で `snmp_agent.add_cpu_load`。スタンドアロン版は
+`sources.snmp` で `cvs/snmp_poll.SnmpPoller`(`cvs/snmp_client.py` は標準ライブラリの SNMPv2c)。`cvs/route_watch.py` は engine のコピー。
+テストは `tests/test_snmp_route_cpu_info.py`。
 

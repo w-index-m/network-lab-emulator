@@ -57,6 +57,8 @@ class Collector:
         self._prev_down = {}
         self.hist = defaultdict(lambda: deque(maxlen=400))
         self.valhalla_alerts = AlertImporter()
+        from .snmp_poll import SnmpPoller
+        self.snmp = SnmpPoller(cfg, self.analytics, self.errors)   # 経路表・CPU を実機から直接(sources.snmp)
         if self.prom and not self.prom.use_proxy:
             V.OPENER = S._opener(False)     # 構内の監視基盤へは直接(sources と同じ扱い)
         self._stop = threading.Event()
@@ -293,9 +295,11 @@ class Collector:
                     self.errors['tick'] = str(e)[:200]
                 self._stop.wait(float(self.cfg['poll_interval']))
         threading.Thread(target=loop, daemon=True, name='cvs-collector').start()
+        self.snmp.start()
 
     def stop(self):
         self._stop.set()
+        self.snmp.stop()
 
     # ── 画面向けのまとめ ──
     def hosts(self):

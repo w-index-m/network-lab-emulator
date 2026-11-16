@@ -58,6 +58,9 @@ RULES = {
     'valhalla': {'name': 'ヴァルハラ(Prometheus)の警報', 'severity': 'medium',
                  'window': 0, 'threshold': 0, 'cooldown': 0,
                  'desc': 'ヴァルハラの alert ルールが発報(firing)した。重要度は severity ラベルに従う'},
+    'cpu_high': {'name': 'CPU 高負荷', 'severity': 'warning',
+                 'window': 0, 'threshold': 80, 'cooldown': 300,
+                 'desc': 'CPU 使用率(cpmCPUTotal5minRev)が続けてしきい値以上。しきい値は NETLAB_CPU_HIGH / _HOLD'},
 }
 # フラップ(状態の繰り返し)は「警告」扱い。ルールの中身は engine/flap_rules.py
 from engine.flap_rules import FLAP_RULES as _FLAP_RULES, ROUTE_FLAP as _ROUTE_FLAP  # noqa: E402
@@ -68,7 +71,7 @@ for _r in _FLAP_RULES + [_ROUTE_FLAP]:
 FLAP_RULE_IDS = {_r['id'] for _r in _FLAP_RULES + [_ROUTE_FLAP]}
 # 検知元(センサー)。/cyber-view の六角形の花びらはこの単位でまとめる
 RULE_SOURCE = {**{_k: 'SYSLOG' for _k in FLAP_RULE_IDS}, 'route_flap': 'NET', 'conn_scan': 'IDS', 'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
-               'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'valhalla': 'VALHALLA', 'nirvana_rule': 'RULE'}
+               'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'valhalla': 'VALHALLA', 'nirvana_rule': 'RULE', 'cpu_high': 'NET'}
 SECURITY_SOURCES = {'IDS', 'FW'}
 _TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')
 # 復旧を知らせるメッセージ(実機のCiscoでは up も %LINK-3 なので重要度だけでは区別できない)

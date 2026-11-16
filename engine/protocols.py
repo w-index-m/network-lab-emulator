@@ -6661,6 +6661,57 @@ def _snmp_if_name(ifn: str) -> str:
     return ifn
 
 
+# IANAipRouteProtocol(IP-FORWARD-MIB の inetCidrRouteProto / ipCidrRouteProto)
+_ROUTE_PROTO = {'connected': 2, 'static': 3, 'rip': 8, 'ospf': 13, 'ospf_ia': 13, 'ospf_e1': 13, 'ospf_e2': 13,
+                'bgp': 14, 'eigrp': 16}
+
+
+def _route_mib(device_id, if_names):
+    """rib_engine の最良経路から IP-FORWARD-MIB の行を作る。
+    inetCidrRouteTable の索引 = 宛先種別(1).長さ(4).宛先.プレフィックス長.方針(0.0 → 2.0.0).次ホップ種別(1).長さ(4).次ホップ"""
+    out = []
+    try:
+        routes = rib_engine.get_best_routes(device_id)
+    except Exception:            # 経路が取れない装置は表を出さない
+        return out
+    norm = {vnet._norm_iface(n): i for i, n in enumerate(if_names, 1)}
+    rows = []
+    for r in routes:
+        try:
+            net = ipaddress.ip_network(f"{r['network']}/{r['prefix']}", strict=False)
+        except (ValueError, KeyError):
+            continue
+        if net.version != 4:
+            continue
+        nh = r.get('next_hop') or '0.0.0.0'
+        try:
+            nh = str(ipaddress.ip_address(nh))
+        except ValueError:          # Null0 等
+            nh = '0.0.0.0'
+        src = r.get('source') or 'static'
+        rows.append((net, nh, norm.get(vnet._norm_iface(r.get('iface') or ''), 0), _ROUTE_PROTO.get(src, 1),
+                     3 if src == 'connected' else 4, int(r.get('metric') or 0)))
+    rows.sort(key=lambda x: (int(x[0].network_address), x[0].prefixlen, x[1]))
+    base, old = '1.3.6.1.2.1.4.24.7.1', '1.3.6.1.2.1.4.24.4.1'
+    for net, nh, ifx, proto, rtype, metric in rows:
+        d, n = str(net.network_address), nh
+        idx = f'1.4.{d}.{net.prefixlen}.2.0.0.1.4.{n}'
+        out += [(f'{base}.7.{idx}', 'INTEGER', str(ifx)),       # inetCidrRouteIfIndex
+                (f'{base}.8.{idx}', 'INTEGER', str(rtype)),     # inetCidrRouteType 3=local 4=remote
+                (f'{base}.9.{idx}', 'INTEGER', str(proto)),     # inetCidrRouteProto
+                (f'{base}.10.{idx}', 'Gauge32', '0'),           # inetCidrRouteAge
+                (f'{base}.12.{idx}', 'INTEGER', str(metric)),   # inetCidrRouteMetric1
+                (f'{base}.17.{idx}', 'INTEGER', '1')]           # inetCidrRouteStatus active
+        oidx = f'{d}.{net.netmask}.0.{n}'
+        out += [(f'{old}.1.{oidx}', 'IpAddress', d), (f'{old}.2.{oidx}', 'IpAddress', str(net.netmask)),
+                (f'{old}.4.{oidx}', 'IpAddress', n), (f'{old}.5.{oidx}', 'INTEGER', str(ifx)),
+                (f'{old}.6.{oidx}', 'INTEGER', str(rtype)), (f'{old}.7.{oidx}', 'INTEGER', str(proto)),
+                (f'{old}.11.{oidx}', 'INTEGER', str(metric)), (f'{old}.16.{oidx}', 'INTEGER', '1')]
+    out.append(('1.3.6.1.2.1.4.24.3.0', 'Gauge32', str(len(rows))))   # ipCidrRouteNumber
+    out.append(('1.3.6.1.2.1.4.24.6.0', 'Gauge32', str(len(rows))))   # inetCidrRouteNumber
+    return out
+
+
 class SnmpAgent:
     """
     各装置の状態から標準MIB-II（system / interfaces / ip グループ）を生成し、
@@ -6712,12 +6763,21 @@ class SnmpAgent:
         if cur is None:
             cur = random.uniform(8, 25)
         elif now - last >= 5.0:
-            cur = max(2.0, min(95.0, cur + random.uniform(-4, 4)))
+            # 高いときは平常値(~20%)へ戻る向きに歩く(ping の負荷で上がった分が引いていく)
+            step = random.uniform(-10, 1) if cur > 35 else random.uniform(-4, 4)
+            cur = max(2.0, min(99.0, cur + step))
         else:
             return round(cur, 1)
         self._cpu_state[device_id] = cur
         self._cpu_last[device_id] = now
         return round(cur, 1)
+
+    def add_cpu_load(self, device_id: str, points: float):
+        """大きな ping などの処理負荷で CPU を一時的に上げる(以後 5秒ごとに平常値へ戻っていく)"""
+        if points < 1 or device_id not in self._cpu_state:
+            return
+        self._cpu_state[device_id] = min(99.0, self._cpu_state[device_id] + points)
+        self._cpu_last[device_id] = time.time()
 
     def register(self, device_id: str, device_type: str, hostname: str,
                  contact: str = '', location: str = '',
@@ -6796,7 +6856,11 @@ class SnmpAgent:
             cpu_int = str(int(cpu))
             mib.append(('1.3.6.1.4.1.9.9.109.1.1.1.1.3.1', 'Gauge32', cpu_int))  # cpmCPUTotal5sec
             mib.append(('1.3.6.1.4.1.9.9.109.1.1.1.1.4.1', 'Gauge32', cpu_int))  # cpmCPUTotal1min
-            mib.append(('1.3.6.1.4.1.9.9.109.1.1.1.1.7.1', 'Gauge32', cpu_int))  # cpmCPUTotal5minRev
+            # CISCO-PROCESS-MIB の列: 3=5sec 4=1min 5=5min 6=5secRev 7=1minRev 8=5minRev(実機の監視は Rev を使う)
+            mib.append(('1.3.6.1.4.1.9.9.109.1.1.1.1.5.1', 'Gauge32', cpu_int))  # cpmCPUTotal5min
+            mib.append(('1.3.6.1.4.1.9.9.109.1.1.1.1.6.1', 'Gauge32', cpu_int))  # cpmCPUTotal5secRev
+            mib.append(('1.3.6.1.4.1.9.9.109.1.1.1.1.7.1', 'Gauge32', cpu_int))  # cpmCPUTotal1minRev
+            mib.append(('1.3.6.1.4.1.9.9.109.1.1.1.1.8.1', 'Gauge32', cpu_int))  # cpmCPUTotal5minRev
         # ── interfaces group (1.3.6.1.2.1.2) ──
         info = icmp_engine.device_ips.get(device_id, {})
         ifaces = list(info.get('interfaces', {}).items())
@@ -6864,6 +6928,10 @@ class SnmpAgent:
                     mib.append((f'{nb_oid}.2.{idx}', 'INTEGER', '0'))               # ospfNbrAddressLessIndex
                     mib.append((f'{nb_oid}.3.{idx}', 'IpAddress', nb.router_id))    # ospfNbrRtrId
                     mib.append((f'{nb_oid}.6.{idx}', 'INTEGER', str(st_num.get(nb.state, 1))))  # ospfNbrState
+        # ── IP-FORWARD-MIB(RFC 4292): 経路表 ──
+        # 監視側(ニルヴァーナのスタンドアロン版など)が定期的に取り、経路の追加・削除・変更を「情」として出す。
+        # 新しい inetCidrRouteTable(4.24.7)と、古い機種向けの ipCidrRouteTable(4.24.4)の両方を出す。
+        mib.extend(_route_mib(device_id, [n for n, _ in ifaces]))
         # ── ip group: ipAdEntAddr (1.3.6.1.2.1.4.20.1.1.<ip>) ──
         for ip in info.get('ips', {}):
             mib.append((f'1.3.6.1.2.1.4.20.1.1.{ip}', 'IpAddress', ip))
@@ -6954,7 +7022,10 @@ class SnmpAgent:
         # CISCO-PROCESS-MIB（CPU使用率、Cisco系のみ）
         'cpmcputotal5sec': '1.3.6.1.4.1.9.9.109.1.1.1.1.3',
         'cpmcputotal1min': '1.3.6.1.4.1.9.9.109.1.1.1.1.4',
-        'cpmcputotal5min': '1.3.6.1.4.1.9.9.109.1.1.1.1.7',
+        'cpmcputotal5min': '1.3.6.1.4.1.9.9.109.1.1.1.1.5',
+        'cpmcputotal1minrev': '1.3.6.1.4.1.9.9.109.1.1.1.1.7',
+        'cpmcputotal5minrev': '1.3.6.1.4.1.9.9.109.1.1.1.1.8',
+        'ipcidrroutetable': '1.3.6.1.2.1.4.24.4', 'inetcidrroutetable': '1.3.6.1.2.1.4.24.7',
     }
 
     def resolve_oid(self, name: str) -> str:

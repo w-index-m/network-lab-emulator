@@ -3,6 +3,12 @@
 新しいものが上。各項目の「詳細」に、その時の検証記録(実際のコマンド・出力・画面)がある。
 commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 
+## 2026-11-16(深夜2)— 経路と CPU を SNMP で定期取得して「情」「注」
+
+| 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
+|---|---|---|---|
+| 16:20 | エミュレータの SNMP に inetCidrRouteTable / ipCidrRouteTable / 経路数。スタンドアロン版が SNMP で経路表と CPU を直接定期取得 → 情・注。ラボ版も CPU の情・注(大きな ping で経路上の CPU が上がる) | 本物の snmpwalk で経路表を確認。スタンドアロン版でスタティック経路の追加・削除が情、CPU 高負荷が注。cpmCPUTotal5minRev の OID が1つずれていた(.7 → .8)のを直した | [snmp-route-cpu-info.md](snmp-route-cpu-info.md) |
+
 ## 2026-11-16(深夜)— ニルヴァーナに Grafana の機能を
 
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |

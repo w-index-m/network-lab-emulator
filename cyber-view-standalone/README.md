@@ -81,6 +81,12 @@ ZABBIX_TOKEN=xxxx docker compose up -d --build
   リポジトリの `iac/cisco-traffic-monitoring/snmp_exporter/snmp.yml`
 - ヴァルハラで発報中の警報を、警報の花に「VALHALLA」の花びらで出す(新しく出たものだけ)
 
+### 経路と CPU の「情」「注」(SNMP の直接取得)
+
+`sources.snmp` を書くと、各装置の `mgmt_ip` に SNMPv2c で直接問い合わせ、経路表(inetCidrRouteTable、無ければ
+ipCidrRouteTable)と CPU(cpmCPUTotal5minRev)を定期取得する。経路の追加・削除・変更と CPU の急上昇・回復が「情」、
+CPU が高い状態が続くと「注」(警告)。しきい値は `sources.snmp.cpu`。詳細はリポジトリの `docs/snmp-route-cpu-info.md`。
+
 ### BOARD / EXPLORE / ALERTS(Grafana が持つ機能)
 
 ダッシュボード(8種のパネル・変数・時間範囲・自動更新・注釈・編集)、問い合わせ(PromQL / LogQL / 内部ログ)、
@@ -90,7 +96,7 @@ ZABBIX_TOKEN=xxxx docker compose up -d --build
 
 ## ラボ版との違い
 
-- ラボ専用のもの(ping の経路の粒、ポートスキャン検知、経路の変化「情」、DEMO)は無い。DEMO ボタンは自動で隠れる。
+- ラボ専用のもの(ping の経路の粒、ポートスキャン検知、DEMO)は無い。経路の変化「情」は `sources.snmp` を書いたときだけ出る。DEMO ボタンは自動で隠れる。
 - 検知経路の「STATE」(エミュレータ内部の IF 状態)は無い。
 - 画面(`web/cyber_view.html`)と検知ルール(`cvs/flap_rules.py`・`cvs/link_evidence.py`)はラボ版と同じファイル。
   ラボ側を直したら `cp static/cyber_view.html cyber-view-standalone/web/` 等で揃える

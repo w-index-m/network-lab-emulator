@@ -1583,7 +1583,7 @@ async def snmp_dashboard():
                 'out_octets': int(_val(f'1.3.6.1.2.1.2.2.1.16.{i}', '0') or 0),
             })
 
-        cpu_raw = by_oid.get('1.3.6.1.4.1.9.9.109.1.1.1.1.7.1')
+        cpu_raw = by_oid.get('1.3.6.1.4.1.9.9.109.1.1.1.1.8.1')
         cpu_percent = int(cpu_raw[1]) if cpu_raw else None
         total_bytes = sum(i['in_octets'] + i['out_octets'] for i in interfaces)
         route_count = len(rib_engine.get_best_routes(device_id))
@@ -7049,6 +7049,11 @@ def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict,
             path.append(_dst_dev)
     links = [(x, y) for x, y in zip(path, path[1:]) if y in vnet.links.get(x, set())]
     _record_flow_event(src_id, dest_ip, path, ping_result, count, size)
+    # 経路上の装置の CPU を処理量に応じて上げる(1000発×1500byte の往復でおよそ +60)。
+    # 通常の ping(5発×100byte)では上がらない
+    _load = min(60.0, count * size * 2 / 50000)
+    for _d in dict.fromkeys(path):
+        snmp_agent.add_cpu_load(_d, _load)
     if not links:
         # ホップ情報が無い(同一セグメント直結など)場合は従来どおり直結リンクへ
         links = [(src_id, p) for p in vnet.links.get(src_id, set())]
@@ -9138,7 +9143,7 @@ async def restconf_dashboard():
         if device_id in snmp_agent.devices:
             mib = snmp_agent._build_mib(device_id)
             by_oid = {oid: v for oid, _t, v in mib}
-            cpu_raw = by_oid.get('1.3.6.1.4.1.9.9.109.1.1.1.1.7.1')
+            cpu_raw = by_oid.get('1.3.6.1.4.1.9.9.109.1.1.1.1.8.1')
             cpu_percent = int(cpu_raw) if cpu_raw is not None else None
             in_oids = [v for oid, v in by_oid.items() if oid.startswith('1.3.6.1.2.1.2.2.1.10.')]
             out_oids = [v for oid, v in by_oid.items() if oid.startswith('1.3.6.1.2.1.2.2.1.16.')]
@@ -9927,6 +9932,22 @@ async def _link_sample_loop():
 
 
 ROUTE_WATCH_INTERVAL = 3
+# CPU の「情」「注」のしきい値(/cyber-view)。high% 以上が hold 回続くと注、前回から jump 以上上がると情
+CPU_HIGH = float(os.environ.get('NETLAB_CPU_HIGH', '80'))
+CPU_JUMP = float(os.environ.get('NETLAB_CPU_JUMP', '20'))
+CPU_HOLD = int(os.environ.get('NETLAB_CPU_HOLD', '2'))
+_cpu_watch = None
+
+
+def _get_cpu_watch():
+    global _cpu_watch
+    if _cpu_watch is None:
+        from engine.route_watch import CpuWatch, watcher
+
+        def fire(dev, host, v, detail, now):
+            _flow_recorder.external_alert('cpu_high', dev, dev, None, detail, now=now)
+        _cpu_watch = CpuWatch(watcher, fire, CPU_HIGH, CPU_JUMP, CPU_HOLD)
+    return _cpu_watch
 
 
 def _route_watch_tick(now=None):
@@ -9953,7 +9974,14 @@ def _route_watch_tick(now=None):
         for e in evs:
             _flow_recorder.record_route_event(dev_id, e['prefix'], e['kind'], now=e['t'])
         new += evs
+        if dev_id in snmp_agent.devices:
+            try:
+                v = snmp_agent._cpu_percent(dev_id, getattr(st, 'device_type', ''))
+            except Exception:  # noqa: BLE001
+                v = None
+            new += _get_cpu_watch().observe(dev_id, getattr(st, 'hostname', dev_id), v, now=now)
     watcher.forget(set(device_sessions))
+    _get_cpu_watch().forget(set(device_sessions))
     return new
 
 
