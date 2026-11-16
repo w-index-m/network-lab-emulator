@@ -13,6 +13,8 @@ from types import SimpleNamespace as NS
 
 from fastapi.testclient import TestClient
 
+os.environ.setdefault('NETLAB_AUTH_DISABLE', '1')   # app を import する前に(test_cyber_view.py と同じ)
+
 from engine.ospf_view import snapshot
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -139,3 +141,11 @@ def test_standalone_has_no_ospf_endpoint():
     from cvs import config as sa_config
     cfg = sa_config.validate({'devices': [{'id': 'a'}], 'links': [], 'sources': {}})
     assert TestClient(sa_server.create_app(cfg, start_collector=False)).get('/api/traffic/ospf').status_code == 404
+
+
+def test_background_selector_in_page():
+    """背景(標準/金魚鉢/富士山)の切り替えボタンと、?bg= での指定、選択の記憶"""
+    html = open(os.path.join(ROOT, 'static', 'cyber_view.html'), encoding='utf-8').read()
+    assert 'id="zBg"' in html and "BG_LIST = ['default', 'goldfish', 'fuji']" in html
+    assert 'function drawGoldfishBowl' in html and 'function drawFuji' in html
+    assert "localStorage.setItem('cvBg'" in html and "get('bg')" in html

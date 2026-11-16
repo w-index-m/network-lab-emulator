@@ -2841,3 +2841,4 @@ OspfEngine の隣接(両端の state・Dead 残り=dead_interval−最終Hello�
 画面: 床のエリア円、隣接バッジ(Dead の円弧カウントダウン)、金色の矢印でツリー、DESTINATION/NO ROUTE/cost プレート、
 SPF 波紋(`_recalc_routes` で `spf_runs`/`last_spf` を記録)、差分ポップアップ。スタンドアロン版は 404 → ボタンを隠す。
 テストは `tests/test_ospf_view.py`。DR/BDR がルータ単位・DR 側だけコストが小さく出る点はエンジンの既存挙動(未修正)。
+追加(v13): `/cyber-view` の背景を 標準/金魚鉢/富士山 で切り替え(`#zBg` ボタン、`localStorage cvBg`、`?bg=goldfish|fuji`。`drawBackdrop`→`drawGoldfishBowl`/`drawFuji`、Canvas 描画で画像ファイル無し)。

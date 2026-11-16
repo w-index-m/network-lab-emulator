@@ -27,6 +27,8 @@
   #zoom button { width: 38px; height: 38px; border: 1px solid rgba(51,214,255,0.45); background: rgba(4,14,28,0.72); color: #8fe9ff;
     font: 700 18px/1 sans-serif; cursor: pointer; border-radius: 4px; }
   #zoom button:hover { background: rgba(51,214,255,0.18); }
+  #bgToast { position: fixed; right: 64px; top: 50%; transform: translateY(70px); padding: 4px 10px; font-size: 12px; color: #fff;
+    background: rgba(4,14,28,0.8); border: 1px solid rgba(51,214,255,0.45); opacity: 0; transition: opacity .3s; pointer-events: none; }
   #zoom button.on { color: #3dff9a; border-color: rgba(61,255,154,0.55); }
   body.showlist:not(.links) #zoom { right: calc(min(300px, 44vw) + 28px); }
   body.showlist.links #zoom { right: calc(min(380px, 46vw) + 28px); }
@@ -148,7 +150,8 @@
 </div>
 
 <div id="cidr" class="hud">0.0.0.0/0</div>
-<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button></div>
+<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山)">◎</button></div>
+<div id="bgToast" class="hud"></div>
 <div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
 <div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
 <div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
@@ -1574,6 +1577,208 @@
   document.getElementById('mList').onclick = (e) => { document.body.classList.toggle('showlist'); e.target.classList.toggle('on'); };
 
   // ── メインループ ─────────────────────────────
+  // ── 背景(標準 / 金魚鉢 / 富士山)─────────────────────────
+  // 画像ファイルは使わず Canvas で描く。視点を回すと少しだけ横にずれる(奥行き感)。?bg=goldfish|fuji でも指定できる
+  const BG_LIST = ['default', 'goldfish', 'fuji'];
+  const BG_NAME = { default: '標準', goldfish: '金魚鉢', fuji: '富士山' };
+  const BG_ICON = { default: '◎', goldfish: '🐟', fuji: '🗻' };
+  let bgMode = 'default';
+  try {
+    const q = new URLSearchParams(location.search).get('bg');
+    bgMode = BG_LIST.includes(q) ? q : (BG_LIST.includes(localStorage.getItem('cvBg')) ? localStorage.getItem('cvBg') : 'default');
+  } catch (e) { /* 保存できない環境では標準 */ }
+  const rnd = (() => { let s = 7; return () => (s = (s * 16807) % 2147483647) / 2147483647; })();
+  const STARS = Array.from({ length: 160 }, () => ({ x: rnd(), y: rnd() * 0.62, r: 0.4 + rnd() * 1.3, p: rnd() * 6.28 }));
+  const BUBBLES = Array.from({ length: 34 }, () => ({ x: rnd(), s: 0.5 + rnd(), r: 1.5 + rnd() * 4.5, p: rnd() }));
+  const FISH = [
+    { y: 0.30, sp: 0.000045, sz: 1.0, ph: 0.1, col: ['#ff7a1a', '#ff3b1f'] },
+    { y: 0.55, sp: -0.000032, sz: 0.8, ph: 0.6, col: ['#fff1e0', '#ff4a26'] },   // 更紗(白と赤)
+    { y: 0.72, sp: 0.000027, sz: 0.65, ph: 0.35, col: ['#ff9a3c', '#e8361a'] },
+    { y: 0.42, sp: -0.00004, sz: 0.55, ph: 0.85, col: ['#2a1a14', '#ff6a2a'] },   // 黒出目金っぽい
+  ];
+  const parallax = () => Math.sin(cam.yaw) * W * 0.06;
+  function horizonY() { return H * ((W < 640 ? 0.56 : 0.44) - (cam.pitch - 0.72) * 0.4); }   // スマホは上の状態表示に隠れないよう低め
+
+  function drawFish(x, y, s, dir, t, col) {
+    ctx.save(); ctx.translate(x, y); ctx.scale(dir * s, s);
+    const w = Math.sin(t * 0.008) * 0.35;
+    // 尾びれ(ひらひら)
+    ctx.beginPath(); ctx.moveTo(-26, 0);
+    ctx.quadraticCurveTo(-48, -22 + w * 20, -62, -18 + w * 26); ctx.quadraticCurveTo(-50, 0, -62, 18 + w * 26);
+    ctx.quadraticCurveTo(-48, 22 + w * 20, -26, 0); ctx.closePath();
+    ctx.fillStyle = col[1] + 'cc'; ctx.fill();
+    // 体
+    const g = ctx.createRadialGradient(6, -6, 2, 0, 0, 30);
+    g.addColorStop(0, col[0]); g.addColorStop(1, col[1]);
+    ctx.beginPath(); ctx.ellipse(0, 0, 30, 17, 0, 0, Math.PI * 2); ctx.fillStyle = g; ctx.fill();
+    // 背びれ・胸びれ
+    ctx.beginPath(); ctx.moveTo(-8, -15); ctx.quadraticCurveTo(2, -30 + w * 6, 12, -15); ctx.fillStyle = col[1] + 'aa'; ctx.fill();
+    ctx.beginPath(); ctx.ellipse(6, 10, 9, 4, 0.6 + w, 0, Math.PI * 2); ctx.fillStyle = col[0] + '99'; ctx.fill();
+    // 目
+    ctx.beginPath(); ctx.arc(18, -4, 3.4, 0, Math.PI * 2); ctx.fillStyle = '#111'; ctx.fill();
+    ctx.beginPath(); ctx.arc(19, -5, 1.1, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
+    ctx.restore();
+  }
+  function drawGoldfishBowl(t) {
+    const cx = W / 2 + parallax() * 0.5, cy = H * 0.54, R = Math.min(W * 0.49, H * 0.5);
+    const wall = ctx.createLinearGradient(0, 0, 0, H);
+    wall.addColorStop(0, '#04101c'); wall.addColorStop(0.8, '#02070e'); wall.addColorStop(1, '#0b0805');
+    ctx.fillStyle = wall; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(80,55,30,0.35)'; ctx.fillRect(0, cy + R * 0.93, W, H);   // 鉢を置いた台
+    ctx.beginPath(); ctx.ellipse(cx, cy + R * 0.97, R * 0.75, R * 0.07, 0, 0, Math.PI * 2); ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fill();
+    ctx.save();
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
+    // 水
+    const g = ctx.createLinearGradient(0, cy - R, 0, cy + R);
+    g.addColorStop(0, '#0f5a78'); g.addColorStop(0.45, '#073449'); g.addColorStop(1, '#021521');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // 上から差し込む光
+    ctx.globalCompositeOperation = 'lighter';
+    for (let k = 0; k < 6; k++) {
+      const x0 = cx - R * 0.6 + k * R * 0.24 + Math.sin(t * 0.0004 + k) * 30;
+      const lg = ctx.createLinearGradient(0, cy - R, 0, cy + R * 0.3);
+      lg.addColorStop(0, 'rgba(150,230,255,0.10)'); lg.addColorStop(1, 'rgba(150,230,255,0)');
+      ctx.beginPath(); ctx.moveTo(x0, cy - R); ctx.lineTo(x0 + 40, cy - R); ctx.lineTo(x0 + 140, cy + R * 0.3); ctx.lineTo(x0 + 60, cy + R * 0.3); ctx.closePath();
+      ctx.fillStyle = lg; ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    // 水面のゆらぎ(鉢の上の方)
+    const sy = cy - R * 0.78;
+    ctx.beginPath(); ctx.moveTo(0, sy);
+    for (let x = 0; x <= W; x += 16) ctx.lineTo(x, sy + Math.sin(x * 0.02 + t * 0.002) * 4);
+    ctx.lineTo(W, 0); ctx.lineTo(0, 0); ctx.closePath(); ctx.fillStyle = 'rgba(2,10,18,0.85)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(160,230,255,0.35)'; ctx.lineWidth = 1.5; ctx.beginPath();
+    for (let x = 0; x <= W; x += 16) { const y = sy + Math.sin(x * 0.02 + t * 0.002) * 4; x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } ctx.stroke();
+    // 底の砂利と水草
+    for (let k = 0; k < 220; k++) {
+      const a = (k * 97.13) % 1, px = cx - R + a * R * 2, py = cy + R * (0.80 + ((k * 31.7) % 1) * 0.2);
+      ctx.fillStyle = ['#c9a36b', '#8e6f4a', '#e6d2a8', '#6d5a48'][k % 4]; ctx.beginPath(); ctx.arc(px, py, 3 + (k % 3), 0, Math.PI * 2); ctx.fill();
+    }
+    for (let k = 0; k < 7; k++) {
+      const bx = cx - R * 0.7 + k * R * 0.23, hgt = R * (0.35 + (k % 3) * 0.12);
+      ctx.strokeStyle = k % 2 ? 'rgba(60,170,90,0.75)' : 'rgba(40,130,70,0.75)'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(bx, cy + R * 0.86);
+      for (let s = 1; s <= 10; s++) { const yy = cy + R * 0.86 - hgt * s / 10; ctx.lineTo(bx + Math.sin(s * 0.7 + t * 0.0012 + k) * 14 * s / 10, yy); }
+      ctx.stroke();
+    }
+    // 泡
+    for (const b of BUBBLES) {
+      const u = (b.p + t * 0.00004 * b.s) % 1, by = cy + R * 0.8 - u * R * 1.55, bx = cx - R * 0.8 + b.x * R * 1.6 + Math.sin(u * 12 + b.p * 9) * 6;
+      ctx.beginPath(); ctx.arc(bx, by, b.r, 0, Math.PI * 2); ctx.strokeStyle = 'rgba(200,245,255,0.55)'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.beginPath(); ctx.arc(bx - b.r * 0.35, by - b.r * 0.35, b.r * 0.3, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fill();
+    }
+    // 金魚(鉢の中を左右に泳ぐ)
+    const sc = Math.max(0.8, Math.min(1.8, R / 600));
+    for (const f of FISH) {
+      const u = ((f.ph + t * Math.abs(f.sp)) % 1), dir = f.sp > 0 ? 1 : -1;
+      const x = dir > 0 ? cx - R * 1.1 + u * R * 2.2 : cx + R * 1.1 - u * R * 2.2;
+      const y = cy - R * 0.6 + f.y * R * 1.2 + Math.sin(t * 0.0011 + f.ph * 10) * 18;
+      drawFish(x, y, f.sz * sc, dir, t + f.ph * 1000, f.col);
+    }
+    ctx.restore();
+    // ガラス: 縁・ハイライト・口の楕円
+    ctx.save();
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.strokeStyle = 'rgba(190,240,255,0.35)'; ctx.lineWidth = 4; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, R - 10, Math.PI * 1.08, Math.PI * 1.32); ctx.strokeStyle = 'rgba(255,255,255,0.28)'; ctx.lineWidth = 14; ctx.lineCap = 'round'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, R - 18, Math.PI * 1.6, Math.PI * 1.7); ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 8; ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(cx, cy - R * 0.86, R * 0.5, R * 0.06, 0, 0, Math.PI * 2); ctx.strokeStyle = 'rgba(200,245,255,0.45)'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = 'rgba(2,6,15,0.28)'; ctx.fillRect(0, 0, W, H);   // 前面の表示を読みやすく
+  }
+  function drawFuji(t) {
+    const hy = horizonY(), px = parallax();
+    // 夜明け前の空
+    const g = ctx.createLinearGradient(0, 0, 0, hy + 40);
+    g.addColorStop(0, '#020615'); g.addColorStop(0.55, '#141842'); g.addColorStop(0.85, '#47265a'); g.addColorStop(1, '#a8476a');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    for (const s of STARS) {
+      const a = 0.35 + 0.65 * Math.abs(Math.sin(t * 0.0012 + s.p));
+      ctx.fillStyle = `rgba(220,235,255,${a * (1 - s.y)})`; ctx.fillRect(((s.x * W + px * 0.3) % W + W) % W, s.y * hy, s.r, s.r);
+    }
+    // 月
+    const mx = W * 0.82 + px * 0.4, my = hy * 0.28;
+    const mg = ctx.createRadialGradient(mx, my, 4, mx, my, 70); mg.addColorStop(0, 'rgba(255,240,200,0.5)'); mg.addColorStop(1, 'rgba(255,240,200,0)');
+    ctx.fillStyle = mg; ctx.fillRect(mx - 70, my - 70, 140, 140);
+    ctx.beginPath(); ctx.arc(mx, my, 16, 0, Math.PI * 2); ctx.fillStyle = '#fff4d6'; ctx.fill();
+    // 遠くの稜線
+    ctx.beginPath(); ctx.moveTo(0, hy);
+    for (let x = 0; x <= W; x += 20) ctx.lineTo(x, hy - 18 - Math.sin(x * 0.006 + 1) * 14 - Math.sin(x * 0.017) * 6);
+    ctx.lineTo(W, hy + 4); ctx.lineTo(0, hy + 4); ctx.closePath(); ctx.fillStyle = '#1b1a3c'; ctx.fill();
+    // 富士山(なだらかな裾野の曲線 + 平らな山頂)
+    const fx = W * 0.5 + px, fw = Math.max(W * 0.95, 700), fh = Math.min(H * 0.25, fw * 0.28), top = hy - fh, tw = fw * 0.06;
+    const shape = () => {
+      ctx.beginPath(); ctx.moveTo(fx - fw / 2, hy + 6);
+      ctx.bezierCurveTo(fx - fw * 0.25, hy - fh * 0.12, fx - fw * 0.12, top + fh * 0.18, fx - tw, top);
+      ctx.lineTo(fx - tw * 0.4, top + 4); ctx.lineTo(fx, top + 1); ctx.lineTo(fx + tw * 0.5, top + 5); ctx.lineTo(fx + tw, top);
+      ctx.bezierCurveTo(fx + fw * 0.12, top + fh * 0.18, fx + fw * 0.25, hy - fh * 0.12, fx + fw / 2, hy + 6);
+      ctx.closePath();
+    };
+    shape();
+    const mgr = ctx.createLinearGradient(0, top, 0, hy);
+    mgr.addColorStop(0, '#3c4a86'); mgr.addColorStop(1, '#0d1430');
+    ctx.fillStyle = mgr; ctx.fill();
+    // 雪(山頂から筋状に下りる)
+    ctx.save(); shape(); ctx.clip();
+    const snowY = top + fh * 0.30;
+    ctx.beginPath(); ctx.moveTo(fx - fw * 0.3, top - 10);
+    for (let k = 0; k <= 16; k++) {
+      const x = fx - fw * 0.17 + k * fw * 0.34 / 16, d = (k % 2 ? 0.55 : 1) * (0.75 + 0.25 * Math.sin(k * 1.7));
+      ctx.lineTo(x, top + (snowY - top) * d);
+    }
+    ctx.lineTo(fx + fw * 0.3, top - 10); ctx.closePath();
+    const sg = ctx.createLinearGradient(0, top, 0, snowY);
+    sg.addColorStop(0, '#ffffff'); sg.addColorStop(1, '#b9cdf2'); ctx.fillStyle = sg; ctx.fill();
+    // 等高線(サイバー風の発光ライン)
+    ctx.strokeStyle = 'rgba(51,214,255,0.22)'; ctx.lineWidth = 1;
+    for (let k = 1; k < 12; k++) {
+      const y = top + fh * k / 12 + ((t * 0.01) % (fh / 12));
+      ctx.beginPath(); ctx.moveTo(fx - fw / 2, y); ctx.lineTo(fx + fw / 2, y); ctx.stroke();
+    }
+    ctx.restore();
+    shape(); ctx.strokeStyle = 'rgba(120,200,255,0.55)'; ctx.lineWidth = 1.5; ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 10; ctx.stroke(); ctx.shadowBlur = 0;
+    // 裾野のもや + 湖面への映り込み
+    const fog = ctx.createLinearGradient(0, hy - 30, 0, hy + 20);
+    fog.addColorStop(0, 'rgba(160,140,200,0)'); fog.addColorStop(1, 'rgba(160,140,200,0.35)');
+    ctx.fillStyle = fog; ctx.fillRect(0, hy - 30, W, 50);
+    const lake = ctx.createLinearGradient(0, hy, 0, H);
+    lake.addColorStop(0, '#1a1840'); lake.addColorStop(1, '#02040c');
+    ctx.fillStyle = lake; ctx.fillRect(0, hy + 6, W, H - hy);
+    ctx.save(); ctx.globalAlpha = 0.22; ctx.translate(0, (hy + 6) * 2); ctx.scale(1, -1); shape(); ctx.fillStyle = '#5a6ab0'; ctx.fill(); ctx.restore();
+    for (let k = 0; k < 18; k++) {
+      const y = hy + 12 + k * k * 1.6, w = 40 + k * 10;
+      ctx.fillStyle = `rgba(255,240,200,${0.18 - k * 0.008})`; ctx.fillRect(mx - w / 2 + Math.sin(t * 0.002 + k) * 6, y, w, 1.2);
+    }
+    ctx.fillStyle = 'rgba(2,6,15,0.22)'; ctx.fillRect(0, 0, W, H);
+  }
+  function drawBackdrop(t, alert) {
+    if (bgMode === 'goldfish') drawGoldfishBowl(t);
+    else if (bgMode === 'fuji') drawFuji(t);
+    else {
+      const g = ctx.createRadialGradient(W / 2, H * 0.55, 10, W / 2, H * 0.55, Math.max(W, H) * 0.75);
+      g.addColorStop(0, alert ? '#2a0608' : '#071a33'); g.addColorStop(1, '#020306');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+      return;
+    }
+    if (alert) {   // 背景を選んでいてもアラート中は赤く染める
+      const r = ctx.createRadialGradient(W / 2, H * 0.55, 10, W / 2, H * 0.55, Math.max(W, H) * 0.7);
+      r.addColorStop(0, 'rgba(160,10,20,0.35)'); r.addColorStop(1, 'rgba(60,0,8,0.15)');
+      ctx.fillStyle = r; ctx.fillRect(0, 0, W, H);
+    }
+  }
+  function setBg(m) {
+    bgMode = m;
+    try { localStorage.setItem('cvBg', m); } catch (e) { /* 保存できなくても切り替える */ }
+    const b = document.getElementById('zBg');
+    b.textContent = BG_ICON[m]; b.title = `背景: ${BG_NAME[m]}(押すと切り替え)`;
+    const tt = document.getElementById('bgToast');
+    tt.textContent = '背景: ' + BG_NAME[m]; tt.style.opacity = 1;
+    clearTimeout(setBg._t); setBg._t = setTimeout(() => { tt.style.opacity = 0; }, 1400);
+  }
+  document.getElementById('zBg').onclick = () => setBg(BG_LIST[(BG_LIST.indexOf(bgMode) + 1) % BG_LIST.length]);
+  document.getElementById('zBg').textContent = BG_ICON[bgMode];
+  document.getElementById('zBg').title = `背景: ${BG_NAME[bgMode]}(押すと切り替え)`;
+  window.__cvBg = (m) => { if (m) setBg(m); return bgMode; };
+
   function frame(t) {
     // 操作が無い時はゆっくり回り、少しだけ上下に揺れる(止まって見えないように)
     const idle = performance.now() - lastInput > 2500;
@@ -1581,10 +1786,8 @@
     cam.bob += ((idle && autoSpin ? 0.035 * Math.sin(t * 0.0005) : 0) - cam.bob) * 0.03;
     cam.dist += (cam.tdist - cam.dist) * 0.08;
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    const g = ctx.createRadialGradient(W / 2, H * 0.55, 10, W / 2, H * 0.55, Math.max(W, H) * 0.75);
     // アラートがある階層では背景ごと赤く染まる
-    g.addColorStop(0, mode === 'net' && alertLevel ? '#2a0608' : '#071a33'); g.addColorStop(1, '#020306');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    drawBackdrop(t, mode === 'net' && alertLevel);
     drawFloor();
     const nowSec = Date.now() / 1000;
     drawGroundRing(t);
