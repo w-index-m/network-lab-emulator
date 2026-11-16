@@ -2851,3 +2851,4 @@ CI(v14): `pytest.yml`/`regression.yml` は `claude/**` への push でも動く�
 (ospfRouterId・ospfNbrTable、index は相手 IF の IP)。IaC は `netlab-nirvana` ジョブ・`valhalla-nirvana` ルール群・snmp.yml に OSPF。
 スタンドアロン版は `cvs/valhalla_views.py`(snmp_exporter の生メトリクスから再生・予測・OSPF、`AlertImporter`)。
 `engine/valhalla.py` と `cyber-view-standalone/cvs/valhalla.py` は同一(テストで検出)。テストは `tests/test_valhalla_nirvana.py`。
+追加(v16): `/cyber-view` の BGM(`#zMusic`、なし/jazz/reggae/ambient、`localStorage cvBgm`・`?bgm=`、DEMO 以外でも鳴る。Web Audio 合成、`playJazz`/`playReggae`/`playAmbient`)。

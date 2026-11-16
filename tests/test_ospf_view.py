@@ -149,3 +149,11 @@ def test_background_selector_in_page():
     assert 'id="zBg"' in html and "BG_LIST = ['default', 'goldfish', 'fuji']" in html
     assert 'function drawGoldfishBowl' in html and 'function drawFuji' in html
     assert "localStorage.setItem('cvBg'" in html and "get('bg')" in html
+
+
+def test_bgm_selector_in_page():
+    """BGM(なし/ジャズ/レゲエ/アンビエント)を DEMO 以外でも鳴らせる。選択は記憶、?bgm= でも指定"""
+    html = open(os.path.join(ROOT, 'static', 'cyber_view.html'), encoding='utf-8').read()
+    assert 'id="zMusic"' in html and "STYLES = ['off', 'jazz', 'reggae', 'ambient']" in html
+    assert 'function playJazz' in html and 'function playReggae' in html and 'function playAmbient' in html
+    assert "localStorage.setItem('cvBgm'" in html and "get('bgm')" in html

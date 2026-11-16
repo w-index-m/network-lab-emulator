@@ -29,6 +29,9 @@
   #zoom button:hover { background: rgba(51,214,255,0.18); }
   #bgToast { position: fixed; right: 64px; top: 50%; transform: translateY(70px); padding: 4px 10px; font-size: 12px; color: #fff;
     background: rgba(4,14,28,0.8); border: 1px solid rgba(51,214,255,0.45); opacity: 0; transition: opacity .3s; pointer-events: none; }
+  #bgmToast { position: fixed; right: 64px; top: 50%; transform: translateY(110px); padding: 4px 10px; font-size: 12px; color: #fff;
+    background: rgba(4,14,28,0.8); border: 1px solid rgba(255,171,46,0.55); opacity: 0; transition: opacity .3s; pointer-events: none; }
+  #bgmToast.show { opacity: 1; }
   #zoom button.on { color: #3dff9a; border-color: rgba(61,255,154,0.55); }
   body.showlist:not(.links) #zoom { right: calc(min(300px, 44vw) + 28px); }
   body.showlist.links #zoom { right: calc(min(380px, 46vw) + 28px); }
@@ -162,7 +165,7 @@
 </div>
 
 <div id="cidr" class="hud">0.0.0.0/0</div>
-<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山)">◎</button></div>
+<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山)">◎</button><button id="zMusic" title="BGM を切り替え(なし/ジャズ/レゲエ/アンビエント)">♪</button></div><div id="bgmToast" class="hud"></div>
 <div id="bgToast" class="hud"></div>
 <div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
 <div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
@@ -2241,10 +2244,24 @@
   const post = (path) => fetch(path, { method: 'POST', headers: token ? { 'X-Session-Token': token } : {} }).then(r => r.json());
   let AC = null, master = null, musicOn = false, musicTimer = null, demoOn = false, demoTimer = null, tourTimer = null;
   const NOTE = (n) => 440 * Math.pow(2, (n - 69) / 12);
-  // A minor のアンビエント(Am - F - C - G)。1小節 = 4拍、BPM 92
-  const BPM = 92, BEAT = 60 / BPM;
+  // BGM は3種類(すべてその場で合成。曲のコピーではなく、ジャンルらしいリズムと和音の型だけを使う)
+  //   ambient: A minor のアンビエント(Am - F - C - G)、BPM 92(DEMO の既定)
+  //   jazz:    スウィングの ii-V-I(Dm7 - G7 - Cmaj7 - A7)、ウォーキングベース・ライド・コンピング、BPM 132
+  //   reggae:  ワンドロップ(3拍目にキックとリム)、裏拍のスカンク、オルガンのバブル、Am7 - D7、BPM 74
+  const STYLES = ['off', 'jazz', 'reggae', 'ambient'];
+  const STYLE_LABEL = { off: 'BGM なし', jazz: 'BGM: JAZZ', reggae: 'BGM: REGGAE', ambient: 'BGM: AMBIENT' };
+  const STYLE_BPM = { ambient: 92, jazz: 132, reggae: 74 };
+  let style = 'ambient';
+  try { const v = localStorage.getItem('cvBgm'); if (STYLES.includes(v)) style = v; } catch (e) { /* 記憶できなくても動く */ }
+  const BPM = 92, BEAT = 60 / BPM;   // ディレイの長さ(アンビエント基準)
+  const beatLen = () => 60 / (STYLE_BPM[style] || 92);
   const CHORDS = [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]];
   const PENTA = [69, 72, 74, 76, 79, 81, 84];
+  const JAZZ = [   // [ルート, コードの構成音(ルート以外)]、1コード2小節
+    [50, [53, 57, 60, 64]], [43, [53, 59, 62, 64]], [48, [52, 55, 59, 62]], [45, [49, 55, 59, 61]]];
+  const JAZZ_SCALE = [60, 62, 63, 64, 67, 69, 70, 72, 74, 75, 76, 79];   // C のブルース寄りの音
+  const REGGAE = [[45, [55, 60, 64, 67]], [50, [54, 57, 60, 66]]];       // Am7 / D7、1コード2小節
+  let noiseBuf = null;
   function initAudio() {
     if (AC) return;
     AC = new (window.AudioContext || window.webkitAudioContext)();
@@ -2255,6 +2272,9 @@
     dly.delayTime.value = BEAT * 0.75; fb.gain.value = 0.35; wet.gain.value = 0.3;
     master.connect(comp); master.connect(dly); dly.connect(fb); fb.connect(dly); dly.connect(wet); wet.connect(comp);
     comp.connect(AC.destination);
+    noiseBuf = AC.createBuffer(1, AC.sampleRate * 0.5, AC.sampleRate);
+    const ch = noiseBuf.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
   }
   function tone(freq, t, dur, type, vol, cutoff, attack) {
     const o = AC.createOscillator(), g = AC.createGain(), f = AC.createBiquadFilter();
@@ -2266,40 +2286,131 @@
     o.connect(f); f.connect(g); g.connect(master);
     o.start(t); o.stop(t + dur + 0.05);
   }
-  function kick(t) {
+  function kick(t, vol) {
     const o = AC.createOscillator(), g = AC.createGain();
     o.frequency.setValueAtTime(110, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.25);
-    g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
+    g.gain.setValueAtTime(vol || 0.5, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
     o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.4);
+  }
+  // ノイズ系(ライド・ハイハット・リム): 高域だけ通したノイズを短く鳴らす
+  function noise(t, dur, vol, hp, bp) {
+    const src = AC.createBufferSource(), g = AC.createGain(), f = AC.createBiquadFilter();
+    src.buffer = noiseBuf; f.type = bp ? 'bandpass' : 'highpass'; f.frequency.value = bp || hp || 7000;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(f); f.connect(g); g.connect(master); src.start(t); src.stop(t + dur + 0.02);
+  }
+  const anyOf = (a) => a[Math.floor(Math.random() * a.length)];
+  function playAmbient(beat, t, B) {
+    const bar = Math.floor(beat / 4), chord = CHORDS[bar % CHORDS.length];
+    if (beat % 4 === 0) {                         // 小節頭: パッドとベース
+      chord.forEach(n => { tone(NOTE(n), t, B * 4.2, 'sawtooth', 0.045, 900, 1.2); tone(NOTE(n) * 1.005, t, B * 4.2, 'sawtooth', 0.03, 700, 1.4); });
+      tone(NOTE(chord[0] - 24), t, B * 3.6, 'sine', 0.22, 400, 0.05);
+    }
+    if (beat % 2 === 0) kick(t);
+    for (let k = 0; k < 2; k++) {                 // 8分のアルペジオ(ペンタトニックからランダム)
+      if (Math.random() < 0.72) tone(NOTE(anyOf(PENTA)), t + k * B / 2, 0.35, 'triangle', 0.07, 3000);
+    }
+  }
+  function playJazz(beat, t, B) {
+    const pos = beat % 8, [root, ch] = JAZZ[Math.floor(beat / 8) % JAZZ.length];
+    const nextRoot = JAZZ[(Math.floor(beat / 8) + 1) % JAZZ.length][0];
+    const sw = B * 2 / 3;                          // スウィング: 裏の8分は3連の3つ目
+    // ウォーキングベース(4分): ルート → 構成音 → … 最後は次のルートへ半音で寄る
+    const walk = [root, ch[0] - 12, ch[1] - 12, ch[0] - 12, root + 12 - 12, ch[2] - 24, ch[1] - 12, nextRoot + (Math.random() < 0.5 ? 1 : -1)];
+    tone(NOTE(walk[pos] - 12), t, B * 0.95, 'triangle', 0.26, 700, 0.01);
+    // ライド: 1・2(+裏)・3・4(+裏)の「チン・チキ」
+    noise(t, 0.28, 0.05, 6500);
+    if (beat % 2 === 1) noise(t + sw, 0.16, 0.035, 7500);
+    if (beat % 2 === 1) noise(t, 0.05, 0.03, 9000);       // 2・4 のハイハット
+    // コンピング: エレピ風(サイン+少し倍音)で 2拍目と 4拍目の裏
+    if (pos === 1 || pos === 5 || (pos === 3 && Math.random() < 0.5) || (pos === 6 && Math.random() < 0.6)) {
+      const tt = pos === 3 || pos === 6 ? t + sw : t;
+      ch.forEach(n => { tone(NOTE(n), tt, B * 0.9, 'sine', 0.045, 2500); tone(NOTE(n) * 2, tt, B * 0.5, 'sine', 0.008, 4000); });
+    }
+    // メロディ(少なめ、スウィングの8分)
+    if (Math.random() < 0.45) tone(NOTE(anyOf(JAZZ_SCALE) + 12), t, B * 0.6, 'triangle', 0.05, 2800);
+    if (Math.random() < 0.3) tone(NOTE(anyOf(JAZZ_SCALE) + 12), t + sw, B * 0.3, 'triangle', 0.04, 2800);
+    if (pos === 0 && Math.random() < 0.3) kick(t, 0.18);  // フェザリングのバスドラ
+  }
+  function playReggae(beat, t, B) {
+    const pos = beat % 4, [root, ch] = REGGAE[Math.floor(beat / 8) % REGGAE.length];
+    // ワンドロップ: 3拍目にキックとリム(1拍目は空ける)
+    if (pos === 2) { kick(t, 0.55); noise(t, 0.09, 0.09, 0, 1800); }
+    // ハイハット: 8分(裏を少し跳ねさせる)
+    noise(t, 0.04, 0.025, 8000); noise(t + B * 0.55, 0.04, 0.035, 8000);
+    // スカンク: 裏拍で短く切ったギター風の和音
+    ch.forEach(n => tone(NOTE(n + 12), t + B * 0.5, 0.11, 'square', 0.022, 2600, 0.003));
+    // オルガンのバブル: 16分の裏で低めの和音を細かく
+    tone(NOTE(ch[0]), t + B * 0.75, 0.09, 'square', 0.018, 900, 0.005);
+    tone(NOTE(ch[1]), t + B * 0.25, 0.09, 'square', 0.014, 900, 0.005);
+    // ベース: 重めのサイン、2拍目から入るのがそれらしい
+    const line = [null, root, root + 7, root + 10, root + 12, null, root + 7, root + 3];
+    const bn = line[beat % 8];
+    if (bn != null) tone(NOTE(bn - 12), t, B * 0.85, 'sine', 0.3, 500, 0.02);
+    // ときどきメロディカ風の短いフレーズ
+    if (pos === 0 && Math.random() < 0.35) tone(NOTE(anyOf([69, 72, 74, 76, 79])), t + B, B * 1.4, 'sawtooth', 0.03, 1600, 0.05);
   }
   let nextBeat = 0, beatNo = 0;
   function scheduler() {
     if (!AC) return;
+    const B = beatLen();
     while (nextBeat < AC.currentTime + 0.25) {
-      const bar = Math.floor(beatNo / 4), chord = CHORDS[bar % CHORDS.length], t = nextBeat;
-      if (beatNo % 4 === 0) {                       // 小節頭: パッドとベース
-        chord.forEach(n => { tone(NOTE(n), t, BEAT * 4.2, 'sawtooth', 0.045, 900, 1.2); tone(NOTE(n) * 1.005, t, BEAT * 4.2, 'sawtooth', 0.03, 700, 1.4); });
-        tone(NOTE(chord[0] - 24), t, BEAT * 3.6, 'sine', 0.22, 400, 0.05);
-      }
-      if (beatNo % 2 === 0) kick(t);
-      for (let k = 0; k < 2; k++) {                 // 8分のアルペジオ(ペンタトニックからランダム)
-        if (Math.random() < 0.72) tone(NOTE(PENTA[Math.floor(Math.random() * PENTA.length)]), t + k * BEAT / 2, 0.35, 'triangle', 0.07, 3000);
-      }
-      nextBeat += BEAT; beatNo++;
+      const t = nextBeat;
+      if (style === 'jazz') playJazz(beatNo, t, B);
+      else if (style === 'reggae') playReggae(beatNo, t, B);
+      else playAmbient(beatNo, t, B);
+      nextBeat += B; beatNo++;
     }
   }
   function startMusic() {
+    if (style === 'off') style = 'ambient';
     initAudio(); AC.resume(); musicOn = true;
     nextBeat = AC.currentTime + 0.1;
     if (!musicTimer) musicTimer = setInterval(scheduler, 100);
     master.gain.setTargetAtTime(0.22, AC.currentTime, 0.5);
     document.getElementById('demoMute').textContent = '♪';
+    updateMusicBtn();
   }
   function stopMusic() {
     musicOn = false;
     if (AC) master.gain.setTargetAtTime(0, AC.currentTime, 0.3);
     clearInterval(musicTimer); musicTimer = null;
     document.getElementById('demoMute').textContent = '×';
+    updateMusicBtn();
+  }
+  // 右の操作ボタン列の ♪: なし → ジャズ → レゲエ → アンビエント → なし(DEMO 以外でも鳴らせる。選択は記憶)
+  function updateMusicBtn() {
+    const b = document.getElementById('zMusic'), on = musicOn && style !== 'off';
+    b.classList.toggle('on', on);
+    b.textContent = !on ? '♪' : style === 'jazz' ? '🎷' : style === 'reggae' ? '🌴' : '🎹';
+    b.title = (on ? STYLE_LABEL[style] : 'BGM なし') + '(押すと切り替え)';
+  }
+  let bgmToastTimer = null;
+  function bgmToast(text) {
+    const el = document.getElementById('bgmToast');
+    el.textContent = text; el.classList.add('show');
+    clearTimeout(bgmToastTimer); bgmToastTimer = setTimeout(() => el.classList.remove('show'), 1600);
+  }
+  function setStyle(v, announce) {
+    style = v;
+    try { localStorage.setItem('cvBgm', v); } catch (e) { /* 記憶できなくても動く */ }
+    if (v === 'off') stopMusic();
+    else { if (AC) nextBeat = Math.max(nextBeat, AC.currentTime + 0.05); startMusic(); }
+    if (announce) bgmToast(STYLE_LABEL[v]);
+  }
+  document.getElementById('zMusic').onclick = () => {
+    const cur = musicOn ? style : 'off';
+    setStyle(STYLES[(STYLES.indexOf(cur) + 1) % STYLES.length], true);
+  };
+  // 前回 BGM を鳴らしていたら、最初に画面を触った時に再開する(ブラウザは操作なしの自動再生を許さない)
+  let savedBgm = null;
+  try { savedBgm = localStorage.getItem('cvBgm'); } catch (e) { /* 無くても動く */ }
+  const qBgm = new URLSearchParams(location.search).get('bgm');
+  if (STYLES.includes(qBgm)) savedBgm = qBgm;
+  if (savedBgm && savedBgm !== 'off') {
+    style = savedBgm;
+    const resume = () => { if (!musicOn) setStyle(savedBgm, true); window.removeEventListener('pointerdown', resume); window.removeEventListener('keydown', resume); };
+    window.addEventListener('pointerdown', resume); window.addEventListener('keydown', resume);
   }
   // 出来事の効果音(情=高いチャイム、注/警=低い音)
   function sfx(kind) {
@@ -2340,7 +2451,7 @@
   }
   document.getElementById('mDemo').onclick = toggleDemo;
   document.getElementById('demoMute').onclick = () => (musicOn ? stopMusic() : startMusic());
-  window.__cvDemo = () => ({ demoOn, musicOn, ctx: AC ? AC.state : null, beats: beatNo });
+  window.__cvDemo = () => ({ demoOn, musicOn, style, ctx: AC ? AC.state : null, beats: beatNo });
   // デモの無いサーバー(スタンドアロン版など)では DEMO ボタンを出さない
   fetch('/api/demo/status', { headers: token ? { 'X-Session-Token': token } : {} })
     .then(r => { if (!r.ok) document.getElementById('mDemo').style.display = 'none'; })
