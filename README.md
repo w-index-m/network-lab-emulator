@@ -13,6 +13,8 @@
   <sub>通常運用 → リンク障害と迂回 → フラップ → 経路の変化(情)。クリックで音楽つきの動画 / normal → link failure and reroute → flapping → route change info. Click for the full video with music.</sub>
 </p>
 
+> 🇬🇧 **English version: [at the bottom of this page](#english)**
+>
 > 📊 **[実装進捗ダッシュボード](./IMPLEMENTATION_PROGRESS.md)**  
 > ✅ Priority 1 の進捗をまとめて確認できます。
 
@@ -397,3 +399,122 @@ Network Lab Emulator は、ネットワーク学習・検証・運用演習・�
 
 実験環境の構築、プロトコル挙動の理解、運用監視の検証、実機との連携まで、1つのリポジトリで扱えるようにしています。
 
+
+---
+
+<a id="english"></a>
+
+# Network Lab Emulator (English)
+
+A multi-vendor network device CLI emulator. In the browser you can use a CLI close to real equipment, simulate routing
+protocols, and try out monitoring and observability. It is not just a "show text generator": several protocols run as real
+sockets and real packets (OSPF over raw IP protocol 89, BGP over TCP 179, RIPv2 over UDP 520, SNMP over UDP 161,
+NETCONF / SSH-CLI / Telnet-CLI, gNMI over gRPC), so real clients (ncclient, gnmic / pygnmi, snmpwalk, ssh / telnet) can
+connect to emulated devices.
+
+Public deployment: https://network-lab-emulator.onrender.com/
+
+## Overview
+
+- Multi-vendor: Cisco / Nexus / Catalyst / ASA / Arista / Juniper / Yamaha RTX / APRESIA / FortiGate / F5 BIG-IP / AWS ALB / Si-R / SR-S / BAS (pseudo FLET'S)
+- CLI operation and config loading (some devices use their real syntax as is: aws-cli, tmsh, Junos `set` commands)
+- Behaviour for training and testing: OSPF / BGP (Route Reflector, RTBH, Confederation, Graceful Restart / LLGR, RPKI) / RIP /
+  VRRP (incl. unicast-peer) / HSRP / STP / LACP / VLAN / IPv6 routing / IPsec / PPPoE / v6plus (MAP-E)
+- F5 BIG-IP and AWS ALB do real health checks and real TCP / HTTP load balancing (round-robin, least-connections, persistence, SNAT)
+- Topology editor to build connections
+- Monitoring with SNMP / syslog / Prometheus / Grafana / Loki / Alertmanager
+- Security and load testing tools: Strix (AI pentest agent), ZGrab2, k6
+- Tools for real devices: netmiko / Ansible / ncclient / pygnmi
+- **Mock Nirvana (`/cyber-view`)**: a 3D network monitoring view in the style of NIRVANA-Kai, with a standalone edition for
+  real monitoring environments → [see the section above](#モックニルヴァーナ--cyber-viewcyber-view) (written in Japanese and English)
+
+## Concept: Network Infrastructure Digital Twin + AI Observability
+
+This project can be seen as the network version of a "digital twin" (reproducing physical equipment in a virtual space from sensor data).
+
+| Digital twin element | Implementation here |
+|---|---|
+| Reproduce physical assets virtually | Catalyst / Cisco / SR-S / ASA / Nexus / Arista / Juniper / Yamaha RTX / APRESIA / FortiGate / BIG-IP / AWS ALB / Si-R / BAS emulated with protocol engines |
+| Real telemetry from the virtual model | Virtual SNMP agent (MIB-II, IF-MIB, OSPF-MIB, IP-FORWARD-MIB, CISCO-PROCESS-MIB), real UDP syslog / SNMP traps (`engine/syslog_sender.py`) |
+| Monitoring and observability layer | [SNMP dashboard](./docs/snmp-dashboard.md), [Syslog AI monitor](./docs/syslog-ai-monitor.md), Nirvana (`/cyber-view`) |
+| Bridge to the real world (tools) | netmiko / paramiko for real devices, `route_injector` (route load tests), `bigip_qkview_collector` (log collection), etc. |
+
+It is not "AI virtualizing the infrastructure" but "AI observing and summarizing a virtualized network infrastructure".
+See [`docs/feature-inventory.md`](./docs/feature-inventory.md) for details.
+
+## Supported devices
+
+| Device | CLI style | Main features |
+|---|---|---|
+| **Cisco Catalyst** | IOS-XE 17.x | OSPF / BGP / HSRP / STP / EtherChannel / ZTP (AUTOINSTALL) / 802.1X |
+| **Cisco Nexus** | NX-OS 10.2 | OSPF / BGP / vPC / VRRP / LACP / TACACS+ and AAA / VXLAN EVPN |
+| **Cisco ASA** | ASA 9.x | firewall / NAT / ACL / IPsec / PPPoE WAN / threat-detection scanning-threat |
+| **Arista** | EOS | shares the Cisco-style tree; netmiko / Ansible (eAPI JSON) |
+| **Juniper** | Junos (set / delete / commit) | two-stage candidate / active config, real NETCONF / SSH listeners |
+| **Yamaha RTX (RTX1300)** | RTX | real routing, PPPoE client, v6plus (MAP-E), NAT / PPPoE config |
+| **APRESIA** | ApresiaLight | VLAN / STP / LACP |
+| **FortiGate** | FortiOS (config / edit / set / next / end) | PPPoE WAN, IPsec (IKE / IPsec) |
+| **F5 BIG-IP** | TMOS / tmsh | LTM (pool / virtual / monitor) with **real TCP health checks and real traffic distribution**, persistence (source-addr), SNAT (automap / snatpool), net vlan / net self |
+| **AWS ALB** | aws-cli (elbv2) | **real HTTP health checks and real L7 distribution** (path / host-based rules), cookie stickiness |
+| **Fujitsu SR-S** | SR-S series | VLAN / LACP / STP |
+| **Fujitsu Si-R** | Si-R G series | RIP / OSPF / VRRP / BGP / IPsec |
+| **BAS (pseudo FLET'S)** | original (access concentrator model) | PPPoE / v6plus (MAP-E) rule server |
+| **NetAttest / WLC** | NetAttest EPS style / Catalyst 9800 | real RADIUS, 802.1X, Wi-Fi authentication |
+| **PC / Host** | host commands | IP settings, default gateway, real `http.server`, `nmcli` supplicant |
+
+BGP also supports Route Reflector (cluster-id / route-reflector-client), RTBH, Confederation, Hostname Capability,
+Graceful Restart / LLGR and RPKI. IPv6 addressing, static routing and ping / traceroute are implemented (`docs/ipv6-routing.md`).
+
+## Main features
+
+- CLI emulation: an interactive CLI close to real devices (`configure`, `interface`, `router ospf`, `show ip route`, …)
+- Topology editing: place devices and links by drag and drop; edit and delete connections; manage VLANs
+- Protocol emulation: RIP / OSPF / BGP / VRRP / HSRP / STP / LACP
+- Monitoring: SNMP traps to metrics, alerting with Prometheus + Alertmanager, Nirvana 3D view
+- Real devices: config deployment with netmiko / paramiko; route_injector / qkview / UCS collection tools
+
+## Getting started
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python -m uvicorn app:app --host 0.0.0.0 --port 8000
+# open http://localhost:8000          (login admin / admin by default; NETLAB_AUTH_DISABLE=1 skips login)
+# open http://localhost:8000/cyber-view for Nirvana
+```
+
+In the launcher, choose devices, add connections and open CLI terminals; create links between devices in the topology editor.
+
+## Typical uses
+
+- **Learn routing with a CLI**: build a lab in the browser emulator (`show ip route`, `show ip ospf neighbor`, `show run`)
+- **Build labs from a topology**: combine switches, routers and PCs; check VLAN / LACP / STP / OSPF; mix vendors
+- **Try the same config as real devices**: netmiko / RESTCONF / export-deploy flow, e.g.
+  `python tools/eveng_deploy.py export --api http://127.0.0.1:8099 --out ./out --platform c3650`
+- **Check monitoring and alerts**: Prometheus + Alertmanager samples (`tools/monitoring_stack/README.md`), the Cisco traffic
+  monitoring IaC (`iac/cisco-traffic-monitoring/`), and Nirvana
+- **Watch real devices in 3D**: `cyber-view-standalone/` ([README](cyber-view-standalone/README.md#english))
+
+## Documents
+
+`docs/` has one document per feature area, each with a live verification transcript (more than 90 documents).
+Representative ones are listed in the Japanese section above ("ドキュメント一覧"). Nirvana-related documents are listed in the
+Nirvana section (日本語 / English).
+
+## Running the tests
+
+```bash
+pytest tests/ -q -p no:cacheprovider      # full regression suite (~15 min)
+ruff check .
+```
+
+## License
+
+MIT License
+
+## Summary
+
+Network Lab Emulator is a CLI-based multi-vendor network emulator that makes network learning, testing, operations
+training and demo environments easy to build — from building a lab and understanding protocol behaviour to verifying
+monitoring and working with real devices, all in one repository.
