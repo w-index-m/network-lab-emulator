@@ -309,7 +309,8 @@
   const octets = (ip) => ip.split('.').map(Number);
   const RULE_CODE = { valhalla: 'VH', nirvana_rule: 'RULE', conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR',
     if_flap: 'IF FLAP', ospf_flap: 'OSPF FLAP', bgp_flap: 'BGP FLAP', eigrp_flap: 'EIGRP FLAP', fhrp_flap: 'FHRP FLAP',
-    stp_tc_flap: 'STP TC', stp_root_flap: 'STP ROOT', mac_flap: 'MAC FLAP', errdisable_flap: 'ERRDIS', route_flap: 'RT FLAP' };
+    stp_tc_flap: 'STP TC', stp_root_flap: 'STP ROOT', mac_flap: 'MAC FLAP', errdisable_flap: 'ERRDIS', route_flap: 'RT FLAP',
+    cpu_high: 'CPU HIGH', wan_slow: 'WAN SLOW', wan_loss: 'WAN LOSS' };
   const SEV_COL = { high: '#ff3b4e', medium: '#ffab2e', warning: '#ffab2e', low: '#ffe14d' };
 
   // ── 表示状態: prefix = 選んだオクテット列 (長さ0〜3) / host = ホストビュー ──
@@ -1321,8 +1322,18 @@
     if (hostView) { if (dev === hostView.id) return [0, 1, 0]; return peerPos[dev] || null; }
     const ip = devIp(dev); return ip ? posForIp(ip) : null;
   }
+  const flowPopAt = {};
   function popupForFlow(e) {
     const dstPos = mode !== 'net' ? posForDevice(e.dst || (e.path || []).slice(-1)[0] || e.src) : hostView ? (posForDevice(e.dst) || posForDevice(e.src)) : posForIp(e.dst_ip);
+    if (e.via === 'sflow' || e.via === 'netflow') {     // 装置が送ってきたフロー(ping の結果ではない)
+      // 経路上の複数の装置が同じ通信を報告するので、同じ送信元・宛先は 10秒に1回だけ出す
+      const k = `${e.src_ip}>${e.dst_ip}`, nowT = performance.now();
+      if (flowPopAt[k] && nowT - flowPopAt[k] < 10000) return;
+      flowPopAt[k] = nowT;
+      const kb = (e.bytes || 0) / 1024;
+      popup(dstPos, '#33d6ff', e.via === 'sflow' ? 'sFlow' : 'NetFlow', `${String(e.proto || '').toUpperCase()} ${e.src_ip || ''} → ${e.dst_ip || ''} ・ ${kb >= 1024 ? (kb / 1024).toFixed(1) + 'MB' : kb.toFixed(0) + 'KB'}`);
+      return;
+    }
     const okN = e.ok ? e.pkts : 0;
     popup(dstPos, e.ok ? '#3dff9a' : '#ff3b4e', e.ok ? 'PING OK' : 'PING NG', `${okN}/${e.pkts} ・ ${e.size}B`);
   }
@@ -2656,7 +2667,7 @@
       alerts = alerts.concat(d.alerts || []).slice(-400);
       if (primed && (d.alerts || []).length) sfx((d.alerts || []).some(a => a.severity === 'high' || a.severity === 'medium') ? 'alert' : 'warn');
       if (primed) (d.alerts || []).filter(a => a.severity === 'warning').forEach(a =>
-        popup(posForDevice(a.src), '#ffab2e', `WARN ${RULE_CODE[a.rule] || 'FLAP'}`, (a.detail || '').split(': ')[0].slice(0, 22), 7000, '注'));
+        popup(posForDevice(a.src), '#ffab2e', `WARN ${RULE_CODE[a.rule] || String(a.rule || '').toUpperCase()}`, (a.detail || '').split(': ')[0].slice(0, 22), 7000, '注'));
       flowTotal = d.seq; seq = d.seq; alertSeq = d.alert_seq;
       document.getElementById('sFlows').textContent = flowTotal;
       document.getElementById('sAlerts').textContent = alerts.length;

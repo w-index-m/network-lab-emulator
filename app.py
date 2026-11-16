@@ -408,6 +408,9 @@ def _nac_persist_dump(state) -> dict:
     d = getattr(state, 'dot1x', None)
     if d:
         out['dot1x'] = {k: v for k, v in d.items() if k not in ('sessions', 'blocked')}
+    fe = getattr(state, 'flow_export', None)
+    if fe:
+        out['flow_export'] = {k: {kk: vv for kk, vv in v.items() if kk != 'sent'} for k, v in fe.items()}
     w = getattr(state, 'wireless', None)
     if w:
         out['wireless'] = {k: v for k, v in w.items() if k != 'clients'}
@@ -429,6 +432,8 @@ def _nac_persist_restore(state, dev_data: dict) -> None:
         srv['stats'] = {k: 0 for k in srv.get('stats', {})}
     if dev_data.get('dot1x'):
         state.dot1x = dict(dev_data['dot1x'], sessions={}, blocked=[])
+    if dev_data.get('flow_export'):
+        state.flow_export = {k: dict(v, sent=0) for k, v in dev_data['flow_export'].items()}
     if dev_data.get('wireless'):
         state.wireless = dict(dev_data['wireless'], clients={})
     if dev_data.get('netattest'):
@@ -3327,10 +3332,10 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # Cisco/Catalyst: "logging host 192.168.1.100"
     # Cisco/Catalyst: "logging trap informational"
     # Cisco/Catalyst: "logging facility local7"
-    log_host = re.match(r'^logging\s+(?:host|server)\s+([\d.]+)(?:\s+(\d+))?', c)
+    log_host = re.match(r'^logging\s+(?:host|server)\s+([\d.]+)(?:\s+(\d+)|\s+transport\s+udp\s+port\s+(\d+))?', c)
     if log_host:
         ip = log_host.group(1)
-        port = int(log_host.group(2)) if log_host.group(2) else 514
+        port = int(log_host.group(2) or log_host.group(3) or 514)
         existing = next((s for s in state.syslog_servers if s['host'] == ip), None)
         if existing:
             # 同じホストを再設定した場合はポート等を更新する。更新しないと、
@@ -3599,6 +3604,63 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         else:
             ipv6_engine.add_static_route(device_id, dest, prefix, next_hop)
         return
+
+    # ── フロー情報の送出(sFlow / NetFlow)。ラボの通信が通るたびに本物の UDP を送る(engine/flow_export.py) ──
+    if state.device_type in ('cisco', 'catalyst', 'nexus', 'arista'):
+        from engine import flow_export as _fx
+        _fe = _fx.config(state)
+        _sf, _nf = _fe['sflow'], _fe['netflow']
+        if state.device_type == 'nexus' and re.match(r'^(no\s+)?feature\s+sflow$', c):
+            _sf['enabled'] = not c.startswith('no')
+            return None                      # feature 一覧(rules.py 側)にも載せる
+        m_fx = re.match(r'^sflow\s+collector-ip\s+([\d.]+)(?:\s+vrf\s+\S+)?$', c) if state.device_type == 'nexus' else \
+            re.match(r'^sflow\s+destination\s+([\d.]+)(?:\s+(\d+))?$', c) if state.device_type == 'arista' else None
+        if m_fx:
+            port = int(m_fx.group(2)) if m_fx.lastindex and m_fx.lastindex >= 2 and m_fx.group(2) else 6343
+            _sf['collectors'] = [x for x in _sf['collectors'] if x[0] != m_fx.group(1)] + [[m_fx.group(1), port]]
+            return ''
+        if state.device_type in ('nexus', 'arista'):
+            m_fx = re.match(r'^sflow\s+collector-port\s+(\d+)$', c)
+            if m_fx:
+                _sf['collectors'] = [[h, int(m_fx.group(1))] for h, _p in _sf['collectors']]
+                return ''
+            m_fx = re.match(r'^sflow\s+(?:sampling-rate|sample)\s+(\d+)$', c)
+            if m_fx:
+                _sf['rate'] = max(1, int(m_fx.group(1)))
+                return ''
+            m_fx = re.match(r'^sflow\s+(?:agent-ip|source)\s+([\d.]+)$', c)
+            if m_fx:
+                _sf['agent_ip'] = m_fx.group(1)
+                return ''
+            if re.match(r'^sflow\s+(data-source\s+interface|source-interface|counter-poll-interval|polling-interval|max-sampled-size)\b', c):
+                return ''
+            if state.device_type == 'arista' and c in ('sflow run', 'no sflow run'):
+                _sf['enabled'] = c == 'sflow run'
+                return ''
+            if re.match(r'^no\s+sflow\s+(collector-ip|destination)\s+([\d.]+)', c):
+                ip_ = re.match(r'^no\s+sflow\s+\S+\s+([\d.]+)', c).group(1)
+                _sf['collectors'] = [x for x in _sf['collectors'] if x[0] != ip_]
+                return ''
+        m_fx = re.match(r'^(no\s+)?ip\s+flow-export\s+destination\s+([\d.]+)\s+(\d+)$', c)
+        if m_fx:
+            _nf['collectors'] = [x for x in _nf['collectors'] if x[0] != m_fx.group(2)]
+            if not m_fx.group(1):
+                _nf['collectors'].append([m_fx.group(2), int(m_fx.group(3))])
+            return ''
+        m_fx = re.match(r'^ip\s+flow-export\s+version\s+(\d+)$', c)
+        if m_fx:
+            if m_fx.group(1) != '5':
+                return '% このエミュレータは NetFlow v5 だけを送ります'
+            _nf['version'] = 5
+            return ''
+        m_fx = re.match(r'^ip\s+flow-export\s+source\s+(\S+)$', orig.strip(), re.I)
+        if m_fx:
+            _nf['source'] = m_fx.group(1)
+            return ''
+        m_fx = re.match(r'^(no\s+)?ip\s+flow\s+(ingress|egress)$', c)
+        if m_fx and state.mode.startswith('config-if') and state.current_if:
+            _nf['ifaces'] = [x for x in _nf['ifaces'] if x != state.current_if] + ([] if m_fx.group(1) else [state.current_if])
+            return ''
 
     # 宛先を捨てる経路 "ip route 192.0.2.66 255.255.255.255 Null0"(ブラックホール。遮断に使う)
     null_route = re.match(r'^ip\s+route\s+([\d.]+)\s+([\d.]+)\s+null\s*0\s*$', c)
@@ -5003,6 +5065,12 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
 async def handle_protocol_show(device_id: str, command: str, state: DeviceState):
     """showコマンドでエンジンが起動していればエンジン出力を返す"""
     c = command.lower().strip()
+    if state.device_type in ('nexus', 'arista') and c in ('show sflow', 'show sflow detail'):
+        from engine.flow_export import show as _fx_show
+        return _fx_show(state, state.device_type)
+    if state.device_type in ('cisco', 'catalyst') and c in ('show ip flow export', 'show ip cache flow'):
+        from engine.flow_export import show as _fx_show
+        return _fx_show(state, state.device_type)
 
     # ── ALB: 実機にCLI/showコマンドという概念が無く、aws-cli(aws elbv2
     # ...)構文のみ——ここの汎用show系正規表現群(show running-config等)
@@ -6103,6 +6171,10 @@ def _build_running_config(device_id: str, state) -> str:
                 _sfx = ' local' if _authc.get('local_fallback') else ''
                 lines.append(f"aaa authentication login default group {_authc['group']}{_sfx}")
             lines.append('')
+        from engine.flow_export import running_config_lines as _fx_lines
+        _fxl = _fx_lines(state, 'nexus')
+        if _fxl:
+            lines.extend(_fxl + [''])
         lines.append('! end')
         return '\n'.join(lines)
 
@@ -6678,6 +6750,11 @@ def _build_running_config(device_id: str, state) -> str:
                 port_str = f' {s["port"]}' if s.get('port', 514) != 514 else ''
                 lines.append(f'logging facility {s.get("facility","local7")}')
                 lines.append(f'logging host {s["host"]}{port_str}')
+        from engine.flow_export import running_config_lines as _fx_lines
+        _fxl = _fx_lines(state, state.device_type)
+        if _fxl:
+            lines.append('!')
+            lines.extend(_fxl)
         # SNMP
         comms = getattr(state, 'snmp_community', [])
         hosts = getattr(state, 'snmp_hosts', [])
@@ -7038,6 +7115,21 @@ def _record_flow_event(src_id: str, dest_ip: str, path: list, ping_result: dict,
                                src_ip=_src_ip_toward(src_id, path))
 
 
+def _flow_export_ping(src_id, dest_ip, path, count, size):
+    """経路上で sFlow / NetFlow を設定した装置から、本物の UDP でフロー情報を送る"""
+    from engine import flow_export
+    src_ip = _src_ip_toward(src_id, path)
+    for d in dict.fromkeys(path):
+        st = device_sessions.get(d)
+        if st is None or not getattr(st, 'flow_export', None):
+            continue
+        agent = next((i['ip'] for i in (getattr(st, 'interfaces', {}) or {}).values() if isinstance(i, dict) and i.get('ip')), '0.0.0.0')
+        try:
+            flow_export.export_ping(d, st, agent, src_ip, dest_ip, count, size)
+        except Exception as e:  # noqa: BLE001 - 送れなくても ping は止めない
+            print(f"[flow-export] {d}: {e}")
+
+
 def _darknet_observe_ping(src_id, dest_ip, path, count, size):
     """ラボの ping の宛先がダークネット(使われていない帯)なら、ICMP echo として記録する"""
     from engine.darknet import darknet
@@ -7099,6 +7191,7 @@ def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict,
     _record_flow_event(src_id, dest_ip, path, ping_result, count, size)
     _darknet_observe_ping(src_id, dest_ip, path, count, size)
     _exfil_observe(src_id, dest_ip, count, size)
+    _flow_export_ping(src_id, dest_ip, path, count, size)
     # 経路上の装置の CPU を処理量に応じて上げる(1000発×1500byte の往復でおよそ +60)。
     # 通常の ping(5発×100byte)では上がらない
     _load = min(60.0, count * size * 2 / 50000)

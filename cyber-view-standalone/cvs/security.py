@@ -135,7 +135,7 @@ class SiteSecurity:
         pk = max(1, int(fl.get('packets', 1)))
         self.flow_events.append({'seq': self.flow_seq, 't': fl['t'], 'src': s_dev or fl['src'], 'dst': d_dev,
                                  'dst_ip': fl['dst'], 'src_ip': fl['src'], 'path': [x for x in (s_dev, d_dev) if x],
-                                 'ok': True, 'count': pk, 'size': max(1, int(fl.get('bytes', 0)) // pk),
+                                 'ok': True, 'pkts': pk, 'size': max(1, int(fl.get('bytes', 0)) // pk),
                                  'bytes': int(fl.get('bytes', 0)), 'proto': fl['proto'], 'via': fl.get('via')})
 
     def on_log(self, dev, msg, t):

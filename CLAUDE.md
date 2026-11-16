@@ -2877,4 +2877,9 @@ A `engine/wan_watch.py` + `/api/wan`(BAS の `pppoe congestion`)、スタンド�
 (`NETLAB_FLOW_COLLECT`)、`engine/sensor_syslog.py`(`NETLAB_SYSLOG_LISTEN`)、連絡先 email(`send_contact`)、`engine/capture.py`(`NETLAB_CAPTURE=1`、
 `/api/alerts/<seq>/capture`)。スタンドアロン版は `cvs/security.py` がまとめて動かし、engine のファイルは `cvs/` にコピー(ずれはテストで検出)。
 テストは `tests/test_nirvana_security_suite.py`・`tests/test_cyber_view_standalone.py`。
+追加(v22): `iac/nirvana-monitoring/`(Grafana 版のニルヴァーナ版。snmp_exporter :9117 / ヴァルハラ :9091 / Loki :3101 / syslog-bridge UDP 5515 /
+ニルヴァーナ :8090、`docs/nirvana-monitoring-iac.md`)。装置からのフロー送出 `engine/flow_export.py`: NX-OS `feature sflow`/`sflow collector-ip`…、
+Arista `sflow destination`/`sflow run`、IOS `ip flow-export destination`/`ip flow ingress`(`_flow_export_ping` が ping ごとに本物の UDP、
+`show sflow`/`show ip flow export`、running-config・保存)。`logging host <ip> transport udp port <n>` を解釈。Nexus の SNMP は mgmt0 で受ける。
+テストは `tests/test_flow_export_and_nirvana_iac.py`。docker build 内の pip には `cyber-view-standalone/extra-ca/` に CA を置く(コミットしない)。
 

@@ -3,6 +3,12 @@
 新しいものが上。各項目の「詳細」に、その時の検証記録(実際のコマンド・出力・画面)がある。
 commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 
+## 2026-11-17(昼)— ニルヴァーナで見る監視スタックの IaC
+
+| 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
+|---|---|---|---|
+| 03:00 | `iac/nirvana-monitoring/`(snmp_exporter + ヴァルハラ + Loki + syslog 中継 + ニルヴァーナ)。エミュレータの装置が本物の sFlow(NX-OS / Arista)・NetFlow v5(IOS)を送るように | 本物の docker で5コンテナ起動、NetFlow 56 + sFlow 25 件をニルヴァーナが受け、ヴァルハラの流量・Loki のログ・本物の ping の回線チェックが揃った。Nexus は mgmt0 で SNMP を受ける・フローが「PING OK undefined」と出る・CPU の注が「WARN FLAP」を直した | [nirvana-monitoring-iac.md](nirvana-monitoring-iac.md) |
+
 ## 2026-11-17(朝)— A〜E: 遮断・隔離 / ATT&CK / 複数拠点 / 回線チェック / フロー・外部センサー
 
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |

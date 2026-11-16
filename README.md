@@ -204,7 +204,7 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | ☐ | BOARD に無いもの: 利用者・権限の管理、プラグイン、PDF レポート、Slack/Teams/メールの専用通知(webhook で代用) | Not in BOARD: user and permission management, plugins, PDF reports, native Slack/Teams/mail (use webhooks) |
 | ☐ | 内部データソースの PromQL で `or` / `and` / `offset` / `histogram_quantile` が未対応(ヴァルハラ=Prometheus 経由なら使える) | Internal data source PromQL lacks `or` / `and` / `offset` / `histogram_quantile` (available via VALHALLA = Prometheus) |
 | ☐ | ATT&CK の対応はこのエミュレータが検知できる事象だけ(エンドポイントのエージェントは無い) | ATT&CK mapping covers only what this emulator can detect (no endpoint agents) |
-| ☐ | ヤマハ RTX の CPU の MIB は未確認(設定で OID を指定する)。sFlow は本物の送信側 agent では未確認(sfcapd で形式は確認) | Yamaha RTX CPU MIB unconfirmed (set the OID in config); sFlow not yet tested with a real agent (format checked with sfcapd) |
+| ☐ | ヤマハ RTX の CPU の MIB は未確認(設定で OID を指定する)。sFlow は実機の agent では未確認(エミュレータの装置が出す sFlow と sfcapd で確認) | Yamaha RTX CPU MIB unconfirmed (set the OID in config); sFlow not yet tested with a hardware agent (checked with the emulator's own exporter and sfcapd) |
 | ☐ | CPU の「情」「注」のしきい値(80% / +20)は仮の値。実機で調整が必要 | CPU info/notice thresholds (80% / +20) are provisional and need tuning on real devices |
 | ☐ | README の動画は GIF。再生プレーヤーにするには github.com の編集画面で mp4 をドラッグ&ドロップする | README videos are GIFs; for an inline player, drag and drop the mp4 in the github.com editor |
 | ☐ | STP のテストが GitHub の CI でだけ時々失敗する(調査用の出力を仕込み済み) | An STP test fails intermittently only on GitHub CI (diagnostics are in place) |
@@ -233,6 +233,7 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | 経路と CPU の情・注 / route and CPU info | [docs/snmp-route-cpu-info.md](docs/snmp-route-cpu-info.md) |
 | ダークネット観測 / darknet observation | [docs/darknet-nicter.md](docs/darknet-nicter.md) |
 | 遮断・ATT&CK・複数拠点・回線チェック・フロー / response, ATT&CK, nexus, WAN, flows | [docs/nirvana-response-attack-nexus-wan-flow.md](docs/nirvana-response-attack-nexus-wan-flow.md) |
+| ニルヴァーナで見る監視スタックの IaC(docker compose)/ Nirvana monitoring stack IaC | [docs/nirvana-monitoring-iac.md](docs/nirvana-monitoring-iac.md)(`iac/nirvana-monitoring/`) |
 | 機種 × プロトコルの試験 / vendor × protocol tests | [docs/vendor-protocol-matrix-cyber-view.md](docs/vendor-protocol-matrix-cyber-view.md)、[docs/verification/README.md](docs/verification/README.md) |
 | 作業記録 / progress log | [docs/progress-log.md](docs/progress-log.md) |
 
@@ -508,7 +509,8 @@ In the launcher, choose devices, add connections and open CLI terminals; create 
 - **Try the same config as real devices**: netmiko / RESTCONF / export-deploy flow, e.g.
   `python tools/eveng_deploy.py export --api http://127.0.0.1:8099 --out ./out --platform c3650`
 - **Check monitoring and alerts**: Prometheus + Alertmanager samples (`tools/monitoring_stack/README.md`), the Cisco traffic
-  monitoring IaC (`iac/cisco-traffic-monitoring/`), and Nirvana
+  monitoring IaC with Grafana (`iac/cisco-traffic-monitoring/`) or with Nirvana (`iac/nirvana-monitoring/`: snmp_exporter +
+  VALHALLA + Loki + Nirvana, with the emulator's devices exporting real sFlow / NetFlow)
 - **Watch real devices in 3D**: `cyber-view-standalone/` ([README](cyber-view-standalone/README.md#english))
 
 ## Documents

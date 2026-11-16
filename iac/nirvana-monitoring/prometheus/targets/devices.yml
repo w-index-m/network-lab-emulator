@@ -3,5 +3,5 @@
   labels: {router: CR1, site: tokyo}
 - targets: [10.240.12.2]
   labels: {router: CR2, site: osaka}
-- targets: [10.240.23.2]
+- targets: [10.240.99.3]          # NX-OS は mgmt0 で SNMP を受ける
   labels: {router: NX1, site: osaka}

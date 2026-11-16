@@ -4,7 +4,8 @@
 #   [LAN 10.240.1.0/24] CR1 ── 10.240.12.0/30 ── CR2 ── 10.240.23.0/30 ── NX1(Nexus)
 #
 #   - CR1 / CR2: SNMP(netlab-ro)、syslog → 127.0.0.1:5515、NetFlow v5 → 127.0.0.1:2055(ip flow ingress)
-#   - NX1      : SNMP、syslog、sFlow → 127.0.0.1:6343(sampling-rate 64)
+#   - NX1      : 管理 IP は mgmt0 の 10.240.99.3(SNMP はここで受ける。実機の NX-OS と同じ)、syslog、
+#                sFlow → 127.0.0.1:6343(sampling-rate 64、agent-ip はデータ側の 10.240.23.2)
 set -euo pipefail
 cd "$(dirname "$0")"
 EMU="${EMU_URL:-http://localhost:8000}"
@@ -28,10 +29,11 @@ done
 cli cr2 "configure terminal" "interface GigabitEthernet0/0/2" "description to NX1" "ip address 10.240.23.1 255.255.255.252" \
   "no shutdown" "exit" "ip route 10.240.30.0 255.255.255.0 10.240.23.2" "end"
 cli nx1 "configure terminal" "feature sflow" \
+  "interface mgmt0" "ip address 10.240.99.3/24" "exit" \
   "interface Ethernet1/1" "no switchport" "ip address 10.240.23.2/30" "no shutdown" "exit" \
   "ip route 0.0.0.0/0 10.240.23.1" "snmp-server community netlab-ro ro" \
   "logging server 127.0.0.1 5515" \
   "sflow sampling-rate 64" "sflow agent-ip 10.240.23.2" "sflow collector-ip 127.0.0.1 vrf default" \
   "sflow data-source interface Ethernet1/1" "end"
 cli cr1 "configure terminal" "ip route 10.240.23.0 255.255.255.252 10.240.12.2" "end"
-echo "[lab] CR1(10.240.12.1) / CR2(10.240.12.2) / NX1(10.240.23.2) を構築しました(NetFlow → :2055、sFlow → :6343、syslog → :5515)"
+echo "[lab] CR1(10.240.12.1) / CR2(10.240.12.2) / NX1(管理 10.240.99.3) を構築しました(NetFlow → :2055、sFlow → :6343、syslog → :5515)"
