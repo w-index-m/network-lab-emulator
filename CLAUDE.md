@@ -2863,4 +2863,10 @@ ipCidrRouteTable/経路数)。cpmCPUTotal5minRev は `.8`(以前 `.7` と誤っ�
 `snmp_agent._cpu_percent` を見る(しきい値 `NETLAB_CPU_HIGH/JUMP/HOLD`)、大きな ping で `snmp_agent.add_cpu_load`。スタンドアロン版は
 `sources.snmp` で `cvs/snmp_poll.SnmpPoller`(`cvs/snmp_client.py` は標準ライブラリの SNMPv2c)。`cvs/route_watch.py` は engine のコピー。
 テストは `tests/test_snmp_route_cpu_info.py`。
+追加(v20): `/cyber-view` に **DARKNET**(`?view=darknet`、NICTER のエッセンス、`docs/darknet-nicter.md`)。`engine/darknet.py`: 帯(`/api/darknet/config`、
+`NETLAB_DARKNET`)に届いた通信を scan(60秒に5アドレス)/ backscatter(SYN-ACK・RST・ICMP 応答)/ misconfig(同じ宛先へ300秒に5回)/
+reflection(UDP 53/123/161/1900/11211 等)に分類、日ごとの統計、警報 `darknet_*`(花びら DARKNET、セキュリティ観点)。本物のパケットは `LoSensor`
+(root: `ip route add local <帯> dev lo` + `iptables -I INPUT -d <帯> -j DROP` で受け身、AF_PACKET で lo を読む。停止で両方外す)、ラボの ping は
+`_darknet_observe_ping`。試験用 `tools/darknet_traffic.py`(lo に引き込まれた帯にだけ送る。送信元を bind しないと宛先自身が送信元になる)。
+README は日英併記(英語版は末尾)、先頭に `docs/videos/nirvana-hero.gif`。テストは `tests/test_darknet.py`。
 

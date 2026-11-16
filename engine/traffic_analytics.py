@@ -58,6 +58,18 @@ RULES = {
     'valhalla': {'name': 'ヴァルハラ(Prometheus)の警報', 'severity': 'medium',
                  'window': 0, 'threshold': 0, 'cooldown': 0,
                  'desc': 'ヴァルハラの alert ルールが発報(firing)した。重要度は severity ラベルに従う'},
+    'darknet_scan': {'name': 'ダークネットへのスキャン', 'severity': 'high',
+                     'window': 60, 'threshold': 5, 'cooldown': 60,
+                     'desc': '同じ送信元が使われていないアドレス帯(ダークネット)を短時間に多数叩いた(ワーム型の探索活動)'},
+    'darknet_backscatter': {'name': 'DDoS の跳ね返り(バックスキャッタ)', 'severity': 'medium',
+                            'window': 0, 'threshold': 1, 'cooldown': 60,
+                            'desc': 'ダークネットに SYN-ACK / RST / ICMP 応答が届いた = 送信元を偽装された DDoS を受けているサーバーがある'},
+    'darknet_misconfig': {'name': 'ダークネットへの繰り返し送信(設定ミスの疑い)', 'severity': 'low',
+                          'window': 300, 'threshold': 5, 'cooldown': 300,
+                          'desc': '同じ送信元が使われていないアドレスへ繰り返し送っている'},
+    'darknet_reflection': {'name': 'リフレクション攻撃の準備(踏み台探し)', 'severity': 'medium',
+                           'window': 0, 'threshold': 1, 'cooldown': 60,
+                           'desc': 'ダークネットへ DNS / NTP / SNMP / SSDP / memcached 等の問い合わせ(オープンリゾルバ探索など)'},
     'cpu_high': {'name': 'CPU 高負荷', 'severity': 'warning',
                  'window': 0, 'threshold': 80, 'cooldown': 300,
                  'desc': 'CPU 使用率(cpmCPUTotal5minRev)が続けてしきい値以上。しきい値は NETLAB_CPU_HIGH / _HOLD'},
@@ -71,8 +83,9 @@ for _r in _FLAP_RULES + [_ROUTE_FLAP]:
 FLAP_RULE_IDS = {_r['id'] for _r in _FLAP_RULES + [_ROUTE_FLAP]}
 # 検知元(センサー)。/cyber-view の六角形の花びらはこの単位でまとめる
 RULE_SOURCE = {**{_k: 'SYSLOG' for _k in FLAP_RULE_IDS}, 'route_flap': 'NET', 'conn_scan': 'IDS', 'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
-               'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'valhalla': 'VALHALLA', 'nirvana_rule': 'RULE', 'cpu_high': 'NET'}
-SECURITY_SOURCES = {'IDS', 'FW'}
+               'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'valhalla': 'VALHALLA', 'nirvana_rule': 'RULE', 'cpu_high': 'NET',
+               'darknet_scan': 'DARKNET', 'darknet_backscatter': 'DARKNET', 'darknet_misconfig': 'DARKNET', 'darknet_reflection': 'DARKNET'}
+SECURITY_SOURCES = {'IDS', 'FW', 'DARKNET'}
 _TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')
 # 復旧を知らせるメッセージ(実機のCiscoでは up も %LINK-3 なので重要度だけでは区別できない)
 RECOVERY = re.compile(r'state to up|to FULL|Established|Link ?Up|復旧', re.I)

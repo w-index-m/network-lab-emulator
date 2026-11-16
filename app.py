@@ -993,7 +993,14 @@ async def lifespan(app: FastAPI):
     print(f"[OSPF] 実リスナー起動: {len(ospf_responders)}台 "
           f"({', '.join(ospf_responders.keys())})")
 
+    _darknet_init()
     yield
+    try:
+        from engine.darknet import darknet as _dn
+        if _dn.sensor:
+            _dn.sensor.stop()
+    except Exception:  # noqa: BLE001
+        pass
     link_sample_task.cancel()
     route_watch_task.cancel()
     valhalla_task.cancel()
@@ -7000,6 +7007,16 @@ def _record_flow_event(src_id: str, dest_ip: str, path: list, ping_result: dict,
                                src_ip=_src_ip_toward(src_id, path))
 
 
+def _darknet_observe_ping(src_id, dest_ip, path, count, size):
+    """ラボの ping の宛先がダークネット(使われていない帯)なら、ICMP echo として記録する"""
+    from engine.darknet import darknet
+    if not darknet.prefixes or not darknet.contains(dest_ip):
+        return
+    src_ip = _src_ip_toward(src_id, path) or src_id
+    for _ in range(max(1, min(int(count or 1), 20))):
+        darknet.observe(src_ip, dest_ip, 'icmp', icmp_type=8, length=size, via='lab')
+
+
 def _src_ip_toward(src_id: str, path: list):
     """送信元IP = 経路の次ホップへ向くIFのIP(無ければ最初のIP)"""
     st = device_sessions.get(src_id)
@@ -7049,6 +7066,7 @@ def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict,
             path.append(_dst_dev)
     links = [(x, y) for x, y in zip(path, path[1:]) if y in vnet.links.get(x, set())]
     _record_flow_event(src_id, dest_ip, path, ping_result, count, size)
+    _darknet_observe_ping(src_id, dest_ip, path, count, size)
     # 経路上の装置の CPU を処理量に応じて上げる(1000発×1500byte の往復でおよそ +60)。
     # 通常の ping(5発×100byte)では上がらない
     _load = min(60.0, count * size * 2 / 50000)
@@ -10301,6 +10319,72 @@ async def traffic_flap_rules():
     """フラップ検知ルールの一覧(機種・しきい値)。"""
     from engine.flap_rules import rules_table
     return {'rules': rules_table()}
+
+
+# ── ダークネット観測(NICTER のエッセンス、/cyber-view の DARKNET) ──
+def _darknet_init():
+    """警報の出し先をつなぎ、NETLAB_DARKNET=10.250.0.0/24,... があれば起動時から観測する"""
+    from engine.darknet import darknet, LoSensor
+
+    def fire(rule, src, dst, detail, now):
+        _flow_recorder.external_alert(rule, src, src, dst, detail, now=now)
+    darknet.fire = fire
+    env = os.environ.get('NETLAB_DARKNET', '').strip()
+    if env and not darknet.prefixes:
+        try:
+            darknet.set_prefixes([p for p in env.split(',') if p.strip()])
+            darknet.sensor = LoSensor(darknet)
+            darknet.sensor.start()
+        except Exception as e:  # noqa: BLE001
+            print(f"[darknet] {e}")
+
+
+@app.get("/api/darknet")
+async def darknet_status(since: int = 0, limit: int = 400):
+    """ダークネットに届いた通信(since=<seq> 以降)と日ごとの統計・分類"""
+    from engine.darknet import darknet, CAT_NAME
+    d = darknet.snapshot(since, max(1, min(int(limit), 2000)))
+    d['cat_names'] = CAT_NAME
+    return d
+
+
+@app.post("/api/darknet/config")
+async def darknet_config(request: Request):
+    """{"prefixes": ["10.250.0.0/24"], "sensor": true} — 観測する帯を決める。sensor=true で本物のパケットも受ける
+    (lo に帯を引き込む。root が必要)。prefixes が空なら観測をやめる"""
+    from engine.darknet import darknet, LoSensor
+    body = await request.json()
+    prefixes = body.get('prefixes') or []
+    if isinstance(prefixes, str):
+        prefixes = [p for p in prefixes.replace(' ', ',').split(',') if p]
+    owned = []
+    for st_id, st in device_sessions.items():
+        for itf in (getattr(st, 'interfaces', {}) or {}).values():
+            if isinstance(itf, dict) and itf.get('ip'):
+                owned.append((st_id, itf['ip']))
+    try:
+        if darknet.sensor:
+            darknet.sensor.stop()
+            darknet.sensor = None
+        darknet.set_prefixes(prefixes)
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    clash = [f'{d} {ip}' for d, ip in owned if darknet.contains(ip)]
+    if clash:
+        darknet.set_prefixes([])
+        return JSONResponse({'error': 'この帯は装置が使っています(ダークネットにできません): ' + ', '.join(clash[:5])},
+                            status_code=400)
+    if prefixes and body.get('sensor', True):
+        darknet.sensor = LoSensor(darknet)
+        await asyncio.to_thread(darknet.sensor.start)
+    return darknet.snapshot(darknet.seq)
+
+
+@app.post("/api/darknet/clear")
+async def darknet_clear():
+    from engine.darknet import darknet
+    darknet.clear()
+    return {'ok': True}
 
 
 @app.get("/api/traffic/routes")

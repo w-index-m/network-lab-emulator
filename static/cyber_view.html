@@ -126,6 +126,25 @@
   #ospfbar select { background: #061428; color: var(--ink); border: 1px solid var(--line); font: inherit; }
   #ospfbar .lg { margin-left: 10px; } #ospfbar .lg i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin: 0 4px 0 8px; }
   #ospfbar .areas b { margin-left: 8px; }
+  /* DARKNET モード(NICTER のエッセンス): 使われていない帯に届いた通信 */
+  body.dark #linkbar, body.dark #linkpanel, body.dark #ospfbar { display: none !important; }
+  #darkbar { top: 46px; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--dim); display: none; white-space: nowrap; text-align: center; }
+  body.dark #darkbar { display: block; }
+  #darkbar input { background: #061428; color: var(--ink); border: 1px solid var(--line); font: inherit; width: 150px; }
+  #darkbar button { background: #1a0f2e; color: #e6dcff; border: 1px solid #8f6dff; font: inherit; padding: 1px 8px; cursor: pointer; }
+  #darkbar .lg i { display: inline-block; width: 16px; height: 4px; vertical-align: middle; margin: 0 4px 0 8px; }
+  #darkpanel { top: 120px; right: 88px; width: min(340px, 42vw); max-height: calc(100vh - 150px); overflow: auto; display: none; font-size: 12px; }
+  body.dark #darkpanel { display: block; }
+  #darkpanel h4 { margin: 0 0 6px; color: #fff; letter-spacing: .1em; font-size: 12px; }
+  #darkpanel .box { background: var(--panel); border: 1px solid var(--line); padding: 8px; margin-bottom: 8px; }
+  #darkpanel table { width: 100%; border-collapse: collapse; color: var(--ink); }
+  #darkpanel th { color: var(--dim); font-weight: 400; text-align: right; padding: 2px 4px; border-bottom: 1px solid var(--line); }
+  #darkpanel td { text-align: right; padding: 2px 4px; font-family: monospace; }
+  #darkpanel th:first-child, #darkpanel td:first-child { text-align: left; }
+  #darkpanel .cat { display: grid; grid-template-columns: 9em 1fr 3em; gap: 4px; align-items: center; margin: 3px 0; }
+  #darkpanel .cat i { display: block; height: 7px; } #darkpanel .cat b { text-align: right; font-family: monospace; color: #fff; }
+  #darkpanel .ev { font-family: monospace; font-size: 11px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 640px) { #darkpanel { top: auto; bottom: 60px; right: 8px; width: 70vw; max-height: 34vh; } #darkbar input { width: 110px; } }
   /* BOARD / EXPLORE / ALERTS: 3D は後ろで暗く動かし、その上にホログラムのパネルを並べる */
   body.board #cv { filter: brightness(.3) saturate(1.2) blur(1.5px); }
   body.board #crumbs, body.board #alerts, body.board #card, body.board #session, body.board #legend, body.board #filter,
@@ -172,7 +191,7 @@
 <div id="cidr" class="hud">0.0.0.0/0</div>
 <div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山)">◎</button><button id="zMusic" title="BGM を切り替え(なし/ジャズ/レゲエ/アンビエント)">♪</button></div><div id="bgmToast" class="hud"></div>
 <div id="bgToast" class="hud"></div>
-<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mBoard" title="ダッシュボード(パネル・変数・時間範囲・自動更新・注釈)">BOARD</button><button id="mExplore" title="問い合わせ(PromQL / LogQL / 内部の時系列とログ)">EXPLORE</button><button id="mAlerts" title="アラートルール・連絡先・履歴">ALERTS</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
+<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mDark" title="DARKNET: 使われていない帯に届いた通信(スキャン・DDoS の跳ね返り・設定ミス・リフレクションの準備)">DARKNET</button><button id="mBoard" title="ダッシュボード(パネル・変数・時間範囲・自動更新・注釈)">BOARD</button><button id="mExplore" title="問い合わせ(PromQL / LogQL / 内部の時系列とログ)">EXPLORE</button><button id="mAlerts" title="アラートルール・連絡先・履歴">ALERTS</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
 <div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
 <div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
   <option value="10">10秒</option><option value="60" selected>1分</option><option value="300">5分</option></select>
@@ -191,6 +210,9 @@
 <div id="ospfbar" class="hud"><b id="oSum" style="color:#fff"></b>宛先 <select id="oDest" aria-label="最短経路ツリーの宛先"></select>
   <span class="lg"><i style="background:#ffd166"></i>最短経路<i style="background:#5dffa8"></i>FULL<i style="background:#ffab2e"></i>確立中<i style="background:#ff3b4e"></i>DOWN</span>
   <span class="areas" id="oAreas"></span></div>
+<div id="darkbar" class="hud"><b id="dSum" style="color:#fff"></b> 帯 <input id="dPrefix" placeholder="10.250.0.0/24" aria-label="ダークネットの帯"> <button id="dApply">観測</button>
+  <span class="lg"><i style="background:#3b6bff"></i>TCP<i style="background:#ffe14d"></i>UDP<i style="background:#ff3b3b"></i>ICMP</span></div>
+<div id="darkpanel" class="hud"></div>
 <div id="crumbs" class="hud"></div>
 <div id="alerts" class="hud"></div>
 <div id="card" class="hud"></div>
@@ -708,9 +730,11 @@
     NET: { label: 'NET', sub: 'リンク監視', col: '#d98a00' },
     VALHALLA: { label: 'VALHALLA', sub: 'ヴァルハラの警報', col: '#6b3fd0' },
     RULE: { label: 'RULES', sub: 'ボードのアラートルール', col: '#0f8f7a' },
+    DARKNET: { label: 'DARKNET', sub: 'ダークネット観測', col: '#4a2a7a' },
   };
   const SOURCE_OF = { conn_scan: 'IDS', scan: 'IDS', unreach_burst: 'IDS', flood: 'IDS', large_icmp: 'IDS',
-    fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET', route_flap: 'NET', valhalla: 'VALHALLA', nirvana_rule: 'RULE' };
+    fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET', route_flap: 'NET', valhalla: 'VALHALLA', nirvana_rule: 'RULE',
+    darknet_scan: 'DARKNET', darknet_backscatter: 'DARKNET', darknet_misconfig: 'DARKNET', darknet_reflection: 'DARKNET' };
   function drawIcon(src, x, y, s) {
     const c = SOURCES[src].col;
     ctx.save(); ctx.strokeStyle = c; ctx.fillStyle = c; ctx.lineWidth = Math.max(1.2, s * 0.09);
@@ -737,6 +761,11 @@
       ctx.beginPath(); ctx.arc(x, y - s * 0.05, s * 0.4, Math.PI * 1.05, Math.PI * 1.95); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(x, y - s * 0.05); ctx.lineTo(x + s * 0.26, y - s * 0.33); ctx.stroke();
       ctx.beginPath(); ctx.arc(x, y - s * 0.05, s * 0.07, 0, Math.PI * 2); ctx.fill();
+    } else if (src === 'DARKNET') {          // 蜘蛛の巣(ダークネット)
+      ctx.lineWidth = Math.max(1, s * 0.05);
+      const cx = x, cy = y - s * 0.2, R = s * 0.42;
+      for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + R * Math.cos(a), cy + R * Math.sin(a)); ctx.stroke(); }
+      for (const r of [0.35, 0.68, 1]) { ctx.beginPath(); for (let k = 0; k <= 8; k++) { const a = k * Math.PI / 4; const px = cx + R * r * Math.cos(a), py = cy + R * r * Math.sin(a); k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.stroke(); }
     } else if (src === 'SYSLOG') {           // ログの書類
       const w = s * 0.6, h = s * 0.72, x0 = x - w / 2, y0 = y - h * 0.85;
       ctx.lineWidth = Math.max(1, s * 0.06); ctx.strokeRect(x0, y0, w, h);
@@ -1722,6 +1751,142 @@
       }
     }
   }
+  // ── DARKNET(NICTER のエッセンス): 使われていない帯に届いた通信を、送信元からの放物線の矢で見せる ──
+  // 矢の色はプロトコル(TCP 青 / UDP 黄 / ICMP 赤)、着地したアドレスのマスは分類の色で光る
+  const DK_PROTO = { tcp: '#3b6bff', udp: '#ffe14d', icmp: '#ff3b3b' };
+  const DK_CAT = { scan: '#ff8a3d', backscatter: '#ff4fa3', misconfig: '#ffd166', reflection: '#b06bff', other: '#5fd0ff' };
+  const DK_NAME = { scan: 'スキャン', backscatter: 'DDoS の跳ね返り', misconfig: '設定ミス', reflection: 'リフレクション準備', other: 'その他' };
+  const DK_SIZE = 12;                      // 床のマス目の一辺(/24 = 16×16)
+  let dkData = null, dkSeq = 0, dkArcs = [], dkCells = {}, dkSrcPos = {}, dkSeen = {};
+  function dkCellXZ(ip) {
+    const o = ip.split('.').map(Number), i = o[3] + (o[2] % 4) * 256;
+    const n = 16, c = (i % 256), cx = c % n, cz = Math.floor(c / n), step = DK_SIZE / n;
+    return [-DK_SIZE / 2 + (cx + 0.5) * step, -DK_SIZE / 2 + (cz + 0.5) * step];
+  }
+  function dkSrcXZ(ip) {
+    if (!dkSrcPos[ip]) {
+      // 同じ /16 は近くに(NICTER の国ごとのまとまりの代わり)
+      const o = ip.split('.').map(Number);
+      const a = ((o[0] * 7919 + o[1] * 104729) % 360) / 180 * Math.PI + (o[2] % 16) * 0.035 + (o[3] % 8) * 0.012;
+      const r = 17 + (o[3] % 5) * 0.6;
+      dkSrcPos[ip] = [r * Math.cos(a), r * Math.sin(a)];
+    }
+    return dkSrcPos[ip];
+  }
+  async function pollDark() {
+    if (mode !== 'dark') return;
+    try {
+      const d = await api('/api/darknet?since=' + dkSeq);
+      const now = performance.now();
+      if (d.seq < dkSeq) { dkSeq = 0; return; }                 // サーバー側で消された
+      d.events.forEach((e, k) => {
+        dkArcs.push({ ...e, born: now + Math.min(k, 60) * 40 });
+        if (e.cat !== 'other' && !dkSeen[e.cat + e.src]) {
+          dkSeen[e.cat + e.src] = 1;
+          const [x, z] = dkCellXZ(e.dst);
+          popup([x, 2.4, z], DK_CAT[e.cat], 'DARKNET ' + DK_NAME[e.cat], e.text.split(' ').slice(0, 3).join(' '), 5200, '警');
+        }
+      });
+      if (dkArcs.length > 700) dkArcs.splice(0, dkArcs.length - 700);
+      dkSeq = d.seq; dkData = d;
+      dkPanel(d);
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  function dkPanel(d) {
+    const inp = document.getElementById('dPrefix');
+    if (document.activeElement !== inp) inp.value = d.prefixes.join(',');
+    const s = d.sensor || {};
+    document.getElementById('dSum').textContent = d.prefixes.length
+      ? `${d.size} アドレス ・ ${s.running ? (s.passive ? '受信中(応答しない)' : '受信中') : 'ラボの ping のみ'} ・ `
+      : 'ダークネット未設定 ・ ';
+    const today = d.days[0] || { packets: 0, srcs: 0, dsts: 0, per_ip: 0 };
+    const hc = d.hour.cats, mx = Math.max(1, ...Object.values(hc));
+    document.getElementById('darkpanel').innerHTML =
+      `<div class="box"><h4>DARKNET 観測統計</h4><table><tr><th>日付</th><th>観測パケット</th><th>送信元IP</th><th>1IPあたり</th></tr>` +
+      (d.days.length ? d.days.slice(0, 7).map(x => `<tr><td>${x.day.slice(5)}</td><td>${x.packets.toLocaleString()}</td><td>${x.srcs}</td><td>${x.per_ip}</td></tr>`).join('') : '<tr><td colspan="4">まだ届いていない</td></tr>') +
+      `</table></div><div class="box"><h4>直近1時間の分類</h4>` +
+      Object.keys(DK_NAME).map(c => `<div class="cat"><span>${DK_NAME[c]}</span><i style="width:${Math.round(hc[c] / mx * 100)}%;background:${DK_CAT[c]}"></i><b>${hc[c]}</b></div>`).join('') +
+      `</div><div class="box"><h4>多い送信元 / 宛先ポート</h4>` +
+      d.hour.top_src.slice(0, 5).map(([ip, n]) => `<div class="ev">${ip} <b style="color:#fff">${n}</b></div>`).join('') +
+      `<div class="ev" style="margin-top:4px;color:var(--dim)">${d.hour.top_port.slice(0, 6).map(([p, n]) => `${p}×${n}`).join('  ')}</div></div>` +
+      `<div class="box"><h4>最新</h4>${dkArcs.slice(-6).reverse().map(e => `<div class="ev" style="color:${DK_CAT[e.cat]}">${fmtT(e.t)} ${e.text}</div>`).join('')}</div>` +
+      (s.notes && s.notes.length ? `<div class="box" style="color:#ffab2e">${s.notes.join('<br>')}</div>` : '') +
+      (s.error ? `<div class="box" style="color:#ff8a8a">${s.error}</div>` : '');
+    document.getElementById('cidr').textContent = 'DARKNET';
+    void today;
+  }
+  function drawDarknet(t) {
+    const now = performance.now(), d = dkData;
+    // 床: ダークネットのアドレスを 16×16 のマスで
+    const n = 16, step = DK_SIZE / n;
+    for (const e of dkArcs) if (now - e.born > 1400 && now - e.born < 1500) dkCells[e.dst] = { at: now, col: DK_CAT[e.cat] };
+    for (let cz = 0; cz < n; cz++) for (let cx = 0; cx < n; cx++) {
+      const x0 = -DK_SIZE / 2 + cx * step, z0 = -DK_SIZE / 2 + cz * step;
+      const pts = [proj(x0, 0, z0), proj(x0 + step, 0, z0), proj(x0 + step, 0, z0 + step), proj(x0, 0, z0 + step)];
+      if (pts.some(p => !p)) continue;
+      poly(pts); ctx.fillStyle = 'rgba(30,12,60,0.55)'; ctx.fill(); ctx.strokeStyle = 'rgba(150,110,255,0.25)'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    for (const [ip, c] of Object.entries(dkCells)) {
+      const age = (now - c.at) / 6000;
+      if (age > 1) { delete dkCells[ip]; continue; }
+      const [x, z] = dkCellXZ(ip), h = 1.6 * (1 - age);
+      const a = proj(x, 0, z), b = proj(x, h, z);
+      if (!a || !b) continue;
+      ctx.save(); ctx.shadowColor = c.col; ctx.shadowBlur = 14; ctx.strokeStyle = c.col; ctx.globalAlpha = 1 - age; ctx.lineWidth = Math.max(2, a.s * step * 0.5);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.restore();
+    }
+    const lab = proj(-DK_SIZE / 2, 0.05, DK_SIZE / 2 + 0.8);
+    if (lab) { ctx.fillStyle = '#b69bff'; ctx.font = '700 12px monospace'; ctx.textAlign = 'left'; ctx.fillText(d && d.prefixes.length ? 'DARKNET ' + d.prefixes.join(', ') : 'DARKNET(帯を設定してください)', lab.x, lab.y); }
+    // 送信元(外周)
+    const srcs = {};
+    for (const e of dkArcs) if (now - e.born < 30000) srcs[e.src] = (srcs[e.src] || 0) + 1;
+    for (const [ip, k] of Object.entries(srcs)) {
+      const [x, z] = dkSrcXZ(ip), a = proj(x, 0, z), b = proj(x, 0.6 + Math.min(3, k * 0.08), z);
+      if (!a || !b) continue;
+      ctx.strokeStyle = '#ff6b6b'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      ctx.fillStyle = '#ffd0d0'; ctx.font = '11px monospace'; ctx.textAlign = 'center'; ctx.fillText(ip, b.x, b.y - 6);
+    }
+    // 放物線の矢(1.4秒で着地、その後 4秒かけて軌跡が消える)
+    for (const e of dkArcs) {
+      const age = now - e.born;
+      if (age < 0 || age > 5400) continue;
+      const [sx, sz] = dkSrcXZ(e.src), [dx, dz] = dkCellXZ(e.dst);
+      const dist = Math.hypot(dx - sx, dz - sz), top = 3 + dist * 0.32, col = DK_PROTO[e.proto] || '#fff';
+      const u = Math.min(1, age / 1400), fade = age > 1400 ? 1 - (age - 1400) / 4000 : 1;
+      const P = (k) => proj(sx + (dx - sx) * k, 4 * top * k * (1 - k), sz + (dz - sz) * k);
+      ctx.save(); ctx.globalAlpha = 0.55 * fade; ctx.strokeStyle = col; ctx.lineWidth = 1.2; ctx.beginPath();
+      let first = true;
+      for (let k = 0; k <= u + 1e-6; k += 0.05) { const p = P(Math.min(k, u)); if (!p) continue; first ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); first = false; }
+      ctx.stroke(); ctx.restore();
+      if (u < 1) {                         // 矢じり(進む向きの三角形)
+        const p = P(u), q = P(Math.max(0, u - 0.04));
+        if (p && q) {
+          const ang = Math.atan2(p.y - q.y, p.x - q.x), L = Math.max(7, p.s * 0.45);
+          ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(ang); ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 10;
+          ctx.beginPath(); ctx.moveTo(L, 0); ctx.lineTo(-L * 0.6, L * 0.45); ctx.lineTo(-L * 0.6, -L * 0.45); ctx.closePath(); ctx.fill(); ctx.restore();
+        }
+      }
+    }
+    // 分類ごとの件数を床の四隅に立てる(直近1時間)
+    if (d) {
+      const corners = [['scan', -1, -1], ['backscatter', 1, -1], ['misconfig', -1, 1], ['reflection', 1, 1]];
+      for (const [c, sx, sz] of corners) {
+        const v = d.hour.cats[c] || 0;
+        plate3d(sx * (DK_SIZE / 2 + 2.6), 3.2, sz * (DK_SIZE / 2 + 2.6), DK_CAT[c], DK_NAME[c], String(v), v > 0, t, '直近1時間');
+      }
+    }
+  }
+  setInterval(pollDark, 1000);
+  document.getElementById('dApply').onclick = async () => {
+    const v = document.getElementById('dPrefix').value.trim();
+    const r = await fetch('/api/darknet/config', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { 'X-Session-Token': token } : {}) },
+      body: JSON.stringify({ prefixes: v ? v.split(/[ ,]+/) : [], sensor: true }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) alert(j.error || '設定できませんでした');
+    dkSeq = 0; dkArcs = []; dkCells = {}; dkSeen = {}; pollDark();
+  };
+  window.__cvDark = () => ({ data: dkData, arcs: dkArcs.length });
+
   // BOARD / EXPLORE / ALERTS(Grafana が持つ機能。本体は nirvana-board.js)。3D はそのまま後ろで動かす
   const BOARD_MODES = ['board', 'explore', 'alerts'];
   let boardView = null;
@@ -1729,7 +1894,7 @@
     boardView = m;
     document.body.classList.toggle('board', !!m);
     for (const [id, v] of [['mBoard', 'board'], ['mExplore', 'explore'], ['mAlerts', 'alerts']]) document.getElementById(id).classList.toggle('on', m === v);
-    for (const [id, v] of [['mNet', 'net'], ['mLink', 'link'], ['mOspf', 'ospf']]) document.getElementById(id).classList.toggle('on', !m && mode === v);
+    for (const [id, v] of [['mNet', 'net'], ['mLink', 'link'], ['mOspf', 'ospf'], ['mDark', 'dark']]) document.getElementById(id).classList.toggle('on', !m && mode === v);
     if (m) { if (window.NirvanaBoard) window.NirvanaBoard.show(m); }
     else if (window.NirvanaBoard) window.NirvanaBoard.hide();
   }
@@ -1742,17 +1907,21 @@
     document.getElementById('mNet').classList.toggle('on', m === 'net');
     document.getElementById('mLink').classList.toggle('on', m === 'link');
     document.getElementById('mOspf').classList.toggle('on', m === 'ospf');
+    document.getElementById('mDark').classList.toggle('on', m === 'dark');
     document.body.classList.toggle('links', m !== 'net');
     document.body.classList.toggle('ospf', m === 'ospf');
+    document.body.classList.toggle('dark', m === 'dark');
     particles = [];
     if (m === 'link') { layoutKey = ''; cam.tdist = 36; cam.pitch = 0.8; document.getElementById('cidr').textContent = 'ROUTER LINKS'; pollLinks(); }
     else if (m === 'ospf') { layoutKey = ''; cam.tdist = 36; cam.pitch = 0.8; ospfPrev = null; document.getElementById('cidr').textContent = 'OSPF'; pollOspf(); }
+    else if (m === 'dark') { cam.tdist = 44; cam.pitch = 0.62; cam.px = 0; cam.pz = 0; dkSeq = 0; dkArcs = []; document.getElementById('cidr').textContent = 'DARKNET'; pollDark(); }
     else update();
-    try { history.replaceState(null, '', m === 'link' ? '?view=links' : m === 'ospf' ? '?view=ospf' : location.pathname); } catch (e) { /* 無くても動く */ }
+    try { history.replaceState(null, '', m === 'link' ? '?view=links' : m === 'ospf' ? '?view=ospf' : m === 'dark' ? '?view=darknet' : location.pathname); } catch (e) { /* 無くても動く */ }
   }
   document.getElementById('mNet').onclick = () => setMode('net');
   document.getElementById('mLink').onclick = () => setMode('link');
   document.getElementById('mOspf').onclick = () => setMode('ospf');
+  document.getElementById('mDark').onclick = () => setMode('dark');
   document.getElementById('mBoard').onclick = () => setMode('board');
   document.getElementById('mExplore').onclick = () => setMode('explore');
   document.getElementById('mAlerts').onclick = () => setMode('alerts');
@@ -1975,6 +2144,7 @@
     drawGroundRing(t);
     if (mode === 'link') { drawLinks(t); drawForecast(t); }
     else if (mode === 'ospf') { drawOspf(t); drawParticles(t); }
+    else if (mode === 'dark') { drawDarknet(t); }
     else { if (hostView) { alertLevel = 0; drawHost(t); } else { drawNetwork(t, nowSec); drawNetFlows(t); } drawParticles(t); }
     drawPopups(t);
     drawBoard(t);
@@ -2218,7 +2388,7 @@
     return k ? { x: k.poly.reduce((a, c) => a + c.x, 0) / 4, y: k.poly.reduce((a, c) => a + c.y, 0) / 4 } : null;
   };
 
-  pollHosts().then(pollFlows).then(() => { if (new URLSearchParams(location.search).get('view') === 'links') setMode('link'); if (new URLSearchParams(location.search).get('view') === 'ospf') setMode('ospf'); if (BOARD_MODES.includes(new URLSearchParams(location.search).get('view'))) setMode(new URLSearchParams(location.search).get('view')); });
+  pollHosts().then(pollFlows).then(() => { if (new URLSearchParams(location.search).get('view') === 'links') setMode('link'); if (new URLSearchParams(location.search).get('view') === 'ospf') setMode('ospf'); if (new URLSearchParams(location.search).get('view') === 'darknet') setMode('dark'); if (BOARD_MODES.includes(new URLSearchParams(location.search).get('view'))) setMode(new URLSearchParams(location.search).get('view')); });
   setInterval(pollFlows, 2000);
   setInterval(pollHosts, 5000);
   pollHealth(); setInterval(pollHealth, 10000);
@@ -2488,6 +2658,11 @@
   // OSPF の状態を返さないサーバー(スタンドアロン版)では OSPF ボタンも出さない
   fetch('/api/traffic/ospf', { headers: token ? { 'X-Session-Token': token } : {} })
     .then(r => { if (r.status === 404) document.getElementById('mOspf').style.display = 'none'; })
+    .catch(() => { /* 一時的な不達では隠さない */ });
+
+  // ダークネット観測の無いサーバー(スタンドアロン版)では DARKNET ボタンも出さない
+  fetch('/api/darknet', { headers: token ? { 'X-Session-Token': token } : {} })
+    .then(r => { if (r.status === 404) document.getElementById('mDark').style.display = 'none'; })
     .catch(() => { /* 一時的な不達では隠さない */ });
 
   update();
