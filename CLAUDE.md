@@ -2852,4 +2852,3 @@ CI(v14): `pytest.yml`/`regression.yml` は `claude/**` への push でも動く�
 スタンドアロン版は `cvs/valhalla_views.py`(snmp_exporter の生メトリクスから再生・予測・OSPF、`AlertImporter`)。
 `engine/valhalla.py` と `cyber-view-standalone/cvs/valhalla.py` は同一(テストで検出)。テストは `tests/test_valhalla_nirvana.py`。
 追加(v16): `/cyber-view` の BGM(`#zMusic`、なし/jazz/reggae/ambient、`localStorage cvBgm`・`?bgm=`、DEMO 以外でも鳴る。Web Audio 合成、`playJazz`/`playReggae`/`playAmbient`)。
-追加(v17): 画面上の当て字。ニルヴァーナ=「爾琉婆亜那」(左上 `.kanji`)、ヴァルハラ=「刃流覇羅」(`SRC_DISPLAY`・花びら・再生バー・取り込み警報名・スタンドアロン `DISPLAY_NAME`)。API/環境変数名は変えない。

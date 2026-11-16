@@ -52,7 +52,7 @@ RULES = {
     'syslog_error': {'name': '装置が error 以上のログを出力', 'severity': 'medium',
                      'window': 0, 'threshold': 3, 'cooldown': 60,
                      'desc': 'syslog 重要度3(error)以下のメッセージ(復旧通知は除く)'},
-    'valhalla': {'name': '刃流覇羅(Prometheus)の警報', 'severity': 'medium',
+    'valhalla': {'name': 'ヴァルハラ(Prometheus)の警報', 'severity': 'medium',
                  'window': 0, 'threshold': 0, 'cooldown': 0,
                  'desc': 'ヴァルハラの alert ルールが発報(firing)した。重要度は severity ラベルに従う'},
 }

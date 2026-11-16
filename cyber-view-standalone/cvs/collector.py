@@ -18,7 +18,7 @@ from . import valhalla as V
 from .valhalla_views import AlertImporter
 
 # 画面に出す呼び名(メトリクス収集基盤 Prometheus は Cyber View では「ヴァルハラ」と呼ぶ)
-DISPLAY_NAME = {'prometheus': '刃流覇羅'}
+DISPLAY_NAME = {'prometheus': 'ヴァルハラ'}
 
 EVIDENCE_ORDER = ('STATE', 'SYSLOG', 'TRAP', 'POLL')
 UTIL_WARN, UTIL_CRIT = 0.5, 0.8

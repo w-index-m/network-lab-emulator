@@ -289,7 +289,7 @@ def test_lab_imports_new_alerts_once_with_valhalla_petal():
     al = [_alert('NirvanaLinkDown', host_a='VHX1', host_b='VHX2')]
     got = app_module._valhalla_import_alerts(al, now=1000.0)
     assert len(got) == 1 and got[0]['rule'] == 'valhalla' and got[0]['source'] == RULE_SOURCE['valhalla'] == 'VALHALLA'
-    assert got[0]['severity'] == 'high' and got[0]['name'] == '刃流覇羅: NirvanaLinkDown'
+    assert got[0]['severity'] == 'high' and got[0]['name'] == 'ヴァルハラ: NirvanaLinkDown'
     assert got[0]['src'] == 'vhx1' and got[0]['dst'] == 'vhx2'
     assert app_module._valhalla_import_alerts(al, now=1010.0) == []          # 発報し続けている間は二重にしない
     assert app_module._valhalla_import_alerts([], now=1020.0) == []          # 解消
@@ -314,7 +314,7 @@ def test_standalone_alert_importer():
 def test_page_has_replay_bar_forecast_and_valhalla_petal():
     html = open(os.path.join(ROOT, 'static', 'cyber_view.html'), encoding='utf-8').read()
     for s in ('id="vhbar"', 'id="vhOpen"', '/api/valhalla/replay', '/api/valhalla/forecast', '/api/valhalla/status',
-              "VALHALLA: { label: '刃流覇羅'", 'function applyFrame', 'いつもと違う', '予測 80%まで'):
+              "VALHALLA: { label: 'VALHALLA'", 'function applyFrame', 'いつもと違う', '予測 80%まで'):
         assert s in html, s
 
 

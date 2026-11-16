@@ -40,13 +40,6 @@
   #status { top: 12px; left: 16px; font-size: 13px; line-height: 1.55; text-shadow: 0 0 6px #000; }
   #status b { color: #fff; font-weight: 600; }
   #status .brand { font-size: 15px; letter-spacing: .32em; color: var(--cyan); }
-  /* 当て字の名前「爾琉婆亜那」: 特攻服の刺繍風(金糸+赤の縁取り)。フォントは明朝の太字(外部フォント無し) */
-  #status .kanji { font: 900 30px/1.15 "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif CJK JP", "Noto Serif JP", serif;
-    letter-spacing: .08em; margin: 2px 0 4px; display: inline-block; transform: skewX(-8deg); transform-origin: left;
-    color: #ffd84a;
-    text-shadow: 1px 0 0 #b00018, -1px 0 0 #b00018, 0 1px 0 #b00018, 0 -1px 0 #b00018, 1px 1px 0 #b00018, -1px -1px 0 #b00018,
-      2px 2px 0 #5a000c, 0 0 8px rgba(255,50,80,.75), 0 0 16px rgba(255,180,40,.35); }
-  @media (max-width: 640px) { #status .brand { display: inline-block; } #status .kanji { font-size: 17px; margin: 0 0 0 8px; vertical-align: -2px; } }
   #status a { color: var(--dim); text-decoration: none; margin-right: 10px; }
   #status a:hover { color: var(--cyan); }
   #cidr { top: 6px; right: 18px; text-align: right; font-size: clamp(26px, 5.4vw, 64px); font-weight: 700;
@@ -166,7 +159,6 @@
 
 <div id="status" class="hud">
   <div class="brand">CYBER VIEW</div>
-  <div class="kanji" title="ニルヴァーナ">爾琉婆亜那</div>
   <div>AlertDB:[<b id="sAlerts">0</b>] Flows:[<b id="sFlows">0</b>] Hosts:[<b id="sHosts">0</b>] Links:[<b id="sLinks">0</b>]</div>
   <div id="sTime">--</div>
   <div class="links"><a href="/traffic-flow">2D フロー表示</a><a href="/dashboard">リソース</a><a href="/">CLI</a></div>
@@ -179,9 +171,9 @@
 <div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
 <div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
   <option value="10">10秒</option><option value="60" selected>1分</option><option value="300">5分</option></select>
-  ごと(平均区間も同じ) ・ 次回 <b id="lNext">--</b>秒 ・ 最終 <b id="lLast">--</b><span id="lSrc" class="src">--</span><button id="vhOpen" style="display:none" title="刃流覇羅(ヴァルハラ = Prometheus)の記録から過去を3Dで再生">⏪ 再生</button></div>
+  ごと(平均区間も同じ) ・ 次回 <b id="lNext">--</b>秒 ・ 最終 <b id="lLast">--</b><span id="lSrc" class="src">--</span><button id="vhOpen" style="display:none" title="ヴァルハラ(Prometheus)の記録から過去を3Dで再生">⏪ 再生</button></div>
 <div id="linkpanel" class="hud"></div>
-<div id="vhbar" class="hud"><b>⏪ 刃流覇羅 再生</b>
+<div id="vhbar" class="hud"><b>⏪ VALHALLA 再生</b>
   <select id="vhRange" aria-label="期間"><option value="900">直近15分</option><option value="3600" selected>直近1時間</option><option value="21600">直近6時間</option><option value="86400">直近24時間</option></select>
   <button id="vhLoad" title="読み込み直す">⟳</button>
   <button id="vhPlay" title="再生/一時停止">❚❚</button>
@@ -224,7 +216,7 @@
   } catch (e) { /* 古いブラウザ */ }
   // データ元の画面上の呼び名。メトリクス収集基盤(Prometheus)はこの画面では「ヴァルハラ」と呼ぶ
   // (接続先・環境変数 PROMETHEUS_URL・API の項目名は Prometheus のまま)
-  const SRC_DISPLAY = { prometheus: '刃流覇羅', mixed: '刃流覇羅+IF COUNTER' };
+  const SRC_DISPLAY = { prometheus: 'VALHALLA', mixed: 'VALHALLA+IF COUNTER' };
   const dispSrc = (v) => String(v).split('+').map(x => SRC_DISPLAY[x] || x.toUpperCase()).join('+');
   const api = (path) => fetch(path, { headers: token ? { 'X-Session-Token': token } : {} })
     .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
@@ -709,7 +701,7 @@
     FW: { label: 'FW', sub: 'ファイアウォール', col: '#d8402a' },
     SYSLOG: { label: 'SYSLOG', sub: 'ログ', col: '#3a4450' },
     NET: { label: 'NET', sub: 'リンク監視', col: '#d98a00' },
-    VALHALLA: { label: '刃流覇羅', sub: '刃流覇羅(ヴァルハラ)の警報', col: '#6b3fd0' },
+    VALHALLA: { label: 'VALHALLA', sub: 'ヴァルハラの警報', col: '#6b3fd0' },
   };
   const SOURCE_OF = { conn_scan: 'IDS', scan: 'IDS', unreach_burst: 'IDS', flood: 'IDS', large_icmp: 'IDS',
     fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET', route_flap: 'NET', valhalla: 'VALHALLA' };
@@ -1002,10 +994,10 @@
       document.getElementById('lLast').textContent = new Date(d.now * 1000).toTimeString().slice(0, 8);
       const src = document.getElementById('lSrc');
       src.textContent = (!d.source || d.source === 'internal' ? 'SOURCE: IF COUNTER' : 'SOURCE: ' + dispSrc(d.source))
-        + (d.prometheus_error ? ' (刃流覇羅 不達)' : '') + (d.zabbix_error ? ' (Zabbix 不達)' : '');
+        + (d.prometheus_error ? ' (ヴァルハラ 不達)' : '') + (d.zabbix_error ? ' (Zabbix 不達)' : '');
       src.className = 'src' + (d.source && d.source !== 'internal' ? ' prom' : '');
-      src.title = d.prometheus_error || (d.prometheus_url ? '刃流覇羅(ヴァルハラ = Prometheus): ' + d.prometheus_url
-        : '刃流覇羅(Prometheus)未接続 — PROMETHEUS_URL 未設定: エミュレータのIFカウンタ(SNMPのifHCOctetsと同じ値)');
+      src.title = d.prometheus_error || (d.prometheus_url ? 'ヴァルハラ(Prometheus): ' + d.prometheus_url
+        : 'ヴァルハラ(Prometheus)未接続 — PROMETHEUS_URL 未設定: エミュレータのIFカウンタ(SNMPのifHCOctetsと同じ値)');
     } catch (e) { /* 次の周期で再試行 */ }
     nextPoll = Date.now() + w * 1000;
   }
@@ -1626,7 +1618,7 @@
     try {
       const d = await api(`/api/valhalla/replay?start=${end - range}&end=${end}&step=${Math.max(15, Math.round(range / 300))}`);
       vh.frames = d.frames || []; vh.events = d.events || [];
-      if (!vh.frames.length) { st.textContent = 'この期間の記録が刃流覇羅にありません'; return; }
+      if (!vh.frames.length) { st.textContent = 'この期間の記録がヴァルハラにありません'; return; }
       if (mode !== 'link') setMode('link');
       if (!vh.active) vh.saved = linkData;
       vh.active = true; vh.playing = true; vh.i = 0;
@@ -1637,7 +1629,7 @@
       document.querySelectorAll('#vhEvents button').forEach(b => { b.onclick = () => { vh.playing = false; applyFrame(vh.frames.findIndex(f => f.t >= +b.dataset.t) - 2); }; });
       st.textContent = `${vh.frames.length} コマ ・ 状態の変化 ${vh.events.length} 件`;
       applyFrame(0);
-    } catch (e) { st.textContent = '刃流覇羅から読めませんでした: ' + e.message; }
+    } catch (e) { st.textContent = 'ヴァルハラから読めませんでした: ' + e.message; }
   }
   function applyFrame(i) {
     if (!vh.frames.length) return;
@@ -1657,7 +1649,7 @@
       if (e.t > prevT && e.t <= f.t) {
         const A = linkPos[e.a], B = linkPos[e.b];
         const bad = e.to === 'down' || e.to === 'crit';
-        popup(A && B ? [(A[0] + B[0]) / 2, 3.4, (A[2] + B[2]) / 2] : null, bad ? '#ff3b4e' : '#5dffa8', '刃流覇羅 ' + fmtT(e.t), `${e.from} → ${e.to}`, 4200, bad ? '警' : '情');
+        popup(A && B ? [(A[0] + B[0]) / 2, 3.4, (A[2] + B[2]) / 2] : null, bad ? '#ff3b4e' : '#5dffa8', 'VALHALLA ' + fmtT(e.t), `${e.from} → ${e.to}`, 4200, bad ? '警' : '情');
       }
     }
   }

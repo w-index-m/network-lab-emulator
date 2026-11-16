@@ -145,7 +145,7 @@ class AlertImporter:
             dst = dev_of(lab.get('neighbor'), lab.get('host_b'), lab.get('ospfNbrIpAddr'))
             detail = a['annotations'].get('summary') or a['annotations'].get('description') or a['name']
             r = analytics.fire('valhalla', fp, src, dst, f"{a['name']}: {detail}"[:200], now=now,
-                               severity=self.SEV.get(str(a['severity']).lower(), 'medium'), name=f"刃流覇羅: {a['name']}")
+                               severity=self.SEV.get(str(a['severity']).lower(), 'medium'), name=f"ヴァルハラ: {a['name']}")
             if r:
                 out.append(r)
         self.seen = cur
