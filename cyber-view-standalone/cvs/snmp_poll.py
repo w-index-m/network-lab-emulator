@@ -22,6 +22,8 @@ from .route_watch import CpuWatch, RouteWatcher
 INET_ROUTE = '1.3.6.1.2.1.4.24.7.1'
 OLD_ROUTE = '1.3.6.1.2.1.4.24.4.1'
 ROUTE_NUM = ['1.3.6.1.2.1.4.24.6.0', '1.3.6.1.2.1.4.24.3.0']
+RFC1213_ROUTE = '1.3.6.1.2.1.4.21.1'      # ipRouteTable(古い機種。宛先ごとに1行、経路数の OID は無い)
+HR_CPU = '1.3.6.1.2.1.25.3.3.1.2'         # HOST-RESOURCES-MIB hrProcessorLoad(Cisco 以外の多くの機種)
 IFNAME = '1.3.6.1.2.1.31.1.1.1.1'
 CPU_5MIN = '1.3.6.1.4.1.9.9.109.1.1.1.1.8'
 PROTO = {1: 'other', 2: 'connected', 3: 'static', 8: 'rip', 9: 'isis', 13: 'ospf', 14: 'bgp', 16: 'eigrp'}
@@ -65,6 +67,7 @@ class SnmpPoller:
         self.timeout = float(src.get('timeout', 2))
         c = src.get('cpu') or {}
         self.cpu_high, self.cpu_jump, self.cpu_hold = float(c.get('high', 80)), float(c.get('jump', 20)), int(c.get('hold', 2))
+        self.cpu_oid = c.get('oid')
         self.devs = [d for d in cfg['devices'] if d.get('mgmt_ip')]
         self.analytics, self.errors = analytics, errors
         self.watch = RouteWatcher()
@@ -97,6 +100,8 @@ class SnmpPoller:
         if not rows:
             rows = SC.walk(host, comm, OLD_ROUTE + '.7', **self._kw())       # ipCidrRouteProto
             parse, base = parse_old_index, OLD_ROUTE
+        if not rows:
+            return self._routes_rfc1213(d, host, comm, now)
         col_if = '.7' if base == INET_ROUTE else '.5'
         for o, v in rows:
             idx = o[len(base) + 3:]
@@ -112,17 +117,47 @@ class SnmpPoller:
                     out[idx]['iface'] = names.get(v, '')
         return list(out.values())
 
+    def _routes_rfc1213(self, d, host, comm, now):
+        cols = {}
+        for col in ('7', '9', '11', '2'):                     # 次ホップ・プロトコル・マスク・ifIndex
+            for o, v in SC.walk(host, comm, f'{RFC1213_ROUTE}.{col}', **self._kw()):
+                cols.setdefault(o[len(RFC1213_ROUTE) + len(col) + 2:], {})[col] = v
+        if not cols:
+            return []
+        names = self.ifnames(d, now)
+        out = []
+        for dest, c in cols.items():
+            try:
+                plen = ipaddress.ip_network(f"0.0.0.0/{c.get('11', '255.255.255.255')}").prefixlen
+            except ValueError:
+                continue
+            nh = c.get('7', '')
+            out.append({'network': dest, 'prefix': plen, 'next_hop': '' if nh in ('', '0.0.0.0') else nh,
+                        'source': PROTO.get(c.get('9'), 'other'), 'iface': names.get(c.get('2'), '')})
+        return out
+
+    def cpu(self, d, host, comm):
+        """CPU 使用率。devices[].snmp_cpu_oid / sources.snmp.cpu.oid → Cisco の cpmCPUTotal5minRev → hrProcessorLoad の平均"""
+        oid = d.get('snmp_cpu_oid') or self.cpu_oid
+        for root, agg in ([(oid, max)] if oid else []) + [(CPU_5MIN, max), (HR_CPU, lambda xs: sum(xs) / len(xs))]:
+            rows = SC.walk(host, comm, root, **self._kw())
+            vals = [v for _, v in rows if isinstance(v, int)]
+            if vals:
+                return agg(vals)
+        return None
+
     def poll_device(self, d, now):
         host, comm = d['mgmt_ip'], self._comm(d)
         got = SC.get(host, comm, ROUTE_NUM, **self._kw())
         num = got.get(ROUTE_NUM[0], got.get(ROUTE_NUM[1]))
         new = []
-        if num is not None and (self._n.get(d['id']) != num or self._tick % self.full_every == 0):
+        # 経路数の OID が無い機種(RFC1213 のみ)は full_every 回ごとに表全体を見る
+        if (num is not None and self._n.get(d['id']) != num) or self._tick % self.full_every == 0:
             new = self.watch.observe(d['id'], d['hostname'], self.routes(d, now), now=now)
             self._n[d['id']] = num
-        cpu_rows = SC.walk(host, comm, CPU_5MIN, **self._kw())
-        if cpu_rows:
-            new += self.observe_cpu(d, max(v for _, v in cpu_rows), now)
+        v = self.cpu(d, host, comm)
+        if v is not None:
+            new += self.observe_cpu(d, v, now)
         return new
 
     def _fire_cpu(self, dev, host, v, detail, now):

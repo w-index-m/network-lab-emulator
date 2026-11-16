@@ -3,6 +3,12 @@
 新しいものが上。各項目の「詳細」に、その時の検証記録(実際のコマンド・出力・画面)がある。
 commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 
+## 2026-11-17(朝)— A〜E: 遮断・隔離 / ATT&CK / 複数拠点 / 回線チェック / フロー・外部センサー
+
+| 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
+|---|---|---|---|
+| 02:30 | IT Leaders / BIGLOBE / 日本ラッドの資料から要素を拾い、A〜E をまとめて実装。RESPONSE(access-class / Null0 / shutdown、解除、自動、pcap)、ATT&CK ビュー、ネクサス、WAN、NetFlow/sFlow、他社 syslog、メール | 本物の SSH 総当たり → ログイン → 探索 → 持ち出しが ATT&CK で「窃取まで」、2拠点の同じ攻撃元を中央が見つけて返し、RESPONSE で押すと実 SSH が本当に切られた。Null0 が直結に負ける・RESPONSE のボタンが消える・試験用 sFlow の詰め忘れ・スタンドアロン版の ping 依存を直した | [nirvana-response-attack-nexus-wan-flow.md](nirvana-response-attack-nexus-wan-flow.md) |
+
 ## 2026-11-17 — ダークネット観測(NICTER のエッセンス)
 
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |

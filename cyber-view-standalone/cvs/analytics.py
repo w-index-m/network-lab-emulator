@@ -23,6 +23,14 @@ RULES = {
     'valhalla': {'name': 'ヴァルハラ(Prometheus)の警報', 'severity': 'medium', 'cooldown': 0, 'source': 'VALHALLA'},
     'nirvana_rule': {'name': 'ニルヴァーナのアラートルール', 'severity': 'medium', 'cooldown': 0, 'source': 'RULE'},
     'cpu_high': {'name': 'CPU 高負荷', 'severity': 'warning', 'cooldown': 300, 'source': 'NET'},
+    'ext_sensor': {'name': 'セキュリティ製品のアラート', 'severity': 'medium', 'cooldown': 30, 'source': 'SENSOR'},
+    'wan_slow': {'name': '回線の遅延', 'severity': 'warning', 'cooldown': 300, 'source': 'NET'},
+    'wan_loss': {'name': '回線のパケットロス', 'severity': 'warning', 'cooldown': 300, 'source': 'NET'},
+    'nexus_finding': {'name': 'ネクサス(複数拠点)の所見', 'severity': 'high', 'cooldown': 0, 'source': 'NEXUS'},
+    'darknet_scan': {'name': 'ダークネットへのスキャン', 'severity': 'high', 'cooldown': 60, 'source': 'DARKNET'},
+    'darknet_backscatter': {'name': 'DDoS の跳ね返り(バックスキャッタ)', 'severity': 'medium', 'cooldown': 60, 'source': 'DARKNET'},
+    'darknet_misconfig': {'name': 'ダークネットへの繰り返し送信(設定ミスの疑い)', 'severity': 'low', 'cooldown': 300, 'source': 'DARKNET'},
+    'darknet_reflection': {'name': 'リフレクション攻撃の準備(踏み台探し)', 'severity': 'medium', 'cooldown': 60, 'source': 'DARKNET'},
 }
 for _r in FLAP_RULES + [ROUTE_FLAP]:
     RULES.setdefault(_r['id'], {'name': _r['name'], 'severity': 'warning', 'window': _r['window'],

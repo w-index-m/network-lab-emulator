@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 # dotenvがあれば読む
@@ -394,7 +394,8 @@ def _trigger_ike_negotiation(device_id: str, _cascade: bool = True):
 
 _NAC_PERSIST_ATTRS = ('radius_servers', 'radius_groups', 'radius_source_interface',
                       'aaa_new_model', 'aaa_authentication_login_lists',
-                      'aaa_authentication_login', 'line_vty_login_authentication', 'users')
+                      'aaa_authentication_login', 'line_vty_login_authentication', 'users',
+                      'line_vty_access_class')
 
 
 def _nac_persist_dump(state) -> dict:
@@ -994,7 +995,13 @@ async def lifespan(app: FastAPI):
           f"({', '.join(ospf_responders.keys())})")
 
     _darknet_init()
+    _nexus_init()
+    _sensors_init()
+    response_task = asyncio.create_task(_response_auto_loop())
+    wan_task = asyncio.create_task(_wan_loop())
     yield
+    response_task.cancel()
+    wan_task.cancel()
     try:
         from engine.darknet import darknet as _dn
         if _dn.sensor:
@@ -1076,6 +1083,7 @@ def _valid_token(token: str) -> bool:
 # 認証はAPI（/api/*）とWebSocket側で行う。
 _NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico", "/dashboard", "/pentest", "/traffic-flow", "/cyber-view",
                   "/nirvana-board.js",
+                  "/api/nexus/report",   # 拠点からの報告。認証は nexus_report() の中で行う(X-Nexus-Token)
                   "/metrics",   # Prometheus 用。認証は metrics() の中で行う(Bearer トークン)
                   "/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
 
@@ -3222,6 +3230,16 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             return
         if re.match(r'^remark\s+', orig, re.I):
             return
+        # 1行消す: "no 5" / "no deny host 192.0.2.1"
+        m_std_no = re.match(r'^no\s+(?:(\d+)|(permit|deny)\s+(any|host\s+[\d.]+|[\d.]+(?:\s+[\d.]+)?))\s*$', orig, re.I)
+        if m_std_no:
+            acl_name = getattr(state, '_current_acl_name', None)
+            if acl_name:
+                ipfilter_engine.remove_rule(device_id, acl_name,
+                                            seq=int(m_std_no.group(1)) if m_std_no.group(1) else None,
+                                            action=(m_std_no.group(2) or '').lower() or None,
+                                            src=m_std_no.group(3))
+            return
 
     # Cisco名前付き拡張ACL: "ip access-list extended TEST_ACL" → サブモードへ
     m_named_acl = re.match(r'^ip\s+access-list\s+extended\s+(\S+)', orig, re.I)
@@ -3582,6 +3600,12 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             ipv6_engine.add_static_route(device_id, dest, prefix, next_hop)
         return
 
+    # 宛先を捨てる経路 "ip route 192.0.2.66 255.255.255.255 Null0"(ブラックホール。遮断に使う)
+    null_route = re.match(r'^ip\s+route\s+([\d.]+)\s+([\d.]+)\s+null\s*0\s*$', c)
+    if null_route:
+        rib_engine.add_static_route(device_id, hostname, null_route.group(1),
+                                    _mask_to_prefix(null_route.group(2)), 'Null0', 1)
+        return
     # ── スタティックルート / フローティングスタティック ──
     # Cisco: "ip route 0.0.0.0 0.0.0.0 192.168.1.1 [200]"
     # Cisco: "ip route 192.168.2.0 255.255.255.0 10.0.0.2"
@@ -4716,6 +4740,11 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
                     if getattr(state, '_line_type', 'vty') == 'con'
                     else 'line_vty_authorization_exec')
             setattr(state, attr, (m_o or m_authz_exec).group(1))
+            return ''
+        # access-class <ACL> in: SSH / Telnet の着信を送信元アドレスで絞る(実リスナーで本当に拒否する)
+        m_ac = re.match(r'^(no\s+)?access-class\s+(\S+)\s+in\s*$', orig.strip(), re.I)
+        if m_ac and state.mode == 'config-line' and getattr(state, '_line_type', 'vty') == 'vty':
+            state.line_vty_access_class = None if m_ac.group(1) else m_ac.group(2)
             return ''
         m_ti = re.match(r'^transport\s+input\s+(.+)$', c)
         if m_ti and state.mode == 'config-line':
@@ -6637,6 +6666,8 @@ def _build_running_config(device_id: str, state) -> str:
                 lines.append(' login local')
             if _vty_authz_exec:
                 lines.append(f' authorization exec {_vty_authz_exec}')
+            if getattr(state, 'line_vty_access_class', None):
+                lines.append(f' access-class {state.line_vty_access_class} in')
             lines.append(_ti_line)
         # syslog
         syslog = getattr(state, 'syslog_servers', [])
@@ -7067,6 +7098,7 @@ def _learn_dataplane(src_id: str, dest_ip: str, ping_result: dict,
     links = [(x, y) for x, y in zip(path, path[1:]) if y in vnet.links.get(x, set())]
     _record_flow_event(src_id, dest_ip, path, ping_result, count, size)
     _darknet_observe_ping(src_id, dest_ip, path, count, size)
+    _exfil_observe(src_id, dest_ip, count, size)
     # 経路上の装置の CPU を処理量に応じて上げる(1000発×1500byte の往復でおよそ +60)。
     # 通常の ping(5発×100byte)では上がらない
     _load = min(60.0, count * size * 2 / 50000)
@@ -10200,7 +10232,7 @@ async def _valhalla_alert_loop():
 # ── ニルヴァーナのボード(Grafana が持つ機能: ダッシュボード・Explore・アラート・注釈) ──────────
 # 本体は engine/nirvana_board.py(データソース・内部の時系列・保存・ルール評価)と
 # engine/nirvana_board_api.py(/api/nirvana/*)。画面は /cyber-view の BOARD / EXPLORE / ALERTS
-from engine.nirvana_board import AlertEvaluator, BoardStore, InternalTSDB, Sources, send_webhook, webhook_payload  # noqa: E402
+from engine.nirvana_board import AlertEvaluator, BoardStore, InternalTSDB, Sources, send_contact, webhook_payload  # noqa: E402
 from engine.nirvana_board_api import make_router as _make_board_router  # noqa: E402
 
 _board_tsdb = InternalTSDB()
@@ -10253,7 +10285,7 @@ def _board_on_change(rule, inst, prev, new):
             if not c:
                 continue
             try:
-                send_webhook(c['url'], webhook_payload(rule, inst, new))
+                send_contact(c, webhook_payload(rule, inst, new))
             except Exception as e:  # noqa: BLE001
                 print(f"[nirvana] 通知を送れませんでした {c.get('name')}: {str(e)[:120]}")
 
@@ -10385,6 +10417,542 @@ async def darknet_clear():
     from engine.darknet import darknet
     darknet.clear()
     return {'ok': True}
+
+
+# ── 警報からの対処(遮断・隔離、/cyber-view の RESPONSE) ──
+_RESP_SOURCES = {'IDS', 'FW', 'DARKNET'}
+
+
+def _resp_suspect(alert):
+    """警報の送信元 → (装置ID or None, IP or None)"""
+    src = alert.get('src') or ''
+    if src in device_sessions:
+        st = device_sessions[src]
+        ip = next((i['ip'] for i in (getattr(st, 'interfaces', {}) or {}).values()
+                   if isinstance(i, dict) and i.get('ip')), None)
+        return src, ip
+    try:
+        ipaddress.ip_address(src)
+    except ValueError:
+        return None, None
+    return icmp_engine._find_device_owning_ip(src), src
+
+
+def _resp_hostname(dev):
+    return getattr(device_sessions.get(dev), 'hostname', dev)
+
+
+def _response_plan(alert):
+    """この警報に対して取れる対処の候補(本物の CLI コマンドと、元に戻すコマンド)"""
+    from engine.response import ACL_NAME
+    dev, ip = _resp_suspect(alert)
+    acts = []
+    cisco = lambda d: getattr(device_sessions.get(d), 'device_type', '') in ('cisco', 'catalyst')  # noqa: E731
+    if dev:
+        for n in sorted(vnet.links.get(dev, set())):
+            ifn = vnet.interface_links.get(n, {}).get(dev)
+            if not ifn or not cisco(n):
+                continue
+            steps = [(n, 'configure terminal'), (n, f'interface {ifn}'), (n, 'shutdown'), (n, 'end')]
+            undo = [(n, 'configure terminal'), (n, f'interface {ifn}'), (n, 'no shutdown'), (n, 'end')]
+            acts.append({'id': f'isolate:{n}:{ifn}', 'kind': 'isolate', 'target': dev,
+                         'label': f'隔離: {_resp_hostname(n)} の {ifn} を shutdown({_resp_hostname(dev)} を切り離す)',
+                         'steps': steps, 'undo': undo})
+    elif ip:
+        dst = alert.get('dst')
+        targets = [dst] if dst in device_sessions and cisco(dst) else \
+            [d for d, st in device_sessions.items() if cisco(d) and getattr(st, 'ssh_rsa_key', False)]
+        for d in targets[:8]:
+            acts.append({'id': f'vty_block:{d}', 'kind': 'vty_block', 'target': ip, 'device': d,
+                         'label': f'管理アクセス遮断: {_resp_hostname(d)} の line vty に access-class {ACL_NAME}(deny host {ip})',
+                         'steps': [], 'undo': []})
+        routers = [d for d in device_sessions if cisco(d)]
+        if routers:
+            steps, undo = [], []
+            for d in routers:
+                steps += [(d, 'configure terminal'), (d, f'ip route {ip} 255.255.255.255 Null0'), (d, 'end')]
+                undo += [(d, 'configure terminal'), (d, f'no ip route {ip} 255.255.255.255 Null0'), (d, 'end')]
+            acts.append({'id': 'blackhole', 'kind': 'blackhole', 'target': ip,
+                         'label': f'ブラックホール: {len(routers)}台のルータに ip route {ip} 255.255.255.255 Null0',
+                         'steps': steps, 'undo': undo})
+    return {'alert': alert, 'suspect': {'device': dev, 'ip': ip}, 'actions': acts}
+
+
+def _vty_block_steps(d, ip):
+    from engine.response import store, ACL_NAME
+    seq = store.next_acl_seq(d)
+    steps = [(d, 'configure terminal'), (d, f'ip access-list standard {ACL_NAME}'), (d, f'{seq} deny host {ip}'),
+             (d, '10000 permit any'), (d, 'exit'), (d, 'line vty 0 15'), (d, f'access-class {ACL_NAME} in'), (d, 'end')]
+    undo = [(d, 'configure terminal'), (d, f'ip access-list standard {ACL_NAME}'), (d, f'no {seq}'), (d, 'end')]
+    return steps, undo
+
+
+async def _response_run(alert, action, auto=False):
+    from engine.response import store
+    steps, undo = action['steps'], action['undo']
+    if action['kind'] == 'vty_block':
+        steps, undo = _vty_block_steps(action['device'], action['target'])
+    if action['kind'] == 'vty_block':
+        # 同じ ACL に 10000 permit any が2回入らないように(2回目以降は省く)
+        from engine.response import ACL_NAME
+        rules = ipfilter_engine.acls.get(action['device'], {}).get(ACL_NAME, [])
+        if any(r.seq == 10000 for r in rules):
+            steps = [s for s in steps if s[1] != '10000 permit any']
+    rec = store.add({'alert_seq': alert.get('seq'), 'rule': alert.get('rule'), 'kind': action['kind'],
+                     'label': action['label'], 'target': action['target'], 'steps': steps, 'undo': undo,
+                     'auto': auto, 'outputs': []})
+    for d, cmd in steps:
+        r = await cli_command({'device_id': d, 'command': cmd})
+        out = (r or {}).get('output', '') if isinstance(r, dict) else ''
+        if out.strip():
+            rec['outputs'].append(f'{_resp_hostname(d)}# {cmd}\n{out.strip()[:300]}')
+    rec['status'] = 'active'
+    _d0 = steps[0][0] if steps else ''
+    _flow_recorder.record_log(_d0, _resp_hostname(_d0), 5,
+                              f"%NIRVANA-5-RESPONSE: {'自動' if auto else ''}対処 {action['label']}", now=time.time())
+    return rec
+
+
+def _alert_by_seq(seq):
+    return next((a for a in list(_flow_recorder.alerts) if a.get('seq') == seq), None)
+
+
+@app.get("/api/attack")
+async def attack_state(since: int = 0, window: int = 86400):
+    """ATT&CK の表(戦術 × 手法)、相手ごと・組織ごとの進行度、手法のイベント(since 以降)"""
+    from engine.attack_map import tracker
+    _attack_tick()
+    from engine.nexus import hub
+    d = tracker.snapshot(since, max(60, min(int(window), 7 * 86400)),
+                         extra=[e for e in hub.attack_events() if e.get('org') != _site_name()])
+    host = lambda x: getattr(device_sessions.get(x), 'hostname', x)  # noqa: E731
+    for t in d['targets']:
+        t['host'] = host(t['target'])
+    for e in d['events']:
+        e['target_host'] = host(e['target'])
+    d['site'] = _site_name()
+    d['nexus'] = _nexus_state()
+    return d
+
+
+# ── 外部センサー(他社セキュリティ製品の syslog)・NetFlow/sFlow・警報時の通信記録 ──
+_flow_collector = None
+_syslog_rx = None
+
+
+def _on_sensor_line(line, from_ip, now=None, sev=6):
+    """受けた syslog 1行。ログとして記録し、セキュリティ製品のアラートなら警報(花びら SENSOR)にする"""
+    from engine import sensor_syslog
+    now = time.time() if now is None else now
+    dev = icmp_engine._find_device_owning_ip(from_ip) or from_ip
+    _flow_recorder.record_log(dev, _resp_hostname(dev) if dev in device_sessions else from_ip, sev, line, now=now)
+    s = sensor_syslog.parse(line)
+    if s:
+        _flow_recorder.external_alert('ext_sensor', f"{s['product']}:{s['src'] or ''}:{s['name']}", s['src'] or dev,
+                                      s['dst'], f"[{s['product']}] {s['detail']}", now=now,
+                                      severity=s['severity'], name=f"{s['product']}: {s['name']}"[:80])
+    return s
+
+
+def _on_flow(f):
+    """NetFlow / sFlow の1フロー: ダークネット観測・外部への大量送信・通信の粒に使う"""
+    from engine.darknet import darknet
+    if darknet.prefixes and darknet.contains(f['dst']):
+        darknet.observe(f['src'], f['dst'], f['proto'], f.get('sport', 0), f.get('dport', 0), f.get('tcp_flags', 0),
+                        length=f.get('bytes', 0), via=f.get('via', 'flow'))
+    s_dev = icmp_engine._find_device_owning_ip(f['src'])
+    d_dev = icmp_engine._find_device_owning_ip(f['dst'])
+    if s_dev:
+        _exfil_observe(s_dev, f['dst'], 1, int(f.get('bytes', 0)))
+    pk = max(1, int(f.get('packets', 1)))
+    _flow_recorder.record_flow(s_dev or f['src'], f['dst'], d_dev, [x for x in (s_dev, d_dev) if x], True,
+                               pk, max(1, int(f.get('bytes', 0)) // pk), f['proto'], src_ip=f['src'])
+
+
+class _SyslogRx:
+    """他社の機器・セキュリティ製品からの syslog を UDP で受ける(NETLAB_SYSLOG_LISTEN=0.0.0.0:5514)"""
+
+    def __init__(self, addr):
+        host, _, port = addr.rpartition(':')
+        self.addr = (host or '0.0.0.0', int(port))
+        self.count, self.error = 0, None
+
+    def start(self):
+        import socket as _s
+        import threading as _th
+        try:
+            sk = _s.socket(_s.AF_INET, _s.SOCK_DGRAM)
+            sk.setsockopt(_s.SOL_SOCKET, _s.SO_REUSEADDR, 1)
+            sk.bind(self.addr)
+        except OSError as e:
+            self.error = str(e)
+            return
+
+        def loop():
+            while True:
+                try:
+                    data, a = sk.recvfrom(65535)
+                except OSError:
+                    break
+                self.count += 1
+                line = data.decode('utf-8', 'replace').strip()
+                pri = re.match(r'^<(\d+)>', line)
+                line = re.sub(r'^<\d+>', '', line)
+                try:
+                    _on_sensor_line(line, a[0], sev=int(pri.group(1)) % 8 if pri else 6)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[syslog-rx] {e}")
+        _th.Thread(target=loop, name='syslog-rx', daemon=True).start()
+
+
+def _sensors_init():
+    global _flow_collector, _syslog_rx
+    from engine.flow_collector import FlowCollector
+    from engine.capture import ring
+    fc = os.environ.get('NETLAB_FLOW_COLLECT', '').strip()          # 例 "2055,6343"(NetFlow v5, sFlow v5)
+    if fc and not _flow_collector:
+        ports = [int(x) for x in fc.split(',') if x.strip()] + [0, 0]
+        _flow_collector = FlowCollector(_on_flow, netflow=ports[0], sflow=ports[1]).start()
+    sl = os.environ.get('NETLAB_SYSLOG_LISTEN', '').strip()          # 例 "0.0.0.0:5514"
+    if sl and not _syslog_rx:
+        _syslog_rx = _SyslogRx(sl)
+        _syslog_rx.start()
+    if os.environ.get('NETLAB_CAPTURE') == '1' and not ring._th:
+        ring.start()
+
+
+@app.get("/api/sensors")
+async def sensors_state():
+    from engine.capture import ring
+    return {'flow': _flow_collector.stats if _flow_collector else None,
+            'syslog': {'listen': f'{_syslog_rx.addr[0]}:{_syslog_rx.addr[1]}', 'received': _syslog_rx.count,
+                       'error': _syslog_rx.error} if _syslog_rx else None,
+            'capture': {'running': bool(ring._th and ring._th.is_alive()), 'frames': len(ring.frames), 'error': ring.error}}
+
+
+@app.get("/api/alerts/{seq}/capture")
+async def alert_capture(seq: int, before: int = 60, after: int = 30, format: str = 'auto'):
+    """警報の前後の通信記録。キャプチャが動いていれば pcap、無ければフロー・ダークネット・ログの JSON"""
+    from engine.capture import ring, to_pcap
+    from engine.darknet import darknet
+    a = _alert_by_seq(seq)
+    if not a:
+        return JSONResponse({'error': 'その警報はありません'}, status_code=404)
+    t0, t1 = a['t'] - max(0, before), a['t'] + max(0, after)
+    ips = set()
+    for x in (a.get('src'), a.get('dst')):
+        if not x:
+            continue
+        if x in device_sessions:
+            ips |= {i['ip'] for i in (getattr(device_sessions[x], 'interfaces', {}) or {}).values()
+                    if isinstance(i, dict) and i.get('ip')}
+        else:
+            ips.add(x)
+    frames = ring.select(ips, t0, t1)
+    if format in ('auto', 'pcap') and frames:
+        return Response(to_pcap(frames), media_type='application/vnd.tcpdump.pcap',
+                        headers={'Content-Disposition': f'attachment; filename="nirvana-alert-{seq}.pcap"'})
+    if format == 'pcap':
+        return JSONResponse({'error': 'この時間のパケットはありません(NETLAB_CAPTURE=1 で記録)'}, status_code=404)
+    hist = _flow_recorder.query(t0, t1, None, None, 'all')
+    dk = [e for e in darknet.snapshot(0, 2000)['events'] if t0 <= e['t'] <= t1 and (not ips or e['src'] in ips or e['dst'] in ips)]
+    return {'alert': a, 'window': [t0, t1], 'ips': sorted(ips), 'flows': hist.get('events', [])[-500:],
+            'darknet': dk[-500:], 'logs': [x for x in _flow_recorder.logs_since(t0) if x['t'] <= t1][-200:]}
+
+
+# ── 回線チェック(フレッツ網、/cyber-view の WAN) ──
+WAN_INTERVAL = 5
+
+
+def _wan_fire(rule, key, detail, now):
+    _flow_recorder.external_alert(rule, key, key.split('|')[0], None, detail, now=now)
+
+
+def _wan_tick(now=None):
+    """PPPoE / MAP-E の経路ごとに遅延とロスを記録する(ラボは BAS の混雑設定からの再現値)"""
+    from engine.protocols import pppoe_engine, map_e_engine
+    from engine.wan_watch import series, simulated_rtt
+    series.fire = _wan_fire
+    keep = set()
+    for (cpe, pp_id), sess in list(pppoe_engine.pp_sessions.items()):
+        bas = sess.get('bas_id')
+        cong = (pppoe_engine.nodes.get(bas) or {}).get('congestion', 0)
+        reach = cpe in device_sessions and bas in vnet.links.get(cpe, set())
+        rtt, loss = simulated_rtt('pppoe', cong) if reach else (None, 1.0)
+        key = f'{cpe}|pppoe|{pp_id}'
+        keep.add(key)
+        series.add(key, rtt, loss, now=now, kind='pppoe', cpe=cpe, peer=bas,
+                   label=f'{_resp_hostname(cpe)} PPPoE pp{pp_id} → {_resp_hostname(bas)}', ip=sess.get('ip'))
+    for srv_id, srv in list(map_e_engine.nodes.items()):
+        for rid, r in list(srv.get('rules', {}).items()):
+            cpe = r['rtx_id']
+            reach = cpe in device_sessions and srv_id in vnet.links.get(cpe, set())
+            rtt, loss = simulated_rtt('ipoe', 0) if reach else (None, 1.0)
+            key = f'{cpe}|ipoe|{rid}'
+            keep.add(key)
+            series.add(key, rtt, loss, now=now, kind='ipoe', cpe=cpe, peer=srv_id,
+                       label=f'{_resp_hostname(cpe)} IPoE(MAP-E) → {_resp_hostname(srv_id)}', ip=r.get('ipv4'))
+    series.forget(keep)
+
+
+def _wan_snapshot():
+    from engine.protocols import pppoe_engine, map_e_engine
+    from engine.wan_watch import series, RTT_HIGH, LOSS_HIGH
+    cpes = {}
+
+    def cpe(dev):
+        st = device_sessions.get(dev)
+        return cpes.setdefault(dev, {'dev': dev, 'host': getattr(st, 'hostname', dev),
+                                     'type': getattr(st, 'device_type', ''), 'pppoe': [], 'ipoe': [], 'ipsec': [],
+                                     'default_route': None})
+    for (dev, pp_id), sess in pppoe_engine.pp_sessions.items():
+        cpe(dev)['pppoe'].append({'pp': pp_id, 'ip': sess.get('ip'), 'gateway': sess.get('gateway'),
+                                  'bas': sess.get('bas_id'), 'bas_host': _resp_hostname(sess.get('bas_id'))})
+    for srv_id, srv in map_e_engine.nodes.items():
+        for rid, r in srv.get('rules', {}).items():
+            cpe(r['rtx_id'])['ipoe'].append({'rule': rid, 'ip': r['ipv4'], 'ports': list(r['port_range']),
+                                              'br': r['br_ipv6'], 'server': srv_id, 'server_host': _resp_hostname(srv_id)})
+    for dev, st in device_sessions.items():
+        tun = getattr(st, 'ipsec_tunnels', None) or {}
+        for tid, tdef in tun.items():
+            if isinstance(tdef, dict) and tdef.get('remote_ip'):
+                cpe(dev)['ipsec'].append({'id': tid, 'local': tdef.get('local_ip'), 'peer': tdef.get('remote_ip'),
+                                          'status': tdef.get('status'), 'peer_dev': icmp_engine._find_device_owning_ip(tdef.get('remote_ip'))})
+    for dev, c in cpes.items():
+        try:
+            d = next((r for r in rib_engine.get_best_routes(dev) if r['network'] == '0.0.0.0' and r['prefix'] == 0), None)
+        except Exception:  # noqa: BLE001
+            d = None
+        if d:
+            c['default_route'] = {'via': d.get('next_hop'), 'iface': d.get('iface')}
+    bas = [{'dev': b, 'host': _resp_hostname(b), 'congestion': n.get('congestion', 0),
+            'sessions': sum(1 for s in pppoe_engine.pp_sessions.values() if s.get('bas_id') == b)}
+           for b, n in pppoe_engine.nodes.items() if b in device_sessions]
+    return {'cpes': sorted(cpes.values(), key=lambda c: c['host']), 'bas': bas, 'paths': series.snapshot(),
+            'thresholds': {'rtt_ms': RTT_HIGH, 'loss': LOSS_HIGH}, 'interval': WAN_INTERVAL, 'simulated': True}
+
+
+@app.get("/api/wan")
+async def wan_state():
+    """回線チェック: CPE ごとの PPPoE / IPoE(MAP-E)/ IPsec / デフォルトルートと、経路ごとの遅延・ロスの推移"""
+    return _wan_snapshot()
+
+
+async def _wan_loop():
+    while True:
+        try:
+            _wan_tick()
+        except Exception as e:  # noqa: BLE001
+            print(f"[wan] {e}")
+        await asyncio.sleep(WAN_INTERVAL)
+
+
+# ── ネクサス(複数拠点の横断分析) ──
+_nexus_reporter = None
+
+
+def _nexus_state():
+    from engine.nexus import hub
+    d = hub.snapshot()
+    d['site'] = _site_name()
+    d['reporter'] = ({'url': _nexus_reporter.url, **_nexus_reporter.status} if _nexus_reporter else None)
+    return d
+
+
+def _nexus_init():
+    """NIRVANA_NEXUS_URL があれば、この拠点の警報と ATT&CK のイベントを中央へ送る"""
+    global _nexus_reporter
+    url = os.environ.get('NIRVANA_NEXUS_URL', '').strip()
+    if not url or _nexus_reporter:
+        return
+    from engine.nexus import NexusReporter
+    from engine.attack_map import tracker
+
+    def on_finding(f):
+        _flow_recorder.external_alert('nexus_finding', f['id'], f.get('src') or _site_name(), None,
+                                      '[ネクサス] ' + f['text'], now=time.time())
+    _nexus_reporter = NexusReporter(url, _site_name(), os.environ.get('NIRVANA_NEXUS_TOKEN', ''),
+                                    lambda: list(_flow_recorder.alerts), lambda: list(tracker.events), on_finding,
+                                    interval=float(os.environ.get('NIRVANA_NEXUS_INTERVAL', '10')))
+    _nexus_reporter.start()
+
+
+@app.post("/api/nexus/report")
+async def nexus_report(request: Request):
+    """拠点からの報告(中央側)。X-Nexus-Token が NIRVANA_NEXUS_TOKEN と一致すること。返り値はその拠点に関係する所見"""
+    from engine.nexus import hub
+    want = os.environ.get('NIRVANA_NEXUS_TOKEN', '')
+    got = request.headers.get('X-Nexus-Token', '')
+    if not (want and got == want) and not _AUTH_DISABLED:
+        return JSONResponse({'error': 'X-Nexus-Token が違います(中央で NIRVANA_NEXUS_TOKEN を設定)'}, status_code=403)
+    body = await request.json()
+    try:
+        findings = hub.ingest(body.get('site'), body, addr=request.client.host if request.client else None)
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    return {'ok': True, 'findings': findings}
+
+
+@app.get("/api/nexus")
+async def nexus_state():
+    return _nexus_state()
+
+
+@app.post("/api/attack/clear")
+async def attack_clear():
+    from engine.attack_map import tracker
+    with tracker._lock:
+        tracker.events.clear()
+        tracker.compromised.clear()
+    return {'ok': True}
+
+
+@app.get("/api/response")
+async def response_state():
+    from engine.response import store
+    return store.snapshot()
+
+
+@app.get("/api/response/plan")
+async def response_plan(seq: int):
+    a = _alert_by_seq(seq)
+    if not a:
+        return JSONResponse({'error': 'その警報はありません'}, status_code=404)
+    p = _response_plan(a)
+    p['actions'] = [{k: v for k, v in x.items() if k not in ('steps', 'undo')} |
+                    {'commands': [f'{_resp_hostname(d)}: {c}' for d, c in x['steps']]} for x in p['actions']]
+    return p
+
+
+@app.post("/api/response/run")
+async def response_run(request: Request):
+    body = await request.json()
+    a = _alert_by_seq(int(body.get('seq', 0)))
+    if not a:
+        return JSONResponse({'error': 'その警報はありません'}, status_code=404)
+    act = next((x for x in _response_plan(a)['actions'] if x['id'] == body.get('action')), None)
+    if not act:
+        return JSONResponse({'error': 'その対処はありません'}, status_code=400)
+    return await _response_run(a, act)
+
+
+@app.post("/api/response/undo")
+async def response_undo(request: Request):
+    from engine.response import store
+    rec = store.get(int((await request.json()).get('id', 0)))
+    if not rec or rec['status'] != 'active':
+        return JSONResponse({'error': '解除できる対処がありません'}, status_code=400)
+    for d, cmd in rec['undo']:
+        await cli_command({'device_id': d, 'command': cmd})
+    rec['status'] = 'undone'
+    rec['undone_at'] = time.time()
+    return rec
+
+
+@app.post("/api/response/auto")
+async def response_auto(request: Request):
+    """{"rules": [{"rule": "darknet_scan", "action": "blackhole"}, {"rule": "conn_scan", "action": "vty_block"}]}"""
+    from engine.response import store
+    try:
+        store.set_auto((await request.json()).get('rules'))
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    return store.snapshot()
+
+
+async def _response_auto_tick():
+    from engine.response import store
+    new = [a for a in list(_flow_recorder.alerts) if a.get('seq', 0) > store.last_alert_seq]
+    if new:
+        store.last_alert_seq = max(a['seq'] for a in new)
+    for a in new:
+        for kind in store.auto_for(a.get('rule')):
+            key = (a.get('rule'), a.get('src'), kind)
+            if key in store.handled:
+                continue
+            for act in _response_plan(a)['actions']:
+                if act['kind'] == kind:
+                    store.handled.add(key)
+                    await _response_run(a, act, auto=True)
+                    if kind != 'vty_block':
+                        break
+
+
+# ── ATT&CK との対応(/cyber-view の ATT&CK)と、ログイン・流量からの検知 ──
+_auth_fail = {}            # (装置, 送信元) -> [時刻...]
+_exfil_bytes = {}          # (装置, 宛先) -> [(時刻, バイト)]
+_attack_last = 0
+
+
+def _site_name():
+    return os.environ.get('NIRVANA_SITE_NAME', 'LAB')
+
+
+def _on_auth(device_id, src_ip, ok, user, now):
+    """実 SSH / Telnet のログイン結果。総当たり(60秒に3回失敗)と、その後の成功を警報にする"""
+    key = (device_id, src_ip)
+    lst = [t for t in _auth_fail.get(key, []) if now - t < 600]
+    if ok:
+        if len(lst) >= 3:
+            _flow_recorder.external_alert('login_after_fail', src_ip, src_ip, device_id,
+                                          f'{src_ip} → {_resp_hostname(device_id)}: 失敗 {len(lst)}回の後に {user} でログイン成功', now=now)
+        _auth_fail.pop(key, None)
+        return
+    lst.append(now)
+    _auth_fail[key] = lst
+    if len([t for t in lst if now - t < 60]) >= 3:
+        _flow_recorder.external_alert('login_brute', src_ip, src_ip, device_id,
+                                      f'{src_ip} → {_resp_hostname(device_id)}: ログイン失敗 {len(lst)}回(user {user})', now=now)
+
+
+def _exfil_observe(src_id, dest_ip, count, size, now=None):
+    """装置からラボの外(どの装置も持たないアドレス)への大量送信"""
+    from engine.darknet import darknet
+    now = time.time() if now is None else now
+    if icmp_engine._find_device_owning_ip(dest_ip) or darknet.contains(dest_ip):
+        return
+    key = (src_id, dest_ip)
+    lst = [(t, b) for t, b in _exfil_bytes.get(key, []) if now - t < 60] + [(now, count * size)]
+    _exfil_bytes[key] = lst
+    total = sum(b for _, b in lst)
+    if total >= 1_000_000:
+        _flow_recorder.external_alert('exfil', src_id, src_id, dest_ip,
+                                      f'{_resp_hostname(src_id)} → {dest_ip}: 60秒に {total / 1e6:.1f}MB', now=now)
+
+
+def _attack_victim(v):
+    if not v:
+        return v
+    if v in device_sessions:
+        return v
+    return icmp_engine._find_device_owning_ip(v) or v
+
+
+def _attack_tick():
+    from engine.attack_map import tracker
+    global _attack_last
+    tracker.org = _site_name()
+    new = [a for a in list(_flow_recorder.alerts) if a.get('seq', 0) > _attack_last]
+    if new:
+        _attack_last = max(a['seq'] for a in new)
+    for a in new:
+        tracker.record(a['rule'], _attack_victim(a.get('src')), _attack_victim(a.get('dst')),
+                       a.get('detail', ''), now=a['t'])
+
+
+async def _response_auto_loop():
+    from engine import login_guard
+    login_guard.on_auth = _on_auth
+    while True:
+        try:
+            _attack_tick()
+        except Exception as e:  # noqa: BLE001
+            print(f"[attack] {e}")
+        try:
+            await _response_auto_tick()
+        except Exception as e:  # noqa: BLE001
+            print(f"[response] {e}")
+        await asyncio.sleep(2)
 
 
 @app.get("/api/traffic/routes")

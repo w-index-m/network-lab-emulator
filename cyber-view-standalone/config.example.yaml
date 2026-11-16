@@ -72,6 +72,20 @@ sources:
   #   interval: 60                   # 秒
   #   full_every: 5                  # 経路数が変わらなくても N 回に1回は経路表全体を取り直す
   #   cpu: {high: 80, jump: 20, hold: 2}   # high% 以上が hold 回続くと注、前回から jump 以上上がると情
+  #   # CPU の OID(機種固有の MIB を使う時。装置ごとなら devices[].snmp_cpu_oid)。無ければ Cisco → hrProcessorLoad
+  #   # cpu: {oid: 1.3.6.1.4.1.1182....}
+
+  # NetFlow v5 / sFlow v5 を受ける(ダークネット観測・通信の粒・外部への大量送信の検知に使う)
+  # flow: {netflow: 2055, sflow: 6343, bind: 0.0.0.0}
+  # ダークネット(使っていない帯)。届いたフローをスキャン・DDoS の跳ね返り等に分類する
+  # darknet: {prefixes: [10.250.0.0/24]}
+  # 回線チェック: 本物の ping(ICMP)で遅延とロスを測る。"host:port" なら TCP の接続時間
+  # wan_probe:
+  #   - {name: プロバイダ出口, target: 203.0.113.1}
+  #   - {name: 本社 VPN, target: 10.0.0.1:443}
+  # wan_probe_interval: 10
+  # 複数拠点の横断分析(ネクサス)。url を書くと中央へ送る。url 無しで token だけなら、この画面が中央になる
+  # nexus: {url: http://central.example.local:8090, site: 名古屋, token: ${NEXUS_TOKEN}}
 
   # SNMP trap(linkDown / linkUp)をこの画面で直接受ける場合
   # snmp_trap:

@@ -70,6 +70,24 @@ RULES = {
     'darknet_reflection': {'name': 'リフレクション攻撃の準備(踏み台探し)', 'severity': 'medium',
                            'window': 0, 'threshold': 1, 'cooldown': 60,
                            'desc': 'ダークネットへ DNS / NTP / SNMP / SSDP / memcached 等の問い合わせ(オープンリゾルバ探索など)'},
+    'login_brute': {'name': '総当たりログイン', 'severity': 'high',
+                    'window': 60, 'threshold': 3, 'cooldown': 120,
+                    'desc': '同じ送信元から実 SSH / Telnet のログイン失敗が 60秒に 3回以上'},
+    'login_after_fail': {'name': '総当たりの後にログイン成功', 'severity': 'high',
+                         'window': 600, 'threshold': 1, 'cooldown': 300,
+                         'desc': '失敗を重ねた送信元が、その後ログインに成功した(正規アカウントの悪用の疑い)'},
+    'exfil': {'name': '外部への大量送信', 'severity': 'high',
+              'window': 60, 'threshold': 1000000, 'cooldown': 300,
+              'desc': '装置からラボの外(どの装置も持たないアドレス)へ 60秒に 1MB 以上'},
+    'nexus_finding': {'name': 'ネクサス(複数拠点)の所見', 'severity': 'high',
+                      'window': 0, 'threshold': 0, 'cooldown': 0,
+                      'desc': '中央のニルヴァーナが複数拠点の情報を突き合わせて見つけたこと(共通の攻撃元・同時期の同じ手口・偏り)'},
+    'wan_slow': {'name': '回線の遅延', 'severity': 'warning', 'window': 15, 'threshold': 30, 'cooldown': 300,
+                 'desc': '出口までの遅延が続けてしきい値以上(NETLAB_WAN_RTT_MS、既定 30ms)。夜間の PPPoE 混雑など'},
+    'wan_loss': {'name': '回線のパケットロス', 'severity': 'warning', 'window': 15, 'threshold': 0.05, 'cooldown': 300,
+                 'desc': '出口までのパケットロスが続けてしきい値以上(NETLAB_WAN_LOSS、既定 5%)'},
+    'ext_sensor': {'name': 'セキュリティ製品のアラート', 'severity': 'medium', 'window': 0, 'threshold': 0, 'cooldown': 30,
+                   'desc': 'UTM・次世代FW・IDS(FortiGate / ASA / Snort・Suricata / Palo Alto)が syslog で出したアラート'},
     'cpu_high': {'name': 'CPU 高負荷', 'severity': 'warning',
                  'window': 0, 'threshold': 80, 'cooldown': 300,
                  'desc': 'CPU 使用率(cpmCPUTotal5minRev)が続けてしきい値以上。しきい値は NETLAB_CPU_HIGH / _HOLD'},
@@ -83,9 +101,9 @@ for _r in _FLAP_RULES + [_ROUTE_FLAP]:
 FLAP_RULE_IDS = {_r['id'] for _r in _FLAP_RULES + [_ROUTE_FLAP]}
 # 検知元(センサー)。/cyber-view の六角形の花びらはこの単位でまとめる
 RULE_SOURCE = {**{_k: 'SYSLOG' for _k in FLAP_RULE_IDS}, 'route_flap': 'NET', 'conn_scan': 'IDS', 'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
-               'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'valhalla': 'VALHALLA', 'nirvana_rule': 'RULE', 'cpu_high': 'NET',
+               'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'valhalla': 'VALHALLA', 'nirvana_rule': 'RULE', 'cpu_high': 'NET', 'wan_slow': 'NET', 'wan_loss': 'NET', 'login_brute': 'IDS', 'nexus_finding': 'NEXUS', 'ext_sensor': 'SENSOR', 'login_after_fail': 'IDS', 'exfil': 'IDS',
                'darknet_scan': 'DARKNET', 'darknet_backscatter': 'DARKNET', 'darknet_misconfig': 'DARKNET', 'darknet_reflection': 'DARKNET'}
-SECURITY_SOURCES = {'IDS', 'FW', 'DARKNET'}
+SECURITY_SOURCES = {'IDS', 'FW', 'DARKNET', 'SENSOR', 'NEXUS'}
 _TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')
 # 復旧を知らせるメッセージ(実機のCiscoでは up も %LINK-3 なので重要度だけでは区別できない)
 RECOVERY = re.compile(r'state to up|to FULL|Established|Link ?Up|復旧', re.I)

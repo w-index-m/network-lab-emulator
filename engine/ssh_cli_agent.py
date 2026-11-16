@@ -299,7 +299,7 @@ class SshCliServer:
                 pass
             # IOS の login block-for: Quiet Mode 中は新しいログインを受け付けない
             from engine import login_guard as _lg
-            if _lg.is_quiet(self.device_id, self.state):
+            if _lg.is_quiet(self.device_id, self.state) or (addr and _lg.vty_denied(self.device_id, self.state, addr[0])):
                 try:
                     client.close()
                 except OSError:

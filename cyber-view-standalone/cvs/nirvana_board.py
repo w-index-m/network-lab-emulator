@@ -754,8 +754,23 @@ def validate_rule(r):
 
 
 def validate_contact(c):
-    if c.get('type', 'webhook') != 'webhook':
-        raise ValueError('連絡先の種類は webhook のみです')
+    kind = c.get('type', 'webhook')
+    if kind not in ('webhook', 'email'):
+        raise ValueError('連絡先の種類は webhook か email です')
+    if not str(c.get('name') or '').strip():
+        raise ValueError('name が必要です')
+    if kind == 'email':
+        to = [x.strip() for x in str(c.get('to') or '').replace(';', ',').split(',') if x.strip()]
+        if not to or not all(re.match(r'^[^@\s]+@[^@\s]+$', x) for x in to):
+            raise ValueError('to(宛先のメールアドレス、カンマ区切り)が必要です')
+        if not str(c.get('smtp_host') or '').strip():
+            raise ValueError('smtp_host が必要です')
+        try:
+            port = int(c.get('smtp_port') or 25)
+        except (TypeError, ValueError):
+            raise ValueError('smtp_port は数字で') from None
+        return {**c, 'to': ', '.join(to), 'smtp_port': port, 'starttls': bool(c.get('starttls')),
+                'from': c.get('from') or 'nirvana@localhost', 'url': f"mailto:{', '.join(to)}"}
     u = urllib.parse.urlparse(str(c.get('url') or ''))
     if u.scheme not in ('http', 'https') or not u.netloc:
         raise ValueError('url は http(s)://... で指定してください')
@@ -878,6 +893,37 @@ def webhook_payload(rule, inst, new_state, external_url=''):
                     'startsAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(inst.get('since') or time.time())),
                     'values': {'A': inst.get('value')}, 'fingerprint': f"{rule['uid']}:{inst['key']}"}],
     }
+
+
+def send_email(c, payload, timeout=10):
+    """連絡先(email)へ送る。パスワードは連絡先には保存せず、環境変数 NIRVANA_SMTP_PASSWORD から読む"""
+    import os
+    import smtplib
+    from email.message import EmailMessage
+    m = EmailMessage()
+    m['Subject'] = payload.get('title', 'ニルヴァーナ')
+    m['From'] = c.get('from') or 'nirvana@localhost'
+    m['To'] = c['to']
+    lines = [payload.get('message', '')]
+    for a in payload.get('alerts', []):
+        lines.append('')
+        lines.append(f"状態: {a.get('status')}  開始: {a.get('startsAt')}")
+        lines += [f'  {k} = {v}' for k, v in (a.get('labels') or {}).items()]
+    m.set_content('\n'.join(lines))
+    with smtplib.SMTP(c['smtp_host'], int(c.get('smtp_port') or 25), timeout=timeout) as s:
+        if c.get('starttls'):
+            s.starttls()
+        if c.get('user'):
+            s.login(c['user'], os.environ.get('NIRVANA_SMTP_PASSWORD', ''))
+        refused = s.send_message(m)
+    return 250 if not refused else 550
+
+
+def send_contact(c, payload):
+    """連絡先の種類(webhook / email)に応じて送る。戻り値は HTTP / SMTP のステータス"""
+    if c.get('type') == 'email':
+        return send_email(c, payload)
+    return send_webhook(c['url'], payload)
 
 
 def send_webhook(url, payload, timeout=5):

@@ -59,6 +59,8 @@ class Collector:
         self.valhalla_alerts = AlertImporter()
         from .snmp_poll import SnmpPoller
         self.snmp = SnmpPoller(cfg, self.analytics, self.errors)   # 経路表・CPU を実機から直接(sources.snmp)
+        from .security import SiteSecurity
+        self.sec = SiteSecurity(cfg, self)        # ATT&CK・ネクサス・ダークネット・フロー・外部センサー・回線チェック
         if self.prom and not self.prom.use_proxy:
             V.OPENER = S._opener(False)     # 構内の監視基盤へは直接(sources と同じ扱い)
         self._stop = threading.Event()
@@ -99,6 +101,7 @@ class Collector:
             if self.analytics.record_log(dev, self.devs[dev]['hostname'], r['msg'], r['t'],
                                          lab.get('level') or lab.get('severity')):
                 n += 1
+                self.sec.on_log(dev, r['msg'], r['t'])
         self._log_until = now
         return n
 
@@ -296,10 +299,12 @@ class Collector:
                 self._stop.wait(float(self.cfg['poll_interval']))
         threading.Thread(target=loop, daemon=True, name='cvs-collector').start()
         self.snmp.start()
+        self.sec.start()
 
     def stop(self):
         self._stop.set()
         self.snmp.stop()
+        self.sec.stop()
 
     # ── 画面向けのまとめ ──
     def hosts(self):

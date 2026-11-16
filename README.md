@@ -120,6 +120,9 @@ NICT の NIRVANA改 を参考に作った、ネットワークを 3D で見る�
 | ROUTER LINKS | リンクごとの流量・使用率・LINK DOWN。断の検知経路(STATE / SYSLOG / TRAP / POLL)をチップで表示。SNMP が応答しない装置は「NO RESPONSE 消失」 |
 | OSPF | 隣接の状態と Dead タイマーの残り、エリア、宛先までの最短経路ツリー、SPF の再計算 |
 | DARKNET | NICTER のエッセンス。使われていない帯(ダークネット)に届いた通信を、送信元からの放物線の矢で表示(TCP 青 / UDP 黄 / ICMP 赤)。スキャン・DDoS の跳ね返り・設定ミス・リフレクション攻撃の準備に分類し、日ごとの観測統計(1 IP あたりのパケット数)も出す |
+| ATT&CK | NIRVANA改 の Organizations View 風。組織を青い輪、攻撃の進行度(ATT&CK の14段階)を中央の橙の円柱で。戦術 × 手法の表と時系列。複数拠点(ネクサス)なら拠点ごとの輪が並ぶ |
+| RESPONSE | 警報から遮断・隔離。本物の CLI を装置に入れる(line vty の access-class / Null0 / 隣の装置の shutdown)、解除、自動対処、警報の前後の通信記録(pcap) |
+| WAN | 回線チェック。フレッツ網の PPPoE / IPoE(MAP-E)/ IPsec の状態と、経路ごとの遅延・ロスの推移(夜間の PPPoE 混雑を再現、実機版は本物の ping) |
 | SYSTEM STATUS | ネットワーク / トラフィック / セキュリティ / syslog の4観点で 正常・注意・異常 |
 | 情 / 注 | 経路の追加・削除・変更、CPU の急上昇・回復は「情」。CPU の高負荷が続く・フラップは「注」(しきい値は設定で変更可) |
 | BOARD / EXPLORE / ALERTS | Grafana 相当の機能。ダッシュボード、PromQL / LogQL の問い合わせ、アラートルールと webhook。Grafana の JSON もそのまま取り込める |
@@ -147,6 +150,9 @@ There are two ways to use it:
 | ROUTER LINKS | Per-link traffic, utilization and LINK DOWN. Chips show which evidence saw the outage (STATE / SYSLOG / TRAP / POLL). Devices that stop answering SNMP show "NO RESPONSE" |
 | OSPF | Adjacency state with the remaining Dead timer, areas, the shortest-path tree to a destination, and SPF recalculations |
 | DARKNET | The essence of NICTER: traffic reaching an unused address block (darknet) flies in as parabolic arrows from its sources (TCP blue / UDP yellow / ICMP red), classified as scan, DDoS backscatter, misconfiguration or reflection-attack preparation, with daily statistics (packets per IP) |
+| ATT&CK | NIRVANA-Kai-style Organizations View: organizations as blue rings, attack progress through the 14 ATT&CK tactics as a central orange cylinder, a tactic × technique matrix and a timeline. With several sites (nexus), one ring per site |
+| RESPONSE | Block or quarantine from an alert by pushing real CLI to devices (line vty access-class / Null0 / shut the neighbour's port), undo, automatic rules, and a capture (pcap) around the alert |
+| WAN | Line check: PPPoE / IPoE (MAP-E) / IPsec state over FLET'S and per-path latency and loss history (evening PPPoE congestion is reproduced in the lab; the standalone edition uses real pings) |
 | SYSTEM STATUS | Normal / warning / critical for four areas: network, traffic, security and syslog |
 | 情 (info) / 注 (notice) | Route add/delete/change and CPU jump/recovery appear as "info". Sustained high CPU and flapping appear as "notice". Thresholds are configurable |
 | BOARD / EXPLORE / ALERTS | Grafana-like features: dashboards, PromQL / LogQL queries, alert rules with webhooks. Grafana dashboard JSON can be imported as is |
@@ -175,7 +181,9 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | OSPF(隣接と最短経路 / adjacencies and SPF tree)<br>![](docs/images/cyber-view-ospf-normal.png) | OSPF の Dead タイマーのカウントダウン / Dead timer countdown<br>![](docs/images/cyber-view-ospf-deadcount.png) |
 | ポートスキャンの検知 / port scan detected<br>![](docs/images/cyber-view-v6-portscan.png) | SSH 総当たりとログインのブロック / SSH brute force and login block<br>![](docs/images/cyber-view-v7-ssh-brute.png) |
 | DARKNET(NICTER のエッセンス / NICTER essence)<br>![](docs/images/cyber-view-darknet.png) | ポートスキャンの検知(ライブネット)/ port scan on the live network<br>![](docs/images/cyber-view-v6-portscan-host.png) |
-| 経路の変化「情」/ route change info<br>![](docs/images/cyber-view-v8-route-info.png) | CPU の「情」/ CPU info<br>![](docs/images/cyber-view-cpu-info.png) |
+| ATT&CK(拠点ごとの輪と進行度 / per-site rings and progress)<br>![](docs/images/cyber-view-attack.png) | RESPONSE(警報から遮断 / block from an alert)<br>![](docs/images/cyber-view-response.png) |
+| WAN(フレッツ網の回線チェック / FLET'S line check)<br>![](docs/images/cyber-view-wan.png) | CPU の「情」/ CPU info<br>![](docs/images/cyber-view-cpu-info.png) |
+| 経路の変化「情」/ route change info<br>![](docs/images/cyber-view-v8-route-info.png) | ダークネット観測 / darknet<br>![](docs/images/cyber-view-darknet.png) |
 | フラップの警告 / flap notice<br>![](docs/images/cyber-view-v8-flap.png) | SNMP 応答なし / no SNMP response<br>![](docs/images/cyber-view-v5-no-response.png) |
 | ヴァルハラから再生 / replay from VALHALLA<br>![](docs/images/cyber-view-valhalla-replay.png) | 使用率の予測 / utilization forecast<br>![](docs/images/cyber-view-valhalla-forecast.png) |
 | BOARD(Grafana 相当 / Grafana-like)<br>![](docs/images/nirvana-board.png) | Grafana JSON の取り込み / Grafana JSON import<br>![](docs/images/nirvana-board-grafana-import.png) |
@@ -190,13 +198,13 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 
 | | 日本語 | English |
 |---|---|---|
-| ☐ | 自動遮断は無い(警報を出すだけ。FW や ACL へは反映しない) | No automatic blocking: alerts are shown only, nothing is pushed to firewalls or ACLs |
+| ☐ | 遮断・隔離はラボの装置(Cisco 系)だけ。実機向け(スタンドアロン版)からは装置へコマンドを入れない | Block/quarantine works on lab (Cisco-type) devices only; the standalone edition does not push commands to real devices |
 | ☐ | OSPF ビューの DR/BDR がルータ単位で、DR 側だけコストが小さく出る(エンジン側の既存の挙動) | OSPF view: DR/BDR is per router and the DR side shows a smaller cost (existing engine behaviour) |
 | ☐ | スタンドアロン版には ping の粒・ポートスキャン検知・DEMO が無い(ラボ専用) | The standalone edition lacks ping particles, port-scan detection and DEMO (lab only) |
 | ☐ | BOARD に無いもの: 利用者・権限の管理、プラグイン、PDF レポート、Slack/Teams/メールの専用通知(webhook で代用) | Not in BOARD: user and permission management, plugins, PDF reports, native Slack/Teams/mail (use webhooks) |
 | ☐ | 内部データソースの PromQL で `or` / `and` / `offset` / `histogram_quantile` が未対応(ヴァルハラ=Prometheus 経由なら使える) | Internal data source PromQL lacks `or` / `and` / `offset` / `histogram_quantile` (available via VALHALLA = Prometheus) |
-| ☐ | DARKNET はラボ版だけ(実機向けにはミラーポートや sFlow の受け口が必要) | DARKNET is lab-only for now (real networks need a mirror port or sFlow input) |
-| ☐ | NIRVANA改 の要素の残り: ATT&CK の対応と攻撃の進行度、警報からの遮断・隔離、複数拠点の横断分析 | Remaining NIRVANA-Kai ideas: ATT&CK mapping and attack progress, block/quarantine from an alert, cross-site analysis |
+| ☐ | ATT&CK の対応はこのエミュレータが検知できる事象だけ(エンドポイントのエージェントは無い) | ATT&CK mapping covers only what this emulator can detect (no endpoint agents) |
+| ☐ | ヤマハ RTX の CPU の MIB は未確認(設定で OID を指定する)。sFlow は本物の送信側 agent では未確認(sfcapd で形式は確認) | Yamaha RTX CPU MIB unconfirmed (set the OID in config); sFlow not yet tested with a real agent (format checked with sfcapd) |
 | ☐ | CPU の「情」「注」のしきい値(80% / +20)は仮の値。実機で調整が必要 | CPU info/notice thresholds (80% / +20) are provisional and need tuning on real devices |
 | ☐ | README の動画は GIF。再生プレーヤーにするには github.com の編集画面で mp4 をドラッグ&ドロップする | README videos are GIFs; for an inline player, drag and drop the mp4 in the github.com editor |
 | ☐ | STP のテストが GitHub の CI でだけ時々失敗する(調査用の出力を仕込み済み) | An STP test fails intermittently only on GitHub CI (diagnostics are in place) |
@@ -224,6 +232,7 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | BOARD / EXPLORE / ALERTS | [docs/nirvana-board.md](docs/nirvana-board.md) |
 | 経路と CPU の情・注 / route and CPU info | [docs/snmp-route-cpu-info.md](docs/snmp-route-cpu-info.md) |
 | ダークネット観測 / darknet observation | [docs/darknet-nicter.md](docs/darknet-nicter.md) |
+| 遮断・ATT&CK・複数拠点・回線チェック・フロー / response, ATT&CK, nexus, WAN, flows | [docs/nirvana-response-attack-nexus-wan-flow.md](docs/nirvana-response-attack-nexus-wan-flow.md) |
 | 機種 × プロトコルの試験 / vendor × protocol tests | [docs/vendor-protocol-matrix-cyber-view.md](docs/vendor-protocol-matrix-cyber-view.md)、[docs/verification/README.md](docs/verification/README.md) |
 | 作業記録 / progress log | [docs/progress-log.md](docs/progress-log.md) |
 

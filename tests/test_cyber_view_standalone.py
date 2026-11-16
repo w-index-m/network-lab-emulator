@@ -30,7 +30,8 @@ from cvs import config as sa_config  # noqa: E402
 def test_shared_files_are_in_sync_with_the_lab():
     """画面と検知ルールはラボ版と同じファイル。片方だけ直すとずれるので固定する"""
     assert filecmp.cmp(os.path.join(ROOT, 'static', 'cyber_view.html'), os.path.join(SA, 'web', 'cyber_view.html'), shallow=False)
-    for f in ('flap_rules.py', 'link_evidence.py'):
+    for f in ('flap_rules.py', 'link_evidence.py', 'attack_map.py', 'darknet.py', 'nexus.py', 'wan_watch.py',
+              'flow_collector.py', 'sensor_syslog.py', 'route_watch.py'):
         assert filecmp.cmp(os.path.join(ROOT, 'engine', f), os.path.join(SA, 'cvs', f), shallow=False), f
 
 
@@ -213,3 +214,79 @@ def test_auth_token(fake):
 def test_prometheus_is_displayed_as_valhalla():
     html = open(os.path.join(ROOT, 'static', 'cyber_view.html'), encoding='utf-8').read()
     assert "SRC_DISPLAY = { prometheus: 'VALHALLA'" in html and 'ヴァルハラ 不達' in html
+
+
+def test_security_features_netflow_darknet_attack_nexus_wan():
+    """スタンドアロン版: NetFlow → ダークネット・ATT&CK、外部センサー(Loki のログ)、ネクサスの中央、回線チェック(TCP で測る)"""
+    import socket as _s
+    import struct as _st
+    from cvs import security as sec_mod
+    u = _s.socket(_s.AF_INET, _s.SOCK_DGRAM)
+    u.bind(('127.0.0.1', 0))
+    nf_port = u.getsockname()[1]
+    u.close()
+    lis = _s.socket()
+    lis.bind(('127.0.0.1', 0))
+    lis.listen(8)
+    tcp_port = lis.getsockname()[1]
+    cfg = _cfg({'flow': {'netflow': nf_port, 'bind': '127.0.0.1'}, 'darknet': {'prefixes': ['10.250.7.0/24']},
+                'nexus': {'site': 'NAGOYA', 'token': 'tok'},
+                'wan_probe': [{'name': 'GW', 'target': f'127.0.0.1:{tcp_port}'}]})
+    app = sa_server.create_app(cfg, start_collector=False)
+    col = app.state.collector
+    col.sec.flows.start()
+    try:
+        c = TestClient(app)
+        hdr = _st.pack('!HHIIIIBBH', 5, 6, 0, int(time.time()), 0, 1, 0, 0, 0)
+        body = b''.join(_s.inet_aton('198.51.100.5') + _s.inet_aton(f'10.250.7.{i}') + b'\0' * 8 +
+                        _st.pack('!IIII', 1, 60, 0, 0) + _st.pack('!HH', 4000, 445) + bytes([0, 2, 6, 0]) + b'\0' * 8
+                        for i in range(1, 7))
+        _s.socket(_s.AF_INET, _s.SOCK_DGRAM).sendto(hdr + body, ('127.0.0.1', nf_port))
+        for _ in range(30):
+            if col.sec.flows.stats['flows'] >= 6:
+                break
+            time.sleep(0.1)
+        d = c.get('/api/darknet').json()
+        assert d['hour']['cats']['scan'] >= 1 and 'NetFlow' in d['sensor']['label']
+        assert c.get('/api/traffic/flowmap').json()['events'][0]['via'] == 'netflow'
+        # 外部センサー: Loki から来たログに Snort の行
+        col.sec.on_log('r1', '[1:2001219:20] ET SCAN Potential SSH Scan [**] [Priority: 2] {TCP} 198.51.100.5:4000 -> 10.9.0.1:22', time.time())
+        a = c.get('/api/attack').json()
+        assert a['site'] == 'NAGOYA' and any(q['id'] == 'T1595' for m in a['matrix'] for q in m['techniques'])
+        # ネクサスの中央: トークン違いは 403、正しければ所見を返す
+        assert c.post('/api/nexus/report', json={'site': 'OSAKA'}, headers={'X-Nexus-Token': 'bad'}).status_code == 403
+        r = c.post('/api/nexus/report', json={'site': 'OSAKA', 'alerts': [{'t': time.time(), 'rule': 'scan', 'src': '198.51.100.5'}]},
+                   headers={'X-Nexus-Token': 'tok'}).json()
+        assert r['ok']
+        col.sec.probe_tick()
+        w = c.get('/api/wan').json()
+        assert w['simulated'] is False and w['paths'][0]['rtt_ms'] is not None and w['paths'][0]['loss'] == 0
+        assert sec_mod.ping('127.0.0.1:1', count=1, timeout=0.3) == (None, 1.0)
+    finally:
+        col.sec.flows.stop()
+        lis.close()
+    # 設定が無ければ API は 404(画面のボタンは自動で隠れる)
+    c2 = TestClient(sa_server.create_app(_cfg({}), start_collector=False))
+    assert c2.get('/api/darknet').status_code == 404 and c2.get('/api/wan').status_code == 404
+
+
+def test_snmp_poller_rfc1213_routes_and_cpu_fallback(monkeypatch):
+    """古い機種: inetCidr / ipCidr が無ければ RFC1213 ipRouteTable、CPU は設定の OID → Cisco → hrProcessorLoad"""
+    from cvs import snmp_poll as SP
+    rows = {
+        SP.RFC1213_ROUTE + '.7': [(SP.RFC1213_ROUTE + '.7.0.0.0.0', '192.168.1.1'), (SP.RFC1213_ROUTE + '.7.192.168.1.0', '0.0.0.0')],
+        SP.RFC1213_ROUTE + '.9': [(SP.RFC1213_ROUTE + '.9.0.0.0.0', 3), (SP.RFC1213_ROUTE + '.9.192.168.1.0', 2)],
+        SP.RFC1213_ROUTE + '.11': [(SP.RFC1213_ROUTE + '.11.0.0.0.0', '0.0.0.0'), (SP.RFC1213_ROUTE + '.11.192.168.1.0', '255.255.255.0')],
+        SP.RFC1213_ROUTE + '.2': [(SP.RFC1213_ROUTE + '.2.0.0.0.0', 3), (SP.RFC1213_ROUTE + '.2.192.168.1.0', 2)],
+        SP.IFNAME: [(SP.IFNAME + '.2', 'lan1'), (SP.IFNAME + '.3', 'pp1')],
+        SP.HR_CPU: [(SP.HR_CPU + '.1', 30), (SP.HR_CPU + '.2', 50)],
+    }
+    monkeypatch.setattr(SP.SC, 'walk', lambda h, c, root, **k: rows.get(root, []))
+    p = SP.SnmpPoller({'devices': [{'id': 'rtx', 'hostname': 'RTX', 'mgmt_ip': '127.0.0.1'}], 'sources': {'snmp': {}}}, None, {})
+    d = p.devs[0]
+    r = sorted((x['network'], x['prefix'], x['next_hop'], x['source'], x['iface']) for x in p.routes(d, 0))
+    assert r == [('0.0.0.0', 0, '192.168.1.1', 'static', 'pp1'), ('192.168.1.0', 24, '', 'connected', 'lan1')]
+    assert p.cpu(d, '127.0.0.1', 'public') == 40                 # hrProcessorLoad の平均
+    rows['1.3.6.1.4.1.1182.9'] = [('1.3.6.1.4.1.1182.9.0', 77)]
+    d['snmp_cpu_oid'] = '1.3.6.1.4.1.1182.9'
+    assert p.cpu(d, '127.0.0.1', 'public') == 77                 # 設定した OID が優先

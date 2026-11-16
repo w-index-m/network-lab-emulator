@@ -25,7 +25,7 @@ import time
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse
 
-from .nirvana_board import (QueryError, auto_step, parse_time, send_webhook, validate_contact,
+from .nirvana_board import (QueryError, auto_step, parse_time, send_contact, validate_contact,
                             validate_dashboard, validate_rule, webhook_payload, _reduce, _CMP)
 
 MAX_POINTS = 11000
@@ -353,10 +353,10 @@ def make_router(get_sources, store, evaluator, system_annotations=None, check=No
         if (g := guard(request)):
             return g
         try:
-            validate_contact(body)
+            body = validate_contact(dict(body, type=body.get('type') or 'webhook'))
         except ValueError as x:
             return err(x)
-        return store.put('contact_points', dict(body, type='webhook'))
+        return store.put('contact_points', body)
 
     @r.delete('/contact-points/{uid}')
     def del_contact(request: Request, uid: str):
@@ -373,7 +373,7 @@ def make_router(get_sources, store, evaluator, system_annotations=None, check=No
             return err('ありません', 404)
         rule = {'uid': 'test', 'title': 'ニルヴァーナからの試験通知', 'severity': 'info', 'summary': '連絡先の試験です'}
         try:
-            code = send_webhook(c['url'], webhook_payload(rule, {'key': 'test', 'labels': {}, 'value': 1, 'since': time.time()}, 'firing'))
+            code = send_contact(c, webhook_payload(rule, {'key': 'test', 'labels': {}, 'value': 1, 'since': time.time()}, 'firing'))
         except Exception as x:
             return err(f'送れませんでした: {str(x)[:200]}', 502)
         return {'ok': True, 'status': code}

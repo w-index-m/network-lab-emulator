@@ -9318,6 +9318,16 @@ Configuration Revision            : 5"""
                 return ''
             if c == 'save':
                 return ''
+            # 網終端装置の混雑(0〜100)。夜間の PPPoE 混雑の再現。IPoE(MAP-E)には効かない
+            m_cong = re.match(r'^(no\s+)?pppoe\s+congestion(?:\s+(\d+))?$', c)
+            if m_cong:
+                device_id = getattr(state, '_device_id', None)
+                v = 0 if m_cong.group(1) else int(m_cong.group(2) or 0)
+                if not 0 <= v <= 100:
+                    return '% congestion は 0〜100'
+                if device_id:
+                    pppoe_engine._bas(device_id)['congestion'] = v
+                return ''
 
             # ── MAP-E(v6プラス等)ルールサーバー設定 ──
             m_mape_pool = re.match(r'^map-e\s+ipv4-pool\s+([\d.]+)\s+([\d.]+)$', c)
@@ -9359,6 +9369,8 @@ Configuration Revision            : 5"""
                 lines.append(f'ip pool {bas["pool_start"]} {bas["pool_end"]}/{bas["prefix"]}')
             for user in sorted(bas.get('users', {})):
                 lines.append(f'pppoe-user {user} {bas["users"][user]}')
+            if bas.get('congestion'):
+                lines.append(f'pppoe congestion {bas["congestion"]}')
         mape = map_e_engine.nodes.get(device_id) if device_id else None
         if mape:
             if mape.get('ipv4_pool'):

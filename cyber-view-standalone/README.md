@@ -91,6 +91,17 @@ ZABBIX_TOKEN=xxxx docker compose up -d --build
 ipCidrRouteTable)と CPU(cpmCPUTotal5minRev)を定期取得する。経路の追加・削除・変更と CPU の急上昇・回復が「情」、
 CPU が高い状態が続くと「注」(警告)。しきい値は `sources.snmp.cpu`。詳細はリポジトリの `docs/snmp-route-cpu-info.md`。
 
+### ATT&CK・ネクサス・ダークネット・フロー・外部センサー・回線チェック
+
+- **ATT&CK**: 警報を ATT&CK の戦術・手法に結びつけ、拠点・装置ごとの進行度を出す(設定不要)
+- **ネクサス**(`sources.nexus`): 複数拠点の横断分析。警報と ATT&CK のイベントを中央へ送り、共通の攻撃元などの所見を受け取る
+- **フロー**(`sources.flow`): NetFlow v5 / sFlow v5。**ダークネット**(`sources.darknet`)の観測と通信の粒に使う
+- **外部センサー**: Loki のログに FortiGate / ASA / Snort・Suricata / Palo Alto のアラートがあれば警報にする(設定不要)
+- **回線チェック**(`sources.wan_probe`): 本物の ping で遅延とロスを測る
+- メール通知: ALERTS の連絡先に「メール」(SMTP のパスワードは環境変数 `NIRVANA_SMTP_PASSWORD`)
+
+詳細はリポジトリの `docs/nirvana-response-attack-nexus-wan-flow.md`。
+
 ### BOARD / EXPLORE / ALERTS(Grafana が持つ機能)
 
 ダッシュボード(8種のパネル・変数・時間範囲・自動更新・注釈・編集)、問い合わせ(PromQL / LogQL / 内部ログ)、
@@ -191,6 +202,11 @@ Long-term history lives in Prometheus (VALHALLA), Loki or Zabbix; this view only
 The first SNMP poll after a restart only takes a baseline, so it produces no info events.
 
 ### More features
+
+- **ATT&CK** (no config), **nexus** cross-site analysis (`sources.nexus`), **NetFlow v5 / sFlow v5** (`sources.flow`) feeding the **darknet**
+  (`sources.darknet`) and flow particles, **external security sensors** read from Loki logs (FortiGate / ASA / Snort·Suricata / Palo Alto),
+  **line check** with real pings (`sources.wan_probe`), and **e-mail** contact points (SMTP password from `NIRVANA_SMTP_PASSWORD`).
+  See `docs/nirvana-response-attack-nexus-wan-flow.md`.
 
 - **VALHALLA (Prometheus)**: replay past states in 3D from `rate(ifHC*Octets)` / `ifOperStatus` history, utilization forecast,
   OSPF adjacencies from OSPF-MIB, and VALHALLA's firing alerts as "VALHALLA" petals (`docs/valhalla-nirvana.md`).

@@ -83,8 +83,20 @@ def is_quiet(device_id, state, now=None):
     return 0
 
 
+on_auth = None        # (装置, 送信元, 成功したか, ユーザー, 時刻) を受け取る関数。/cyber-view の総当たり検知に使う
+
+
+def _notify(device_id, src_ip, ok, user, now):
+    if on_auth:
+        try:
+            on_auth(device_id, src_ip, ok, user, now)
+        except Exception:  # noqa: BLE001 - 監視側の失敗でログインを止めない
+            pass
+
+
 def record_failure(device_id, state, user, src_ip, port=22, now=None):
     now = time.time() if now is None else now
+    _notify(device_id, src_ip, False, user, now)
     cfg = config(state)
     if cfg.get('on_failure_log'):
         _log(device_id, 4, 'LOGIN_FAILED', f'Login failed [user: {user}] [Source: {src_ip}] '
@@ -108,6 +120,7 @@ def record_failure(device_id, state, user, src_ip, port=22, now=None):
 
 def record_success(device_id, state, user, src_ip, port=22, now=None):
     now = time.time() if now is None else now
+    _notify(device_id, src_ip, True, user, now)
     if config(state).get('on_success_log'):
         _log(device_id, 5, 'LOGIN_SUCCESS', f'Login Success [user: {user}] [Source: {src_ip}] '
              f'[localport: {port}] at ' + time.strftime('%H:%M:%S UTC %a %b %d %Y', time.gmtime(now)))
@@ -158,3 +171,15 @@ def reset(device_id=None):
         else:
             _failures.pop(device_id, None)
             _quiet_until.pop(device_id, None)
+
+
+def vty_denied(device_id, state, src_ip):
+    """line vty の access-class で、この送信元を拒否するか(ACL に無ければ実機と同じく素通し)"""
+    acl = getattr(state, 'line_vty_access_class', None)
+    if not acl or not src_ip:
+        return False
+    try:
+        from engine.protocols import ipfilter_engine
+        return not ipfilter_engine.check_source(device_id, acl, src_ip)
+    except Exception:  # noqa: BLE001
+        return False

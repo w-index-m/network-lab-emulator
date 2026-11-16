@@ -15,7 +15,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -81,8 +81,58 @@ def create_app(cfg, start_collector=True):
         links = [{'a': x['a'], 'b': x['b'], 'iface_a': x['iface_a'], 'iface_b': x['iface_b'], 'down': x['down'],
                   'ab_bytes': 0, 'ba_bytes': 0} for x in s['links']]
         al = col.analytics.alerts_since(alert_since)
-        return {'nodes': list(nodes.values()), 'links': links, 'events': [], 'alerts': al,
-                'seq': 0, 'alert_seq': col.analytics.alert_seq, 'now': time.time()}
+        evs = [e for e in list(col.sec.flow_events) if e['seq'] > since][-300:]     # NetFlow / sFlow があれば通信の粒
+        return {'nodes': list(nodes.values()), 'links': links, 'events': evs, 'alerts': al,
+                'seq': col.sec.flow_seq, 'alert_seq': col.analytics.alert_seq, 'now': time.time()}
+
+    @app.get('/api/attack')
+    def attack(since: int = 0, window: int = 86400, x_session_token: str = Header(None)):
+        """ATT&CK の表と進行度(ネクサスの中央なら拠点ごとの輪も)"""
+        check(x_session_token)
+        sec = col.sec
+        sec.tick()
+        d = sec.tracker.snapshot(since, max(60, min(int(window), 7 * 86400)),
+                                 extra=[e for e in sec.hub.attack_events() if e.get('org') != sec.site])
+        for t in d['targets']:
+            t['host'] = (col.devs.get(t['target']) or {}).get('hostname', t['target'])
+        for e in d['events']:
+            e['target_host'] = (col.devs.get(e['target']) or {}).get('hostname', e['target'])
+        d['site'] = sec.site
+        d['nexus'] = {**sec.hub.snapshot(), 'site': sec.site,
+                      'reporter': ({'url': sec.reporter.url, **sec.reporter.status} if sec.reporter else None)}
+        return d
+
+    @app.post('/api/nexus/report')
+    def nexus_report(body: dict = Body(...), x_nexus_token: str = Header(None)):
+        """ほかの拠点からの報告(この画面を中央にする場合。sources.nexus.token と一致すること)"""
+        if not col.sec.hub_token or x_nexus_token != col.sec.hub_token:
+            raise HTTPException(403, 'X-Nexus-Token が違います')
+        try:
+            return {'ok': True, 'findings': col.sec.hub.ingest(body.get('site'), body)}
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+
+    @app.get('/api/darknet')
+    def darknet(since: int = 0, limit: int = 400, x_session_token: str = Header(None)):
+        """ダークネット観測(sources.darknet の帯に届いた NetFlow / sFlow のフロー)"""
+        check(x_session_token)
+        if not col.sec.darknet.prefixes:
+            raise HTTPException(404, 'sources.darknet が未設定')
+        from cvs.darknet import CAT_NAME
+        f = col.sec.flows.stats if col.sec.flows else {}
+        return {**col.sec.darknet.snapshot(since, max(1, min(int(limit), 2000))), 'cat_names': CAT_NAME,
+                'sensor': {'running': bool(col.sec.flows), 'passive': True,
+                           'label': f"NetFlow / sFlow から(フロー {f.get('flows', 0)} 件)" if col.sec.flows else 'フローの受け口なし'}}
+
+    @app.get('/api/wan')
+    def wan(x_session_token: str = Header(None)):
+        """回線チェック(sources.wan_probe の宛先への本物の ping)"""
+        check(x_session_token)
+        if not col.sec.probes:
+            raise HTTPException(404, 'sources.wan_probe が未設定')
+        from cvs.wan_watch import RTT_HIGH, LOSS_HIGH
+        return {'cpes': [], 'bas': [], 'paths': col.sec.wan.snapshot(), 'thresholds': {'rtt_ms': RTT_HIGH, 'loss': LOSS_HIGH},
+                'interval': col.sec.probe_interval, 'simulated': False}
 
     @app.get('/api/traffic/health')
     def health(window: int = 300, x_session_token: str = Header(None)):
@@ -202,7 +252,7 @@ def create_app(cfg, start_collector=True):
                 c = store.get('contact_points', cid)
                 if c:
                     try:
-                        NB.send_webhook(c['url'], NB.webhook_payload(rule, inst, new))
+                        NB.send_contact(c, NB.webhook_payload(rule, inst, new))
                     except Exception as e:  # noqa: BLE001
                         col.errors['webhook'] = str(e)[:200]
 

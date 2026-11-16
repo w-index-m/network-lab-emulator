@@ -848,8 +848,8 @@
         <span class="x">${esc(r.expr)}${errs[r.uid] ? `<div style="color:#ff6b7a">${esc(errs[r.uid])}</div>` : ''}</span>
         <span class="x">${is.filter((i) => i.state !== 'normal').slice(0, 4).map((i) => `<div><span class="badge b-${i.state}" style="min-width:0">${i.state}</span> ${esc(i.key)} = ${fmt(i.value)}</div>`).join('') || `系列 ${is.length}`}</span>
         <span><button data-e="${esc(r.uid)}">編集</button> <button data-d="${esc(r.uid)}" class="warn">削除</button></span></div>`; }).join('')}
-      <div class="sec">連絡先(webhook)</div>${cps.contact_points.length ? '' : '<div class="var">まだありません。「＋ 連絡先」で作れます</div>'}
-      ${cps.contact_points.map((c) => `<div class="ar" style="grid-template-columns:1fr 2fr auto"><b style="color:#fff">${esc(c.name)}</b><span class="x">${esc(c.url)}</span><span><button data-t="${esc(c.uid)}">試験送信</button> <button data-cd="${esc(c.uid)}" class="warn">削除</button></span></div>`).join('')}
+      <div class="sec">連絡先(webhook / メール)</div>${cps.contact_points.length ? '' : '<div class="var">まだありません。「＋ 連絡先」で作れます</div>'}
+      ${cps.contact_points.map((c) => `<div class="ar" style="grid-template-columns:1fr 2fr auto"><b style="color:#fff">${esc(c.name)}</b><span class="x">${c.type === 'email' ? '✉ ' + esc(c.to) + ' (' + esc(c.smtp_host) + ')' : esc(c.url)}</span><span><button data-t="${esc(c.uid)}">試験送信</button> <button data-cd="${esc(c.uid)}" class="warn">削除</button></span></div>`).join('')}
       <div class="sec">状態の履歴</div>${state.history.slice().reverse().slice(0, 60).map((h) => `<div class="ar" style="grid-template-columns:150px 1fr 1fr 100px"><span class="x">${new Date(h.t * 1000).toLocaleString()}</span><span>${esc(h.title)}</span><span class="x">${esc(h.key)}</span><span><span class="badge b-${h.to}" style="min-width:0">${esc(h.from)}→${esc(h.to)}</span></span></div>`).join('') || '<div class="var">まだありません</div>'}`;
     $$('[data-e]', $('#alPane')).forEach((b) => { b.onclick = () => ruleDialog(rules.rules.find((r) => r.uid === b.dataset.e), cps.contact_points); });
     $$('[data-d]', $('#alPane')).forEach((b) => { b.onclick = async () => { if (!confirm('このルールを削除しますか?')) return; await req('DELETE', '/api/nirvana/alert-rules/' + b.dataset.d); renderAlerts(); }; });
@@ -886,11 +886,20 @@
     });
   }
   $('#alNewCp').onclick = () => {
-    modal(`<h3>連絡先(webhook)</h3><div class="row"><label>名前<input id="cpN"></label><label style="flex:1">URL<input id="cpU" placeholder="https://hooks.example/..."></label></div>
-      <div style="color:var(--dim)">発報・解消のたびに Grafana / Alertmanager の webhook に近い JSON を POST します(Slack/Teams 等は受け口側の設定で)</div>
+    modal(`<h3>連絡先</h3><div class="row"><label>名前<input id="cpN"></label><label>種類<select id="cpT"><option value="webhook">webhook</option><option value="email">メール</option></select></label></div>
+      <div class="row" id="cpW"><label style="flex:1">URL<input id="cpU" placeholder="https://hooks.example/..."></label></div>
+      <div class="row" id="cpE" style="display:none"><label style="flex:1">宛先(カンマ区切り)<input id="cpTo" placeholder="noc@example.com"></label><label>SMTP サーバー<input id="cpH" placeholder="smtp.example.com"></label><label>ポート<input id="cpP" value="25" style="width:5em"></label>
+        <label>差出人<input id="cpF" placeholder="nirvana@example.com"></label><label>ユーザー<input id="cpUs" placeholder="(認証する場合)"></label><label style="flex-direction:row;gap:6px;align-items:center"><input type="checkbox" id="cpS">STARTTLS</label></div>
+      <div style="color:var(--dim)">発報・解消のたびに、webhook は Grafana / Alertmanager に近い JSON を POST、メールは件名に状態とルール名を入れて送ります。SMTP のパスワードは保存せず、サーバーの環境変数 NIRVANA_SMTP_PASSWORD から読みます</div>
       <div class="act"><button id="cpC">やめる</button><button id="cpOk" class="pri">保存</button></div>`, (w) => {
       $('#cpC', w).onclick = closeModal;
-      $('#cpOk', w).onclick = async () => { try { await req('POST', '/api/nirvana/contact-points', { name: $('#cpN', w).value, url: $('#cpU', w).value, type: 'webhook' }); closeModal(); renderAlerts(); } catch (e) { toast(e.message, true); } };
+      $('#cpT', w).onchange = () => { const em = $('#cpT', w).value === 'email'; $('#cpW', w).style.display = em ? 'none' : ''; $('#cpE', w).style.display = em ? '' : 'none'; };
+      $('#cpOk', w).onclick = async () => {
+        const em = $('#cpT', w).value === 'email';
+        const body = em ? { name: $('#cpN', w).value, type: 'email', to: $('#cpTo', w).value, smtp_host: $('#cpH', w).value, smtp_port: $('#cpP', w).value, from: $('#cpF', w).value, user: $('#cpUs', w).value, starttls: $('#cpS', w).checked }
+          : { name: $('#cpN', w).value, url: $('#cpU', w).value, type: 'webhook' };
+        try { await req('POST', '/api/nirvana/contact-points', body); closeModal(); renderAlerts(); } catch (e) { toast(e.message, true); }
+      };
     });
   };
 

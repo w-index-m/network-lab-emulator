@@ -5256,6 +5256,13 @@ class IcmpEngine:
             # 宛先と同一直結ネットワーク → 到達（最後のホップは宛先自身なので追加しない）
             for dev_ip, prefix in cur_info.get('ips', {}).items():
                 if self._ip_in_network(dest_ip, dev_ip, prefix):
+                    # 直結より細かい Null0 経路(ブラックホール)があれば、実機と同じくそちらが勝って破棄される
+                    if any(r.get('next_hop') == 'Null0' and r['prefix'] > prefix
+                           and self._ip_in_network(dest_ip, r['network'], r['prefix'])
+                           for r in rib_engine.get_best_routes(current)):
+                        hops.append({'device': current, 'hostname': cur_info.get('hostname', current),
+                                     'ip': dev_ip, 'timeout': True})
+                        return {'reachable': False, 'hops': hops, 'reason': 'null0'}
                     # 同一直結サブネットでも、宛先装置との物理リンクが全down
                     # （並列リンク全滅等）なら到達不可 → 通常ルーティングに委ねる
                     dd = self._find_device_owning_ip(dest_ip)
@@ -7081,6 +7088,17 @@ class IpFilterEngine:
         rules.append(AclRule(seq=seq, action=action, protocol=protocol,
                              src=src, dst=dst, src_port=src_port, dst_port=dst_port))
         rules.sort(key=lambda r: r.seq)
+
+    def remove_rule(self, device_id: str, acl_name: str, seq: int = None, action: str = None, src: str = None):
+        """`no <seq>` / `no deny host X` で1行消す。消せたら True"""
+        rules = self.acls.get(device_id, {}).get(acl_name)
+        if not rules:
+            return False
+        keep = [r for r in rules if not ((seq is not None and r.seq == seq) or
+                                         (seq is None and r.action == action and r.src.strip() == (src or '').strip()))]
+        changed = len(keep) != len(rules)
+        rules[:] = keep
+        return changed
 
     def apply_acl(self, device_id: str, iface: str, direction: str, acl_name: str):
         self.applied[device_id][(iface, direction)] = acl_name

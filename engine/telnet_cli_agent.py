@@ -28,7 +28,7 @@ SSH CLIサーバ（`ssh_cli_agent.py`）のTelnet版。存在理由は2つ:
     `engine/ssh_cli_agent` から参照する）
 
 対応していない範囲（実機との差）:
-  - `line vty` 単位の同時接続数制限、`exec-timeout`、`access-class`
+  - `line vty` 単位の同時接続数制限、`exec-timeout`(`access-class` は対応済み: 拒否した送信元は接続直後に切る)
   - 端末制御（カーソル移動・履歴・TAB補完）
 """
 
@@ -91,7 +91,7 @@ class TelnetCliServer:
             except Exception:  # noqa: BLE001
                 pass
             from engine import login_guard as _lg
-            if _lg.is_quiet(self.device_id, self.state):     # IOS login block-for の Quiet Mode
+            if _lg.is_quiet(self.device_id, self.state) or _lg.vty_denied(self.device_id, self.state, addr[0]):  # Quiet Mode / access-class
                 try:
                     client.close()
                 except OSError:

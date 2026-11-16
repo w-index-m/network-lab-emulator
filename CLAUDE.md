@@ -2869,4 +2869,12 @@ reflection(UDP 53/123/161/1900/11211 等)に分類、日ごとの統計、警報
 (root: `ip route add local <帯> dev lo` + `iptables -I INPUT -d <帯> -j DROP` で受け身、AF_PACKET で lo を読む。停止で両方外す)、ラボの ping は
 `_darknet_observe_ping`。試験用 `tools/darknet_traffic.py`(lo に引き込まれた帯にだけ送る。送信元を bind しないと宛先自身が送信元になる)。
 README は日英併記(英語版は末尾)、先頭に `docs/videos/nirvana-hero.gif`。テストは `tests/test_darknet.py`。
+追加(v21): A〜E(`docs/nirvana-response-attack-nexus-wan-flow.md`)。B `engine/response.py` + `/api/response/*`(plan/run/undo/auto、本物の CLI を
+`cli_command` 経由で入れる)、`line vty` の `access-class <ACL> in`(`login_guard.vty_denied` を SSH/Telnet の accept で判定)、標準 ACL の `no <seq>`、
+`ip route ... Null0`(直結より細かい Null0 が勝つ)。C `engine/attack_map.py`(警報→戦術/手法、`login_guard.on_auth` で総当たり・その後の成功、
+`_exfil_observe` で持ち出し)+ `/api/attack`。E `engine/nexus.py`(`NIRVANA_NEXUS_URL/TOKEN/SITE_NAME`、`/api/nexus/report` は X-Nexus-Token)。
+A `engine/wan_watch.py` + `/api/wan`(BAS の `pppoe congestion`)、スタンドアロン版の RFC1213 経路表と CPU OID 指定。D `engine/flow_collector.py`
+(`NETLAB_FLOW_COLLECT`)、`engine/sensor_syslog.py`(`NETLAB_SYSLOG_LISTEN`)、連絡先 email(`send_contact`)、`engine/capture.py`(`NETLAB_CAPTURE=1`、
+`/api/alerts/<seq>/capture`)。スタンドアロン版は `cvs/security.py` がまとめて動かし、engine のファイルは `cvs/` にコピー(ずれはテストで検出)。
+テストは `tests/test_nirvana_security_suite.py`・`tests/test_cyber_view_standalone.py`。
 
