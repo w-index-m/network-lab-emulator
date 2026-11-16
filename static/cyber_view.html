@@ -1078,9 +1078,9 @@
 
   // ── 立ち上がるポップアップ(ping の結果・ログ) ──
   let popups = [];
-  function popup(pos, col, title, val, ttl) {
+  function popup(pos, col, title, val, ttl, mark) {
     if (!pos) return;
-    popups.push({ pos: pos.slice(), col, title, val, born: performance.now(), ttl: ttl || 3600 });
+    popups.push({ pos: pos.slice(), col, title, val, born: performance.now(), ttl: ttl || 3600, mark });
     if (popups.length > 40) popups.splice(0, popups.length - 40);
   }
   function drawPopups(t) {
@@ -1096,9 +1096,43 @@
       while (placed.some(q => Math.abs(q.x - c.x) < 160 && Math.abs(q.y - y) < 48)) y -= 50;
       placed.push({ x: c.x, y });
       ctx.save(); ctx.globalAlpha = u < 0.1 ? u * 10 : u > 0.75 ? (1 - u) * 4 : 1;
-      plateAt(c.x + (mode === 'net' && !hostView ? -230 : 0), y, 0.82, p.col, p.title, p.val, false, t);
+      const px = c.x + (mode === 'net' && !hostView ? -230 : 0);
+      plateAt(px, y, 0.82, p.col, p.title, p.val, false, t);
+      if (p.mark) {                               // 「情」「注」の六角マークをプレートの左に
+        ctx.font = '800 14px monospace';
+        const tw = Math.max(ctx.measureText(p.val).width, (ctx.font = '800 11px sans-serif', ctx.measureText(p.title).width));
+        const half = Math.max(118 * 0.82, tw + 46 * 0.82) / 2;
+        markHex(px - half - 16, y, 17, p.col, p.mark, t);
+      }
       ctx.restore();
     }
+    // 直近60秒に経路が変わった装置には「情」のバッジを立てておく
+    const nowS = Date.now() / 1000, seen = new Set();
+    for (const e of routeLog) {
+      if (nowS - e.t > 60 || seen.has(e.dev)) continue;
+      seen.add(e.dev);
+      const pos = posForDevice(e.dev); if (!pos) continue;
+      const c = proj(pos[0], pos[1] + 0.9, pos[2]); if (!c) continue;
+      const n = routeLog.filter(x => x.dev === e.dev && nowS - x.t <= 60).length;
+      ctx.save(); ctx.globalAlpha = Math.min(1, (60 - (nowS - e.t)) / 10);
+      markHex(c.x + 26, c.y - 30, Math.max(11, Math.min(18, c.s * 0.35)), '#33d6ff', '情', t, n);
+      ctx.restore();
+    }
+  }
+  // NIRVANA 風の漢字六角マーク(赤の「警」に対し、情報は水色の「情」、警告は橙の「注」)
+  function markHex(x, y, r, col, ch, t, count) {
+    ctx.save();
+    hexPath(x, y, r);
+    const g = ctx.createRadialGradient(x, y - r * 0.3, r * 0.1, x, y, r);
+    g.addColorStop(0, col + 'ee'); g.addColorStop(1, 'rgba(4,14,28,0.95)');
+    ctx.fillStyle = g; ctx.fill();
+    ctx.shadowColor = col; ctx.shadowBlur = 12 + 6 * Math.sin(t * 0.005); ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
+    ctx.shadowBlur = 0; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff'; ctx.font = `900 ${Math.round(r * 1.05)}px sans-serif`; ctx.fillText(ch, x, y + 1);
+    if (count > 1) {
+      ctx.fillStyle = col; ctx.font = `800 ${Math.max(9, Math.round(r * 0.6))}px monospace`; ctx.fillText('×' + count, x, y + r + 9);
+    }
+    ctx.restore();
   }
   function posForDevice(dev) {
     if (mode === 'link') { const P = linkPos[dev]; return P ? [P[0], 2.2, P[2]] : null; }
@@ -1405,7 +1439,7 @@
     }).join('');
     box.innerHTML += routeLog.slice(-6).reverse().map(e => {
       const tm = new Date(e.t * 1000).toTimeString().slice(0, 8);
-      return `<div class="a info"><b>INFO 経路${{ add: '追加', del: '削除', change: '変更' }[e.kind] || ''}</b>
+      return `<div class="a info"><b>情 INFO 経路${{ add: '追加', del: '削除', change: '変更' }[e.kind] || ''}</b>
         <small>${tm} ・ ${esc(e.host || e.dev)} ・ ${esc(e.text)}</small></div>`;
     }).join('');
     box.querySelectorAll('.a').forEach(d => d.onclick = () => { if (hostById[d.dataset.src]) { prefix = octets(devIp(d.dataset.src)).slice(0, 3); openHost(d.dataset.src); } });
@@ -1434,7 +1468,7 @@
       events = events.concat(fresh).slice(-3000);
       alerts = alerts.concat(d.alerts || []).slice(-400);
       if (primed) (d.alerts || []).filter(a => a.severity === 'warning').forEach(a =>
-        popup(posForDevice(a.src), '#ffab2e', `WARN ${RULE_CODE[a.rule] || 'FLAP'}`, (a.detail || '').split(':')[0].slice(0, 22), 7000));
+        popup(posForDevice(a.src), '#ffab2e', `WARN ${RULE_CODE[a.rule] || 'FLAP'}`, (a.detail || '').split(': ')[0].slice(0, 22), 7000, '注'));
       flowTotal = d.seq; seq = d.seq; alertSeq = d.alert_seq;
       document.getElementById('sFlows').textContent = flowTotal;
       document.getElementById('sAlerts').textContent = alerts.length;
@@ -1509,9 +1543,9 @@
         const pos = posForDevice(dev);
         evs.slice(0, 3).forEach(e => {
           const [col, title] = ROUTE_STYLE[e.kind] || ROUTE_STYLE.add;
-          popup(pos, col, title, `${e.code} ${e.prefix}`, 6000);
+          popup(pos, col, title, `${e.code} ${e.prefix}`, 6000, '情');
         });
-        if (evs.length > 3) popup(pos, '#33d6ff', 'INFO ROUTES', `他 ${evs.length - 3} 件`, 6000);
+        if (evs.length > 3) popup(pos, '#33d6ff', 'INFO ROUTES', `他 ${evs.length - 3} 件`, 6000, '情');
       }
       routeLog = routeLog.concat(d.events).slice(-50);
       if (d.events.length) renderAlerts();
