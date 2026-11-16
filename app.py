@@ -9754,6 +9754,7 @@ async def traffic_links(window: int = 60, routers_only: bool = True):
         out.append({**ln, 'host_a': nodes[a]['hostname'], 'host_b': nodes[b]['hostname'],
                     'type_a': nodes[a]['type'], 'type_b': nodes[b]['type'],
                     'ab_bps': round(ab), 'ba_bps': round(ba), 'util': util,
+                    'util_ab': ab / LINK_SPEED_BPS, 'util_ba': ba / LINK_SPEED_BPS,
                     'flows_ok': ok, 'flows_ng': ng,
                     'alerts': [{'rule': x['rule'], 'name': x['name'], 'severity': x['severity'],
                                 't': x['t']} for x in al[-5:]],
