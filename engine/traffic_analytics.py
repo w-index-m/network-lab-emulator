@@ -52,15 +52,22 @@ RULES = {
                      'window': 0, 'threshold': 3, 'cooldown': 60,
                      'desc': 'syslog 重要度3(error)以下のメッセージ(復旧通知は除く)'},
 }
+# フラップ(状態の繰り返し)は「警告」扱い。ルールの中身は engine/flap_rules.py
+from engine.flap_rules import FLAP_RULES as _FLAP_RULES, ROUTE_FLAP as _ROUTE_FLAP  # noqa: E402
+for _r in _FLAP_RULES + [_ROUTE_FLAP]:
+    RULES.setdefault(_r['id'], {'name': _r['name'], 'severity': 'warning', 'window': _r['window'],
+                                'threshold': _r['threshold'], 'cooldown': max(60, _r['window']),
+                                'desc': _r['desc']})
+FLAP_RULE_IDS = {_r['id'] for _r in _FLAP_RULES + [_ROUTE_FLAP]}
 # 検知元(センサー)。/cyber-view の六角形の花びらはこの単位でまとめる
-RULE_SOURCE = {'conn_scan': 'IDS', 'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
+RULE_SOURCE = {**{_k: 'SYSLOG' for _k in FLAP_RULE_IDS}, 'route_flap': 'NET', 'conn_scan': 'IDS', 'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
                'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET'}
 SECURITY_SOURCES = {'IDS', 'FW'}
 _TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')
 # 復旧を知らせるメッセージ(実機のCiscoでは up も %LINK-3 なので重要度だけでは区別できない)
 RECOVERY = re.compile(r'state to up|to FULL|Established|Link ?Up|復旧', re.I)
 _CISCO_SEV = re.compile(r'%[\w-]+?-([0-7])-\w+')
-SEVERITY_ORDER = {'low': 0, 'medium': 1, 'high': 2}
+SEVERITY_ORDER = {'low': 0, 'warning': 1, 'medium': 1, 'high': 2}
 
 
 class FlowRecorder:
@@ -77,6 +84,8 @@ class FlowRecorder:
         self._by_pair = defaultdict(deque)         # (src, dst_ip) -> deque[(t, bytes)]
         self._last_fired = {}                      # (rule, key) -> t
         self._conns = {}                           # (dev, src_ip) -> deque[(t, port)]
+        self._flap = {}                            # (rule, dev, key) -> deque[(t, state)]
+        self.device_type_of = None                 # fn(dev) -> device_type(app が設定)
 
     # ── 記録 ──────────────────────────────────────
     def record_flow(self, src, dst_ip, dst, path, ok, pkts, size, proto='icmp', now=None, src_ip=None):
@@ -127,7 +136,49 @@ class FlowRecorder:
             self.logs.append(ev)
             if ev['sev'] <= RULES['syslog_error']['threshold'] and not RECOVERY.search(msg):
                 self._fire('syslog_error', dev, now, src=dev, dst=None, detail=msg[:160], related=[])
+            self._detect_flap_log(dev, msg, now)
             return ev
+
+    def _flap_count(self, rule_id, dev, key, state, now, window):
+        """状態変化(前回と違う状態)だけを数え、window 内の回数を返す"""
+        dq = self._flap.setdefault((rule_id, dev, key), deque())
+        if dq and dq[-1][1] == state and rule_id not in ('stp_tc_flap', 'stp_root_flap', 'mac_flap',
+                                                          'errdisable_flap', 'route_flap'):
+            return None                         # 同じ状態の重複(LINK と LINEPROTO 等)は数えない
+        dq.append((now, state))
+        while dq and window and now - dq[0][0] > window:
+            dq.popleft()
+        return len(dq)
+
+    def _detect_flap_log(self, dev, msg, now):
+        from engine.flap_rules import match
+        dt = None
+        if self.device_type_of:
+            try:
+                dt = self.device_type_of(dev)
+            except Exception:  # noqa: BLE001
+                dt = None
+        hit = match(dt, msg)
+        if not hit:
+            return None
+        r, key, state = hit
+        n = self._flap_count(r['id'], dev, key, state, now, r['window'])
+        if n is None or n < r['threshold']:
+            return None
+        detail = (f"{key}: {r['window']}秒に {n} 回 状態変化" if r['threshold'] > 1
+                  else f"{key}: {msg[msg.find('%'):][:120] if '%' in msg else msg[:120]}")
+        return self._fire(r['id'], f'{dev}|{key}', now, src=dev, dst=None, detail=detail, related=[])
+
+    def record_route_event(self, dev, prefix, kind, now=None):
+        """経路の追加/削除/変更(route_watch)から経路フラップを検知する"""
+        from engine.flap_rules import ROUTE_FLAP as r
+        now = time.time() if now is None else now
+        with self._lock:
+            n = self._flap_count(r['id'], dev, prefix, kind, now, r['window'])
+            if n is None or n < r['threshold']:
+                return None
+            return self._fire(r['id'], f'{dev}|{prefix}', now, src=dev, dst=None,
+                              detail=f"{prefix}: {r['window']}秒に {n} 回 追加/削除/変更", related=[])
 
     def record_conn(self, dev, src_ip, port, now=None):
         """装置の実リスナー(SSH/Telnet)が受け付けた TCP 接続を数え、スキャンを検知する。
@@ -261,7 +312,7 @@ class FlowRecorder:
     def clear(self):
         with self._lock:
             self.events.clear(); self.link_events.clear(); self.alerts.clear(); self.logs.clear()
-            self._by_src.clear(); self._by_pair.clear(); self._last_fired.clear(); self._conns.clear()
+            self._by_src.clear(); self._by_pair.clear(); self._last_fired.clear(); self._conns.clear(); self._flap.clear()
 
 
 recorder = FlowRecorder()

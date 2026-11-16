@@ -17,6 +17,13 @@
     font-family: "SFMono-Regular", Consolas, "Menlo", "Noto Sans Mono CJK JP", monospace; }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
   canvas.drag { cursor: grabbing; }
+  #zoom { position: fixed; right: 16px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 5; }
+  #zoom button { width: 38px; height: 38px; border: 1px solid rgba(51,214,255,0.45); background: rgba(4,14,28,0.72); color: #8fe9ff;
+    font: 700 18px/1 sans-serif; cursor: pointer; border-radius: 4px; }
+  #zoom button:hover { background: rgba(51,214,255,0.18); }
+  #zoom button.on { color: #3dff9a; border-color: rgba(61,255,154,0.55); }
+  body.showlist:not(.links) #zoom { right: calc(min(300px, 44vw) + 28px); }
+  body.showlist.links #zoom { right: calc(min(380px, 46vw) + 28px); }
   .hud { position: fixed; pointer-events: none; z-index: 2; }
   .hud * { pointer-events: auto; }
   #status { top: 12px; left: 16px; font-size: 13px; line-height: 1.55; text-shadow: 0 0 6px #000; }
@@ -44,6 +51,8 @@
     cursor: pointer; }
   #alerts .a.medium { border-color: var(--orange); }
   #alerts .a.low { border-color: #ffe14d; }
+  #alerts .a.warning { border-color: #ffab2e; }
+  #alerts .a.warning b { color: #ffab2e; }
   #alerts .a.info { border-color: #33d6ff; }
   #alerts .a.info b { color: #33d6ff; }
   #alerts .a small { color: var(--dim); display: block; }
@@ -125,6 +134,7 @@
 </div>
 
 <div id="cidr" class="hud">0.0.0.0/0</div>
+<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button></div>
 <div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button></div>
 <div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
   <option value="10">10秒</option><option value="60" selected>1分</option><option value="300">5分</option></select>
@@ -138,7 +148,7 @@
 
 <div id="legend" class="hud">
   <i style="background:#33d6ff"></i>到達 <i style="background:#ff3b4e"></i>到達不可
-  <i style="background:#ffab2e"></i>アラート関連 ・ ドラッグで回転 / ホイールで拡大 / パネルをクリックで掘り下げ / Escで戻る
+  <i style="background:#ffab2e"></i>アラート関連 ・ ドラッグで回転 / 右ドラッグで移動 / ホイール・ピンチで拡大 / ダブルクリックで視点リセット / パネルをクリックで掘り下げ / Escで戻る
 </div>
 <div id="filter" class="hud">
   <input id="fSrc" placeholder="ANY" aria-label="送信元フィルタ" autocomplete="off">
@@ -175,12 +185,15 @@
   let particles = [];
 
   const octets = (ip) => ip.split('.').map(Number);
-  const RULE_CODE = { conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR' };
-  const SEV_COL = { high: '#ff3b4e', medium: '#ffab2e', low: '#ffe14d' };
+  const RULE_CODE = { conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR',
+    if_flap: 'IF FLAP', ospf_flap: 'OSPF FLAP', bgp_flap: 'BGP FLAP', eigrp_flap: 'EIGRP FLAP', fhrp_flap: 'FHRP FLAP',
+    stp_tc_flap: 'STP TC', stp_root_flap: 'STP ROOT', mac_flap: 'MAC FLAP', errdisable_flap: 'ERRDIS', route_flap: 'RT FLAP' };
+  const SEV_COL = { high: '#ff3b4e', medium: '#ffab2e', warning: '#ffab2e', low: '#ffe14d' };
 
   // ── 表示状態: prefix = 選んだオクテット列 (長さ0〜3) / host = ホストビュー ──
   let prefix = [], hostView = null;          // hostView = {id, ip}
-  const cam = { yaw: -0.55, pitch: 0.72, dist: 33, tdist: 33 };
+  const cam = { yaw: -0.55, pitch: 0.72, dist: 33, tdist: 33, px: 0, pz: 0, bob: 0 };
+  let autoSpin = true;                       // 操作していない時にゆっくり回す
   let lastInput = performance.now();
 
   function levelCidr() {
@@ -213,7 +226,9 @@
 
   // ── 描画の基本: 透視投影 ─────────────────────────
   function proj(x, y, z) {
-    const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw), cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+    x -= cam.px; z -= cam.pz;                // パン(視点の中心を床の上でずらす)
+    const pt = cam.pitch + cam.bob;
+    const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw), cp = Math.cos(pt), sp = Math.sin(pt);
     const x1 = x * cy - z * sy, z1 = x * sy + z * cy;
     const y2 = y * cp + z1 * sp, z2 = -y * sp + z1 * cp;
     const d = z2 + cam.dist;
@@ -401,7 +416,7 @@
   })();
   function litTiles(list) {
     const lit = new Map();
-    const per = { high: 7, medium: 4, low: 2 };
+    const per = { high: 7, medium: 4, warning: 3, low: 2 };
     for (const a of list) {
       let h = hash(String(a.seq) + a.rule);
       for (let k = 0; k < (per[a.severity] || 3); k++) {
@@ -442,8 +457,9 @@
           ctx.save();
           ctx.setTransform(DPR * (ex.x - pc.x) / 50, DPR * (ex.y - pc.y) / 50, DPR * (ey.x - pc.x) / 50, DPR * (ey.y - pc.y) / 50, DPR * pc.x, DPR * pc.y);
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-          ctx.fillStyle = `rgba(255,60,60,${0.9 * k})`; ctx.font = '700 46px sans-serif'; ctx.fillText('警', 0, -12);
-          ctx.fillStyle = `rgba(255,140,140,${0.9 * k})`; ctx.font = '600 17px monospace'; ctx.fillText(RULE_CODE[a.rule] || a.rule, 0, 30);
+          const wn = a.severity === 'warning';
+          ctx.fillStyle = wn ? `rgba(255,160,40,${0.9 * k})` : `rgba(255,60,60,${0.9 * k})`; ctx.font = '700 46px sans-serif'; ctx.fillText(wn ? '注' : '警', 0, -12);
+          ctx.fillStyle = wn ? `rgba(255,200,140,${0.9 * k})` : `rgba(255,140,140,${0.9 * k})`; ctx.font = '600 17px monospace'; ctx.fillText(RULE_CODE[a.rule] || a.rule, 0, 30);
           ctx.restore();
         }
       } else {
@@ -630,7 +646,7 @@
     NET: { label: 'NET', sub: 'リンク監視', col: '#d98a00' },
   };
   const SOURCE_OF = { conn_scan: 'IDS', scan: 'IDS', unreach_burst: 'IDS', flood: 'IDS', large_icmp: 'IDS',
-    fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET' };
+    fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET', route_flap: 'NET' };
   function drawIcon(src, x, y, s) {
     const c = SOURCES[src].col;
     ctx.save(); ctx.strokeStyle = c; ctx.fillStyle = c; ctx.lineWidth = Math.max(1.2, s * 0.09);
@@ -696,7 +712,7 @@
       hexPath(px, py, r * 0.96);
       if (!src) { ctx.fillStyle = 'rgba(6,10,16,0.6)'; ctx.fill(); ctx.strokeStyle = 'rgba(120,140,160,0.25)'; ctx.lineWidth = 1; ctx.stroke(); continue; }
       const items = bySrc[src];
-      const sev = items.some(a => a.severity === 'high') ? 'high' : items.some(a => a.severity === 'medium') ? 'medium' : 'low';
+      const sev = items.some(a => a.severity === 'high') ? 'high' : items.some(a => a.severity === 'medium' || a.severity === 'warning') ? 'medium' : 'low';
       const g = ctx.createLinearGradient(px, py - r, px, py + r);
       g.addColorStop(0, '#fbfcfd'); g.addColorStop(1, '#cdd5dd');
       ctx.fillStyle = g; ctx.fill();
@@ -713,17 +729,21 @@
     }
     // 中央の「警」
     const pulse = 0.85 + 0.15 * Math.sin(t * 0.006);
+    // 警告(フラップ)だけなら橙の「注」、1件でも警報があれば赤の「警」
+    const W = list.length && list.every(a => a.severity === 'warning');
+    const CC = W ? { a: `rgba(200,110,0,${pulse})`, b: 'rgba(70,35,0,0.96)', sh: '#ff9a1a', st: '#ffbe5c', in: 'rgba(255,190,110,0.35)', ch: '注', tx: 'rgba(255,225,180,0.7)', fl: '#ff9a1a', n: '#ffe6c4' }
+                 : { a: `rgba(190,20,35,${pulse})`, b: 'rgba(70,0,8,0.96)', sh: '#ff2a3a', st: '#ff6a72', in: 'rgba(255,120,130,0.35)', ch: '警', tx: 'rgba(255,200,205,0.7)', fl: '#ff2236', n: '#ffd9dc' };
     hexPath(c.x, c.y, r);
     const g = ctx.createRadialGradient(c.x, c.y - r * 0.3, r * 0.1, c.x, c.y, r);
-    g.addColorStop(0, `rgba(190,20,35,${pulse})`); g.addColorStop(1, 'rgba(70,0,8,0.96)');
+    g.addColorStop(0, CC.a); g.addColorStop(1, CC.b);
     ctx.fillStyle = g; ctx.fill();
-    ctx.save(); ctx.shadowColor = '#ff2a3a'; ctx.shadowBlur = 22 * pulse; ctx.strokeStyle = '#ff6a72'; ctx.lineWidth = 2.4; ctx.stroke(); ctx.restore();
-    hexPath(c.x, c.y, r * 0.86); ctx.strokeStyle = 'rgba(255,120,130,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.save(); ctx.shadowColor = CC.sh; ctx.shadowBlur = 22 * pulse; ctx.strokeStyle = CC.st; ctx.lineWidth = 2.4; ctx.stroke(); ctx.restore();
+    hexPath(c.x, c.y, r * 0.86); ctx.strokeStyle = CC.in; ctx.lineWidth = 1; ctx.stroke();
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = `900 ${r * 0.98}px sans-serif`;
-    ctx.lineWidth = Math.max(1, r * 0.05); ctx.strokeStyle = 'rgba(255,200,205,0.7)'; ctx.strokeText('警', c.x, c.y - r * 0.06);
-    ctx.fillStyle = '#ff2236'; ctx.fillText('警', c.x, c.y - r * 0.06);
-    ctx.fillStyle = '#ffd9dc'; ctx.font = `700 ${Math.max(8, r * 0.24)}px monospace`;
+    ctx.lineWidth = Math.max(1, r * 0.05); ctx.strokeStyle = CC.tx; ctx.strokeText(CC.ch, c.x, c.y - r * 0.06);
+    ctx.fillStyle = CC.fl; ctx.fillText(CC.ch, c.x, c.y - r * 0.06);
+    ctx.fillStyle = CC.n; ctx.font = `700 ${Math.max(8, r * 0.24)}px monospace`;
     ctx.fillText(list.length, c.x, c.y + r * 0.66);
     ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
   }
@@ -1198,7 +1218,10 @@
 
   // ── メインループ ─────────────────────────────
   function frame(t) {
-    if (performance.now() - lastInput > 6000) cam.yaw += 0.0009;      // 操作が無い時はゆっくり回る
+    // 操作が無い時はゆっくり回り、少しだけ上下に揺れる(止まって見えないように)
+    const idle = performance.now() - lastInput > 2500;
+    if (idle && autoSpin) cam.yaw += 0.0011;
+    cam.bob += ((idle && autoSpin ? 0.035 * Math.sin(t * 0.0005) : 0) - cam.bob) * 0.03;
     cam.dist += (cam.tdist - cam.dist) * 0.08;
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     const g = ctx.createRadialGradient(W / 2, H * 0.55, 10, W / 2, H * 0.55, Math.max(W, H) * 0.75);
@@ -1216,27 +1239,83 @@
   }
 
   // ── 操作 ─────────────────────────────────────
+  // マウス: 左ドラッグ=回転 / 右ドラッグ(または Shift+ドラッグ)=平行移動 / ホイール=ズーム / ダブルクリック=視点リセット
+  // タッチ: 1本指=回転 / 2本指=ピンチでズーム+平行移動 / ダブルタップ=視点リセット
   let down = null;
-  cv.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, yaw: cam.yaw, pitch: cam.pitch, moved: false }; cv.setPointerCapture(e.pointerId); lastInput = performance.now(); });
-  cv.addEventListener('pointermove', (e) => {
+  const ptrs = new Map();
+  let pinch = null;
+  function zoomBy(f) { lastInput = performance.now(); cam.tdist = Math.max(8, Math.min(90, cam.tdist * f)); }
+  function panBy(dx, dy) {
+    const k = cam.dist / (Math.min(W, H * 1.25) * 1.05);
+    const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw), sp = Math.max(0.35, Math.sin(cam.pitch));
+    cam.px = Math.max(-40, Math.min(40, cam.px - dx * k * cy + dy * k * sy / sp));
+    cam.pz = Math.max(-40, Math.min(40, cam.pz + dx * k * sy + dy * k * cy / sp));
+  }
+  function resetView() {
     lastInput = performance.now();
+    cam.yaw = -0.55; cam.pitch = mode === 'link' ? 0.8 : 0.72; cam.px = 0; cam.pz = 0;
+    cam.tdist = mode === 'link' ? 36 : hostView ? 26 : viewDist();
+  }
+  window.__cvCam = () => ({ ...cam, autoSpin });
+  cv.addEventListener('contextmenu', (e) => e.preventDefault());
+  cv.addEventListener('pointerdown', (e) => {
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    cv.setPointerCapture(e.pointerId); lastInput = performance.now();
+    if (ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()];
+      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, dist: cam.tdist };
+      if (down) down.moved = true;           // 2本指になったらタップ扱いにしない
+      return;
+    }
+    down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, yaw: cam.yaw, pitch: cam.pitch, moved: false,
+             pan: e.button === 2 || e.shiftKey };
+  });
+  cv.addEventListener('pointermove', (e) => {
+    if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && ptrs.size >= 2) {
+      lastInput = performance.now();
+      const [a, b] = [...ptrs.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y) || 1, mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      cam.tdist = Math.max(8, Math.min(90, pinch.dist * pinch.d / d));
+      panBy(mx - pinch.mx, my - pinch.my); pinch.mx = mx; pinch.my = my;
+      return;
+    }
     if (down) {
+      lastInput = performance.now();
       const dx = e.clientX - down.x, dy = e.clientY - down.y;
       if (Math.abs(dx) + Math.abs(dy) > 5) { down.moved = true; cv.classList.add('drag'); }
       if (down.moved) {
-        cam.yaw = down.yaw + dx * 0.006;
-        cam.pitch = Math.max(0.12, Math.min(1.45, down.pitch + dy * 0.004));
+        if (down.pan) panBy(e.clientX - down.lx, e.clientY - down.ly);
+        else {
+          cam.yaw = down.yaw + dx * 0.006;
+          cam.pitch = Math.max(0.12, Math.min(1.45, down.pitch + dy * 0.004));
+        }
       }
+      down.lx = e.clientX; down.ly = e.clientY;
       return;
     }
-    hover(e.clientX, e.clientY);
+    if (e.pointerType === 'mouse') { lastInput = performance.now(); hover(e.clientX, e.clientY); }
   });
-  cv.addEventListener('pointerup', (e) => {
+  let lastTap = 0;
+  function endPtr(e) {
+    ptrs.delete(e.pointerId);
+    if (ptrs.size < 2) pinch = null;
+    if (ptrs.size) return;
     cv.classList.remove('drag');
-    if (down && !down.moved) click(e.clientX, e.clientY);
+    if (down && !down.moved && e.type === 'pointerup') {
+      const now = performance.now();
+      if (now - lastTap < 320) { resetView(); lastTap = 0; }
+      else { lastTap = now; click(e.clientX, e.clientY); }
+    }
     down = null;
-  });
-  cv.addEventListener('wheel', (e) => { e.preventDefault(); lastInput = performance.now(); cam.tdist = Math.max(12, Math.min(70, cam.tdist * (e.deltaY > 0 ? 1.1 : 0.9))); }, { passive: false });
+  }
+  cv.addEventListener('pointerup', endPtr);
+  cv.addEventListener('pointercancel', endPtr);
+  cv.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY > 0 ? 1.1 : 0.9); }, { passive: false });
+  document.getElementById('zIn').onclick = () => zoomBy(0.8);
+  document.getElementById('zOut').onclick = () => zoomBy(1.25);
+  document.getElementById('zReset').onclick = resetView;
+  document.getElementById('zSpin').onclick = (e) => { autoSpin = !autoSpin; e.currentTarget.classList.toggle('on', autoSpin); e.currentTarget.textContent = autoSpin ? '⟳' : '❚❚'; };
   window.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT') return;
     if (e.key === 'Escape' || e.key === 'Backspace') up();
@@ -1354,6 +1433,8 @@
       }
       events = events.concat(fresh).slice(-3000);
       alerts = alerts.concat(d.alerts || []).slice(-400);
+      if (primed) (d.alerts || []).filter(a => a.severity === 'warning').forEach(a =>
+        popup(posForDevice(a.src), '#ffab2e', `WARN ${RULE_CODE[a.rule] || 'FLAP'}`, (a.detail || '').split(':')[0].slice(0, 22), 7000));
       flowTotal = d.seq; seq = d.seq; alertSeq = d.alert_seq;
       document.getElementById('sFlows').textContent = flowTotal;
       document.getElementById('sAlerts').textContent = alerts.length;

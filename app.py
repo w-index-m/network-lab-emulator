@@ -6946,6 +6946,7 @@ def _handle_nat_config(device_id: str, command: str, state: DeviceState):
 # ping 1回(= repeat N 発のEcho)ごとに「どの経路を何バイト流れたか」を記録する。
 # 記録と同時に侵害検知ルールも評価される(engine/traffic_analytics.py)。
 from engine.traffic_analytics import recorder as _flow_recorder
+_flow_recorder.device_type_of = lambda d: getattr(device_sessions.get(d), 'device_type', None)
 
 
 def _on_fw_shun(key, src_ip, avg_rate, burst_rate):
@@ -9846,11 +9847,18 @@ async def traffic_health(window: int = 300):
     bad = [x for x in logs if not RECOVERY.search(x['msg'])]
     err = [x for x in bad if x['sev'] <= 3]
     warn = [x for x in bad if x['sev'] == 4]
-    st = 'crit' if err else 'warn' if warn else 'ok'
+    # フラップ(ログ・経路の繰り返し)は警告。error 以上が無ければ「注意」
+    from engine.traffic_analytics import FLAP_RULE_IDS
+    flaps = [a for a in hist['alerts'] if a['rule'] in FLAP_RULE_IDS]
+    st = 'crit' if err else 'warn' if (warn or flaps) else 'ok'
+    _hn = lambda d: getattr(device_sessions.get(d), 'hostname', d)  # noqa: E731
     cats.append({'key': 'syslog', 'label': 'syslog', 'state': st, 'source': log_src,
                  'source_error': log_err,
-                 'summary': f'error以上 {len(err)} ・ warning {len(warn)} ・ 全 {len(logs)}件',
-                 'details': [f"{x['host']}: {x['msg'][:90]}" for x in (err + warn)[-4:]]})
+                 'summary': (f'error以上 {len(err)} ・ warning {len(warn)} ・ 全 {len(logs)}件'
+                             + (f' ・ フラップ {len(flaps)}件' if flaps else '')),
+                 'details': ([f"フラップ {_hn(a['src'])}: {a['name']} ({a['detail'][:60]})" for a in flaps[-3:]]
+                             + [f"{x['host']}: {x['msg'][:90]}" for x in (err + warn)[-4:]])[:5],
+                 'flaps': len(flaps)})
 
     overall = max((c['state'] for c in cats), key=lambda v: rank[v])
     return {'overall': overall, 'categories': cats, 'window': window, 'now': now,
@@ -9921,7 +9929,10 @@ def _route_watch_tick(now=None):
                 if nh:
                     r = {**r, 'next_hop': nh}
             fixed.append(r)
-        new += watcher.observe(dev_id, getattr(st, 'hostname', dev_id), fixed, now=now)
+        evs = watcher.observe(dev_id, getattr(st, 'hostname', dev_id), fixed, now=now)
+        for e in evs:
+            _flow_recorder.record_route_event(dev_id, e['prefix'], e['kind'], now=e['t'])
+        new += evs
     watcher.forget(set(device_sessions))
     return new
 
@@ -9933,6 +9944,13 @@ async def _route_watch_loop():
         except Exception as e:  # noqa: BLE001
             print(f"[route-watch] {e}")
         await asyncio.sleep(ROUTE_WATCH_INTERVAL)
+
+
+@app.get("/api/traffic/flap-rules")
+async def traffic_flap_rules():
+    """フラップ検知ルールの一覧(機種・しきい値)。"""
+    from engine.flap_rules import rules_table
+    return {'rules': rules_table()}
 
 
 @app.get("/api/traffic/routes")

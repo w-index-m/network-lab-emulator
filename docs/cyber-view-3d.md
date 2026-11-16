@@ -305,3 +305,49 @@ login on-success log
 新しいアラートや warning 以上のログを受け取った時点でボードも即時更新するよう修正済み。
 
 ![SSH 総当たり](images/cyber-view-v7-ssh-brute.png)
+
+## 経路の Info 表示 / フラップの警告 / 視点操作 (v8)
+
+### 経路の追加・削除・変更 → INFO
+
+`engine/route_watch.py` が3秒ごとに全装置の最良経路(`rib_engine.get_best_routes`)を前回と比べ、
+差分を `GET /api/traffic/routes?since=<seq>` で返す。static / connected / OSPF / BGP / RIP / EIGRP
+すべて同じ扱いで、OSPF 等の次ホップは `show ip route` と同じ実IPに直してある。最初に見た装置は
+基準を取るだけ(起動直後に全経路が「追加」にならない)。画面では装置の上に
+`INFO ROUTE ADD`(水色)/ `INFO ROUTE DEL`(灰)/ `INFO ROUTE CHG` が浮かび、LIST にも並ぶ。
+実機の IOS は経路の増減を syslog に出さない(debug ip routing を除く)ため、syslog とは別のイベント。
+
+![経路 INFO](images/cyber-view-v8-route-info.png)
+
+### ログからのフラップ検知 → WARN(警告)
+
+ルールは `engine/flap_rules.py`(一覧は `GET /api/traffic/flap-rules`)。1回の down は
+既存の LINK DOWN / syslog error が受け持ち、ここでは「繰り返し」だけを見る。
+
+| ルール | 機種 | 元のログ | しきい値 |
+|---|---|---|---|
+| if_flap | Cisco/Catalyst(/Nexus) | `%LINK-n-UPDOWN` / `%LINK-5-CHANGED` | 60秒に状態変化3回 |
+| if_flap | Si-R/SR-S | `[LINK] lanN Link Down/Up` | 60秒に3回 |
+| ospf_flap | Cisco/Catalyst/Si-R | `%OSPF-5-ADJCHG` / `[OSPF] neighbor X ... state: Full / is down` | 120秒に3回 |
+| bgp_flap | Cisco/Catalyst/Si-R | `%BGP-5-ADJCHANGE` / `[BGP] peer X ... Established / is down` | 300秒に3回 |
+| eigrp_flap | Cisco/Catalyst | `%DUAL-5-NBRCHANGE` | 120秒に3回 |
+| fhrp_flap | Cisco/Catalyst/Si-R | `%HSRP-5-STATECHANGE` / `%VRRP-6-STATECHANGE` / `[VRRP] VRID n ... state changed` | 120秒に4回 |
+| stp_tc_flap | Catalyst | `%SPANTREE-6-TOPOTRAP` | 60秒に5回 |
+| stp_root_flap | Catalyst | `%SPANTREE-5-ROOTCHANGE` | 300秒に3回 |
+| mac_flap | Catalyst | `%SW_MATM-4-MACFLAP_NOTIF` | 1回(IOSが判定済み) |
+| errdisable_flap | Cisco/Catalyst | `%PM-4-ERR_DISABLE: link-flap` | 1回(IOSがポートを停止) |
+| route_flap | 全機種 | 経路の追加/削除/変更(上の route_watch) | 120秒に4回 |
+
+数えるのは「前回と違う状態」だけ(LINK と LINEPROTO の同じ down を二重に数えない)。
+アラートは severity `warning`。画面では装置の上に `WARN IF FLAP` などの橙のプレート、
+警告だけの装置は花の中央が橙の「注」(警報が混ざると赤の「警」)。状態ボードの syslog 観点は
+「注意 ・ フラップ N件」(error 以上があれば異常)。セキュリティ観点には数えない。
+
+![フラップ](images/cyber-view-v8-flap.png)
+
+### 視点操作
+
+- 何もしないと2.5秒後からゆっくり回転し、少し上下に揺れる(右側の ⟳ でオン/オフ)
+- マウス: 左ドラッグ=回転 / 右ドラッグ(または Shift+ドラッグ)=平行移動 / ホイール=ズーム / ダブルクリック=リセット
+- タッチ: 1本指=回転 / 2本指=ピンチでズーム+平行移動 / ダブルタップ=リセット
+- 右側のボタン: ＋ / － / ⌂(リセット) / ⟳(自動回転)

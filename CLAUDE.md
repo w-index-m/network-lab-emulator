@@ -2805,3 +2805,9 @@ healthのネットワーク観点は異常「応答なし N台」、画面は灰
 syslog観点)。設定は`state.login_block`で保存・復元。(3) IDSルール`conn_scan`(`recorder.record_conn`、
 SSH/Telnetの実accept数、30秒10回)。実nmap(-sT -sV / ssh-brute)でライブ確認。
 テストは`tests/test_login_guard_and_lost.py`。
+追加(v8): 経路変化の INFO 表示(`engine/route_watch.py`、3秒ごとに `get_best_routes` の差分、`GET /api/traffic/routes`)、
+ログからのフラップ検知(`engine/flap_rules.py`、Cisco/Catalyst/Si-R のログ形式ごとのルールとしきい値、
+`GET /api/traffic/flap-rules`、severity `warning`、syslog 観点は「注意・フラップ N件」、route_watch の
+繰り返しは `route_flap`)、視点操作(待機中の自動回転+揺れ、右ドラッグ平行移動、ピンチ、ダブルクリック
+リセット、右側の ＋/－/⌂/⟳ ボタン)。テストは `tests/test_route_watch.py` / `tests/test_flap_rules.py`。
+
