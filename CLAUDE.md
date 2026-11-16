@@ -2817,4 +2817,12 @@ SSH/Telnetの実accept数、30秒10回)。実nmap(-sT -sV / ssh-brute)でライ�
 (engine/protocols.py StpEngine・VirtualNetwork)、Si-R の `bgp neighbor N address <ip>` が IP を無視して
 最初の隣接をピアにする(app.py)。ROUTER LINKS は連結成分ごとの輪を格子状に並べる配置に変更。
 Si-R の ether use off で lan を落とすには `ether G P vlan untag V` + `lan N vlan V` の対応付けが必要(実機仕様)。
+追加(v10): 機種×プロトコルの個別試験 `tools/verification/scenario_report.py <vendor> <proto> [--devices N]` / `all`
+(1シナリオごとに保存設定を消して uvicorn を新規起動、台数からアドレス自動割り当て、段階ごとの show/ログ/アラート/
+状態ボード/画面を `docs/verification/<vendor>-<proto>.md` に出力、一覧は `docs/verification/README.md`。
+README の結果表は `<!-- results:start/end -->` の間だけ自動更新)。作業の振り返り用に `docs/progress-log.md`。
+/cyber-view の DEMO(`engine/demo_scenario.py`、`/api/demo/*`、Web Audio で合成する音楽)。
+直した実バグ: OSPF `network` 文の範囲をそのまま stub として広告していた(/16 で書くと経路が入らない。
+OspfEngine の Router LSA 生成で範囲内の IF サブネットに展開)、フラップ判定で最初の状態(設定時の no shutdown)を
+変化として数えていた。
 

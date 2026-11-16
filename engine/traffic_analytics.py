@@ -85,6 +85,7 @@ class FlowRecorder:
         self._last_fired = {}                      # (rule, key) -> t
         self._conns = {}                           # (dev, src_ip) -> deque[(t, port)]
         self._flap = {}                            # (rule, dev, key) -> deque[(t, state)]
+        self._flap_last = {}                       # (rule, dev, key) -> 直前の状態
         self.device_type_of = None                 # fn(dev) -> device_type(app が設定)
 
     # ── 記録 ──────────────────────────────────────
@@ -141,10 +142,15 @@ class FlowRecorder:
 
     def _flap_count(self, rule_id, dev, key, state, now, window):
         """状態変化(前回と違う状態)だけを数え、window 内の回数を返す"""
-        dq = self._flap.setdefault((rule_id, dev, key), deque())
-        if dq and dq[-1][1] == state and rule_id not in ('stp_tc_flap', 'stp_root_flap', 'mac_flap',
-                                                          'errdisable_flap', 'route_flap'):
-            return None                         # 同じ状態の重複(LINK と LINEPROTO 等)は数えない
+        events = rule_id in ('stp_tc_flap', 'stp_root_flap', 'mac_flap', 'errdisable_flap', 'route_flap')
+        k = (rule_id, dev, key)
+        if not events:
+            last = self._flap_last.get(k)
+            self._flap_last[k] = state
+            if last is None or last == state:
+                # 最初に見た状態(設定時の no shutdown 等)は基準。同じ状態の重複(LINK と LINEPROTO 等)も数えない
+                return None
+        dq = self._flap.setdefault(k, deque())
         dq.append((now, state))
         while dq and window and now - dq[0][0] > window:
             dq.popleft()
@@ -312,7 +318,7 @@ class FlowRecorder:
     def clear(self):
         with self._lock:
             self.events.clear(); self.link_events.clear(); self.alerts.clear(); self.logs.clear()
-            self._by_src.clear(); self._by_pair.clear(); self._last_fired.clear(); self._conns.clear(); self._flap.clear()
+            self._by_src.clear(); self._by_pair.clear(); self._last_fired.clear(); self._conns.clear(); self._flap.clear(); self._flap_last.clear()
 
 
 recorder = FlowRecorder()

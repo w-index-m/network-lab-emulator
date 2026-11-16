@@ -89,6 +89,15 @@ class TestDetection:
         assert fl[0]['severity'] == 'warning' and fl[0]['source'] == 'SYSLOG' and fl[0]['src'] == 'r1'
         assert fl[0]['detail'].startswith('Gi0/0/1: 60秒に 3 回')
 
+    def test_initial_state_is_baseline_not_a_change(self):
+        """設定時の no shutdown(最初の up)は数えない。障害で1回落として戻しただけでは警告にしない"""
+        r = self._rec()
+        for i, st in enumerate(('up', 'down', 'up')):
+            r.record_log('r1', 'R1', 3, f'%LINK-3-UPDOWN: Interface Gi0/0/1, changed state to {st}', now=100 + i)
+        assert not [a for a in r.alerts if a['rule'] == 'if_flap']
+        r.record_log('r1', 'R1', 3, '%LINK-3-UPDOWN: Interface Gi0/0/1, changed state to down', now=104)
+        assert [a for a in r.alerts if a['rule'] == 'if_flap']
+
     def test_slow_changes_outside_window_do_not_count(self):
         r = self._rec()
         for i, st in enumerate(('down', 'up', 'down')):

@@ -1651,7 +1651,39 @@ class OspfEngine:
                       and _ipa.ip_address(v['ip']) in nw]
             return not owners or any(vnet._norm_iface(k) not in _down for k in owners)
 
+        # network 文の範囲(例: 10.200.0.0 0.0.255.255)は、実機どおり「範囲に入るインタフェースの
+        # サブネット」を1つずつ広告する。以前は範囲(/16)をそのまま stub にしていたため、
+        # 全ルータが同じ 10.200.0.0/16 を広告して互いのサブネットが経路にならなかった。
+        # 範囲に入るインタフェースが無い/IF情報が無い場合は従来どおり範囲のまま。
+        def _expand(net):
+            try:
+                nw = _ipa.ip_network(net, strict=False)
+            except ValueError:
+                return [net]
+            subs = []
+            for k, v in _ifs.items():
+                if not (isinstance(v, dict) and v.get('ip')) or v['ip'].startswith('127.'):
+                    continue
+                try:
+                    ip = _ipa.ip_address(v['ip'])
+                    sub = _ipa.ip_network(f"{v['ip']}/{int(v.get('prefix', 24))}", strict=False)
+                except ValueError:
+                    continue
+                if ip in nw and sub.prefixlen >= nw.prefixlen and str(sub) not in subs:
+                    subs.append(str(sub))
+            return subs if subs and subs != [str(nw)] else [net]
+
+        _stub_nets = []
         for net in n['networks']:
+            for sub in _expand(net):
+                if sub not in _stub_nets:
+                    _stub_nets.append(sub)
+                    if sub != net:
+                        # エリア判定用: 展開元の network 文のエリアを引き継ぐ
+                        for _a, _nets in self.area_networks.get(device_id, {}).items():
+                            if net in _nets and sub not in _nets:
+                                _nets.append(sub)
+        for net in _stub_nets:
             if not _stub_alive(net):
                 continue
             parts = net.split('/')

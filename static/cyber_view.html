@@ -17,6 +17,12 @@
     font-family: "SFMono-Regular", Consolas, "Menlo", "Noto Sans Mono CJK JP", monospace; }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
   canvas.drag { cursor: grabbing; }
+  #demoCap { display: none; left: 50%; transform: translateX(-50%); top: 58px; padding: 6px 14px; border: 1px solid rgba(255,171,46,0.6);
+    background: rgba(20,10,0,0.7); color: #ffd9a0; font: 600 14px sans-serif; border-radius: 4px; z-index: 6; white-space: nowrap; }
+  #demoCap b { color: #ffab2e; letter-spacing: 0.15em; margin-right: 8px; }
+  #demoCap button { margin-left: 10px; background: none; border: 1px solid rgba(255,171,46,0.6); color: #ffab2e; cursor: pointer; border-radius: 3px; }
+  body.demo #demoCap { display: block; }
+  #mDemo.on { color: #ffab2e; }
   #zoom { position: fixed; right: 16px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 5; }
   #zoom button { width: 38px; height: 38px; border: 1px solid rgba(51,214,255,0.45); background: rgba(4,14,28,0.72); color: #8fe9ff;
     font: 700 18px/1 sans-serif; cursor: pointer; border-radius: 4px; }
@@ -135,7 +141,8 @@
 
 <div id="cidr" class="hud">0.0.0.0/0</div>
 <div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button></div>
-<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button></div>
+<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
+<div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
 <div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
   <option value="10">10秒</option><option value="60" selected>1分</option><option value="300">5分</option></select>
   ごと(平均区間も同じ) ・ 次回 <b id="lNext">--</b>秒 ・ 最終 <b id="lLast">--</b><span id="lSrc" class="src">--</span></div>
@@ -1537,6 +1544,7 @@
       }
       events = events.concat(fresh).slice(-3000);
       alerts = alerts.concat(d.alerts || []).slice(-400);
+      if (primed && (d.alerts || []).length) sfx((d.alerts || []).some(a => a.severity === 'high' || a.severity === 'medium') ? 'alert' : 'warn');
       if (primed) (d.alerts || []).filter(a => a.severity === 'warning').forEach(a =>
         popup(posForDevice(a.src), '#ffab2e', `WARN ${RULE_CODE[a.rule] || 'FLAP'}`, (a.detail || '').split(': ')[0].slice(0, 22), 7000, '注'));
       flowTotal = d.seq; seq = d.seq; alertSeq = d.alert_seq;
@@ -1618,10 +1626,118 @@
         if (evs.length > 3) popup(pos, '#33d6ff', 'INFO ROUTES', `他 ${evs.length - 3} 件`, 6000, '情');
       }
       routeLog = routeLog.concat(d.events).slice(-50);
-      if (d.events.length) renderAlerts();
+      if (d.events.length) { renderAlerts(); sfx('info'); }
     } catch (e) { /* 次の周期で再試行 */ }
   }
   setInterval(pollRoutes, 3000); pollRoutes();
+
+  // ── デモ: 自動シナリオ + 合成音楽 ─────────────────────
+  // 音楽は外部ファイルを使わず Web Audio でその場で合成する(著作権の心配が無い・オフラインでも鳴る)。
+  // ブラウザの自動再生制限があるため、DEMO ボタンを押した時に鳴らし始める。
+  const post = (path) => fetch(path, { method: 'POST', headers: token ? { 'X-Session-Token': token } : {} }).then(r => r.json());
+  let AC = null, master = null, musicOn = false, musicTimer = null, demoOn = false, demoTimer = null, tourTimer = null;
+  const NOTE = (n) => 440 * Math.pow(2, (n - 69) / 12);
+  // A minor のアンビエント(Am - F - C - G)。1小節 = 4拍、BPM 92
+  const BPM = 92, BEAT = 60 / BPM;
+  const CHORDS = [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]];
+  const PENTA = [69, 72, 74, 76, 79, 81, 84];
+  function initAudio() {
+    if (AC) return;
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    const comp = AC.createDynamicsCompressor();
+    master = AC.createGain(); master.gain.value = 0.22;
+    // 簡単なディレイで広がりを出す
+    const dly = AC.createDelay(1.0), fb = AC.createGain(), wet = AC.createGain();
+    dly.delayTime.value = BEAT * 0.75; fb.gain.value = 0.35; wet.gain.value = 0.3;
+    master.connect(comp); master.connect(dly); dly.connect(fb); fb.connect(dly); dly.connect(wet); wet.connect(comp);
+    comp.connect(AC.destination);
+  }
+  function tone(freq, t, dur, type, vol, cutoff, attack) {
+    const o = AC.createOscillator(), g = AC.createGain(), f = AC.createBiquadFilter();
+    o.type = type; o.frequency.value = freq;
+    f.type = 'lowpass'; f.frequency.value = cutoff || 2000;
+    const a = attack || 0.01;
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(f); f.connect(g); g.connect(master);
+    o.start(t); o.stop(t + dur + 0.05);
+  }
+  function kick(t) {
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.frequency.setValueAtTime(110, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.25);
+    g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
+    o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.4);
+  }
+  let nextBeat = 0, beatNo = 0;
+  function scheduler() {
+    if (!AC) return;
+    while (nextBeat < AC.currentTime + 0.25) {
+      const bar = Math.floor(beatNo / 4), chord = CHORDS[bar % CHORDS.length], t = nextBeat;
+      if (beatNo % 4 === 0) {                       // 小節頭: パッドとベース
+        chord.forEach(n => { tone(NOTE(n), t, BEAT * 4.2, 'sawtooth', 0.045, 900, 1.2); tone(NOTE(n) * 1.005, t, BEAT * 4.2, 'sawtooth', 0.03, 700, 1.4); });
+        tone(NOTE(chord[0] - 24), t, BEAT * 3.6, 'sine', 0.22, 400, 0.05);
+      }
+      if (beatNo % 2 === 0) kick(t);
+      for (let k = 0; k < 2; k++) {                 // 8分のアルペジオ(ペンタトニックからランダム)
+        if (Math.random() < 0.72) tone(NOTE(PENTA[Math.floor(Math.random() * PENTA.length)]), t + k * BEAT / 2, 0.35, 'triangle', 0.07, 3000);
+      }
+      nextBeat += BEAT; beatNo++;
+    }
+  }
+  function startMusic() {
+    initAudio(); AC.resume(); musicOn = true;
+    nextBeat = AC.currentTime + 0.1;
+    if (!musicTimer) musicTimer = setInterval(scheduler, 100);
+    master.gain.setTargetAtTime(0.22, AC.currentTime, 0.5);
+    document.getElementById('demoMute').textContent = '♪';
+  }
+  function stopMusic() {
+    musicOn = false;
+    if (AC) master.gain.setTargetAtTime(0, AC.currentTime, 0.3);
+    clearInterval(musicTimer); musicTimer = null;
+    document.getElementById('demoMute').textContent = '×';
+  }
+  // 出来事の効果音(情=高いチャイム、注/警=低い音)
+  function sfx(kind) {
+    if (!musicOn || !AC) return;
+    const t = AC.currentTime + 0.02;
+    if (kind === 'info') { tone(NOTE(88), t, 0.8, 'sine', 0.12, 6000); tone(NOTE(95), t + 0.12, 0.9, 'sine', 0.09, 6000); }
+    else if (kind === 'warn') { tone(NOTE(62), t, 0.6, 'square', 0.06, 1200); tone(NOTE(62), t + 0.25, 0.6, 'square', 0.06, 1200); }
+    else { tone(NOTE(45), t, 1.2, 'sawtooth', 0.12, 800); tone(NOTE(46), t, 1.2, 'sawtooth', 0.1, 800); }
+  }
+  async function pollDemo() {
+    try {
+      const d = await api('/api/demo/status');
+      document.getElementById('demoStep').textContent = d.running ? `${d.step}(${Math.floor(d.elapsed)}秒)` : '停止';
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  // デモ中は視点を自動で巡回(NETWORK の 10.200.0.0/16 → ROUTER LINKS → …)
+  let tourStep = 0;
+  function tour() {
+    if (!demoOn || performance.now() - lastInput < 8000) return;   // 触っている間は巡回しない
+    tourStep++;
+    if (tourStep % 2) { hostView = null; prefix = [10, 200]; setMode('link'); }
+    else { setMode('net'); hostView = null; prefix = [10, 200]; update(); }
+  }
+  async function toggleDemo() {
+    demoOn = !demoOn;
+    document.body.classList.toggle('demo', demoOn);
+    document.getElementById('mDemo').classList.toggle('on', demoOn);
+    if (demoOn) {
+      startMusic();
+      try { await post('/api/demo/start'); } catch (e) { /* 表示だけ続ける */ }
+      hostView = null; prefix = [10, 200]; setMode('link');
+      pollDemo(); demoTimer = setInterval(pollDemo, 2000); tourTimer = setInterval(tour, 25000);
+    } else {
+      stopMusic();
+      try { await post('/api/demo/stop'); } catch (e) { /* 無視 */ }
+      clearInterval(demoTimer); clearInterval(tourTimer);
+    }
+  }
+  document.getElementById('mDemo').onclick = toggleDemo;
+  document.getElementById('demoMute').onclick = () => (musicOn ? stopMusic() : startMusic());
+  window.__cvDemo = () => ({ demoOn, musicOn, ctx: AC ? AC.state : null, beats: beatNo });
+
   update();
   requestAnimationFrame(frame);
 })();

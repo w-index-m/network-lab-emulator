@@ -9950,6 +9950,33 @@ async def _route_watch_loop():
         await asyncio.sleep(ROUTE_WATCH_INTERVAL)
 
 
+# ── /cyber-view のデモ(自動シナリオ。画面側で合成音楽を流す) ──
+async def _demo_cli(dev, *cmds):
+    for c in cmds:
+        await cli_command({'device_id': dev, 'command': c})
+
+
+@app.post("/api/demo/start")
+async def demo_start():
+    """4台の Cisco で OSPF を張り、障害・復旧・フラップ・経路変化を90秒周期で繰り返す。"""
+    from engine import demo_scenario
+    started = demo_scenario.start(_demo_cli, add_device, add_link)
+    return {'ok': True, 'started': started, **demo_scenario.status()}
+
+
+@app.post("/api/demo/stop")
+async def demo_stop():
+    from engine import demo_scenario
+    demo_scenario.stop()
+    return {'ok': True, **demo_scenario.status()}
+
+
+@app.get("/api/demo/status")
+async def demo_status():
+    from engine import demo_scenario
+    return demo_scenario.status()
+
+
 @app.get("/api/traffic/flap-rules")
 async def traffic_flap_rules():
     """フラップ検知ルールの一覧(機種・しきい値)。"""
