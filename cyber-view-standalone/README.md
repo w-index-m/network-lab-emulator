@@ -12,6 +12,8 @@ network-lab-emulator の `/cyber-view`(NIRVANA 改風の 3D 監視画面)を、*
 
 装置とつながり(トポロジ)は設定ファイルに手書きする。
 
+実機の Catalyst を登録する手順(装置側の SNMP/syslog 設定から確認方法まで)は、リポジトリの `docs/real-catalyst-registration.md`。
+
 画面では Prometheus を **ヴァルハラ(VALHALLA)** と表示する(呼び名だけ。設定項目名 `sources.prometheus` などは Prometheus のまま)。
 
 ## 必要なもの
