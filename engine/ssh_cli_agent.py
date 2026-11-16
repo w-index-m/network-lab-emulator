@@ -145,8 +145,11 @@ def check_enable_password(state, password: str):
 
 
 class _CliSshServer(paramiko.ServerInterface if _HAS_PARAMIKO else object):
-    def __init__(self, valid_users, authorized_keys=None, state=None, nas_ip=None):
+    def __init__(self, valid_users, authorized_keys=None, state=None, nas_ip=None,
+                 device_id=None, peer=None):
         self.valid_users = valid_users
+        self.device_id = device_id          # login block-for(engine.login_guard)用
+        self.peer = peer
         # AAA(aaa authentication login ... group radius)の判定に使う装置状態と、
         # RADIUS問い合わせの送信元(NAS)IP。Noneならローカル認証のみ。
         self.state = state
@@ -163,6 +166,16 @@ class _CliSshServer(paramiko.ServerInterface if _HAS_PARAMIKO else object):
         self.events = {}            # chanid -> Event
 
     def check_auth_password(self, username, password):
+        res = self._check_auth_password(username, password)
+        if self.device_id is not None and self.state is not None:
+            from engine import login_guard
+            if res == paramiko.AUTH_SUCCESSFUL:
+                login_guard.record_success(self.device_id, self.state, username, self.peer or '?')
+            else:
+                login_guard.record_failure(self.device_id, self.state, username, self.peer or '?')
+        return res
+
+    def _check_auth_password(self, username, password):
         if self.state is not None:
             from engine import aaa_radius
             decision = aaa_radius.login(self.state, username, password, self.nas_ip)
@@ -277,6 +290,21 @@ class SshCliServer:
             # 短時間多数接続を、ここで実際に遮断する——フェイクの検知
             # ではない)。ASA以外は state.threat_detection['enabled']が
             # 常にFalse(既定値)なのでno-op。
+            # IDS(/cyber-view): 実リスナーへの接続数でスキャン/総当たりを検知
+            try:
+                from engine.traffic_analytics import recorder as _rec
+                if addr:
+                    _rec.record_conn(self.device_id, addr[0], self.port)
+            except Exception:  # noqa: BLE001
+                pass
+            # IOS の login block-for: Quiet Mode 中は新しいログインを受け付けない
+            from engine import login_guard as _lg
+            if _lg.is_quiet(self.device_id, self.state):
+                try:
+                    client.close()
+                except OSError:
+                    pass
+                continue
             cfg = getattr(self.state, 'threat_detection', None)
             if cfg is not None and addr and threat_detection_engine.record_connection_attempt(
                     id(self.state), addr[0], cfg):
@@ -294,15 +322,16 @@ class SshCliServer:
                 except OSError:
                     pass
                 continue
-            threading.Thread(target=self._serve, args=(client,),
+            threading.Thread(target=self._serve, args=(client, addr[0] if addr else None),
                              daemon=True).start()
 
-    def _serve(self, sock):
+    def _serve(self, sock, peer=None):
         transport = paramiko.Transport(sock)
         transport.add_server_key(_shared_host_key())
         server = _CliSshServer(_device_users(self.state),
                                _device_authorized_keys(self.state),
-                               state=self.state, nas_ip=self.ip)
+                               state=self.state, nas_ip=self.ip,
+                               device_id=self.device_id, peer=peer)
         try:
             transport.start_server(server=server)
             # 1本の接続で複数チャンネルが開かれる。1本目を処理して

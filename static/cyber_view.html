@@ -173,7 +173,7 @@
   let particles = [];
 
   const octets = (ip) => ip.split('.').map(Number);
-  const RULE_CODE = { scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR' };
+  const RULE_CODE = { conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR' };
   const SEV_COL = { high: '#ff3b4e', medium: '#ffab2e', low: '#ffe14d' };
 
   // ── 表示状態: prefix = 選んだオクテット列 (長さ0〜3) / host = ホストビュー ──
@@ -347,6 +347,14 @@
       if (info && info.alerts.length) drawFlower(p.x, p.z, info.alerts, t, 4.6 + (fi++ % 3) * 2.8);
     }
     if (L === 3) { drawShell(t, subAlerts, true); drawSparks(t, subAlerts.length, subFlows); }
+    // SNMP に応答しない装置(Prometheus の up=0)の上に「NO RESPONSE 消失」
+    const lostDevs = ((health && health.categories.find(c => c.key === 'network')) || {}).unreachable || [];
+    for (const u of lostDevs) {
+      const ip = devIp(u.id);
+      if (!ip || !inBlock(ip)) continue;
+      const [x, z] = panelXZ(octets(ip)[L]);
+      plate3d(x, 3.2, z, STATE_COL.lost, 'NO RESPONSE', '消失', true, t, u.hostname);
+    }
     // 直近30秒に通信のあったブロック/装置の上に、状態と量の立体プレート(上位6件)
     const busy = Object.entries(st).filter(([, v]) => v.bytes > 0).sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 6);
     // 隣り合うパネルのプレートが重ならないよう、パネル番号順に左右へ扇状に振り分ける
@@ -619,7 +627,7 @@
     SYSLOG: { label: 'SYSLOG', sub: 'ログ', col: '#3a4450' },
     NET: { label: 'NET', sub: 'リンク監視', col: '#d98a00' },
   };
-  const SOURCE_OF = { scan: 'IDS', unreach_burst: 'IDS', flood: 'IDS', large_icmp: 'IDS',
+  const SOURCE_OF = { conn_scan: 'IDS', scan: 'IDS', unreach_burst: 'IDS', flood: 'IDS', large_icmp: 'IDS',
     fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET' };
   function drawIcon(src, x, y, s) {
     const c = SOURCES[src].col;
@@ -849,8 +857,8 @@
 
   // ── LINK VIEW: ルータ間リンクのトラフィックと状態 ─────────
   let mode = 'net', linkData = null, linkPos = {}, selLink = null, nextPoll = 0;
-  const STATE_COL = { ok: '#5dffa8', warn: '#ffab2e', crit: '#ff3b4e', down: '#ff3b4e' };
-  const STATE_JA = { ok: '正常', warn: '注意', crit: '警告', down: '断' };
+  const STATE_COL = { ok: '#5dffa8', warn: '#ffab2e', crit: '#ff3b4e', down: '#ff3b4e', lost: '#9aa4b8' };
+  const STATE_JA = { ok: '正常', warn: '注意', crit: '警告', down: '断', lost: '応答なし' };
   const fmtBps = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + ' Gbps' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' Mbps'
     : b >= 1e3 ? (b / 1e3).toFixed(1) + ' kbps' : Math.round(b) + ' bps';
   const lkey = (l) => l.a + '|' + l.b;
@@ -904,7 +912,7 @@
   function renderLinkPanel() {
     const box = document.getElementById('linkpanel');
     const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-    const order = { down: 0, crit: 1, warn: 2, ok: 3 };
+    const order = { down: 0, lost: 1, crit: 2, warn: 3, ok: 4 };
     const ls = [...linkData.links].sort((x, y) => order[x.state] - order[y.state] || (y.ab_bps + y.ba_bps) - (x.ab_bps + x.ba_bps));
     if (!ls.length) { box.innerHTML = '<div class="l"><small>ルータ同士のリンクがありません。メイン画面でルータ同士をリンクしてください。</small></div>'; return; }
     box.innerHTML = ls.map(l => {
@@ -926,7 +934,7 @@
       d.onclick = () => { selLink = selLink === d.dataset.k ? null : d.dataset.k; renderLinkPanel(); };
     });
   }
-  const STATE_EN = { ok: 'NORMAL', warn: 'HIGH LOAD', crit: 'CRITICAL', down: 'LINK DOWN' };
+  const STATE_EN = { ok: 'NORMAL', warn: 'HIGH LOAD', crit: 'CRITICAL', down: 'LINK DOWN', lost: 'NO RESPONSE' };
   const fmtShort = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + ' Gbps' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' Mbps'
     : b >= 1e3 ? (b / 1e3).toFixed(0) + ' kbps' : Math.round(b) + ' bps';
   const shortIf = (n) => n.replace('GigabitEthernet', 'Gi').replace('TenGigabitEthernet', 'Te').replace('FastEthernet', 'Fa').replace('Ethernet', 'Eth');
@@ -946,7 +954,10 @@
       ctx.beginPath();
       const pts = [[-w / 2 + 8, -11], [w / 2 - 8, -11], [w / 2, 0], [w / 2 - 8, 11], [-w / 2 + 8, 11], [-w / 2, 0]];
       pts.forEach(([a, b], j) => j ? ctx.lineTo(cx + a, cy + b) : ctx.moveTo(cx + a, cy + b)); ctx.closePath();
-      if (st === 'down') {
+      if (st === 'lost') {
+        ctx.fillStyle = `rgba(154,164,184,${0.35 + 0.3 * Math.abs(Math.sin(t * 0.004))})`; ctx.fill();
+        ctx.strokeStyle = '#c9d1e0'; ctx.lineWidth = 1.2; ctx.stroke(); ctx.fillStyle = '#0a0f18';
+      } else if (st === 'down') {
         const p = 0.65 + 0.35 * Math.abs(Math.sin(t * 0.006 + i));
         ctx.fillStyle = col; ctx.globalAlpha = p; ctx.shadowColor = col; ctx.shadowBlur = 14; ctx.fill();
         ctx.globalAlpha = 1; ctx.shadowBlur = 0; ctx.fillStyle = '#10060a';
@@ -959,7 +970,7 @@
       ctx.font = '800 10px monospace'; ctx.textBaseline = 'middle';
       ctx.fillText(EV_LABEL[k], cx, cy - 2);
       ctx.font = '8px monospace';
-      ctx.fillText(st === 'down' ? 'DOWN' : st === 'up' ? 'up' : '—', cx, cy + 7);
+      ctx.fillText(st === 'down' ? 'DOWN' : st === 'lost' ? 'LOST' : st === 'up' ? 'up' : '—', cx, cy + 7);
     });
     ctx.restore();
   }
@@ -1096,7 +1107,7 @@
       const tot = l.ab_bps + l.ba_bps;
       const wdt = 2 + Math.min(14, Math.log10(1 + tot) * 1.6) * (pa.s + pb.s) / 60;
       ctx.save();
-      if (l.state === 'down') { ctx.setLineDash([10, 8]); ctx.globalAlpha = 0.5 + 0.5 * Math.abs(Math.sin(t * 0.004)); }
+      if (l.state === 'down' || l.state === 'lost') { ctx.setLineDash(l.state === 'lost' ? [3, 9] : [10, 8]); ctx.globalAlpha = 0.5 + 0.5 * Math.abs(Math.sin(t * 0.004)); }
       ctx.strokeStyle = col; ctx.lineWidth = wdt + (sel ? 3 : 0); ctx.shadowColor = col; ctx.shadowBlur = l.state === 'ok' ? 6 : 18;
       ctx.globalAlpha *= l.state === 'ok' && !tot ? 0.35 : 0.8;
       ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
@@ -1123,11 +1134,11 @@
       // 中点: 通信量に比例した高さの六角柱 + その上に状態と量の立体プレート(右脇の文字ではなく画面内に)
       const mx = (A[0] + B[0]) / 2, mz = (A[2] + B[2]) / 2, tot2 = l.down ? 0 : l.ab_bps + l.ba_bps;
       const colH = 0.4 + Math.min(3.2, Math.log10(1 + tot2) * 0.42);
-      if (!l.down) hexColumn(mx, Y, mz, 0.42, colH, col, t);
+      if (!l.down && l.state !== 'lost') hexColumn(mx, Y, mz, 0.42, colH, col, t);
       const title = l.down ? 'LINK DOWN' : STATE_EN[l.state];
-      const val = l.down ? '停止' : fmtShort(tot2);
+      const val = l.down ? '停止' : l.state === 'lost' ? '不明' : fmtShort(tot2);
       plate3d(mx, Y + colH + 0.9, mz, col, title, val, l.down || l.state === 'crit', t, l.down ? null : `使用率 ${(l.util * 100).toFixed(1)}%`);
-      if (l.down || (l.down_sources || []).length) evidenceChips(mx, Y + colH + 0.9, mz, l.evidence || {}, t);
+      if (l.down || l.state === 'lost' || (l.down_sources || []).length) evidenceChips(mx, Y + colH + 0.9, mz, l.evidence || {}, t);
       if (l.down) sparksAt(mx, Y + 0.3, mz, t, '#ff3b4e');
       if (l.alerts.length) {
         const ap = proj(mx, Y + colH + 2.6, mz);
@@ -1143,18 +1154,22 @@
     }
     // ルータ(六角柱)
     const worst = {};
-    const rank = { ok: 0, warn: 1, crit: 2, down: 3 };
+    const rank = { ok: 0, warn: 1, lost: 2, crit: 3, down: 4 };
     items.forEach(({ l }) => { for (const d of [l.a, l.b]) if (!(d in worst) || rank[l.state] > rank[worst[d]]) worst[d] = l.state; });
     const names = {};
     linkData.links.forEach(l => { names[l.a] = l.host_a; names[l.b] = l.host_b; });
     Object.entries(linkPos).map(([id, P]) => ({ id, P, c: proj(...P) })).filter(x => x.c).sort((a, b) => b.c.d - a.c.d).forEach(({ id, P }) => {
-      const col = STATE_COL[worst[id] || 'ok'];
+      const isLost = (linkData.unreachable || []).some(u => u.id === id);
+      const col = isLost ? STATE_COL.lost : STATE_COL[worst[id] || 'ok'];
+      if (isLost) ctx.globalAlpha = 0.35 + 0.45 * Math.abs(Math.sin(t * 0.003));   // 応答なし: 消えかけて点滅
       const ring = (y) => Array.from({ length: 6 }, (_, k) => { const a = Math.PI / 6 + k * Math.PI / 3; return proj(P[0] + Math.cos(a) * 0.8, y, P[2] + Math.sin(a) * 0.8); });
       const bot = ring(0), top = ring(Y + 0.4);
       if (bot.some(v => !v) || top.some(v => !v)) return;
       ctx.fillStyle = 'rgba(40,150,255,0.18)'; ctx.strokeStyle = col; ctx.lineWidth = 1.2;
       for (let k = 0; k < 6; k++) { poly([bot[k], bot[(k + 1) % 6], top[(k + 1) % 6], top[k]]); ctx.fill(); ctx.stroke(); }
-      poly(top); ctx.fillStyle = 'rgba(60,200,255,0.35)'; ctx.fill(); ctx.stroke();
+      poly(top); ctx.fillStyle = isLost ? 'rgba(154,164,184,0.3)' : 'rgba(60,200,255,0.35)'; ctx.fill(); ctx.stroke();
+      ctx.globalAlpha = 1;
+      if (isLost) plate3d(P[0], Y + 3.4, P[2], STATE_COL.lost, 'NO RESPONSE', '消失', true, t, 'SNMP 応答なし');
       const lp = proj(P[0], Y + 1.2, P[2]);
       if (lp) {
         ctx.fillStyle = '#fff'; ctx.font = '600 14px monospace'; ctx.textAlign = 'center';

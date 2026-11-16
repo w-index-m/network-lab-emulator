@@ -214,3 +214,59 @@ snmp-server host 127.0.0.1 udp-port 1162 traps public
 拾うための1秒以内の同文除外)が、`shutdown`→`no shutdown` を1秒以内に繰り返すと最後の
 「changed state to up」を重複として捨ててしまい、復旧したのに断のまま残っていた。
 間に同じ IF の逆の状態変化が挟まる場合は別の出来事として残すようにした。
+
+## 応答なし(消失)と、スキャン/総当たりの検知(v5)
+
+### SNMP 応答なし(消失)
+`PROMETHEUS_URL` があるとき、Prometheus の `up{job="cisco-snmp"}` が 0 の装置(snmp_exporter が
+SNMP の応答を得られない: 電源断・到達不可・コミュニティ不一致など)を「応答なし」にする。
+
+- ROUTER LINKS: その装置の六角柱が灰色で点滅し「NO RESPONSE 消失 / SNMP 応答なし」。
+  つながるリンクは灰色の点線・「NO RESPONSE 不明」になり(量は分からないので「不明」)、
+  検知経路チップの POLL が「LOST」。STATE/SYSLOG/TRAP のチップと見比べると、
+  装置自体が落ちたのか SNMP だけが届かないのかが分かる(下の画像は SNMP だけ止めた例で、
+  STATE・SYSLOG は up のまま)。
+- NETWORK: 装置のパネル上に「NO RESPONSE 消失」。状態ボードのネットワーク観点は
+  「異常 ・ 応答なし 1台 / 応答なし: CR2 (10.240.12.2)」。
+- `/api/traffic/links` は `unreachable`(装置と instance)と、リンクごとの `lost`・`state: "lost"` を返す。
+
+### Cisco IOS の login block-for(実機コマンド)
+```
+login block-for 60 attempts 3 within 60
+login on-failure log
+login on-success log
+show login
+```
+実 SSH/Telnet リスナーでのログイン失敗を数え、閾値で Quiet Mode に入って以降のログインを拒否し、
+実機と同じ `%SEC_LOGIN-4-LOGIN_FAILED` / `%SEC_LOGIN-1-QUIET_MODE_ON` /
+`%SEC_LOGIN-5-QUIET_MODE_OFF` を出す(`show logging`・Loki・/cyber-view の SYSLOG 花びら)。
+`show running-config` にも出て、設定は保存・復元される。
+
+### ポートスキャン(IDS)
+実機の IOS ルータにはポートスキャン(接続だけで認証しない)の標準検知は無いので、ネットワーク側の
+センサーとして /cyber-view の IDS ルール `conn_scan` を追加した: 同じ送信元から装置の実リスナー
+(SSH/Telnet)へ 30秒間に10回以上の TCP 接続で「短時間の大量接続(ポートスキャン/総当たりの疑い)」
+(high)。アラートの花は装置の上に IDS の花びらで出る。ASA なら従来どおり
+`threat-detection scanning-threat shun` が送信元を遮断し FW の花びらになる。
+
+ライブ検証(本物の nmap 7.94 で CR2 の実 SSH リスナー 10.240.12.2:22 を攻撃):
+```
+$ nmap -Pn -sV -p 21-25,80,161,443,830 10.240.12.2
+22/tcp  open   ssh   Paramiko Python sshd 5.1.0 (protocol 2.0)
+$ nmap -Pn -p 22 --script ssh-brute --script-args userdb=users.txt,passdb=pass.txt 10.240.12.2
+CR2# show login
+     Router presently in Quiet-Mode.
+     Will remain in Quiet-Mode for 60 seconds.
+CR2# show logging
+*Nov 15 23:46:57.218: %SEC_LOGIN-4-LOGIN_FAILED: Login failed [user: admin] [Source: 10.240.12.2] ...
+*Nov 15 23:46:57.218: %SEC_LOGIN-1-QUIET_MODE_ON: Still timeleft for watching failures is 60 secs, ...
+$ (nmap -sT -sV -p 22 を連続実行)
+alert: conn_scan IDS high cr2  10.240.12.2 から 30秒間に 10 回接続 (port 22)
+CR2(config)# no snmp-server community netlab-ro     → 約35秒後 up{instance="10.240.12.2"}=0 → 応答なし
+```
+nmap は同じホスト上から実行したので、Source が装置自身のIPになっている(ラボの都合)。
+既定の SYN スキャン(-sS)は TCP 接続を完了しないため装置側の accept に現れず、数に入らない
+(実機の IOS も同じく、完了しない接続はログイン失敗にならない)。
+
+![応答なし(消失)](images/cyber-view-v5-no-response.png)
+![スキャン・総当たりの検知(IDS / SYSLOG の花びらと NO RESPONSE)](images/cyber-view-v5-scan-login-block.png)

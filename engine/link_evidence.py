@@ -206,3 +206,20 @@ def prometheus_oper_status(url, timeout=3.0):
             if st:
                 out[(m['instance'].split(':')[0], norm_if(m['ifName']))] = st
     return out
+
+
+def prometheus_targets_up(url, timeout=3.0):
+    """{instance: True/False} — snmp_exporter 経由の収集が成功しているか(Prometheus の up)。
+    False の装置は SNMP の応答が無い(消失・電源断・到達不可・コミュニティ不一致など)。"""
+    q = 'up{job="cisco-snmp"}'
+    full = url.rstrip('/') + '/api/v1/query?' + urllib.parse.urlencode({'query': q})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(full, timeout=timeout) as r:
+        data = json.loads(r.read().decode())
+    out = {}
+    for row in data.get('data', {}).get('result', []):
+        inst = row.get('metric', {}).get('instance')
+        v = float(row['value'][1])
+        if inst and v in (0, 1):            # up は 0/1 のみ。それ以外の値は判定に使わない
+            out[inst.split(':')[0]] = v == 1
+    return out

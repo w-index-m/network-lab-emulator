@@ -82,14 +82,27 @@ class TelnetCliServer:
     def _loop(self):
         while not self._stop.is_set():
             try:
-                client, _addr = self._sock.accept()
+                client, addr = self._sock.accept()
             except OSError:
                 return
-            threading.Thread(target=self._serve, args=(client,),
+            try:
+                from engine.traffic_analytics import recorder as _rec
+                _rec.record_conn(self.device_id, addr[0], getattr(self, 'port', 23))
+            except Exception:  # noqa: BLE001
+                pass
+            from engine import login_guard as _lg
+            if _lg.is_quiet(self.device_id, self.state):     # IOS login block-for の Quiet Mode
+                try:
+                    client.close()
+                except OSError:
+                    pass
+                continue
+            threading.Thread(target=self._serve, args=(client, addr[0]),
                              daemon=True).start()
 
     # ── セッション ───────────────────────
-    def _serve(self, sock):
+    def _serve(self, sock, peer=None):
+        self._peer = peer
         try:
             sock.settimeout(120)
             # ECHO と SGA はこちら（サーバ）が持つ、と宣言する
@@ -121,15 +134,21 @@ class TelnetCliServer:
             pw = self._readline(sock, b'Password: ', echo=False)
             if pw is None:
                 return None
-            from engine import aaa_radius
+            from engine import aaa_radius, login_guard
             decision = aaa_radius.login(self.state, user, pw, getattr(self, 'ip', None))
+            peer = getattr(self, '_peer', None) or '?'
             if decision is not None:
                 # RADIUSで確定(Accept/Reject)。Rejectはlocalへ進まない
                 if decision[0] == 'accept':
                     self._remote_privilege = decision[1]
+                    login_guard.record_success(self.device_id, self.state, user, peer, 23)
                     return user
             elif users.get(user) == pw:
+                login_guard.record_success(self.device_id, self.state, user, peer, 23)
                 return user
+            if login_guard.record_failure(self.device_id, self.state, user, peer, 23):
+                sock.sendall(b'\r\n% Login invalid\r\n')
+                return None
             sock.sendall(b'\r\n% Login invalid\r\n\r\n')
         sock.sendall(b'% Bad passwords\r\n')
         return None

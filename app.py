@@ -495,6 +495,9 @@ def _save_config():
             td = getattr(state, "threat_detection", None)
             if td:
                 dev_data["threat_detection"] = td
+        # IOS の login block-for / on-failure log
+        if getattr(state, "login_block", None):
+            dev_data["login_block"] = state.login_block
         # Juniper Junos: candidate/committed両方を保存。実機のJunosも
         # commit前のcandidate configはセッションを跨いで残る(exitで
         # 破棄確認が出るのと同じ理由)ため、candidateも含めて復元する。
@@ -721,6 +724,8 @@ def _load_config():
         # ASA threat-detection scanning-threat設定を復元(_save_configの対)
         if dev_data["type"] == "asa" and dev_data.get("threat_detection"):
             state.threat_detection = dev_data["threat_detection"]
+        if dev_data.get("login_block"):
+            state.login_block = dev_data["login_block"]
         # Juniper Junos: candidate/committed設定とSSH/NETCONF有効化
         # フラグを復元(_save_configの対)。実リスナー自体の再起動は
         # BIG-IP/ALBと同じく後段でまとめて行う。
@@ -3377,6 +3382,11 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         # 読めず public では読めてしまう、という逆の状態になる。
         _register_icmp(device_id)
         return
+    # IOS: login block-for / login on-failure log / login on-success log
+    if state.device_type in ('cisco', 'catalyst', 'wlc') and state.mode == 'config':
+        from engine import login_guard as _lg
+        if _lg.handle_config(state, c):
+            return ''
     # Cisco: "snmp-server host 192.168.1.200 traps public"
     snmp_host = re.match(r'^snmp-server\s+host\s+([\d.]+)'
                          r'(?:\s+udp-port\s+(\d+))?'
@@ -4956,6 +4966,11 @@ async def handle_protocol_show(device_id: str, command: str, state: DeviceState)
     if state.device_type in ('alb', 'netattest'):
         return None
 
+    # ── IOS: show login(login block-for の状態) ──
+    if c == 'show login' and state.device_type in ('cisco', 'catalyst', 'wlc'):
+        from engine import login_guard as _lg
+        return _lg.show_login(device_id, state)
+
     # ── NX-OS: show logging ──
     if re.match(r'^show\s+logging$', c) and state.device_type == 'nexus':
         logs = nxos_log_buffer.get(device_id, [])
@@ -6096,6 +6111,11 @@ def _build_running_config(device_id: str, state) -> str:
                 lines.append(' exit')
             lines.append('exit')
             lines.append('!')
+        from engine.login_guard import running_config_lines as _lg_lines
+        _lg = _lg_lines(state)
+        if _lg:
+            lines.extend(_lg)
+            lines.append('!')
         # AAA（モデルベースAAAの前提。NETCONF/RESTCONFを使うには必要）
         if getattr(state, 'aaa_new_model', False):
             lines.append('aaa new-model')
@@ -6936,6 +6956,16 @@ def _on_fw_shun(key, src_ip, avg_rate, burst_rate):
 
 
 from engine import threat_detection as _td_mod  # noqa: E402
+from engine import login_guard as _login_guard  # noqa: E402
+
+
+def _login_guard_log(device_id, facility, severity, mnemonic, text):
+    """login block-for のログを実機と同じ形式で show logging / syslog 観点に出す"""
+    from engine.protocols import cisco_msg as _cm
+    _cisco_log(device_id, _cm._fmt(facility, severity, mnemonic, text))
+
+
+_login_guard.set_logger(_login_guard_log)
 if _on_fw_shun not in _td_mod.shun_listeners:
     _td_mod.shun_listeners.append(_on_fw_shun)
 
@@ -9603,7 +9633,8 @@ _EVIDENCE_ORDER = ('STATE', 'SYSLOG', 'TRAP', 'POLL')
 async def _annotate_link_evidence(links, nodes, now):
     """各リンクに、どの経路(STATE/SYSLOG/TRAP/POLL)が断を示しているかを付ける。
     どれか1つでも「最後に見た状態が down」ならリンクは断(ln['down']=True)。"""
-    from engine.link_evidence import traps, parse_log_link_event, norm_if, prometheus_oper_status
+    from engine.link_evidence import (traps, parse_log_link_event, norm_if, prometheus_oper_status,
+                                      prometheus_targets_up)
     logs, _src, _err = await _health_logs(now - 3600, now)
     host_to_dev = {n['hostname']: d for d, n in nodes.items()}
     ip_to_dev = {}
@@ -9626,13 +9657,20 @@ async def _annotate_link_evidence(links, nodes, now):
     for e in traps.snapshot():
         dev = host_to_dev.get(e['host']) or ip_to_dev.get(e['src_ip'])
         note('TRAP', dev, e['iface'], e['t'], e['state'])
-    poll = {}
+    poll, lost = {}, {}
     prom_url = os.environ.get('PROMETHEUS_URL', '').strip()
     if prom_url:
         try:
             poll = await asyncio.to_thread(prometheus_oper_status, prom_url)
         except Exception:  # noqa: BLE001 - 取れなければ POLL 無しで判定
             poll = {}
+        try:
+            for inst, ok in (await asyncio.to_thread(prometheus_targets_up, prom_url)).items():
+                d = ip_to_dev.get(inst)
+                if d and not ok:
+                    lost[d] = inst          # SNMP の収集に応答しない装置
+        except Exception:  # noqa: BLE001
+            lost = {}
     for (inst, ifn), st in poll.items():
         note('POLL', ip_to_dev.get(inst), ifn, now, st)
     for ln in links:
@@ -9643,10 +9681,14 @@ async def _annotate_link_evidence(links, nodes, now):
                       if i and (src, d, norm_if(i)) in seen]
             if states:
                 ev[src] = 'down' if 'down' in states else 'up'
+        lost_ends = [d for d in (ln['a'], ln['b']) if d in lost]
+        if lost_ends and ev['POLL'] != 'down':
+            ev['POLL'] = 'lost'
         ln['evidence'] = ev
         ln['down_sources'] = [k for k in _EVIDENCE_ORDER if ev[k] == 'down']
         ln['down'] = bool(ln['down_sources'])
-    return links
+        ln['lost'] = [nodes[d]['hostname'] for d in lost_ends]
+    return [{'id': d, 'hostname': nodes[d]['hostname'], 'instance': inst} for d, inst in lost.items()]
 
 
 @app.get("/api/traffic/links")
@@ -9662,7 +9704,7 @@ async def traffic_links(window: int = 60, routers_only: bool = True):
     links, nodes = _collect_links()
     sampler.sample(links)
     now = time.time()
-    await _annotate_link_evidence(links, nodes, now)
+    unreachable = await _annotate_link_evidence(links, nodes, now)
     prom, prom_err = {}, None
     prom_url = os.environ.get('PROMETHEUS_URL', '').strip()
     if prom_url:
@@ -9712,12 +9754,13 @@ async def traffic_links(window: int = 60, routers_only: bool = True):
                     'flows_ok': ok, 'flows_ng': ng,
                     'alerts': [{'rule': x['rule'], 'name': x['name'], 'severity': x['severity'],
                                 't': x['t']} for x in al[-5:]],
-                    'state': classify(util, ln['down'], ng, al), 'source': src,
+                    'state': ('lost' if ln.get('lost') and not ln['down'] else classify(util, ln['down'], ng, al)),
+                    'source': src,
                     'series': sampler.series((a, b), 3600, 60)})
     return {'links': out, 'window': window, 'now': now,
             'source': 'prometheus' if prom else 'internal',
             'prometheus_url': prom_url or None, 'prometheus_error': prom_err,
-            'sample_interval': 10, 'trap_listen': _link_traps_listen()}
+            'sample_interval': 10, 'trap_listen': _link_traps_listen(), 'unreachable': unreachable}
 
 
 def _link_traps_listen():
@@ -9734,7 +9777,7 @@ async def traffic_health(window: int = 300):
     now = time.time()
     rank = {'ok': 0, 'warn': 1, 'crit': 2}
     links, nodes = _collect_links()
-    await _annotate_link_evidence(links, nodes, now)
+    unreachable = await _annotate_link_evidence(links, nodes, now)
     routers = [ln for ln in links
                if nodes[ln['a']]['type'] not in _NON_ROUTER_TYPES and nodes[ln['b']]['type'] not in _NON_ROUTER_TYPES]
     cats = []
@@ -9743,11 +9786,17 @@ async def traffic_health(window: int = 300):
     down_r = [f"{nodes[x['a']]['hostname']} ⇄ {nodes[x['b']]['hostname']}" for x in routers if x['down']]
     down_t = [f"{nodes[x['a']]['hostname']} ⇄ {nodes[x['b']]['hostname']}" for x in links
               if x['down'] and x not in routers]
-    st = 'crit' if down_r else 'warn' if down_t else 'ok'
+    st = 'crit' if down_r or unreachable else 'warn' if down_t else 'ok'
+    summ = []
+    if down_r or down_t:
+        summ.append(f'リンク断 {len(down_r) + len(down_t)}本')
+    if unreachable:
+        summ.append(f"応答なし {len(unreachable)}台")
     cats.append({'key': 'network', 'label': 'ネットワーク', 'state': st,
-                 'summary': (f'リンク断 {len(down_r) + len(down_t)}本' if st != 'ok'
-                             else f'リンク {len(links)}本 すべて up'),
-                 'details': [f'断: {x}' for x in down_r + down_t][:5] +
+                 'summary': ' ・ '.join(summ) if summ else f'リンク {len(links)}本 すべて up',
+                 'unreachable': unreachable,
+                 'details': [f"応答なし: {u['hostname']} ({u['instance']})" for u in unreachable] +
+                            [f'断: {x}' for x in down_r + down_t][:5] +
                             [f"検知: {nodes[x['a']]['hostname']} ⇄ {nodes[x['b']]['hostname']} = "
                              f"{' / '.join(x['down_sources'])}" for x in links if x['down']][:3]})
 

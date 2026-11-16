@@ -2796,3 +2796,12 @@ STATE(vnet)/SYSLOG(`parse_log_link_event`、Loki直近1h or 内部)/TRAP(`SNMP_T
 最新がdownならリンク断、`evidence`/`down_sources`を返し、画面はLINK DOWN下に4経路チップ。
 `recorder.record_log`の重複除外は、間に同IFの逆の状態変化が挟まれば残す(素早いflapで最後の
 upが落ちて断のまま残る実バグを修正)。テストは`tests/test_link_evidence.py`。
+追加(v5): (1) SNMP応答なし: `link_evidence.prometheus_targets_up`(`up{job="cisco-snmp"}`=0)の装置を
+`_annotate_link_evidence`が`unreachable`として返し、リンクは`state:'lost'`/`evidence.POLL='lost'`、
+healthのネットワーク観点は異常「応答なし N台」、画面は灰色点滅の「NO RESPONSE 消失」。
+(2) `engine/login_guard.py`: IOSの`login block-for <s> attempts <n> within <s>`/`login on-failure log`/
+`login on-success log`/`show login`。実SSH(`_CliSshServer.check_auth_password`)・Telnet(`_login`)の
+失敗を数えQuiet Mode中は`_loop`でacceptを即close、`%SEC_LOGIN-*`は`_cisco_log`経由(show logging/
+syslog観点)。設定は`state.login_block`で保存・復元。(3) IDSルール`conn_scan`(`recorder.record_conn`、
+SSH/Telnetの実accept数、30秒10回)。実nmap(-sT -sV / ssh-brute)でライブ確認。
+テストは`tests/test_login_guard_and_lost.py`。

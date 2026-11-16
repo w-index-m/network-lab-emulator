@@ -42,6 +42,9 @@ RULES = {
     'link_down': {'name': 'リンク断', 'severity': 'medium',
                   'window': 0, 'threshold': 0, 'cooldown': 0,
                   'desc': 'インタフェースのshutdown等でリンクが落ちた'},
+    'conn_scan': {'name': '短時間の大量接続(ポートスキャン/総当たりの疑い)', 'severity': 'high',
+                  'window': 30, 'threshold': 10, 'cooldown': 60,
+                  'desc': '同じ送信元から装置の実リスナー(SSH/Telnet)へ短時間に多数の接続'},
     'fw_shun': {'name': 'FWがスキャン元を遮断(shun)', 'severity': 'high',
                 'window': 0, 'threshold': 0, 'cooldown': 30,
                 'desc': 'ASA の threat-detection scanning-threat shun が送信元を遮断した'},
@@ -50,7 +53,7 @@ RULES = {
                      'desc': 'syslog 重要度3(error)以下のメッセージ(復旧通知は除く)'},
 }
 # 検知元(センサー)。/cyber-view の六角形の花びらはこの単位でまとめる
-RULE_SOURCE = {'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
+RULE_SOURCE = {'conn_scan': 'IDS', 'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
                'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET'}
 SECURITY_SOURCES = {'IDS', 'FW'}
 _TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')
@@ -73,6 +76,7 @@ class FlowRecorder:
         self._by_src = defaultdict(deque)          # src -> deque[(t, dst_ip, ok)]
         self._by_pair = defaultdict(deque)         # (src, dst_ip) -> deque[(t, bytes)]
         self._last_fired = {}                      # (rule, key) -> t
+        self._conns = {}                           # (dev, src_ip) -> deque[(t, port)]
 
     # ── 記録 ──────────────────────────────────────
     def record_flow(self, src, dst_ip, dst, path, ok, pkts, size, proto='icmp', now=None, src_ip=None):
@@ -124,6 +128,23 @@ class FlowRecorder:
             if ev['sev'] <= RULES['syslog_error']['threshold'] and not RECOVERY.search(msg):
                 self._fire('syslog_error', dev, now, src=dev, dst=None, detail=msg[:160], related=[])
             return ev
+
+    def record_conn(self, dev, src_ip, port, now=None):
+        """装置の実リスナー(SSH/Telnet)が受け付けた TCP 接続を数え、スキャンを検知する。
+        アラートは装置(dev)の場所に出す(src=装置、dst=接続元IP)。"""
+        now = time.time() if now is None else now
+        r = RULES['conn_scan']
+        with self._lock:
+            dq = self._conns.setdefault((dev, src_ip), deque())
+            dq.append((now, port))
+            while dq and now - dq[0][0] > r['window']:
+                dq.popleft()
+            if len(dq) >= r['threshold']:
+                ports = sorted({p for _, p in dq})
+                return self._fire('conn_scan', f'{dev}|{src_ip}', now, src=dev, dst=src_ip,
+                                  detail=f"{src_ip} から {r['window']}秒間に {len(dq)} 回接続 (port {','.join(map(str, ports))})",
+                                  related=[])
+        return None
 
     def external_alert(self, rule, key, src, dst, detail, now=None):
         """エンジン外の検知(FWのshun等)をアラートとして記録"""
@@ -240,7 +261,7 @@ class FlowRecorder:
     def clear(self):
         with self._lock:
             self.events.clear(); self.link_events.clear(); self.alerts.clear(); self.logs.clear()
-            self._by_src.clear(); self._by_pair.clear(); self._last_fired.clear()
+            self._by_src.clear(); self._by_pair.clear(); self._last_fired.clear(); self._conns.clear()
 
 
 recorder = FlowRecorder()
