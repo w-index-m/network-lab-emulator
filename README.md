@@ -7,6 +7,12 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-green)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
+<p align="center">
+  <a href="docs/videos/cyber-view-demo-music.mp4"><img src="docs/videos/nirvana-hero.gif" alt="ニルヴァーナ / Nirvana — 3D network monitoring view" width="100%"></a><br>
+  <b>ニルヴァーナ(<code>/cyber-view</code>)</b> — ネットワークを 3D で見る監視画面 / a 3D network monitoring view<br>
+  <sub>通常運用 → リンク障害と迂回 → フラップ → 経路の変化(情)。クリックで音楽つきの動画 / normal → link failure and reroute → flapping → route change info. Click for the full video with music.</sub>
+</p>
+
 > 📊 **[実装進捗ダッシュボード](./IMPLEMENTATION_PROGRESS.md)**  
 > ✅ Priority 1 の進捗をまとめて確認できます。
 
@@ -147,6 +153,8 @@ What is saved: only the config file (`config.yaml`) and what you build in BOARD 
 events, alerts and logs stay in memory; long-term history is left to Prometheus / Loki / Zabbix.
 
 ### 動画 / Videos
+
+[![ニルヴァーナ DEMO / Nirvana DEMO](docs/videos/nirvana-hero.gif)](docs/videos/cyber-view-demo-music.mp4)
 
 | DEMO(自動シナリオ / scripted scenario) | 流れのアニメと MAC フラップ / flow animation and a MAC flap |
 |---|---|
