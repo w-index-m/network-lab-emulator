@@ -9977,6 +9977,16 @@ async def demo_status():
     return demo_scenario.status()
 
 
+@app.get("/api/traffic/ospf")
+async def traffic_ospf(dest: str = None):
+    """/cyber-view の OSPF 表示: 隣接状態(Dead タイマー残り・DR/BDR)・エリア・宛先への最短経路ツリー。"""
+    from engine.ospf_view import snapshot
+    from engine.protocols import ospf_engine, icmp_engine
+    links, _nodes = _collect_links()
+    hostnames = {d: s.hostname for d, s in device_sessions.items()}
+    return snapshot(ospf_engine, vnet, icmp_engine, links, hostnames, dest=dest or None)
+
+
 @app.get("/api/traffic/flap-rules")
 async def traffic_flap_rules():
     """フラップ検知ルールの一覧(機種・しきい値)。"""

@@ -372,3 +372,75 @@ login on-success log
 
 ![デモ: 障害で迂回中](images/cyber-view-demo-fault.png)
 ![デモ: NETWORK 画面](images/cyber-view-demo-network.png)
+
+## OSPF モード(v12)— 隣接状態・エリア・最短経路ツリー
+
+依頼: 「3台繋いだ状態で OSPF を組んだ場合、どう表現できるか」→ 不足していた OSPF 固有の情報
+(隣接ごとの状態・Dead タイマー・エリア・ABR・SPF の経路)を描く OSPF ボタンを追加。
+
+データは `GET /api/traffic/ospf?dest=<net/len>`(`engine/ospf_view.py`)。エンジンが持っている隣接と経路を
+そのまま返すだけで、画面側では計算しない(`show ip ospf neighbor` / `show ip route` と同じ値になる)。2秒ごとに取得。
+
+| 画面の要素 | 意味 | 元データ |
+|---|---|---|
+| 床の円(色付き) | エリア。ABR は複数の円にまたがり、柱に2つ目のエリア色の帯と紫の「ABR」バッジ | network 文のエリア |
+| リンクの線 | 下地=エリアの色、上=隣接状態(緑 FULL / 橙 確立中・片側だけ / 赤点滅 DOWN) | 両端の neighbor テーブル |
+| 両端の丸いバッジ | **その装置から見た**隣接(`FULL/DR` など)と **Dead タイマーの残り秒**(円弧。Hello を受けるたびに満タンに戻り、30%未満で赤) | `show ip ospf neighbor` の State / Dead Time |
+| 中点のプレート | `ADJ FULL` / `ADJ DOWN` / `ADJ DOWN/FULL`(片側だけ)とエリア、理由(リンク断・エリア不一致・Hello間隔の不一致・認証キーの不一致) | |
+| 金色の線と流れる矢印 | 選んだ宛先への**最短経路ツリー**(各ルータの OSPF 経路の次ホップ) | 各ルータの OSPF 経路 |
+| 宛先ルータの光の柱 | `DESTINATION 10.70.103.0/24`(直結で持つルータ) | |
+| 各ルータ上のプレート | `O IA cost 20 → OSPF-R3`(経路の種類・コスト・次ホップ)、経路が無ければ赤の `NO ROUTE` | |
+| ルータ名の下 | Router-ID、LSDB 件数・経路数・SPF 計算回数 | |
+| 金色の波紋「SPF」 | そのルータで SPF を再計算した | SPF 回数の増加 |
+| ポップアップ | 隣接の変化(`ADJ R1⇄R3 FULL → PARTIAL`、警/情)、`SPF 経路変更 R1 → R2 (cost 30)`、`NO ROUTE`、経路の復旧 | 前回との差分 |
+
+宛先は上部のセレクトで選ぶ(LAN が先、ルータ間リンクが後)。スマホ幅では FULL の隣接の中点プレートと
+LSDB 行を省く。スタンドアロン版(実機監視)は OSPF の状態を持たないので、API が 404 → OSPF ボタンを隠す。
+
+### ライブ確認(3台の三角形、R3 の LAN を area 1 にして R3 を ABR に)
+
+```
+R1(1.1.1.1) ─ 10.70.12/24 ─ R2(2.2.2.2) ─ 10.70.23/24 ─ R3(3.3.3.3, ABR)
+     └──────────────── 10.70.13/24 ───────────────────┘
+R1 LAN 10.70.101.0/24 (area 0)                 R3 LAN 10.70.103.0/24 (area 1)
+```
+
+正常時(宛先 10.70.103.0/24): R1・R2 とも R3 へ直行(`O IA cost 20 → OSPF-R3`)、隣接 3/3 FULL。
+
+![正常時](images/cyber-view-ospf-normal.png)
+
+R1 の Gi1/0/2(R3 向け)を shutdown:
+
+- R1 側は IF 断で隣接が即 Down、**R3 側は Hello が来なくなっても Dead タイマー(40秒)が切れるまで FULL のまま**
+  → リンクは橙の `ADJ DOWN/FULL`、R3 側のバッジの数字が減っていく
+- R1 の経路が `→ OSPF-R2 (cost 30)` に切り替わり、ツリーの矢印が R1→R2→R3 に変わる(`SPF 経路変更` のポップアップ)
+
+![障害直後](images/cyber-view-ospf-fault.png)
+![Dead タイマーのカウントダウン](images/cyber-view-ospf-deadcount.png)
+
+API で追った R3 側の状態(2.5 秒ごと):
+
+```
+0s  full    R1=Full R3=Full dead_b=34
+3s  partial R1=Down R3=Full dead_b=32
+...
+33s partial R1=Down R3=Full dead_b=2
+36s down    R1=Down R3=Down dead_b=-      ← Dead timer expired
+```
+
+![Dead タイマー切れ](images/cyber-view-ospf-dead-expired.png)
+
+no shutdown → 次の Hello で隣接が FULL に戻り、R1 の経路が R3 直行(cost 20)に戻る。
+
+スマホ幅:
+
+![スマホ](images/cyber-view-ospf-phone.png)
+
+### 気づいたこと(直していない)
+
+- エンジンの DR/BDR はルータ単位(リンク=セグメントごとではない)ので、同じルータが相手によって
+  `BDR` / `DROther` と違って見えることがある。画面は `show ip ospf neighbor` の表示どおりに出している。
+- 同じ構成でも、DR になっているルータの経路だけコストが小さく出る(三角形で R3 から R1 の LAN が cost 11、
+  R2 からは cost 20)。Network LSA 経由の計算のずれで、`show ip route` も同じ値。
+- 片側だけ shutdown したとき、対向は Dead タイマー待ちになる(実機でもメディアコンバータや L2 スイッチを挟むと同じ)。
+  直結の実機なら対向もリンクダウンを検知して即 Down になる。

@@ -101,6 +101,14 @@
   #linkpanel small { color: var(--dim); }
   body.links #alerts, body.links #filter, body.links #crumbs, body.links #card, body.links #session, body.links #legend { display: none !important; }
   body.links #linkbar { display: block; }
+  /* OSPF モード: 宛先の選択と凡例 */
+  body.ospf #linkbar { display: none !important; }
+  #ospfbar { top: 46px; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--dim); display: none;
+    white-space: nowrap; text-align: center; }
+  body.ospf #ospfbar { display: block; }
+  #ospfbar select { background: #061428; color: var(--ink); border: 1px solid var(--line); font: inherit; }
+  #ospfbar .lg { margin-left: 10px; } #ospfbar .lg i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin: 0 4px 0 8px; }
+  #ospfbar .areas b { margin-left: 8px; }
   /* 右脇の文字リストは既定で隠し、画面内の立体表示で見せる(LIST ボタンで出せる) */
   #alerts, #linkpanel { display: none !important; }
   body.showlist:not(.links) #alerts { display: block !important; }
@@ -117,7 +125,7 @@
     #session .row { grid-template-columns: 56px 1fr 1fr 44px; } #session .row .bytes { display: none; }
     #card { top: 44%; }
     #modes { top: 126px; }
-    #linkbar { top: 158px; font-size: 10px; white-space: normal; width: calc(100vw - 16px); text-align: center; }
+    #linkbar, #ospfbar { top: 158px; font-size: 10px; white-space: normal; width: calc(100vw - 16px); text-align: center; }
     #modes button { padding: 5px 8px; letter-spacing: .06em; }
     #alerts { bottom: 60px; }
     #linkpanel { top: auto; bottom: 80px; right: 8px; left: 8px; width: auto; max-height: 34vh; }
@@ -141,12 +149,15 @@
 
 <div id="cidr" class="hud">0.0.0.0/0</div>
 <div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button></div>
-<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
+<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
 <div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
 <div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
   <option value="10">10秒</option><option value="60" selected>1分</option><option value="300">5分</option></select>
   ごと(平均区間も同じ) ・ 次回 <b id="lNext">--</b>秒 ・ 最終 <b id="lLast">--</b><span id="lSrc" class="src">--</span></div>
 <div id="linkpanel" class="hud"></div>
+<div id="ospfbar" class="hud"><b id="oSum" style="color:#fff"></b>宛先 <select id="oDest" aria-label="最短経路ツリーの宛先"></select>
+  <span class="lg"><i style="background:#ffd166"></i>最短経路<i style="background:#5dffa8"></i>FULL<i style="background:#ffab2e"></i>確立中<i style="background:#ff3b4e"></i>DOWN</span>
+  <span class="areas" id="oAreas"></span></div>
 <div id="crumbs" class="hud"></div>
 <div id="alerts" class="hud"></div>
 <div id="card" class="hud"></div>
@@ -931,7 +942,7 @@
     if (key !== layoutKey) {
       layoutKey = key;
       const ext = Math.max(9, ...Object.values(linkPos).map(p => Math.hypot(p[0], p[2])));
-      if (mode === 'link') { cam.px = 0; cam.pz = 0; cam.tdist = Math.max(36, ext * 2.6); }
+      if (mode !== 'net') { cam.px = 0; cam.pz = 0; cam.tdist = Math.max(36, ext * 2.6); }
     }
   }
   async function pollLinks() {
@@ -1171,12 +1182,12 @@
     ctx.restore();
   }
   function posForDevice(dev) {
-    if (mode === 'link') { const P = linkPos[dev]; return P ? [P[0], 2.2, P[2]] : null; }
+    if (mode !== 'net') { const P = linkPos[dev]; return P ? [P[0], 2.2, P[2]] : null; }
     if (hostView) { if (dev === hostView.id) return [0, 1, 0]; return peerPos[dev] || null; }
     const ip = devIp(dev); return ip ? posForIp(ip) : null;
   }
   function popupForFlow(e) {
-    const dstPos = mode === 'link' ? posForDevice(e.dst || (e.path || []).slice(-1)[0] || e.src) : hostView ? (posForDevice(e.dst) || posForDevice(e.src)) : posForIp(e.dst_ip);
+    const dstPos = mode !== 'net' ? posForDevice(e.dst || (e.path || []).slice(-1)[0] || e.src) : hostView ? (posForDevice(e.dst) || posForDevice(e.src)) : posForIp(e.dst_ip);
     const okN = e.ok ? e.pkts : 0;
     popup(dstPos, e.ok ? '#3dff9a' : '#ff3b4e', e.ok ? 'PING OK' : 'PING NG', `${okN}/${e.pkts} ・ ${e.size}B`);
   }
@@ -1237,7 +1248,7 @@
   }
   let netLinks = null;
   async function pollNetLinks() {
-    if (mode === 'link') return;
+    if (mode !== 'net') return;
     try { netLinks = (await api('/api/traffic/links?window=60')).links; } catch (e) { /* 次の周期で再試行 */ }
   }
   setInterval(pollNetLinks, 10000); setTimeout(pollNetLinks, 1500);
@@ -1319,18 +1330,247 @@
     });
     document.getElementById('empty').style.display = 'none';
   }
+  // ── OSPF: 隣接状態(Dead タイマー)・エリア・宛先への最短経路ツリー ─────────
+  // /api/traffic/ospf を2秒ごとに読む。隣接・経路はエンジンが持っているもの(show ip ospf neighbor /
+  // show ip route と同じ)をそのまま描き、画面側では計算しない
+  let ospfData = null, ospfAt = 0, ospfDest = '', ospfPrev = null;
+  const spfRipples = [];
+  const AREA_COLS = ['#33d6ff', '#c58bff', '#5dffa8', '#ff8fd1', '#ffd166', '#7aa2ff'];
+  const OSPF_COL = { full: '#5dffa8', partial: '#ffab2e', down: '#ff3b4e' };
+  const TREE_COL = '#ffd166';
+  const areaIdx = {};
+  const areaCol = (a) => { if (!(a in areaIdx)) areaIdx[a] = Object.keys(areaIdx).length; return AREA_COLS[areaIdx[a] % AREA_COLS.length]; };
+  const areaName = (a) => { const p = String(a).split('.'); return p.length === 4 ? 'AREA ' + ((+p[0] << 24 >>> 0) + (+p[1] << 16) + (+p[2] << 8) + +p[3]) : 'AREA ' + a; };
+  const ST_SHORT = { Full: 'FULL', Down: 'DOWN', Init: 'INIT', TwoWay: '2WAY', ExStart: 'EXSTART', Exchange: 'EXCHANGE', Loading: 'LOADING' };
+  async function pollOspf() {
+    if (mode !== 'ospf') return;
+    try {
+      const d = await api('/api/traffic/ospf' + (ospfDest ? '?dest=' + encodeURIComponent(ospfDest) : ''));
+      ospfNotice(ospfPrev, d);
+      ospfPrev = d; ospfData = d; ospfAt = performance.now();
+      if (!ospfDest && d.tree) ospfDest = d.tree.dest;
+      layoutRouters(d.adjacencies);
+      const sel = document.getElementById('oDest');
+      const opts = d.destinations.map(x => `${x.net}|${x.transit ? 'リンク ' : 'LAN '}${x.net}(${x.owners.map(o => hostName(o)).join(', ')})`);
+      if (sel.dataset.k !== opts.join()) {
+        sel.dataset.k = opts.join();
+        sel.innerHTML = opts.map(o => { const [v, l] = o.split('|'); return `<option value="${v}">${l}</option>`; }).join('');
+      }
+      sel.value = ospfDest;
+      const areas = [...new Set(d.devices.flatMap(x => x.areas))].sort();
+      document.getElementById('oAreas').innerHTML = areas.map(a => `<b style="color:${areaCol(a)}">■ ${areaName(a)}</b>`).join('')
+        + (d.devices.some(x => x.abr) ? ' ・ ABR = 複数エリアにまたがるルータ' : '');
+      document.getElementById('oSum').textContent = d.enabled ? `${d.devices.length}台 ・ 隣接 ${d.adjacencies.filter(a => a.state === 'full').length}/${d.adjacencies.length} FULL ・ ` : 'OSPF 未設定 ・ ';
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  setInterval(pollOspf, 2000);
+  document.getElementById('oDest').addEventListener('change', (e) => { ospfDest = e.target.value; ospfPrev = null; pollOspf(); });
+  function hostName(id) {
+    const d = ospfData && ospfData.devices.find(x => x.id === id);
+    return d ? d.hostname : (hostById[id] && hostById[id].hostname) || id;
+  }
+  // 前回との差分: 隣接の状態変化・最短経路の切り替わり・SPF の再計算を画面に出す
+  function ospfNotice(prev, d) {
+    if (!prev) return;
+    const pos = (id) => { const P = linkPos[id]; return P ? [P[0], 3.2, P[2]] : null; };
+    const pk = {}; prev.adjacencies.forEach(a => { pk[a.a + '|' + a.b] = a; });
+    for (const a of d.adjacencies) {
+      const o = pk[a.a + '|' + a.b];
+      if (o && o.state !== a.state) {
+        const A = linkPos[a.a], B = linkPos[a.b];
+        const mid = A && B ? [(A[0] + B[0]) / 2, 3.4, (A[2] + B[2]) / 2] : null;
+        const up = a.state === 'full';
+        popup(mid, up ? '#5dffa8' : '#ff3b4e', `ADJ ${hostName(a.a)}⇄${hostName(a.b)}`, `${o.state.toUpperCase()} → ${a.state.toUpperCase()}`, 5200, up ? '情' : '警');
+        sfx(up ? 'info' : 'alert');
+      }
+    }
+    const pd = {}; prev.devices.forEach(x => { pd[x.id] = x; });
+    for (const x of d.devices) {
+      if (pd[x.id] && x.spf_runs > pd[x.id].spf_runs) spfRipples.push({ id: x.id, born: performance.now() });
+    }
+    if (prev.tree && d.tree && prev.tree.dest === d.tree.dest) {
+      const pe = {}; prev.tree.edges.forEach(e => { pe[e.from] = e; });
+      for (const e of d.tree.edges) {
+        const o = pe[e.from];
+        if (o && o.to !== e.to) popup(pos(e.from), TREE_COL, `SPF 経路変更 ${hostName(e.from)}`, `→ ${hostName(e.to)} (cost ${e.cost})`, 6000, '情');
+        else if (!o && prev.tree.unreachable.includes(e.from)) popup(pos(e.from), TREE_COL, `経路復旧 ${hostName(e.from)}`, `→ ${hostName(e.to)} (cost ${e.cost})`, 6000, '情');
+      }
+      for (const u of d.tree.unreachable) if (!prev.tree.unreachable.includes(u)) popup(pos(u), '#ff3b4e', `NO ROUTE ${hostName(u)}`, d.tree.dest, 6000, '警');
+    }
+  }
+  // 床に描く円(エリアの広がり)
+  function floorRing(cx, cz, R, col, alpha, dash) {
+    ctx.save(); ctx.beginPath(); let f = true;
+    for (let a = 0; a <= 360; a += 8) { const p = proj(cx + R * Math.cos(a * Math.PI / 180), 0.02, cz + R * Math.sin(a * Math.PI / 180)); if (!p) continue; f ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); f = false; }
+    ctx.closePath(); ctx.fillStyle = col + alpha; ctx.fill();
+    if (dash) ctx.setLineDash(dash);
+    ctx.strokeStyle = col + 'aa'; ctx.lineWidth = 1.5; ctx.stroke(); ctx.restore();
+  }
+  // 隣接の端に付けるバッジ: その装置の show ip ospf neighbor の1行(相手の状態/役割)と Dead タイマーの残り
+  function adjBadge(x, y, z, state, role, dead, deadMax, col, t) {
+    const c = proj(x, y, z);
+    if (!c) return;
+    const sc = Math.max(0.65, Math.min(1.15, c.s / 32)), r = 15 * sc;
+    ctx.save();
+    // Dead タイマー: 円弧が残り時間(Hello を受けるたびに満タンに戻る)
+    ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2); ctx.fillStyle = 'rgba(4,14,30,0.88)'; ctx.fill();
+    ctx.strokeStyle = col + '44'; ctx.lineWidth = 3 * sc; ctx.stroke();
+    if (dead != null && deadMax) {
+      const f = Math.max(0, Math.min(1, dead / deadMax));
+      ctx.beginPath(); ctx.arc(c.x, c.y, r, -Math.PI / 2, -Math.PI / 2 + f * Math.PI * 2);
+      ctx.strokeStyle = f < 0.3 ? '#ff3b4e' : col; ctx.shadowColor = ctx.strokeStyle; ctx.shadowBlur = 8; ctx.stroke(); ctx.shadowBlur = 0;
+    }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff'; ctx.font = `800 ${Math.round(11 * sc)}px monospace`;
+    ctx.fillText(dead != null ? Math.ceil(dead) : '--', c.x, c.y);
+    ctx.fillStyle = col; ctx.font = `800 ${Math.round(11 * sc)}px monospace`;
+    const label = (ST_SHORT[state] || state) + (state === 'Full' && role ? '/' + role : '');
+    ctx.fillText(label, c.x, c.y + r + 10 * sc);
+    ctx.fillStyle = '#7fb2d0'; ctx.font = `${Math.round(9 * sc)}px sans-serif`;
+    ctx.fillText('Dead', c.x, c.y - r - 7 * sc);
+    ctx.restore();
+  }
+  // 最短経路ツリーの矢印(from → to に流れる山形)
+  function treeArrows(A, B, Y, t) {
+    const n = 5;
+    for (let k = 0; k < n; k++) {
+      const u = ((t * 0.00045) + k / n) % 1;
+      const x = A[0] + (B[0] - A[0]) * u, z = A[2] + (B[2] - A[2]) * u;
+      const p = proj(x, Y + 0.25, z), q = proj(x + (B[0] - A[0]) * 0.04, Y + 0.25, z + (B[2] - A[2]) * 0.04);
+      if (!p || !q) continue;
+      const ang = Math.atan2(q.y - p.y, q.x - p.x), s = 7 * Math.max(0.7, Math.min(1.4, p.s / 30));
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(ang);
+      ctx.beginPath(); ctx.moveTo(s, 0); ctx.lineTo(-s, -s * 0.8); ctx.lineTo(-s * 0.3, 0); ctx.lineTo(-s, s * 0.8); ctx.closePath();
+      ctx.globalAlpha = 0.35 + 0.65 * Math.sin(u * Math.PI);
+      ctx.fillStyle = TREE_COL; ctx.shadowColor = TREE_COL; ctx.shadowBlur = 12; ctx.fill();
+      ctx.restore();
+    }
+  }
+  function drawOspf(t) {
+    const d = ospfData;
+    const empty = document.getElementById('empty');
+    if (!d || !d.enabled) {
+      empty.style.display = 'block';
+      empty.innerHTML = d ? 'OSPF が動いているルータがありません。<br>ルータで router ospf と network 文を設定してください。' : '読み込み中…';
+      return;
+    }
+    empty.style.display = 'none';
+    const el = (performance.now() - ospfAt) / 1000;   // 取得からの経過(Dead タイマーを画面側で減らす)
+    const Y = 1.6, small = W < 640;   // スマホ幅では文字を減らす(FULL の隣接の中点プレート・LSDB 行を省く)
+    const dev = {}; d.devices.forEach(x => { dev[x.id] = x; });
+    // 1) エリア: そのエリアに属するルータの重心に床の円。ABR は両方の円に入る
+    const areas = {};
+    d.devices.forEach(x => x.areas.forEach(a => { (areas[a] = areas[a] || []).push(x.id); }));
+    Object.entries(areas).sort().forEach(([a, ids], k) => {
+      const P = ids.map(i => linkPos[i]).filter(Boolean);
+      if (!P.length) return;
+      const cx = P.reduce((s, p) => s + p[0], 0) / P.length, cz = P.reduce((s, p) => s + p[2], 0) / P.length;
+      const R = Math.max(3.2, ...P.map(p => Math.hypot(p[0] - cx, p[2] - cz))) + 2.6 + k * 0.5;
+      floorRing(cx, cz, R, areaCol(a), '14', k ? [8, 6] : null);
+      const lp = proj(cx, 0.05, cz + R + 0.6);
+      if (lp) { ctx.fillStyle = areaCol(a); ctx.font = '800 14px monospace'; ctx.textAlign = 'center'; ctx.fillText(areaName(a), lp.x, lp.y); ctx.textAlign = 'start'; }
+    });
+    // 2) 隣接(リンク)
+    const tree = d.tree || { edges: [], root: [], unreachable: [] };
+    const onTree = {}; tree.edges.forEach(e => { onTree[e.from + '|' + e.to] = e; });
+    for (const a of d.adjacencies) {
+      const A = linkPos[a.a], B = linkPos[a.b];
+      if (!A || !B) continue;
+      const pa = proj(A[0], Y, A[2]), pb = proj(B[0], Y, B[2]);
+      if (!pa || !pb) continue;
+      const col = OSPF_COL[a.state], acol = areaCol(a.area);
+      const fwd = onTree[a.a + '|' + a.b], back = onTree[a.b + '|' + a.a];
+      ctx.save();
+      if (a.state !== 'full') { ctx.setLineDash(a.state === 'down' ? [10, 8] : [4, 6]); ctx.globalAlpha = 0.5 + 0.5 * Math.abs(Math.sin(t * 0.004)); }
+      // 下地はエリアの色、上に隣接状態の色
+      ctx.strokeStyle = acol; ctx.lineWidth = 9; ctx.globalAlpha *= 0.35; ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+      ctx.globalAlpha = a.state === 'full' ? 0.9 : ctx.globalAlpha / 0.35;
+      ctx.strokeStyle = fwd || back ? TREE_COL : col; ctx.lineWidth = fwd || back ? 4.5 : 2.5; ctx.shadowColor = ctx.strokeStyle; ctx.shadowBlur = 14;
+      ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+      ctx.restore();
+      if (fwd) treeArrows(A, B, Y, t);
+      if (back) treeArrows(B, A, Y, t);
+      // 両端: それぞれの装置から見た隣接(show ip ospf neighbor の State と Dead Time)
+      for (const [P, Q, st, role, dead] of [[A, B, a.state_a, a.role_b, a.dead_a], [B, A, a.state_b, a.role_a, a.dead_b]]) {
+        const u = 0.27, ix = P[0] + (Q[0] - P[0]) * u, iz = P[2] + (Q[2] - P[2]) * u;
+        const dv = dead == null ? null : Math.max(0, dead - el);
+        adjBadge(ix, Y + 0.9, iz, st, role, st === 'Down' ? null : dv, a.dead_interval, st === 'Full' ? OSPF_COL.full : st === 'Down' ? OSPF_COL.down : OSPF_COL.partial, t);
+      }
+      // 中点: 隣接の状態とエリア
+      const mx = (A[0] + B[0]) / 2, mz = (A[2] + B[2]) / 2;
+      const title = a.state === 'full' ? 'ADJ FULL' : a.state === 'down' ? 'ADJ DOWN' : 'ADJ ' + (ST_SHORT[a.state_a] || a.state_a) + '/' + (ST_SHORT[a.state_b] || a.state_b);
+      if (!small || a.state !== 'full') plate3d(mx, Y + 2.0, mz, a.state === 'full' ? acol : col, title, areaName(a.area), a.state !== 'full', t,
+        a.why.length ? a.why.join(' / ') : `${shortIf(a.iface_a || '?')} ⇄ ${shortIf(a.iface_b || '?')}`);
+      if (a.state === 'down') sparksAt(mx, Y + 0.3, mz, t, '#ff3b4e');
+    }
+    // 3) ルータ: 六角柱 + Router-ID・ABR・宛先までのコスト
+    const costOf = {}; tree.edges.forEach(e => { costOf[e.from] = e; });
+    const now = performance.now();
+    for (let i = spfRipples.length - 1; i >= 0; i--) if (now - spfRipples[i].born > 2200) spfRipples.splice(i, 1);
+    Object.entries(linkPos).map(([id, P]) => ({ id, P, c: proj(...P) })).filter(x => x.c && dev[x.id]).sort((a, b) => b.c.d - a.c.d).forEach(({ id, P }) => {
+      const x = dev[id], isRoot = tree.root.includes(id), unreach = tree.unreachable.includes(id);
+      const col = isRoot ? TREE_COL : unreach ? '#ff3b4e' : areaCol(x.areas[0]);
+      // SPF 再計算の波紋
+      spfRipples.filter(r => r.id === id).forEach(r => {
+        const f = (now - r.born) / 2200;
+        floorRing(P[0], P[2], 0.9 + f * 4.5, TREE_COL, Math.round((1 - f) * 60).toString(16).padStart(2, '0'));
+        const sp = proj(P[0], Y + 0.6 + f * 2, P[2]);
+        if (sp) { ctx.globalAlpha = 1 - f; ctx.fillStyle = TREE_COL; ctx.font = '800 12px monospace'; ctx.textAlign = 'center'; ctx.fillText('SPF', sp.x, sp.y); ctx.textAlign = 'start'; ctx.globalAlpha = 1; }
+      });
+      const ring = (y, r) => Array.from({ length: 6 }, (_, k) => { const a = Math.PI / 6 + k * Math.PI / 3; return proj(P[0] + Math.cos(a) * r, y, P[2] + Math.sin(a) * r); });
+      const bot = ring(0, 0.8), top = ring(Y + 0.4, 0.8);
+      if (bot.some(v => !v) || top.some(v => !v)) return;
+      ctx.fillStyle = 'rgba(40,150,255,0.18)'; ctx.strokeStyle = col; ctx.lineWidth = 1.2;
+      for (let k = 0; k < 6; k++) { poly([bot[k], bot[(k + 1) % 6], top[(k + 1) % 6], top[k]]); ctx.fill(); ctx.stroke(); }
+      poly(top); ctx.fillStyle = col + '55'; ctx.fill(); ctx.stroke();
+      // ABR: 2つ目のエリアの色の帯
+      if (x.abr) {
+        x.areas.slice(1).forEach((a, k) => { const rg = ring(Y * (0.35 + k * 0.2), 0.86); poly(rg); ctx.strokeStyle = areaCol(a); ctx.lineWidth = 3; ctx.stroke(); });
+      }
+      if (isRoot) {   // 宛先を直結で持つルータ: 光の柱
+        const b0 = proj(P[0], Y + 0.4, P[2]), b1 = proj(P[0], Y + 6, P[2]);
+        if (b0 && b1) { const g = ctx.createLinearGradient(b0.x, b0.y, b1.x, b1.y); g.addColorStop(0, TREE_COL + 'cc'); g.addColorStop(1, TREE_COL + '00');
+          ctx.fillStyle = g; ctx.fillRect(b0.x - 5, b1.y, 10, b0.y - b1.y); }
+        plate3d(P[0], Y + 5.2, P[2], TREE_COL, 'DESTINATION', tree.dest, false, t, '直結(C)');
+      } else if (unreach) {
+        plate3d(P[0], Y + 4.2, P[2], '#ff3b4e', 'NO ROUTE', tree.dest, true, t, 'OSPF 経路なし');
+      } else if (costOf[id]) {
+        const e = costOf[id];
+        plate3d(P[0], Y + 4.2, P[2], TREE_COL, `${e.type} cost ${e.cost}`, '→ ' + hostName(e.to), false, t, `宛先 ${tree.dest}`);
+      }
+      const lp = proj(P[0], Y + 1.2, P[2]);
+      if (lp) {
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#fff'; ctx.font = '600 14px monospace'; ctx.fillText(x.hostname, lp.x, lp.y);
+        ctx.fillStyle = '#7fb2d0'; ctx.font = '11px monospace'; ctx.fillText('RID ' + x.router_id, lp.x, lp.y + 14);
+        ctx.fillStyle = '#9fc6dd'; ctx.font = '10px monospace';
+        if (!small) ctx.fillText(`LSDB ${x.lsdb} ・ 経路 ${x.routes} ・ SPF ${x.spf_runs}回`, lp.x, lp.y + 27);
+        if (x.abr) {
+          const bx = lp.x, by = lp.y - 24;
+          hexPath(bx, by, 12); ctx.fillStyle = '#c58bff'; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+          ctx.fillStyle = '#10061a'; ctx.font = '800 9px monospace'; ctx.textBaseline = 'middle'; ctx.fillText('ABR', bx, by); ctx.textBaseline = 'alphabetic';
+        }
+        ctx.textAlign = 'start';
+      }
+    });
+  }
+  window.__cvOspf = () => ospfData;
   function setMode(m) {
     mode = m;
     document.getElementById('mNet').classList.toggle('on', m === 'net');
     document.getElementById('mLink').classList.toggle('on', m === 'link');
-    document.body.classList.toggle('links', m === 'link');
+    document.getElementById('mOspf').classList.toggle('on', m === 'ospf');
+    document.body.classList.toggle('links', m !== 'net');
+    document.body.classList.toggle('ospf', m === 'ospf');
     particles = [];
     if (m === 'link') { layoutKey = ''; cam.tdist = 36; cam.pitch = 0.8; document.getElementById('cidr').textContent = 'ROUTER LINKS'; pollLinks(); }
+    else if (m === 'ospf') { layoutKey = ''; cam.tdist = 36; cam.pitch = 0.8; ospfPrev = null; document.getElementById('cidr').textContent = 'OSPF'; pollOspf(); }
     else update();
-    try { history.replaceState(null, '', m === 'link' ? '?view=links' : location.pathname); } catch (e) { /* 無くても動く */ }
+    try { history.replaceState(null, '', m === 'link' ? '?view=links' : m === 'ospf' ? '?view=ospf' : location.pathname); } catch (e) { /* 無くても動く */ }
   }
   document.getElementById('mNet').onclick = () => setMode('net');
   document.getElementById('mLink').onclick = () => setMode('link');
+  document.getElementById('mOspf').onclick = () => setMode('ospf');
   document.getElementById('mList').onclick = (e) => { document.body.classList.toggle('showlist'); e.target.classList.toggle('on'); };
 
   // ── メインループ ─────────────────────────────
@@ -1343,12 +1583,13 @@
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     const g = ctx.createRadialGradient(W / 2, H * 0.55, 10, W / 2, H * 0.55, Math.max(W, H) * 0.75);
     // アラートがある階層では背景ごと赤く染まる
-    g.addColorStop(0, mode !== 'link' && alertLevel ? '#2a0608' : '#071a33'); g.addColorStop(1, '#020306');
+    g.addColorStop(0, mode === 'net' && alertLevel ? '#2a0608' : '#071a33'); g.addColorStop(1, '#020306');
     ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
     drawFloor();
     const nowSec = Date.now() / 1000;
     drawGroundRing(t);
     if (mode === 'link') drawLinks(t);
+    else if (mode === 'ospf') { drawOspf(t); drawParticles(t); }
     else { if (hostView) { alertLevel = 0; drawHost(t); } else { drawNetwork(t, nowSec); drawNetFlows(t); } drawParticles(t); }
     drawPopups(t);
     drawBoard(t);
@@ -1371,9 +1612,10 @@
   }
   function resetView() {
     lastInput = performance.now();
-    cam.yaw = -0.55; cam.pitch = mode === 'link' ? 0.8 : 0.72; cam.px = 0; cam.pz = 0;
-    cam.tdist = mode === 'link' ? 36 : hostView ? 26 : viewDist();
+    cam.yaw = -0.55; cam.pitch = mode !== 'net' ? 0.8 : 0.72; cam.px = 0; cam.pz = 0;
+    cam.tdist = mode !== 'net' ? 36 : hostView ? 26 : viewDist();
     if (mode === 'link' && linkData) { layoutKey = ''; layoutRouters(linkData.links); }
+    if (mode === 'ospf' && ospfData) { layoutKey = ''; layoutRouters(ospfData.adjacencies); }
   }
   window.__cvCam = () => ({ ...cam, autoSpin });
   cv.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -1453,7 +1695,7 @@
   }
   const tip = document.getElementById('tip');
   function hover(x, y) {
-    if (mode === 'link') return;
+    if (mode !== 'net') return;
     const p = hostView ? null : pick(x, y);
     if (!p) { tip.style.display = 'none'; return; }
     const o = prefix.concat([p.n]);
@@ -1466,7 +1708,7 @@
     tip.style.left = Math.min(x + 14, W - tip.offsetWidth - 4) + 'px'; tip.style.top = (y + 14) + 'px';
   }
   function click(x, y) {
-    if (mode === 'link') return;
+    if (mode !== 'net') return;
     if (hostView) return;
     const p = pick(x, y);
     if (!p) return;
@@ -1485,7 +1727,7 @@
   function viewDist() { return prefix.length === 3 ? 40 : 33; }
   function dive() { particles = []; cam.dist = 11; cam.tdist = viewDist(); update(); }
   function up() {
-    if (mode === 'link') return;
+    if (mode !== 'net') return;
     if (hostView) hostView = null;
     else if (prefix.length) prefix = prefix.slice(0, -1);
     else return;
@@ -1495,7 +1737,7 @@
   function goTo(len) { hostView = null; prefix = prefix.slice(0, len); particles = []; cam.dist = 50; cam.tdist = viewDist(); update(); }
 
   function update() {
-    if (mode === 'link') return;
+    if (mode !== 'net') return;
     tip.style.display = 'none';
     if (!hostView) cam.tdist = viewDist();
     document.getElementById('cidr').textContent = levelCidr();
@@ -1561,7 +1803,7 @@
       document.getElementById('sLinks').textContent = links.length;
       if (fresh.length || (d.alerts || []).length || !primed) { renderAlerts(); if (hostView) renderCard(); }
       if (primed && (d.alerts || []).length) pollHealth();   // 新しいアラートはボードにもすぐ反映
-      if (!primed) { primed = true; if (mode !== 'link') autoFocus(); }
+      if (!primed) { primed = true; if (mode === 'net') autoFocus(); }
     } catch (e) { /* 次の周期で再試行 */ }
   }
   // 起動時、前回のブロックか、装置が1つのブロックにまとまっていればそこまで降りる
@@ -1591,7 +1833,7 @@
     return k ? { x: k.poly.reduce((a, c) => a + c.x, 0) / 4, y: k.poly.reduce((a, c) => a + c.y, 0) / 4 } : null;
   };
 
-  pollHosts().then(pollFlows).then(() => { if (new URLSearchParams(location.search).get('view') === 'links') setMode('link'); });
+  pollHosts().then(pollFlows).then(() => { if (new URLSearchParams(location.search).get('view') === 'links') setMode('link'); if (new URLSearchParams(location.search).get('view') === 'ospf') setMode('ospf'); });
   setInterval(pollFlows, 2000);
   setInterval(pollHosts, 5000);
   pollHealth(); setInterval(pollHealth, 10000);
@@ -1749,6 +1991,10 @@
   fetch('/api/demo/status', { headers: token ? { 'X-Session-Token': token } : {} })
     .then(r => { if (!r.ok) document.getElementById('mDemo').style.display = 'none'; })
     .catch(() => { document.getElementById('mDemo').style.display = 'none'; });
+  // OSPF の状態を返さないサーバー(スタンドアロン版)では OSPF ボタンも出さない
+  fetch('/api/traffic/ospf', { headers: token ? { 'X-Session-Token': token } : {} })
+    .then(r => { if (r.status === 404) document.getElementById('mOspf').style.display = 'none'; })
+    .catch(() => { /* 一時的な不達では隠さない */ });
 
   update();
   requestAnimationFrame(frame);

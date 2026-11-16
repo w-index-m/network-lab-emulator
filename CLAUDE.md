@@ -2835,3 +2835,9 @@ Zabbix 7.0(docker、host network)で実施、記録は `docs/cyber-view-standalo
 独自 CA で中継するため docker build 内の pip は `extra-ca/*.crt` に `/root/.ccr/ca-bundle.crt` を置いて通す
 (証明書は .gitignore、コミットしない)。
 
+追加(v12): `/cyber-view` に **OSPF** モード(`?view=ospf`)。`GET /api/traffic/ospf?dest=`(`engine/ospf_view.snapshot`)が
+OspfEngine の隣接(両端の state・Dead 残り=dead_interval−最終Hello経過・role)、エリア/ABR(`area_networks`)、
+宛先サブネット(OSPF に載った IF、LAN 先)、最短経路ツリー(各ルータの OSPF 経路の next_hop Router-ID→装置)を返す。
+画面: 床のエリア円、隣接バッジ(Dead の円弧カウントダウン)、金色の矢印でツリー、DESTINATION/NO ROUTE/cost プレート、
+SPF 波紋(`_recalc_routes` で `spf_runs`/`last_spf` を記録)、差分ポップアップ。スタンドアロン版は 404 → ボタンを隠す。
+テストは `tests/test_ospf_view.py`。DR/BDR がルータ単位・DR 側だけコストが小さく出る点はエンジンの既存挙動(未修正)。

@@ -1916,6 +1916,9 @@ class OspfEngine:
         filtered_routes = filter_engine.filter_routes(
             device_id, 'ospf', 'in', list(best.values()))
         n['routes'] = filtered_routes
+        # /cyber-view の OSPF 表示用: SPF を何回・いつ計算したか
+        n['spf_runs'] = n.get('spf_runs', 0) + 1
+        n['last_spf'] = time.time()
         self._inject_external_routes(device_id)
         _spawn(vnet.send_to(device_id, {
             'type': 'ospf_log',
