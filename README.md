@@ -179,6 +179,32 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | スタンドアロン版 + Prometheus / Loki<br>![](docs/images/standalone-prom-loki-fault.png) | スタンドアロン版 + Zabbix<br>![](docs/images/standalone-zabbix-fault.png) |
 | スマホ / phone<br>![](docs/images/cyber-view-ospf-phone.png) | 装置ごとの表示 / host view<br>![](docs/images/cyber-view-host.png) |
 
+### 残タスク / Remaining work
+
+ニルヴァーナ / Nirvana
+
+| | 日本語 | English |
+|---|---|---|
+| ☐ | 自動遮断は無い(警報を出すだけ。FW や ACL へは反映しない) | No automatic blocking: alerts are shown only, nothing is pushed to firewalls or ACLs |
+| ☐ | OSPF ビューの DR/BDR がルータ単位で、DR 側だけコストが小さく出る(エンジン側の既存の挙動) | OSPF view: DR/BDR is per router and the DR side shows a smaller cost (existing engine behaviour) |
+| ☐ | スタンドアロン版には ping の粒・ポートスキャン検知・DEMO が無い(ラボ専用) | The standalone edition lacks ping particles, port-scan detection and DEMO (lab only) |
+| ☐ | BOARD に無いもの: 利用者・権限の管理、プラグイン、PDF レポート、Slack/Teams/メールの専用通知(webhook で代用) | Not in BOARD: user and permission management, plugins, PDF reports, native Slack/Teams/mail (use webhooks) |
+| ☐ | 内部データソースの PromQL で `or` / `and` / `offset` / `histogram_quantile` が未対応(ヴァルハラ=Prometheus 経由なら使える) | Internal data source PromQL lacks `or` / `and` / `offset` / `histogram_quantile` (available via VALHALLA = Prometheus) |
+| ☐ | CPU の「情」「注」のしきい値(80% / +20)は仮の値。実機で調整が必要 | CPU info/notice thresholds (80% / +20) are provisional and need tuning on real devices |
+| ☐ | README の動画は GIF。再生プレーヤーにするには github.com の編集画面で mp4 をドラッグ&ドロップする | README videos are GIFs; for an inline player, drag and drop the mp4 in the github.com editor |
+| ☐ | STP のテストが GitHub の CI でだけ時々失敗する(調査用の出力を仕込み済み) | An STP test fails intermittently only on GitHub CI (diagnostics are in place) |
+
+エミュレータ全体 / Emulator
+
+| | 日本語 | English |
+|---|---|---|
+| ☐ | Si-R の `show spanning-tree` の表示のずれ(動作は正しい) | Si-R `show spanning-tree` display is slightly off (behaviour is correct) |
+| ☐ | SR-S に Si-R 形式の `lan 0 ip address` を打つとエラーなのに running-config に残る | On SR-S, Si-R-style `lan 0 ip address` errors yet remains in running-config |
+| ☐ | 直結サブネット内の誰も持たない IP への ping が成功する(仕様にするか判断待ち) | Ping to an unowned IP in a connected subnet succeeds (awaiting a decision) |
+| ☐ | Si-R の SCP サーバー機能(実機のコマンド確認待ち) | Si-R SCP server (waiting to confirm the real command syntax) |
+
+作業の記録は [docs/progress-log.md](docs/progress-log.md) / Progress log: [docs/progress-log.md](docs/progress-log.md)
+
 ### 詳しい資料 / Documents
 
 | 内容 / Topic | 資料 / Document |
