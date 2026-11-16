@@ -170,6 +170,11 @@
   const SESSION_KEY = 'netlabToken_v1';      // index.html / dashboard.html と同じキー
   let token = null;
   try { token = localStorage.getItem(SESSION_KEY); } catch (e) { token = null; }
+  // スタンドアロン版: URL の ?token=... でも受け取る(以後はブラウザに保存)
+  try {
+    const qt = new URLSearchParams(location.search).get('token');
+    if (qt) { token = qt; try { localStorage.setItem(SESSION_KEY, qt); } catch (e) { /* 保存できなくても使う */ } }
+  } catch (e) { /* 古いブラウザ */ }
   const api = (path) => fetch(path, { headers: token ? { 'X-Session-Token': token } : {} })
     .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
 
@@ -560,7 +565,9 @@
     ctx.fillText(`SYSTEM STATUS  ・ 直近${Math.round(health.window / 60)}分`, x0 + 10, y0 + 20);
     const srcs = health.sources || {};
     ctx.fillStyle = '#7fb2d0'; ctx.font = '10px monospace';
-    ctx.fillText(`METRICS: ${srcs.metrics === 'prometheus' ? 'PROMETHEUS' : 'IF COUNTER'}  LOGS: ${srcs.logs === 'loki' ? 'LOKI' : 'INTERNAL'}`, x0 + 10, y0 + hgt - 6);
+    // ラボ版は internal(エミュレータの IF カウンタ/内部ログ)、スタンドアロン版は prometheus/zabbix/loki 等
+    const srcName = (v, internal) => !v || v === 'internal' ? internal : String(v).toUpperCase();
+    ctx.fillText(`METRICS: ${srcName(srcs.metrics, 'IF COUNTER')}  LOGS: ${srcName(srcs.logs, 'INTERNAL')}`, x0 + 10, y0 + hgt - 6);
     ctx.fillStyle = H_COL[health.overall]; ctx.font = '700 13px sans-serif';
     ctx.fillText('総合 ' + H_JA[health.overall], x0 + w - 74, y0 + 20);
     health.categories.forEach((c, i) => {
@@ -935,8 +942,9 @@
       pollHealth();
       document.getElementById('lLast').textContent = new Date(d.now * 1000).toTimeString().slice(0, 8);
       const src = document.getElementById('lSrc');
-      src.textContent = d.source === 'prometheus' ? 'SOURCE: PROMETHEUS' : 'SOURCE: IF COUNTER' + (d.prometheus_error ? ' (Prometheus 不達)' : '');
-      src.className = 'src' + (d.source === 'prometheus' ? ' prom' : '');
+      src.textContent = (!d.source || d.source === 'internal' ? 'SOURCE: IF COUNTER' : 'SOURCE: ' + String(d.source).toUpperCase())
+        + (d.prometheus_error ? ' (Prometheus 不達)' : '') + (d.zabbix_error ? ' (Zabbix 不達)' : '');
+      src.className = 'src' + (d.source && d.source !== 'internal' ? ' prom' : '');
       src.title = d.prometheus_error || (d.prometheus_url || 'PROMETHEUS_URL 未設定: エミュレータのIFカウンタ(SNMPのifHCOctetsと同じ値)');
     } catch (e) { /* 次の周期で再試行 */ }
     nextPoll = Date.now() + w * 1000;
@@ -1737,6 +1745,10 @@
   document.getElementById('mDemo').onclick = toggleDemo;
   document.getElementById('demoMute').onclick = () => (musicOn ? stopMusic() : startMusic());
   window.__cvDemo = () => ({ demoOn, musicOn, ctx: AC ? AC.state : null, beats: beatNo });
+  // デモの無いサーバー(スタンドアロン版など)では DEMO ボタンを出さない
+  fetch('/api/demo/status', { headers: token ? { 'X-Session-Token': token } : {} })
+    .then(r => { if (!r.ok) document.getElementById('mDemo').style.display = 'none'; })
+    .catch(() => { document.getElementById('mDemo').style.display = 'none'; });
 
   update();
   requestAnimationFrame(frame);

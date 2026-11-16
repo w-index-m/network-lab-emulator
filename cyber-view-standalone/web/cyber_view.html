@@ -1,0 +1,1758 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cyber View</title>
+<style>
+  :root {
+    --bg: #02060f; --ink: #bfe9ff; --dim: #4f7896; --cyan: #33d6ff; --red: #ff3b4e;
+    --orange: #ffab2e; --panel: rgba(6, 20, 40, .72); --line: rgba(51, 214, 255, .35);
+  }
+  /* 3Dビューは常に暗い背景で描くため、ライトモードでも同じ配色を使う */
+  :root[data-theme="light"], :root[data-theme="dark"] { --bg: #02060f; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg: #02060f; } }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); overflow: hidden;
+    font-family: "SFMono-Regular", Consolas, "Menlo", "Noto Sans Mono CJK JP", monospace; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  canvas.drag { cursor: grabbing; }
+  #demoCap { display: none; left: 50%; transform: translateX(-50%); top: 58px; padding: 6px 14px; border: 1px solid rgba(255,171,46,0.6);
+    background: rgba(20,10,0,0.7); color: #ffd9a0; font: 600 14px sans-serif; border-radius: 4px; z-index: 6; white-space: nowrap; }
+  #demoCap b { color: #ffab2e; letter-spacing: 0.15em; margin-right: 8px; }
+  #demoCap button { margin-left: 10px; background: none; border: 1px solid rgba(255,171,46,0.6); color: #ffab2e; cursor: pointer; border-radius: 3px; }
+  body.demo #demoCap { display: block; }
+  #mDemo.on { color: #ffab2e; }
+  #zoom { position: fixed; right: 16px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 5; }
+  #zoom button { width: 38px; height: 38px; border: 1px solid rgba(51,214,255,0.45); background: rgba(4,14,28,0.72); color: #8fe9ff;
+    font: 700 18px/1 sans-serif; cursor: pointer; border-radius: 4px; }
+  #zoom button:hover { background: rgba(51,214,255,0.18); }
+  #zoom button.on { color: #3dff9a; border-color: rgba(61,255,154,0.55); }
+  body.showlist:not(.links) #zoom { right: calc(min(300px, 44vw) + 28px); }
+  body.showlist.links #zoom { right: calc(min(380px, 46vw) + 28px); }
+  .hud { position: fixed; pointer-events: none; z-index: 2; }
+  .hud * { pointer-events: auto; }
+  #status { top: 12px; left: 16px; font-size: 13px; line-height: 1.55; text-shadow: 0 0 6px #000; }
+  #status b { color: #fff; font-weight: 600; }
+  #status .brand { font-size: 15px; letter-spacing: .32em; color: var(--cyan); }
+  #status a { color: var(--dim); text-decoration: none; margin-right: 10px; }
+  #status a:hover { color: var(--cyan); }
+  #cidr { top: 6px; right: 18px; text-align: right; font-size: clamp(26px, 5.4vw, 64px); font-weight: 700;
+    color: transparent; -webkit-text-stroke: 1.4px #e8f7ff; letter-spacing: .02em; white-space: nowrap; }
+  #crumbs { top: clamp(44px, 7vw, 82px); right: 18px; font-size: 12px; color: var(--dim); text-align: right; }
+  #crumbs span { cursor: pointer; color: var(--cyan); }
+  #crumbs span:hover { text-decoration: underline; }
+  #crumbs button { margin-left: 8px; background: transparent; color: var(--ink); border: 1px solid var(--line);
+    font: inherit; padding: 2px 8px; cursor: pointer; }
+  #filter { left: 16px; bottom: 14px; font-size: clamp(18px, 3.2vw, 30px); font-weight: 700; display: flex;
+    align-items: center; gap: 10px; }
+  #filter input { width: 7.5em; background: transparent; border: 0; border-bottom: 1px solid var(--line);
+    color: #fff; font: inherit; padding: 0 2px; }
+  #filter input::placeholder { color: #e8f7ff; opacity: .95; }
+  #filter .arrow { color: var(--cyan); }
+  #legend { left: 16px; bottom: clamp(52px, 7vw, 66px); font-size: 11px; color: var(--dim); }
+  #legend i { display: inline-block; width: 10px; height: 10px; margin: 0 4px 0 10px; vertical-align: -1px; }
+  #alerts { top: 120px; right: 16px; width: min(300px, 44vw); font-size: 12px; }
+  #alerts .a { background: var(--panel); border-left: 3px solid var(--red); padding: 5px 8px; margin-bottom: 5px;
+    cursor: pointer; }
+  #alerts .a.medium { border-color: var(--orange); }
+  #alerts .a.low { border-color: #ffe14d; }
+  #alerts .a.warning { border-color: #ffab2e; }
+  #alerts .a.warning b { color: #ffab2e; }
+  #alerts .a.info { border-color: #33d6ff; }
+  #alerts .a.info b { color: #33d6ff; }
+  #alerts .a small { color: var(--dim); display: block; }
+  #card { left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(420px, 88vw);
+    background: rgba(4, 14, 30, .86); border: 1px solid var(--cyan); box-shadow: 0 0 24px rgba(51, 214, 255, .35);
+    padding: 12px 14px; font-size: 12px; display: none; }
+  #card h2 { margin: 0 0 4px; font-size: 18px; color: #fff; letter-spacing: .04em; }
+  #card .sub { color: var(--dim); margin-bottom: 8px; }
+  #card table { width: 100%; border-collapse: collapse; }
+  #card td { padding: 2px 4px; border-top: 1px solid rgba(51, 214, 255, .12); white-space: nowrap; }
+  #card td.up { color: #5dffa8; } #card td.down { color: var(--red); }
+  #card .stat { display: flex; justify-content: space-between; margin-top: 8px; color: var(--dim); }
+  #card .stat b { color: #fff; }
+  #session { right: 16px; bottom: 14px; width: min(600px, calc(100vw - 32px)); display: none;
+    background: rgba(4, 14, 30, .8); border: 1px solid var(--line); font-size: 12px; }
+  #session .hd { padding: 4px 10px; background: rgba(51, 214, 255, .14); color: #fff; letter-spacing: .1em; }
+  #session .row { display: grid; grid-template-columns: 70px 1fr 1fr 70px 40px; gap: 6px; padding: 2px 10px; }
+  #session .row .ng { color: var(--red); } #session .row .ok { color: #5dffa8; }
+  #modes { top: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 0; font-size: 12px; }
+  #modes button { background: rgba(4,14,30,.7); color: var(--dim); border: 1px solid var(--line); padding: 5px 14px;
+    font: inherit; letter-spacing: .14em; cursor: pointer; }
+  #modes button.on { color: #02060f; background: var(--cyan); border-color: var(--cyan); font-weight: 700; }
+  #linkbar { top: 46px; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--dim); display: none;
+    white-space: nowrap; }
+  #linkbar select { background: #061428; color: var(--ink); border: 1px solid var(--line); font: inherit; }
+  #linkbar .src { color: #fff; border: 1px solid var(--line); padding: 1px 6px; margin-left: 6px; }
+  #linkbar .src.prom { color: #ffab2e; border-color: #ffab2e; }
+  #linkpanel { top: 120px; right: 16px; width: min(380px, 46vw); max-height: calc(100vh - 150px); overflow: auto;
+    display: none; font-size: 12px; }
+  #linkpanel .l { background: var(--panel); border-left: 4px solid #5dffa8; padding: 6px 8px; margin-bottom: 6px; cursor: pointer; }
+  #linkpanel .l.warn { border-color: #ffab2e; } #linkpanel .l.crit, #linkpanel .l.down { border-color: #ff3b4e; }
+  #linkpanel .l.sel { outline: 1px solid var(--cyan); }
+  #linkpanel .top { display: flex; justify-content: space-between; color: #fff; }
+  #linkpanel .st { font-weight: 700; letter-spacing: .08em; }
+  #linkpanel .st.ok { color: #5dffa8; } #linkpanel .st.warn { color: #ffab2e; } #linkpanel .st.crit, #linkpanel .st.down { color: #ff3b4e; }
+  #linkpanel .bps { display: grid; grid-template-columns: 1fr 1fr; color: var(--ink); margin-top: 3px; }
+  #linkpanel .bar { height: 4px; background: rgba(51,214,255,.15); margin-top: 4px; }
+  #linkpanel .bar i { display: block; height: 100%; background: var(--cyan); }
+  #linkpanel canvas { width: 100%; height: 26px; position: static; display: block; margin-top: 4px; cursor: inherit; }
+  #linkpanel small { color: var(--dim); }
+  body.links #alerts, body.links #filter, body.links #crumbs, body.links #card, body.links #session, body.links #legend { display: none !important; }
+  body.links #linkbar { display: block; }
+  /* 右脇の文字リストは既定で隠し、画面内の立体表示で見せる(LIST ボタンで出せる) */
+  #alerts, #linkpanel { display: none !important; }
+  body.showlist:not(.links) #alerts { display: block !important; }
+  body.showlist.links #linkpanel { display: block !important; }
+  #tip { position: fixed; z-index: 3; pointer-events: none; background: var(--panel); border: 1px solid var(--line);
+    padding: 4px 8px; font-size: 12px; display: none; white-space: nowrap; }
+  #empty { left: 50%; top: 58%; transform: translateX(-50%); color: var(--dim); font-size: 13px; text-align: center;
+    display: none; }
+  @media (max-width: 640px) {
+    #status { font-size: 11px; } #status .links { display: none; }
+    #alerts { top: auto; bottom: 108px; right: 8px; width: 60vw; max-height: 30vh; overflow: hidden; }
+    #alerts .a:nth-child(n+3) { display: none; }
+    #legend { display: none; }
+    #session .row { grid-template-columns: 56px 1fr 1fr 44px; } #session .row .bytes { display: none; }
+    #card { top: 44%; }
+    #modes { top: 126px; }
+    #linkbar { top: 158px; font-size: 10px; white-space: normal; width: calc(100vw - 16px); text-align: center; }
+    #modes button { padding: 5px 8px; letter-spacing: .06em; }
+    #alerts { bottom: 60px; }
+    #linkpanel { top: auto; bottom: 80px; right: 8px; left: 8px; width: auto; max-height: 34vh; }
+    #session { bottom: 64px; }
+    body.host #filter, body.host #alerts { display: none; }
+    #crumbs { top: 74px; }
+    #card td:last-child { display: none; }
+    body.host #session { bottom: 14px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="status" class="hud">
+  <div class="brand">CYBER VIEW</div>
+  <div>AlertDB:[<b id="sAlerts">0</b>] Flows:[<b id="sFlows">0</b>] Hosts:[<b id="sHosts">0</b>] Links:[<b id="sLinks">0</b>]</div>
+  <div id="sTime">--</div>
+  <div class="links"><a href="/traffic-flow">2D フロー表示</a><a href="/dashboard">リソース</a><a href="/">CLI</a></div>
+</div>
+
+<div id="cidr" class="hud">0.0.0.0/0</div>
+<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button></div>
+<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
+<div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
+<div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
+  <option value="10">10秒</option><option value="60" selected>1分</option><option value="300">5分</option></select>
+  ごと(平均区間も同じ) ・ 次回 <b id="lNext">--</b>秒 ・ 最終 <b id="lLast">--</b><span id="lSrc" class="src">--</span></div>
+<div id="linkpanel" class="hud"></div>
+<div id="crumbs" class="hud"></div>
+<div id="alerts" class="hud"></div>
+<div id="card" class="hud"></div>
+<div id="session" class="hud"><div class="hd">SESSION</div><div id="sessRows"></div></div>
+<div id="empty" class="hud">このブロックには装置もトラフィックもありません</div>
+
+<div id="legend" class="hud">
+  <i style="background:#33d6ff"></i>到達 <i style="background:#ff3b4e"></i>到達不可
+  <i style="background:#ffab2e"></i>アラート関連 ・ ドラッグで回転 / 右ドラッグで移動 / ホイール・ピンチで拡大 / ダブルクリックで視点リセット / パネルをクリックで掘り下げ / Escで戻る
+</div>
+<div id="filter" class="hud">
+  <input id="fSrc" placeholder="ANY" aria-label="送信元フィルタ" autocomplete="off">
+  <span class="arrow">-&gt;</span>
+  <input id="fDst" placeholder="ANY" aria-label="宛先フィルタ" autocomplete="off">
+</div>
+<div id="tip"></div>
+
+<script>
+(() => {
+  'use strict';
+  const SESSION_KEY = 'netlabToken_v1';      // index.html / dashboard.html と同じキー
+  let token = null;
+  try { token = localStorage.getItem(SESSION_KEY); } catch (e) { token = null; }
+  // スタンドアロン版: URL の ?token=... でも受け取る(以後はブラウザに保存)
+  try {
+    const qt = new URLSearchParams(location.search).get('token');
+    if (qt) { token = qt; try { localStorage.setItem(SESSION_KEY, qt); } catch (e) { /* 保存できなくても使う */ } }
+  } catch (e) { /* 古いブラウザ */ }
+  const api = (path) => fetch(path, { headers: token ? { 'X-Session-Token': token } : {} })
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = W * DPR; cv.height = H * DPR;
+  }
+  window.addEventListener('resize', resize); resize();
+
+  // ── データ ─────────────────────────────────────
+  const S = 1.15, HALF = 0.5;              // パネル間隔とパネル半幅
+  let hosts = [], hostById = {}, ipOwner = {}, links = [];
+  let events = [];                          // 直近のフロー(最大3000)
+  let alerts = [];                          // 直近のアラート
+  let seq = 0, alertSeq = 0, primed = false, flowTotal = 0;
+  let particles = [];
+
+  const octets = (ip) => ip.split('.').map(Number);
+  const RULE_CODE = { conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR',
+    if_flap: 'IF FLAP', ospf_flap: 'OSPF FLAP', bgp_flap: 'BGP FLAP', eigrp_flap: 'EIGRP FLAP', fhrp_flap: 'FHRP FLAP',
+    stp_tc_flap: 'STP TC', stp_root_flap: 'STP ROOT', mac_flap: 'MAC FLAP', errdisable_flap: 'ERRDIS', route_flap: 'RT FLAP' };
+  const SEV_COL = { high: '#ff3b4e', medium: '#ffab2e', warning: '#ffab2e', low: '#ffe14d' };
+
+  // ── 表示状態: prefix = 選んだオクテット列 (長さ0〜3) / host = ホストビュー ──
+  let prefix = [], hostView = null;          // hostView = {id, ip}
+  const cam = { yaw: -0.55, pitch: 0.72, dist: 33, tdist: 33, px: 0, pz: 0, bob: 0 };
+  let autoSpin = true;                       // 操作していない時にゆっくり回す
+  let lastInput = performance.now();
+
+  function levelCidr() {
+    if (hostView) return hostView.ip + '/32';
+    const o = prefix.concat([0, 0, 0, 0]).slice(0, 4);
+    return o.join('.') + '/' + (prefix.length * 8);
+  }
+  function inBlock(ip) {
+    const o = octets(ip);
+    for (let i = 0; i < prefix.length; i++) if (o[i] !== prefix[i]) return false;
+    return true;
+  }
+  function panelXZ(n) {                      // 0..255 → 床面の座標(0が奥の左)
+    const i = n % 16, j = Math.floor(n / 16);
+    return [(i - 7.5) * S, (7.5 - j) * S];
+  }
+  function hash(s) { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; }
+  function outsidePoint(ip) {                // 今のブロック外の相手は外周の上空から飛んでくる
+    const a = (hash(ip.split('.').slice(0, prefix.length + 1).join('.')) % 360) * Math.PI / 180;
+    return [Math.cos(a) * 15, 6.5, Math.sin(a) * 15];
+  }
+  function posForIp(ip) {
+    if (!ip) return null;
+    if (hostView) return null;
+    if (!inBlock(ip)) return outsidePoint(ip);
+    const [x, z] = panelXZ(octets(ip)[prefix.length]);
+    return [x, prefix.length === 3 ? 0.9 : 0.15, z];
+  }
+  function devIp(dev) { const h = hostById[dev]; return h ? h.interfaces[0].ip : null; }
+
+  // ── 描画の基本: 透視投影 ─────────────────────────
+  function proj(x, y, z) {
+    x -= cam.px; z -= cam.pz;                // パン(視点の中心を床の上でずらす)
+    const pt = cam.pitch + cam.bob;
+    const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw), cp = Math.cos(pt), sp = Math.sin(pt);
+    const x1 = x * cy - z * sy, z1 = x * sy + z * cy;
+    const y2 = y * cp + z1 * sp, z2 = -y * sp + z1 * cp;
+    const d = z2 + cam.dist;
+    if (d < 0.5) return null;
+    const f = Math.min(W, H * 1.25) * 1.05, s = f / d;
+    return { x: W / 2 + x1 * s, y: H * 0.54 - y2 * s, s, d };
+  }
+  function poly(pts) { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.closePath(); }
+  function hexPath(cx, cy, r) {
+    ctx.beginPath();
+    for (let k = 0; k < 6; k++) { const a = Math.PI / 6 + k * Math.PI / 3; const px = cx + r * Math.cos(a), py = cy + r * Math.sin(a); k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+    ctx.closePath();
+  }
+
+  // ── パネル集計(装置数・直近の通信量・アラート) ──
+  function panelStats(now) {
+    const st = {};
+    const get = (n) => st[n] || (st[n] = { hosts: [], bytes: 0, ng: 0, alerts: [] });
+    const L = prefix.length;
+    for (const h of hosts) for (const itf of h.interfaces) {
+      if (inBlock(itf.ip)) get(octets(itf.ip)[L]).hosts.push({ h, itf });
+    }
+    for (const e of events) {
+      if (now - e.t > 30) continue;
+      for (const ip of [e.src_ip, e.dst_ip]) {
+        if (ip && inBlock(ip)) { const p = get(octets(ip)[L]); p.bytes += e.bytes; if (!e.ok) p.ng++; }
+      }
+    }
+    for (const a of alerts) {
+      if (now - a.t > 600) continue;
+      const ip = devIp(a.src) || (a.dst && /^\d+\.\d+\.\d+\.\d+$/.test(a.dst) ? a.dst : devIp(a.dst));
+      if (ip && inBlock(ip)) get(octets(ip)[L]).alerts.push(a);
+    }
+    return st;
+  }
+
+  // ── Network View (/0〜/24) ───────────────────────
+  let pickables = [];
+  function drawNetwork(t, nowSec) {
+    const L = prefix.length;
+    const st = panelStats(nowSec);
+    const maxB = Math.max(1, ...Object.values(st).map(p => p.bytes));
+    const panels = [];
+    for (let n = 0; n < 256; n++) {
+      const [x, z] = panelXZ(n);
+      const c = proj(x, 0, z);
+      if (c) panels.push({ n, x, z, d: c.d });
+    }
+    panels.sort((a, b) => b.d - a.d);
+    pickables = [];
+
+    // サブネットを球で囲む(NIRVANA改 図2): 裏側のタイルと球の枠はパネルより先に描く
+    let subAlerts = [], subFlows = 0;
+    if (L === 3) {
+      for (const k in st) { subAlerts = subAlerts.concat(st[k].alerts); }
+      subFlows = events.filter(e => nowSec - e.t < 30 && ((e.src_ip && inBlock(e.src_ip)) || inBlock(e.dst_ip))).length;
+      alertLevel = subAlerts.length;
+      drawSphere(SUB_R, t, subAlerts.length ? 'rgba(255,60,60,0.16)' : 'rgba(51,214,255,0.13)', 0, 0);
+      drawShell(t, subAlerts, false);
+    } else {
+      alertLevel = Object.values(st).reduce((a, p) => a + p.alerts.length, 0);
+    }
+
+    for (const p of panels) {
+      const info = st[p.n];
+      // 立体感: パネルを厚みのある板にする(装置のいるパネルは厚く)、遠いものは霧で薄く
+      const TH = info && info.hosts.length ? 0.32 : 0.1;
+      const SQ = [[-HALF, HALF], [HALF, HALF], [HALF, -HALF], [-HALF, -HALF]];
+      const corners = SQ.map(([dx, dz]) => proj(p.x + dx, TH, p.z + dz));
+      const base = SQ.map(([dx, dz]) => proj(p.x + dx, 0, p.z + dz));
+      if (corners.some(c => !c) || base.some(c => !c)) continue;
+      ctx.globalAlpha = fog(p.d);
+      const sides = [0, 1, 2, 3].map(k => ({ q: [base[k], base[(k + 1) % 4], corners[(k + 1) % 4], corners[k]],
+        d: (base[k].d + base[(k + 1) % 4].d) / 2 })).sort((a, b) => b.d - a.d);
+      const hot = info && info.alerts.length, occ = info && info.hosts.length;
+      for (const sd of sides) {
+        poly(sd.q);
+        ctx.fillStyle = hot ? 'rgba(110,10,25,0.75)' : occ ? 'rgba(20,80,150,0.8)' : 'rgba(8,30,60,0.55)';
+        ctx.fill();
+        ctx.strokeStyle = hot ? 'rgba(255,60,80,0.35)' : 'rgba(51,214,255,0.12)'; ctx.lineWidth = 0.6; ctx.stroke();
+      }
+      let fill = 'rgba(30,110,220,0.07)', stroke = 'rgba(51,214,255,0.22)';
+      if (info && info.hosts.length) { fill = 'rgba(40,150,255,0.30)'; stroke = 'rgba(120,230,255,0.85)'; }
+      if (info && info.bytes) {
+        const k = Math.min(1, 0.25 + Math.log10(1 + info.bytes) / Math.log10(1 + maxB) * 0.75);
+        fill = `rgba(${Math.round(60 + 160 * k)},${Math.round(190 + 60 * k)},255,${0.25 + 0.45 * k})`;
+      }
+      if (info && info.alerts.length) { stroke = '#ff3b4e'; fill = 'rgba(255,40,70,0.35)'; }
+      poly(corners); ctx.fillStyle = fill; ctx.fill();
+      ctx.lineWidth = 1; ctx.strokeStyle = stroke; ctx.stroke();
+      pickables.push({ n: p.n, poly: corners, info });
+
+      // パネルのラベル(オクテット)を床面に貼る
+      const c0 = corners[0], c1 = corners[1], c3 = corners[3];
+      if (Math.abs(c1.x - c0.x) + Math.abs(c1.y - c0.y) > 16) {
+        ctx.save();
+        ctx.setTransform(DPR * (c1.x - c0.x) / 100, DPR * (c1.y - c0.y) / 100,
+                         DPR * (c3.x - c0.x) / 100, DPR * (c3.y - c0.y) / 100, DPR * c0.x, DPR * c0.y);
+        ctx.fillStyle = info && info.hosts.length ? '#ffffff' : 'rgba(150,200,230,0.55)';
+        ctx.font = '600 30px monospace'; ctx.textBaseline = 'top';
+        ctx.fillText(String(p.n), 8, 6);
+        if (L === 3 && info && info.hosts.length) {
+          ctx.font = '22px monospace'; ctx.fillStyle = '#bfe9ff';
+          ctx.fillText(info.hosts[0].h.hostname.slice(0, 7), 8, 44);
+        } else if (info && info.hosts.length) {
+          ctx.font = '20px monospace'; ctx.fillStyle = '#bfe9ff';
+          ctx.fillText(info.hosts.length + ' host', 8, 58);
+        }
+        ctx.restore();
+      }
+      // /24では装置を柱で立てる(高さ=直近の通信量)
+      if (L === 3 && info && info.hosts.length) {
+        const h = 0.4 + (info.bytes ? 2.2 * Math.log10(1 + info.bytes) / Math.log10(1 + maxB) : 0);
+        const top = [[-0.3, 0.3], [0.3, 0.3], [0.3, -0.3], [-0.3, -0.3]].map(([dx, dz]) => proj(p.x + dx, TH + h, p.z + dz));
+        const bot = [[-0.3, 0.3], [0.3, 0.3], [0.3, -0.3], [-0.3, -0.3]].map(([dx, dz]) => proj(p.x + dx, TH, p.z + dz));
+        if (!top.some(v => !v)) {
+          ctx.strokeStyle = info.alerts.length ? 'rgba(255,80,100,0.9)' : 'rgba(140,235,255,0.85)';
+          ctx.fillStyle = info.alerts.length ? 'rgba(255,60,80,0.18)' : 'rgba(60,200,255,0.16)';
+          for (let k = 0; k < 4; k++) {
+            const q = [bot[k], bot[(k + 1) % 4], top[(k + 1) % 4], top[k]];
+            poly(q); ctx.fill(); ctx.stroke();
+          }
+          poly(top); ctx.fill(); ctx.stroke();
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+    // アラートの花
+    // 隣り合うパネルの花が重ならないよう、高さを3段に振り分ける
+    let fi = 0;
+    for (const p of panels) {
+      const info = st[p.n];
+      if (info && info.alerts.length) drawFlower(p.x, p.z, info.alerts, t, 4.6 + (fi++ % 3) * 2.8);
+    }
+    if (L === 3) { drawShell(t, subAlerts, true); drawSparks(t, subAlerts.length, subFlows); }
+    // SNMP に応答しない装置(Prometheus の up=0)の上に「NO RESPONSE 消失」
+    const lostDevs = ((health && health.categories.find(c => c.key === 'network')) || {}).unreachable || [];
+    for (const u of lostDevs) {
+      const ip = devIp(u.id);
+      if (!ip || !inBlock(ip)) continue;
+      const [x, z] = panelXZ(octets(ip)[L]);
+      plate3d(x, 3.2, z, STATE_COL.lost, 'NO RESPONSE', '消失', true, t, u.hostname);
+    }
+    // 直近30秒に通信のあったブロック/装置の上に、状態と量の立体プレート(上位6件)
+    const busy = Object.entries(st).filter(([, v]) => v.bytes > 0).sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 6);
+    // 隣り合うパネルのプレートが重ならないよう、パネル番号順に左右へ扇状に振り分ける
+    const order = busy.map(([n]) => +n).sort((a, b) => a - b);
+    busy.forEach(([n, v], i) => {
+      const [x, z] = panelXZ(+n);
+      const ok = !v.ng, col = ok ? '#3dff9a' : '#ffab2e';
+      const top = L === 3 ? 0.32 + 0.4 + (v.bytes ? 2.2 * Math.log10(1 + v.bytes) / Math.log10(1 + maxB) : 0) : 0.4;
+      const k = order.indexOf(+n), ox = (k - (order.length - 1) / 2) * 190;
+      plate3d(x, top + 1.6 + (k % 2) * 0.7, z, col, ok ? 'NORMAL' : `NG ×${v.ng}`, fmtShort(v.bytes * 8 / 30), false, t,
+              L === 3 && v.hosts.length ? v.hosts[0].h.hostname : null, ox);
+    });
+    document.getElementById('empty').style.display = Object.keys(st).length ? 'none' : 'block';
+  }
+
+  // ── 図2の雰囲気: 地平線までの床グリッド・球面の六角タイル・球内の火の粉 ──
+  const SUB_R = 13.6;
+  let alertLevel = 0;
+  function drawFloor() {
+    const E = 70, step = 2.3;
+    for (let k = -E; k <= E; k += step) {
+      for (const horiz of [true, false]) {
+        const a = horiz ? proj(-E, -0.02, k) : proj(k, -0.02, -E), b = horiz ? proj(E, -0.02, k) : proj(k, -0.02, E);
+        if (!a || !b) continue;
+        ctx.strokeStyle = `rgba(120,140,160,${Math.max(0.03, Math.min(0.16, 3 / (a.d + b.d) * 2))})`;
+        ctx.lineWidth = 0.7;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+    }
+  }
+  // 球面を覆う六角タイル(フィボナッチ球で配置)。アラート1件ごとに重要度に応じた枚数を赤く灯す
+  const TILES = (() => {
+    const N = 120, out = [], ga = Math.PI * (3 - Math.sqrt(5));
+    for (let i = 0; i < N; i++) {
+      const y = 1 - (i + 0.5) / N * 2, r = Math.sqrt(1 - y * y), a = i * ga;
+      const n = [Math.cos(a) * r, y, Math.sin(a) * r];
+      let u = [-n[2], 0, n[0]]; const ul = Math.hypot(u[0], u[2]) || 1; u = [u[0] / ul, 0, u[2] / ul];
+      const v = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
+      out.push({ n, u, v });
+    }
+    return out;
+  })();
+  function litTiles(list) {
+    const lit = new Map();
+    const per = { high: 7, medium: 4, warning: 3, low: 2 };
+    for (const a of list) {
+      let h = hash(String(a.seq) + a.rule);
+      for (let k = 0; k < (per[a.severity] || 3); k++) {
+        const idx = h % TILES.length;
+        if (!lit.has(idx)) lit.set(idx, a);
+        h = Math.imul(h ^ (h >>> 13), 2654435761) >>> 0;
+      }
+    }
+    return lit;
+  }
+  function drawShell(t, list, front) {
+    const lit = litTiles(list), o = proj(0, 0, 0);
+    if (!o) return;
+    const r = SUB_R * 0.16;
+    TILES.forEach((tl, i) => {
+      const c = [tl.n[0] * SUB_R, tl.n[1] * SUB_R, tl.n[2] * SUB_R];
+      const pc = proj(...c);
+      if (!pc || (pc.d < o.d) !== front) return;
+      const a = lit.get(i);
+      if (!a && !list.length) return;
+      const pts = [];
+      for (let k = 0; k < 6; k++) {
+        const ang = Math.PI / 6 + k * Math.PI / 3, cs = Math.cos(ang) * r, sn = Math.sin(ang) * r;
+        const p = proj(c[0] + tl.u[0] * cs + tl.v[0] * sn, c[1] + tl.u[1] * cs + tl.v[1] * sn, c[2] + tl.u[2] * cs + tl.v[2] * sn);
+        if (!p) return;
+        pts.push(p);
+      }
+      const k = front ? 1 : 0.45;
+      poly(pts);
+      if (a) {
+        const pulse = 0.75 + 0.25 * Math.sin(t * 0.004 + i);
+        ctx.fillStyle = `rgba(200,20,30,${0.22 * k * pulse})`; ctx.fill();
+        ctx.strokeStyle = `rgba(255,70,70,${0.75 * k})`; ctx.lineWidth = 1.4; ctx.stroke();
+        // タイルの面に「警」とルール名を貼る
+        const ex = proj(c[0] + tl.u[0] * r * 0.6, c[1] + tl.u[1] * r * 0.6, c[2] + tl.u[2] * r * 0.6);
+        const ey = proj(c[0] - tl.v[0] * r * 0.6, c[1] - tl.v[1] * r * 0.6, c[2] - tl.v[2] * r * 0.6);
+        if (ex && ey && Math.hypot(ex.x - pc.x, ex.y - pc.y) > 6) {
+          ctx.save();
+          ctx.setTransform(DPR * (ex.x - pc.x) / 50, DPR * (ex.y - pc.y) / 50, DPR * (ey.x - pc.x) / 50, DPR * (ey.y - pc.y) / 50, DPR * pc.x, DPR * pc.y);
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          const wn = a.severity === 'warning';
+          ctx.fillStyle = wn ? `rgba(255,160,40,${0.9 * k})` : `rgba(255,60,60,${0.9 * k})`; ctx.font = '700 46px sans-serif'; ctx.fillText(wn ? '注' : '警', 0, -12);
+          ctx.fillStyle = wn ? `rgba(255,200,140,${0.9 * k})` : `rgba(255,140,140,${0.9 * k})`; ctx.font = '600 17px monospace'; ctx.fillText(RULE_CODE[a.rule] || a.rule, 0, 30);
+          ctx.restore();
+        }
+      } else {
+        ctx.strokeStyle = `rgba(255,60,60,${0.07 * k})`; ctx.lineWidth = 1; ctx.stroke();
+      }
+    });
+  }
+  // 球の中を漂う火の粉。数はアラートと直近の通信量で増える
+  let sparks = [];
+  function drawSparks(t, nAlerts, nFlows) {
+    const want = Math.min(260, 25 + nAlerts * 30 + nFlows * 4);
+    while (sparks.length < want) {
+      const u = Math.random() * 2 - 1, a = Math.random() * Math.PI * 2, rr = Math.cbrt(Math.random()) * SUB_R * 0.92, q = Math.sqrt(1 - u * u);
+      sparks.push({ x: Math.cos(a) * q * rr, y: u * rr, z: Math.sin(a) * q * rr,
+        vx: (Math.random() - 0.5) * 0.01, vy: 0.004 + Math.random() * 0.01, vz: (Math.random() - 0.5) * 0.01, ph: Math.random() * 6 });
+    }
+    if (sparks.length > want) sparks.length = want;
+    const hot = nAlerts > 0;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (const sp of sparks) {
+      sp.x += sp.vx; sp.y += sp.vy; sp.z += sp.vz;
+      if (sp.x * sp.x + sp.y * sp.y + sp.z * sp.z > SUB_R * SUB_R * 0.85) { sp.y = -SUB_R * 0.6; sp.x *= 0.5; sp.z *= 0.5; }
+      const p = proj(sp.x, sp.y, sp.z);
+      if (!p) continue;
+      const rad = Math.max(1.2, Math.min(5, p.s * 0.09)) * (0.7 + 0.3 * Math.sin(t * 0.005 + sp.ph));
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rad * 3);
+      g.addColorStop(0, hot ? 'rgba(255,220,120,0.95)' : 'rgba(170,240,255,0.7)');
+      g.addColorStop(0.35, hot ? 'rgba(255,140,30,0.55)' : 'rgba(51,214,255,0.3)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g; ctx.fillRect(p.x - rad * 3, p.y - rad * 3, rad * 6, rad * 6);
+    }
+    ctx.restore();
+  }
+
+  function fog(d) { return Math.max(0.3, Math.min(1, 1.35 - (d - cam.dist) / (cam.dist * 0.75))); }
+
+  // ── 状態ボード: ネットワーク / トラフィック / セキュリティ / syslog ──
+  let health = null;
+  const H_COL = { ok: '#3dff9a', warn: '#ffab2e', crit: '#ff3b4e' };
+  const H_JA = { ok: '正常', warn: '注意', crit: '異常' };
+  const H_ICON = { network: 'NET', traffic: 'TRF', security: 'SEC', syslog: 'LOG' };
+  async function pollHealth() {
+    try { health = await api('/api/traffic/health?window=300'); } catch (e) { /* 次の周期で再試行 */ }
+  }
+  function hexPrism(cx, cy, r, col, t) {
+    // 押し出した六角柱(上面+手前の側面)で立体に見せる
+    const depth = r * 0.45;
+    const pts = Array.from({ length: 6 }, (_, k) => { const a = k * Math.PI / 3; return [cx + r * Math.cos(a), cy + r * Math.sin(a) * 0.62]; });
+    for (let k = 0; k < 6; k++) {
+      const a = pts[k], b = pts[(k + 1) % 6];
+      if (a[1] + b[1] < 2 * cy) continue;               // 手前側の面だけ
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(b[0], b[1] + depth); ctx.lineTo(a[0], a[1] + depth); ctx.closePath();
+      ctx.fillStyle = col + '55'; ctx.fill(); ctx.strokeStyle = col + 'aa'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
+    ctx.fillStyle = col + '33'; ctx.fill();
+    ctx.save(); ctx.shadowColor = col; ctx.shadowBlur = 12 + 6 * Math.sin(t * 0.004); ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
+  }
+  function fit(text, maxW) {
+    if (ctx.measureText(text).width <= maxW) return text;
+    while (text.length > 1 && ctx.measureText(text + '…').width > maxW) text = text.slice(0, -1);
+    return text + '…';
+  }
+  function drawBoard(t) {
+    if (!health) return;
+    const compact = W < 640;
+    ctx.save();
+    if (compact) {
+      const y0 = 78, w = (W - 24) / 4;
+      health.categories.forEach((c, i) => {
+        const x = 12 + i * w, col = H_COL[c.state];
+        ctx.fillStyle = 'rgba(4,14,30,0.78)'; ctx.fillRect(x + 2, y0, w - 4, 40);
+        ctx.fillStyle = col; ctx.fillRect(x + 2, y0, w - 4, 3);
+        ctx.fillStyle = '#9fc6dd'; ctx.font = '10px monospace'; ctx.fillText(c.label, x + 6, y0 + 16);
+        ctx.fillStyle = col; ctx.font = '700 15px sans-serif'; ctx.fillText(H_JA[c.state], x + 6, y0 + 34);
+      });
+      ctx.restore(); return;
+    }
+    const x0 = 16, y0 = 150, w = 318, rowH = 70;
+    // 奥へ少し傾けたホログラム板
+    ctx.setTransform(DPR, -0.035 * DPR, 0, DPR, 0, 0);
+    const hgt = 48 + rowH * health.categories.length;
+    const g = ctx.createLinearGradient(x0, y0, x0 + w, y0);
+    g.addColorStop(0, 'rgba(6,24,48,0.86)'); g.addColorStop(1, 'rgba(6,24,48,0.35)');
+    ctx.fillStyle = g; ctx.fillRect(x0, y0, w, hgt);
+    ctx.fillStyle = 'rgba(51,214,255,0.10)'; ctx.fillRect(x0 + w, y0 + 6, 6, hgt);            // 板の厚み
+    ctx.fillRect(x0 + 6, y0 + hgt, w, 6);
+    ctx.strokeStyle = H_COL[health.overall]; ctx.lineWidth = 1.2; ctx.strokeRect(x0, y0, w, hgt);
+    for (let yy = y0 + 2; yy < y0 + hgt; yy += 3) { ctx.fillStyle = 'rgba(255,255,255,0.018)'; ctx.fillRect(x0, yy, w, 1); }  // 走査線
+    ctx.fillStyle = '#e8f7ff'; ctx.font = '600 12px monospace';
+    ctx.fillText(`SYSTEM STATUS  ・ 直近${Math.round(health.window / 60)}分`, x0 + 10, y0 + 20);
+    const srcs = health.sources || {};
+    ctx.fillStyle = '#7fb2d0'; ctx.font = '10px monospace';
+    // ラボ版は internal(エミュレータの IF カウンタ/内部ログ)、スタンドアロン版は prometheus/zabbix/loki 等
+    const srcName = (v, internal) => !v || v === 'internal' ? internal : String(v).toUpperCase();
+    ctx.fillText(`METRICS: ${srcName(srcs.metrics, 'IF COUNTER')}  LOGS: ${srcName(srcs.logs, 'INTERNAL')}`, x0 + 10, y0 + hgt - 6);
+    ctx.fillStyle = H_COL[health.overall]; ctx.font = '700 13px sans-serif';
+    ctx.fillText('総合 ' + H_JA[health.overall], x0 + w - 74, y0 + 20);
+    health.categories.forEach((c, i) => {
+      const y = y0 + 34 + i * rowH, col = H_COL[c.state];
+      hexPrism(x0 + 30, y + 22, 17, col, t + i * 300);
+      ctx.fillStyle = '#fff'; ctx.font = '700 10px monospace'; ctx.textAlign = 'center';
+      ctx.fillText(H_ICON[c.key] || '', x0 + 30, y + 26); ctx.textAlign = 'start';
+      ctx.fillStyle = '#bfe9ff'; ctx.font = '12px sans-serif'; ctx.fillText(c.label, x0 + 60, y + 14);
+      ctx.fillStyle = col; ctx.font = '700 22px sans-serif'; ctx.fillText(H_JA[c.state], x0 + 60, y + 38);
+      ctx.fillStyle = '#9fc6dd'; ctx.font = '11px sans-serif';
+      ctx.fillText(fit(c.summary, w - 128), x0 + 118, y + 30);
+      if (c.details && c.details.length && c.state !== 'ok') {
+        ctx.fillStyle = col; ctx.font = '10px sans-serif';
+        const d = c.details[c.details.length - 1].trim();
+        ctx.fillText(fit(d, w - 128), x0 + 118, y + 46);
+      }
+      if (i < health.categories.length - 1) { ctx.fillStyle = 'rgba(51,214,255,0.12)'; ctx.fillRect(x0 + 10, y + rowH - 6, w - 20, 1); }
+    });
+    ctx.restore();
+  }
+  // 床に描く総合状態のリング(シーンの中に「正常/注意/異常」を出す)
+  function drawGroundRing(t) {
+    if (!health) return;
+    const col = H_COL[health.overall], R = 16.5;
+    ctx.save();
+    for (const [rr, w, a] of [[R, 3, 0.85], [R + 0.6, 1, 0.4], [R - 0.6, 1, 0.4]]) {
+      ctx.beginPath(); let f = true;
+      for (let k = 0; k <= 120; k++) {
+        const ang = k / 120 * Math.PI * 2 + (rr === R ? t * 0.0002 : 0);
+        const p = proj(Math.cos(ang) * rr, 0.01, Math.sin(ang) * rr);
+        if (!p) { f = true; continue; }
+        f ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); f = false;
+      }
+      ctx.strokeStyle = col; ctx.globalAlpha = a; ctx.lineWidth = w; ctx.shadowColor = col; ctx.shadowBlur = 14; ctx.stroke();
+    }
+    // 目盛り
+    ctx.globalAlpha = 0.7; ctx.lineWidth = 2;
+    for (let k = 0; k < 48; k++) {
+      const ang = k / 48 * Math.PI * 2 - t * 0.0002;
+      const a = proj(Math.cos(ang) * (R + 0.9), 0.01, Math.sin(ang) * (R + 0.9)), b = proj(Math.cos(ang) * (R + 1.5), 0.01, Math.sin(ang) * (R + 1.5));
+      if (a && b) { ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
+    }
+    // リングの手前に床に貼った文字
+    // 画面の右方向へ文字が流れ、下がカメラ側を向くように床に貼る
+    const sy = Math.sin(cam.yaw), cy = Math.cos(cam.yaw);
+    const nx = [-sy, -cy], tx = [cy, -sy];
+    // 手前側は画面外に出やすいので、奥側のリングの外に(カメラ向きで読める向きに)置く
+    const c = [-nx[0] * (R + 3.4), -nx[1] * (R + 3.4)];
+    const p0 = proj(c[0], 0.02, c[1]), p1 = proj(c[0] + tx[0], 0.02, c[1] + tx[1]), p2 = proj(c[0] + nx[0], 0.02, c[1] + nx[1]);
+    if (p0 && p1 && p2) {
+      ctx.globalAlpha = 0.95; ctx.shadowBlur = 18;
+      ctx.setTransform(DPR * (p1.x - p0.x) / 20, DPR * (p1.y - p0.y) / 20, DPR * (p2.x - p0.x) / 20, DPR * (p2.y - p0.y) / 20, DPR * p0.x, DPR * p0.y);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = col;
+      ctx.font = '800 22px sans-serif';
+      ctx.fillText(`SYSTEM ${H_JA[health.overall]}`, 0, 0);
+    }
+    ctx.restore();
+  }
+
+  function drawSphere(R, t, color, cx, cz) {
+    ctx.strokeStyle = color; ctx.lineWidth = 1;
+    for (let lat = -60; lat <= 60; lat += 30) {
+      const y = R * Math.sin(lat * Math.PI / 180), r = R * Math.cos(lat * Math.PI / 180);
+      ctx.beginPath(); let first = true;
+      for (let a = 0; a <= 360; a += 8) {
+        const p = proj(cx + r * Math.cos(a * Math.PI / 180), y, cz + r * Math.sin(a * Math.PI / 180));
+        if (!p) { first = true; continue; }
+        first ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); first = false;
+      }
+      ctx.stroke();
+    }
+    for (let k = 0; k < 12; k++) {
+      const lon = k * Math.PI / 6 + t * 0.00008;
+      ctx.beginPath(); let first = true;
+      for (let a = -90; a <= 90; a += 8) {
+        const r = R * Math.cos(a * Math.PI / 180), y = R * Math.sin(a * Math.PI / 180);
+        const p = proj(cx + r * Math.cos(lon), y, cz + r * Math.sin(lon));
+        if (!p) { first = true; continue; }
+        first ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); first = false;
+      }
+      ctx.stroke();
+    }
+  }
+
+  // ── アラートの花(図9風): 中央の赤い「警」+ 検知元ごとの白い花びら + 黄色の多重六角 + コイルの柱 ──
+  const SOURCES = {
+    IDS: { label: 'IDS', sub: '侵入検知', col: '#1f6fd1' },
+    FW: { label: 'FW', sub: 'ファイアウォール', col: '#d8402a' },
+    SYSLOG: { label: 'SYSLOG', sub: 'ログ', col: '#3a4450' },
+    NET: { label: 'NET', sub: 'リンク監視', col: '#d98a00' },
+  };
+  const SOURCE_OF = { conn_scan: 'IDS', scan: 'IDS', unreach_burst: 'IDS', flood: 'IDS', large_icmp: 'IDS',
+    fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET', route_flap: 'NET' };
+  function drawIcon(src, x, y, s) {
+    const c = SOURCES[src].col;
+    ctx.save(); ctx.strokeStyle = c; ctx.fillStyle = c; ctx.lineWidth = Math.max(1.2, s * 0.09);
+    if (src === 'IDS') {                     // レーダー
+      for (const k of [1, 0.66, 0.33]) { ctx.beginPath(); ctx.arc(x, y, s * 0.5 * k, Math.PI, Math.PI * 2); ctx.stroke(); }
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + s * 0.35, y - s * 0.36); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x + s * 0.2, y - s * 0.2, s * 0.07, 0, Math.PI * 2); ctx.fill();
+    } else if (src === 'FW') {               // レンガの壁
+      const w = s * 0.9, h = s * 0.55, x0 = x - w / 2, y0 = y - h * 0.8;
+      ctx.lineWidth = Math.max(1, s * 0.06);
+      ctx.strokeRect(x0, y0, w, h);
+      for (let r = 1; r < 3; r++) { ctx.beginPath(); ctx.moveTo(x0, y0 + h * r / 3); ctx.lineTo(x0 + w, y0 + h * r / 3); ctx.stroke(); }
+      for (let r = 0; r < 3; r++) for (let k = 1; k < 3; k++) {
+        const bx = x0 + w * (k / 3 + (r % 2 ? 0.16 : 0)); ctx.beginPath(); ctx.moveTo(bx, y0 + h * r / 3); ctx.lineTo(bx, y0 + h * (r + 1) / 3); ctx.stroke();
+      }
+    } else if (src === 'SYSLOG') {           // ログの書類
+      const w = s * 0.6, h = s * 0.72, x0 = x - w / 2, y0 = y - h * 0.85;
+      ctx.lineWidth = Math.max(1, s * 0.06); ctx.strokeRect(x0, y0, w, h);
+      for (let r = 1; r <= 4; r++) { ctx.beginPath(); ctx.moveTo(x0 + w * 0.15, y0 + h * r / 5); ctx.lineTo(x0 + w * (r % 2 ? 0.85 : 0.6), y0 + h * r / 5); ctx.stroke(); }
+    } else {                                 // 切れたリンク
+      ctx.beginPath(); ctx.arc(x - s * 0.32, y - s * 0.2, s * 0.13, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + s * 0.32, y - s * 0.2, s * 0.13, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(x - s * 0.2, y - s * 0.2); ctx.lineTo(x - s * 0.06, y - s * 0.2);
+      ctx.moveTo(x + s * 0.06, y - s * 0.2); ctx.lineTo(x + s * 0.2, y - s * 0.2); ctx.stroke();
+      ctx.strokeStyle = '#e0202e'; ctx.beginPath(); ctx.moveTo(x - s * 0.09, y - s * 0.36); ctx.lineTo(x + s * 0.09, y - s * 0.04);
+      ctx.moveTo(x + s * 0.09, y - s * 0.36); ctx.lineTo(x - s * 0.09, y - s * 0.04); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function drawFlower(x, z, list, t, height) {
+    const H0 = height || 4.6;
+    // コイル(重ねた輪)の柱でパネルと花を結ぶ
+    for (let k = 0, n = Math.max(6, Math.round(H0 / 0.28)); k <= n; k++) {
+      const y = k / n * H0, rr = 0.42;
+      ctx.beginPath(); let f = true;
+      for (let a = 0; a <= 360; a += 30) {
+        const p = proj(x + rr * Math.cos(a * Math.PI / 180), y, z + rr * Math.sin(a * Math.PI / 180));
+        if (!p) { f = true; continue; }
+        f ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); f = false;
+      }
+      const lit = Math.abs(((t * 0.0015) % 1) - k / n) < 0.08;
+      ctx.strokeStyle = lit ? 'rgba(255,255,255,0.95)' : 'rgba(120,220,255,0.45)'; ctx.lineWidth = lit ? 1.6 : 1; ctx.stroke();
+    }
+    const c = proj(x, H0 + 0.5, z);
+    if (!c) return;
+    const r = Math.max(13, Math.min(46, c.s * 0.75));
+    // 検知元ごとにまとめる
+    const bySrc = {};
+    for (const a of list) { const sname = a.source || SOURCE_OF[a.rule] || 'IDS'; (bySrc[sname] = bySrc[sname] || []).push(a); }
+    const srcs = Object.keys(bySrc).sort((a, b) => bySrc[b].length - bySrc[a].length);
+    // 黄色の多重六角(ゆっくり脈動)
+    ctx.save();
+    for (let k = 0; k < 7; k++) {
+      hexPath(c.x, c.y, r * (2.75 + k * 0.09 + 0.03 * Math.sin(t * 0.003)));
+      ctx.strokeStyle = `rgba(235,215,70,${0.55 - k * 0.07})`; ctx.lineWidth = 1; ctx.stroke();
+    }
+    ctx.restore();
+    // 花びら(6枠。検知元が無い枠は暗い空き枠)
+    for (let i = 0; i < 6; i++) {
+      const ang = -Math.PI / 2 + i * Math.PI / 3;
+      const px = c.x + Math.cos(ang) * r * 1.76, py = c.y + Math.sin(ang) * r * 1.76;
+      const src = srcs[i];
+      hexPath(px, py, r * 0.96);
+      if (!src) { ctx.fillStyle = 'rgba(6,10,16,0.6)'; ctx.fill(); ctx.strokeStyle = 'rgba(120,140,160,0.25)'; ctx.lineWidth = 1; ctx.stroke(); continue; }
+      const items = bySrc[src];
+      const sev = items.some(a => a.severity === 'high') ? 'high' : items.some(a => a.severity === 'medium' || a.severity === 'warning') ? 'medium' : 'low';
+      const g = ctx.createLinearGradient(px, py - r, px, py + r);
+      g.addColorStop(0, '#fbfcfd'); g.addColorStop(1, '#cdd5dd');
+      ctx.fillStyle = g; ctx.fill();
+      ctx.save(); ctx.shadowColor = SEV_COL[sev]; ctx.shadowBlur = 10; ctx.strokeStyle = SEV_COL[sev]; ctx.lineWidth = 2.2; ctx.stroke(); ctx.restore();
+      drawIcon(src, px, py - r * 0.12, r * 0.62);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#1b2430'; ctx.font = `800 ${Math.max(8, r * 0.27)}px sans-serif`;
+      ctx.fillText(SOURCES[src].label, px, py + r * 0.3);
+      if (r > 20) {
+        const rules = [...new Set(items.map(a => RULE_CODE[a.rule] || a.rule))].slice(0, 2).join('/');
+        ctx.fillStyle = '#56606c'; ctx.font = `600 ${Math.max(7, r * 0.18)}px monospace`;
+        ctx.fillText(`${rules} ×${items.length}`, px, py + r * 0.56);
+      }
+    }
+    // 中央の「警」
+    const pulse = 0.85 + 0.15 * Math.sin(t * 0.006);
+    // 警告(フラップ)だけなら橙の「注」、1件でも警報があれば赤の「警」
+    const W = list.length && list.every(a => a.severity === 'warning');
+    const CC = W ? { a: `rgba(200,110,0,${pulse})`, b: 'rgba(70,35,0,0.96)', sh: '#ff9a1a', st: '#ffbe5c', in: 'rgba(255,190,110,0.35)', ch: '注', tx: 'rgba(255,225,180,0.7)', fl: '#ff9a1a', n: '#ffe6c4' }
+                 : { a: `rgba(190,20,35,${pulse})`, b: 'rgba(70,0,8,0.96)', sh: '#ff2a3a', st: '#ff6a72', in: 'rgba(255,120,130,0.35)', ch: '警', tx: 'rgba(255,200,205,0.7)', fl: '#ff2236', n: '#ffd9dc' };
+    hexPath(c.x, c.y, r);
+    const g = ctx.createRadialGradient(c.x, c.y - r * 0.3, r * 0.1, c.x, c.y, r);
+    g.addColorStop(0, CC.a); g.addColorStop(1, CC.b);
+    ctx.fillStyle = g; ctx.fill();
+    ctx.save(); ctx.shadowColor = CC.sh; ctx.shadowBlur = 22 * pulse; ctx.strokeStyle = CC.st; ctx.lineWidth = 2.4; ctx.stroke(); ctx.restore();
+    hexPath(c.x, c.y, r * 0.86); ctx.strokeStyle = CC.in; ctx.lineWidth = 1; ctx.stroke();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `900 ${r * 0.98}px sans-serif`;
+    ctx.lineWidth = Math.max(1, r * 0.05); ctx.strokeStyle = CC.tx; ctx.strokeText(CC.ch, c.x, c.y - r * 0.06);
+    ctx.fillStyle = CC.fl; ctx.fillText(CC.ch, c.x, c.y - r * 0.06);
+    ctx.fillStyle = CC.n; ctx.font = `700 ${Math.max(8, r * 0.24)}px monospace`;
+    ctx.fillText(list.length, c.x, c.y + r * 0.66);
+    ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+  }
+
+  // ── Host View (/32) ─────────────────────────────
+  const SPHERE_R = 7.5;
+  let peerPos = {};
+  function hostPeers(id) {
+    const h = hostById[id];
+    const set = new Map();
+    (h ? h.peers : []).forEach(p => set.set(p, { id: p, label: (hostById[p] || {}).hostname || p, ip: devIp(p) }));
+    for (const e of events) {
+      if (e.src === id) {
+        const k = e.dst || e.dst_ip;
+        if (!set.has(k)) set.set(k, { id: k, label: e.dst ? ((hostById[e.dst] || {}).hostname || e.dst) : 'unknown', ip: e.dst_ip });
+      } else if (e.dst === id && e.src && !set.has(e.src)) {
+        set.set(e.src, { id: e.src, label: (hostById[e.src] || {}).hostname || e.src, ip: e.src_ip });
+      }
+    }
+    return [...set.values()].slice(0, 40);
+  }
+  function drawHost(t) {
+    const id = hostView.id;
+    drawSphere(SPHERE_R, t, 'rgba(51,214,255,0.22)', 0, 0);
+    const peers = hostPeers(id);
+    peerPos = {};
+    const N = Math.max(peers.length, 1), ga = Math.PI * (3 - Math.sqrt(5));
+    const list = peers.map((p, i) => {
+      const y = 1 - (i + 0.5) / N * 1.6, r = Math.sqrt(1 - y * y), a = i * ga + 0.6;
+      const pos = [Math.cos(a) * r * SPHERE_R, y * SPHERE_R * 0.8, Math.sin(a) * r * SPHERE_R];
+      peerPos[p.id] = pos; if (p.ip) peerPos[p.ip] = pos;
+      return { p, pos, c: proj(...pos) };
+    }).filter(v => v.c).sort((a, b) => b.c.d - a.c.d);
+    const o = proj(0, 0, 0);
+    for (const { p, c } of list) {
+      ctx.strokeStyle = 'rgba(51,214,255,0.28)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(o.x, o.y); ctx.lineTo(c.x, c.y); ctx.stroke();
+      const s = Math.max(5, c.s * 0.42);
+      ctx.fillStyle = 'rgba(40,150,255,0.35)'; ctx.strokeStyle = '#8fe8ff';
+      ctx.fillRect(c.x - s, c.y - s * 0.7, s * 2, s * 1.4); ctx.strokeRect(c.x - s, c.y - s * 0.7, s * 2, s * 1.4);
+      ctx.fillStyle = '#fff'; ctx.font = `${Math.max(10, Math.min(13, c.s * 0.4))}px monospace`;
+      ctx.fillText(p.label, c.x + s + 4, c.y - 2);
+      ctx.fillStyle = '#7fb2d0'; ctx.fillText(p.ip || '', c.x + s + 4, c.y + 12);
+    }
+    const mine = alerts.filter(a => (a.src === id || a.dst === id || a.dst === hostView.ip) && Date.now() / 1000 - a.t < 600);
+    if (mine.length) drawFlower(0, -SPHERE_R * 0.95, mine, t, SPHERE_R * 1.05);
+    pickables = [];
+  }
+
+  function renderCard() {
+    const card = document.getElementById('card'), sess = document.getElementById('session');
+    if (!hostView) { card.style.display = sess.style.display = 'none'; return; }
+    const h = hostById[hostView.id];
+    if (!h) { card.style.display = 'none'; return; }
+    const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const fmt = (b) => b > 1e9 ? (b / 1e9).toFixed(1) + 'G' : b > 1e6 ? (b / 1e6).toFixed(1) + 'M' : b > 1e3 ? (b / 1e3).toFixed(1) + 'k' : String(b);
+    const mine = events.filter(e => e.src === h.id || e.dst === h.id || (e.path || []).includes(h.id));
+    const ng = mine.filter(e => !e.ok).length;
+    card.innerHTML = `<h2>${esc(h.hostname)}</h2><div class="sub">${esc(h.type)} ・ ${esc(h.id)}</div>
+      <table>${h.interfaces.map(i => `<tr><td>${esc(i.name)}</td><td>${esc(i.ip)}/${i.prefix}</td>
+        <td class="${i.up ? 'up' : 'down'}">${i.up ? 'UP' : 'DOWN'}</td>
+        <td>in ${fmt(i.in_bytes)} / out ${fmt(i.out_bytes)}</td></tr>`).join('')}</table>
+      <div class="stat"><span>Flows <b>${mine.length}</b></span><span>NG <b>${ng}</b></span><span>Peers <b>${h.peers.length}</b></span></div>`;
+    card.style.display = 'block';
+    const rows = mine.slice(-7).reverse().map(e => {
+      const tm = new Date(e.t * 1000).toTimeString().slice(0, 8);
+      return `<div class="row"><span>${tm}</span><span>${esc(e.src_ip || e.src)}</span><span>${esc(e.dst_ip)}</span>
+        <span class="bytes">${fmt(e.bytes)}B</span><span class="${e.ok ? 'ok' : 'ng'}">${e.ok ? 'OK' : 'NG'}</span></div>`;
+    }).join('') || '<div class="row"><span>-</span><span>このホストの通信はまだありません</span></div>';
+    document.getElementById('sessRows').innerHTML = rows;
+    sess.style.display = 'block';
+  }
+
+  // ── フローの粒(三角形のダーツ) ───────────────────
+  const fSrc = document.getElementById('fSrc'), fDst = document.getElementById('fDst');
+  function match(q, ip, dev) {
+    q = q.trim().toLowerCase();
+    if (!q || q === 'any') return true;
+    return (ip && ip.startsWith(q)) || (dev && ((hostById[dev] || {}).hostname || dev).toLowerCase().includes(q));
+  }
+  function spawn(e, delay) {
+    if (!match(fSrc.value, e.src_ip, e.src) || !match(fDst.value, e.dst_ip, e.dst)) return;
+    const col = e.alerts && e.alerts.length ? '#ffab2e' : e.ok ? '#33d6ff' : '#ff3b4e';
+    const n = Math.min(7, 1 + Math.round(Math.log10(1 + e.bytes) / 1.2));
+    const segs = [];
+    if (hostView) {
+      const id = hostView.id, path = e.path || [];
+      const i = path.indexOf(id);
+      if (e.src === id) segs.push([[0, 0, 0], peerPos[e.dst] || peerPos[e.dst_ip]]);
+      else if (e.dst === id) segs.push([peerPos[e.src], [0, 0, 0]]);
+      else if (i > 0) { segs.push([peerPos[path[i - 1]], [0, 0, 0]]); if (path[i + 1]) segs.push([[0, 0, 0], peerPos[path[i + 1]]]); }
+    } else {
+      const a = posForIp(e.src_ip || devIp(e.src)), b = posForIp(e.dst_ip);
+      if (a && b && !(inBlock(e.src_ip || '') === false && !inBlock(e.dst_ip))) segs.push([a, b]);
+    }
+    segs.forEach((sg, k) => {
+      if (!sg[0] || !sg[1]) return;
+      for (let j = 0; j < n; j++) {
+        particles.push({ a: sg[0], b: sg[1], born: performance.now() + delay + k * 900 + j * 110,
+          dur: 1500 + Math.random() * 300, col, fail: !e.ok, lift: hostView ? 0.8 : 2 + Math.random() * 1.5 });
+      }
+    });
+    if (particles.length > 1500) particles.splice(0, particles.length - 1500);
+  }
+  function drawParticles(t) {
+    const keep = [];
+    for (const p of particles) {
+      const u = (t - p.born) / p.dur;
+      if (u < 0) { keep.push(p); continue; }
+      // 到達不可の通信は途中で消える
+      if (u > (p.fail ? 0.72 : 1)) continue;
+      keep.push(p);
+      const at = (v) => {
+        const x = p.a[0] + (p.b[0] - p.a[0]) * v, z = p.a[2] + (p.b[2] - p.a[2]) * v;
+        const y = p.a[1] + (p.b[1] - p.a[1]) * v + Math.sin(Math.PI * v) * p.lift;
+        return proj(x, y, z);
+      };
+      const c = at(u), c2 = at(Math.min(1, u + 0.02));
+      if (!c || !c2) continue;
+      const ang = Math.atan2(c2.y - c.y, c2.x - c.x), sz = Math.max(3, Math.min(9, c.s * 0.22));
+      ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(ang);
+      ctx.beginPath(); ctx.moveTo(sz * 1.6, 0); ctx.lineTo(-sz, sz * 0.7); ctx.lineTo(-sz, -sz * 0.7); ctx.closePath();
+      ctx.fillStyle = p.col; ctx.shadowColor = p.col; ctx.shadowBlur = 8; ctx.fill();
+      ctx.restore();
+      if (p.fail && u > 0.62) {               // 途切れる地点に×
+        ctx.strokeStyle = '#ff3b4e'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(c.x - 5, c.y - 5); ctx.lineTo(c.x + 5, c.y + 5);
+        ctx.moveTo(c.x + 5, c.y - 5); ctx.lineTo(c.x - 5, c.y + 5); ctx.stroke();
+      }
+    }
+    particles = keep;
+  }
+
+  // ── LINK VIEW: ルータ間リンクのトラフィックと状態 ─────────
+  let mode = 'net', linkData = null, linkPos = {}, selLink = null, nextPoll = 0;
+  const STATE_COL = { ok: '#5dffa8', warn: '#ffab2e', crit: '#ff3b4e', down: '#ff3b4e', lost: '#9aa4b8' };
+  const STATE_JA = { ok: '正常', warn: '注意', crit: '警告', down: '断', lost: '応答なし' };
+  const fmtBps = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + ' Gbps' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' Mbps'
+    : b >= 1e3 ? (b / 1e3).toFixed(1) + ' kbps' : Math.round(b) + ' bps';
+  const lkey = (l) => l.a + '|' + l.b;
+  let layoutKey = '';
+  function layoutRouters(links) {
+    // つながっている装置どうし(連結成分)ごとに小さな輪にして、それを格子状に並べる。
+    // 1つの大きな輪に全部並べると、台数が多いときに装置やプレートが重なって読めなくなる
+    const adj = {};
+    links.forEach(l => { (adj[l.a] = adj[l.a] || []).push(l.b); (adj[l.b] = adj[l.b] || []).push(l.a); });
+    const ids = Object.keys(adj).sort(), seen = new Set(), comps = [];
+    for (const st of ids) {
+      if (seen.has(st)) continue;
+      const order = [], q = [st]; seen.add(st);
+      while (q.length) { const v = q.shift(); order.push(v); for (const w of (adj[v] || []).sort()) if (!seen.has(w)) { seen.add(w); q.push(w); } }
+      comps.push(order);
+    }
+    linkPos = {};
+    if (comps.length <= 1) {
+      const order = comps[0] || [];
+      const R = Math.max(9, Math.min(13, order.length * 2.2));
+      order.forEach((id, i) => { const a = i / order.length * Math.PI * 2 - Math.PI / 2; linkPos[id] = [Math.cos(a) * R, 0, Math.sin(a) * R]; });
+      if (order.length === 1) linkPos[order[0]] = [0, 0, 0];
+    } else {
+      const radius = (n) => n <= 1 ? 0 : Math.max(3.2, n * 1.25);
+      const cell = Math.max(...comps.map(c => radius(c.length))) * 2 + 7;
+      const cols = Math.ceil(Math.sqrt(comps.length)), rows = Math.ceil(comps.length / cols);
+      comps.forEach((order, k) => {
+        const cx = (k % cols - (cols - 1) / 2) * cell, cz = (Math.floor(k / cols) - (rows - 1) / 2) * cell, R = radius(order.length);
+        order.forEach((id, i) => { const a = i / order.length * Math.PI * 2 - Math.PI / 2; linkPos[id] = [cx + Math.cos(a) * R, 0, cz + Math.sin(a) * R]; });
+      });
+    }
+    // 配置が変わったら全体が入るようにカメラを引く
+    const key = comps.map(c => c.length).join(',');
+    if (key !== layoutKey) {
+      layoutKey = key;
+      const ext = Math.max(9, ...Object.values(linkPos).map(p => Math.hypot(p[0], p[2])));
+      if (mode === 'link') { cam.px = 0; cam.pz = 0; cam.tdist = Math.max(36, ext * 2.6); }
+    }
+  }
+  async function pollLinks() {
+    const w = +document.getElementById('lInt').value;
+    try {
+      const d = await api(`/api/traffic/links?window=${w}`);
+      linkData = d; layoutRouters(d.links); renderLinkPanel();
+      pollHealth();
+      document.getElementById('lLast').textContent = new Date(d.now * 1000).toTimeString().slice(0, 8);
+      const src = document.getElementById('lSrc');
+      src.textContent = (!d.source || d.source === 'internal' ? 'SOURCE: IF COUNTER' : 'SOURCE: ' + String(d.source).toUpperCase())
+        + (d.prometheus_error ? ' (Prometheus 不達)' : '') + (d.zabbix_error ? ' (Zabbix 不達)' : '');
+      src.className = 'src' + (d.source && d.source !== 'internal' ? ' prom' : '');
+      src.title = d.prometheus_error || (d.prometheus_url || 'PROMETHEUS_URL 未設定: エミュレータのIFカウンタ(SNMPのifHCOctetsと同じ値)');
+    } catch (e) { /* 次の周期で再試行 */ }
+    nextPoll = Date.now() + w * 1000;
+  }
+  setInterval(() => {
+    if (mode !== 'link') return;
+    const left = Math.max(0, Math.ceil((nextPoll - Date.now()) / 1000));
+    document.getElementById('lNext').textContent = left;
+    if (left <= 0) { nextPoll = Date.now() + 60000; pollLinks(); }
+  }, 500);
+  document.getElementById('lInt').addEventListener('change', pollLinks);
+
+  function spark(cv, series, col) {
+    const c = cv.getContext('2d'), w = cv.width = cv.clientWidth * DPR, h = cv.height = 26 * DPR;
+    c.clearRect(0, 0, w, h);
+    if (series.length < 2) { c.fillStyle = '#4f7896'; c.font = `${10 * DPR}px monospace`; c.fillText('履歴の蓄積中…', 2, h * 0.7); return; }
+    const mx = Math.max(1, ...series);
+    c.beginPath();
+    series.forEach((v, i) => { const x = i / (series.length - 1) * w, y = h - 2 - v / mx * (h - 4); i ? c.lineTo(x, y) : c.moveTo(x, y); });
+    c.strokeStyle = col; c.lineWidth = 1.5 * DPR; c.stroke();
+    c.lineTo(w, h); c.lineTo(0, h); c.closePath(); c.fillStyle = col + '22'; c.fill();
+  }
+  function renderLinkPanel() {
+    const box = document.getElementById('linkpanel');
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const order = { down: 0, lost: 1, crit: 2, warn: 3, ok: 4 };
+    const ls = [...linkData.links].sort((x, y) => order[x.state] - order[y.state] || (y.ab_bps + y.ba_bps) - (x.ab_bps + x.ba_bps));
+    if (!ls.length) { box.innerHTML = '<div class="l"><small>ルータ同士のリンクがありません。メイン画面でルータ同士をリンクしてください。</small></div>'; return; }
+    box.innerHTML = ls.map(l => {
+      const why = [];
+      if (l.down) why.push('IF断');
+      if (l.util >= 0.5) why.push(`使用率 ${(l.util * 100).toFixed(0)}%`);
+      if (l.flows_ng) why.push(`経由pingの失敗 ${l.flows_ng}`);
+      l.alerts.forEach(a => why.push('警 ' + a.name));
+      return `<div class="l ${l.state}${selLink === lkey(l) ? ' sel' : ''}" data-k="${esc(lkey(l))}">
+        <div class="top"><span>${esc(l.host_a)} ⇄ ${esc(l.host_b)}</span><span class="st ${l.state}">${STATE_JA[l.state]}</span></div>
+        <small>${esc(l.iface_a || '?')} ⇄ ${esc(l.iface_b || '?')}</small>
+        <div class="bps">${l.down ? '<span>→ 停止</span><span>← 停止</span>' : `<span>→ ${fmtBps(l.ab_bps)}</span><span>← ${fmtBps(l.ba_bps)}</span>`}</div>
+        <div class="bar"><i style="width:${Math.min(100, Math.max(l.util * 100, l.ab_bps + l.ba_bps ? 1 : 0))}%;background:${STATE_COL[l.state]}"></i></div>
+        <canvas></canvas>
+        <small>${why.length ? esc(why.join(' / ')) : `問題なし ・ 経由ping ${l.flows_ok}件`}</small></div>`;
+    }).join('');
+    box.querySelectorAll('.l[data-k]').forEach((d, i) => {
+      spark(d.querySelector('canvas'), ls[i].series, STATE_COL[ls[i].state]);
+      d.onclick = () => { selLink = selLink === d.dataset.k ? null : d.dataset.k; renderLinkPanel(); };
+    });
+  }
+  const STATE_EN = { ok: 'NORMAL', warn: 'HIGH LOAD', crit: 'CRITICAL', down: 'LINK DOWN', lost: 'NO RESPONSE' };
+  const fmtShort = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + ' Gbps' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' Mbps'
+    : b >= 1e3 ? (b / 1e3).toFixed(0) + ' kbps' : Math.round(b) + ' bps';
+  const shortIf = (n) => n.replace('GigabitEthernet', 'Gi').replace('TenGigabitEthernet', 'Te').replace('FastEthernet', 'Fa').replace('Ethernet', 'Eth');
+  // 断を示している検知経路のチップ: 点灯=down を示している / 暗い=up / 破線=データ無し
+  const EV_COL = { STATE: '#9fb4c8', SYSLOG: '#ff5a6a', TRAP: '#c58bff', POLL: '#33d6ff' };
+  const EV_LABEL = { STATE: 'STATE', SYSLOG: 'SYSLOG', TRAP: 'TRAP', POLL: 'POLL' };
+  function evidenceChips(x, y, z, ev, t) {
+    const c = proj(x, y, z);
+    if (!c) return;
+    const keys = ['STATE', 'SYSLOG', 'TRAP', 'POLL'], w = 62, gap = 6;
+    const x0 = c.x - (keys.length * w + (keys.length - 1) * gap) / 2, y0 = c.y + 54;
+    ctx.save();
+    ctx.fillStyle = '#ffb0b8'; ctx.font = '700 10px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('検知経路', c.x, y0 - 6);
+    keys.forEach((k, i) => {
+      const cx = x0 + i * (w + gap) + w / 2, cy = y0 + 12, st = ev[k], col = EV_COL[k];
+      ctx.beginPath();
+      const pts = [[-w / 2 + 8, -11], [w / 2 - 8, -11], [w / 2, 0], [w / 2 - 8, 11], [-w / 2 + 8, 11], [-w / 2, 0]];
+      pts.forEach(([a, b], j) => j ? ctx.lineTo(cx + a, cy + b) : ctx.moveTo(cx + a, cy + b)); ctx.closePath();
+      if (st === 'lost') {
+        ctx.fillStyle = `rgba(154,164,184,${0.35 + 0.3 * Math.abs(Math.sin(t * 0.004))})`; ctx.fill();
+        ctx.strokeStyle = '#c9d1e0'; ctx.lineWidth = 1.2; ctx.stroke(); ctx.fillStyle = '#0a0f18';
+      } else if (st === 'down') {
+        const p = 0.65 + 0.35 * Math.abs(Math.sin(t * 0.006 + i));
+        ctx.fillStyle = col; ctx.globalAlpha = p; ctx.shadowColor = col; ctx.shadowBlur = 14; ctx.fill();
+        ctx.globalAlpha = 1; ctx.shadowBlur = 0; ctx.fillStyle = '#10060a';
+      } else {
+        ctx.fillStyle = 'rgba(4,14,30,0.85)'; ctx.fill();
+        if (!st) ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = st === 'up' ? col + '88' : 'rgba(150,170,190,0.45)'; ctx.lineWidth = 1.2; ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = st === 'up' ? col + 'aa' : 'rgba(150,170,190,0.55)';
+      }
+      ctx.font = '800 10px monospace'; ctx.textBaseline = 'middle';
+      ctx.fillText(EV_LABEL[k], cx, cy - 2);
+      ctx.font = '8px monospace';
+      ctx.fillText(st === 'down' ? 'DOWN' : st === 'lost' ? 'LOST' : st === 'up' ? 'up' : '—', cx, cy + 7);
+    });
+    ctx.restore();
+  }
+  // 床から立つ六角柱(高さ=量)
+  function hexColumn(x, y0, z, r, h, col, t) {
+    const ring = (y) => Array.from({ length: 6 }, (_, k) => { const a = k * Math.PI / 3; return proj(x + Math.cos(a) * r, y, z + Math.sin(a) * r); });
+    const bot = ring(y0), top = ring(y0 + h);
+    if (bot.some(v => !v) || top.some(v => !v)) return;
+    const faces = [0, 1, 2, 3, 4, 5].map(k => ({ k, d: (bot[k].d + bot[(k + 1) % 6].d) / 2 })).sort((a, b) => b.d - a.d);
+    for (const { k } of faces) {
+      const q = [bot[k], bot[(k + 1) % 6], top[(k + 1) % 6], top[k]];
+      const g = ctx.createLinearGradient(0, q[0].y, 0, q[3].y);
+      g.addColorStop(0, col + '22'); g.addColorStop(1, col + '88');
+      poly(q); ctx.fillStyle = g; ctx.fill(); ctx.strokeStyle = col + 'aa'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    poly(top); ctx.save(); ctx.shadowColor = col; ctx.shadowBlur = 16; ctx.fillStyle = col + 'cc'; ctx.fill(); ctx.restore();
+    // 中を昇る光
+    const u = (t * 0.0008) % 1, ly = proj(x, y0 + h * u, z);
+    if (ly) { ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.fillRect(ly.x - 2, ly.y - 2, 4, 4); }
+  }
+  // 押し出した横長の六角プレート(画面に正対、奥行き付き)。big=true は脈動+太字
+  function plateAt(cx, cy, sc, col, title, val, big, t, sub) {
+    ctx.font = `800 ${Math.round(17 * sc)}px monospace`;
+    const tw = Math.max(ctx.measureText(val).width, (ctx.font = `800 ${Math.round(13 * sc)}px sans-serif`, ctx.measureText(title).width));
+    const w = Math.max(118 * sc, tw + 46 * sc), h = 50 * sc, d = 9 * sc, cut = 18 * sc;
+    const shape = (ox, oy) => [[-w / 2 + cut, -h / 2], [w / 2 - cut, -h / 2], [w / 2, 0], [w / 2 - cut, h / 2], [-w / 2 + cut, h / 2], [-w / 2, 0]].map(([a, b]) => [cx + a + ox, cy + b + oy]);
+    const fr = shape(0, 0), bk = shape(d * 0.6, d);
+    ctx.save();
+    // 側面(厚み)
+    for (let k = 0; k < 6; k++) {
+      const a = fr[k], b = fr[(k + 1) % 6], c = bk[(k + 1) % 6], e = bk[k];
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.lineTo(e[0], e[1]); ctx.closePath();
+      ctx.fillStyle = col + '40'; ctx.fill();
+    }
+    ctx.beginPath(); fr.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
+    const pulse = big ? 0.6 + 0.4 * Math.abs(Math.sin(t * 0.005)) : 1;
+    const g = ctx.createLinearGradient(cx, cy - h / 2, cx, cy + h / 2);
+    g.addColorStop(0, `rgba(10,22,40,0.92)`); g.addColorStop(1, col + '55');
+    ctx.fillStyle = g; ctx.fill();
+    ctx.shadowColor = col; ctx.shadowBlur = (big ? 26 : 14) * pulse; ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
+    ctx.shadowBlur = 0;
+    for (let yy = cy - h / 2 + 3; yy < cy + h / 2; yy += 3) { ctx.fillStyle = 'rgba(255,255,255,0.03)'; ctx.fillRect(cx - w / 2 + cut * 0.6, yy, w - cut * 1.2, 1); }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = col; ctx.font = `800 ${Math.round(13 * sc)}px sans-serif`; ctx.fillText(title, cx, cy - h * 0.2);
+    ctx.fillStyle = '#ffffff'; ctx.font = `800 ${Math.round(17 * sc)}px monospace`;
+    ctx.shadowColor = col; ctx.shadowBlur = 8; ctx.fillText(val, cx, cy + h * 0.18); ctx.shadowBlur = 0;
+    if (sub && sc > 0.8) { ctx.fillStyle = '#9fc6dd'; ctx.font = `${Math.round(10 * sc)}px sans-serif`; ctx.fillText(sub, cx, cy + h / 2 + 10 * sc); }
+    ctx.restore();
+  }
+  function plate3d(x, y, z, col, title, val, big, t, sub, ox) {
+    const c = proj(x, y, z), b = proj(x, y - 0.9, z);
+    if (!c) return;
+    ox = ox || 0;
+    if (b) { ctx.strokeStyle = col + '88'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(c.x + ox, c.y); ctx.stroke(); ctx.setLineDash([]); }
+    plateAt(c.x + ox, c.y, Math.max(0.7, Math.min(1.5, c.s / 26)), col, title, val, big, t, sub);
+  }
+  function ifTile(x, y, z, col, name, val) {
+    const c = proj(x, y, z);
+    if (!c) return;
+    const sc = Math.max(0.6, Math.min(1.1, c.s / 34)), w = 96 * sc, h = 32 * sc;
+    hexPath(c.x - w / 2 + 4 * sc, c.y, 9 * sc); ctx.fillStyle = col + '66'; ctx.fill(); ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = 'rgba(4,14,30,0.82)'; ctx.fillRect(c.x - w / 2 + 14 * sc, c.y - h / 2, w, h);
+    ctx.fillStyle = col; ctx.fillRect(c.x - w / 2 + 14 * sc, c.y - h / 2, 2, h);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e8f7ff'; ctx.font = `700 ${Math.round(11 * sc)}px monospace`; ctx.fillText(name, c.x - w / 2 + 20 * sc, c.y - h * 0.22);
+    ctx.fillStyle = '#9fe9ff'; ctx.font = `${Math.round(10 * sc)}px monospace`; ctx.fillText(val, c.x - w / 2 + 20 * sc, c.y + h * 0.24);
+    ctx.textBaseline = 'alphabetic';
+  }
+  // リンク断などの火花
+  function sparksAt(x, y, z, t, col) {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (let k = 0; k < 18; k++) {
+      const ph = (t * 0.001 + k * 0.137) % 1, a = k * 2.399;
+      const p = proj(x + Math.cos(a) * ph * 1.4, y + ph * 1.6 - ph * ph * 1.2, z + Math.sin(a) * ph * 1.4);
+      if (!p) continue;
+      const r = 3 * (1 - ph) + 1;
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 3);
+      g.addColorStop(0, 'rgba(255,230,140,0.95)'); g.addColorStop(0.4, col + 'aa'); g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g; ctx.fillRect(p.x - r * 3, p.y - r * 3, r * 6, r * 6);
+    }
+    ctx.restore();
+  }
+
+  // ── 立ち上がるポップアップ(ping の結果・ログ) ──
+  let popups = [];
+  function popup(pos, col, title, val, ttl, mark) {
+    if (!pos) return;
+    popups.push({ pos: pos.slice(), col, title, val, born: performance.now(), ttl: ttl || 3600, mark });
+    if (popups.length > 40) popups.splice(0, popups.length - 40);
+  }
+  function drawPopups(t) {
+    const now = performance.now();
+    popups = popups.filter(p => now - p.born < p.ttl);
+    // 同じ場所(または近く)に出るものは縦に積む
+    const placed = [];
+    for (const p of popups) {
+      const u = (now - p.born) / p.ttl;
+      const c = proj(p.pos[0], p.pos[1] + 1.2 + u * 2.2, p.pos[2]);
+      if (!c) continue;
+      let y = c.y;
+      while (placed.some(q => Math.abs(q.x - c.x) < 160 && Math.abs(q.y - y) < 48)) y -= 50;
+      placed.push({ x: c.x, y });
+      ctx.save(); ctx.globalAlpha = u < 0.1 ? u * 10 : u > 0.75 ? (1 - u) * 4 : 1;
+      const px = c.x + (mode === 'net' && !hostView ? -230 : 0);
+      plateAt(px, y, 0.82, p.col, p.title, p.val, false, t);
+      if (p.mark) {                               // 「情」「注」の六角マークをプレートの左に
+        ctx.font = '800 14px monospace';
+        const tw = Math.max(ctx.measureText(p.val).width, (ctx.font = '800 11px sans-serif', ctx.measureText(p.title).width));
+        const half = Math.max(118 * 0.82, tw + 46 * 0.82) / 2;
+        markHex(px - half - 16, y, 17, p.col, p.mark, t);
+      }
+      ctx.restore();
+    }
+    // 直近60秒に経路が変わった装置には「情」のバッジを立てておく
+    const nowS = Date.now() / 1000, seen = new Set();
+    for (const e of routeLog) {
+      if (nowS - e.t > 60 || seen.has(e.dev)) continue;
+      seen.add(e.dev);
+      const pos = posForDevice(e.dev); if (!pos) continue;
+      const c = proj(pos[0], pos[1] + 0.9, pos[2]); if (!c) continue;
+      const n = routeLog.filter(x => x.dev === e.dev && nowS - x.t <= 60).length;
+      ctx.save(); ctx.globalAlpha = Math.min(1, (60 - (nowS - e.t)) / 10);
+      markHex(c.x + 26, c.y - 30, Math.max(11, Math.min(18, c.s * 0.35)), '#33d6ff', '情', t, n);
+      ctx.restore();
+    }
+  }
+  // NIRVANA 風の漢字六角マーク(赤の「警」に対し、情報は水色の「情」、警告は橙の「注」)
+  function markHex(x, y, r, col, ch, t, count) {
+    ctx.save();
+    hexPath(x, y, r);
+    const g = ctx.createRadialGradient(x, y - r * 0.3, r * 0.1, x, y, r);
+    g.addColorStop(0, col + 'ee'); g.addColorStop(1, 'rgba(4,14,28,0.95)');
+    ctx.fillStyle = g; ctx.fill();
+    ctx.shadowColor = col; ctx.shadowBlur = 12 + 6 * Math.sin(t * 0.005); ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
+    ctx.shadowBlur = 0; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff'; ctx.font = `900 ${Math.round(r * 1.05)}px sans-serif`; ctx.fillText(ch, x, y + 1);
+    if (count > 1) {
+      ctx.fillStyle = col; ctx.font = `800 ${Math.max(9, Math.round(r * 0.6))}px monospace`; ctx.fillText('×' + count, x, y + r + 9);
+    }
+    ctx.restore();
+  }
+  function posForDevice(dev) {
+    if (mode === 'link') { const P = linkPos[dev]; return P ? [P[0], 2.2, P[2]] : null; }
+    if (hostView) { if (dev === hostView.id) return [0, 1, 0]; return peerPos[dev] || null; }
+    const ip = devIp(dev); return ip ? posForIp(ip) : null;
+  }
+  function popupForFlow(e) {
+    const dstPos = mode === 'link' ? posForDevice(e.dst || (e.path || []).slice(-1)[0] || e.src) : hostView ? (posForDevice(e.dst) || posForDevice(e.src)) : posForIp(e.dst_ip);
+    const okN = e.ok ? e.pkts : 0;
+    popup(dstPos, e.ok ? '#3dff9a' : '#ff3b4e', e.ok ? 'PING OK' : 'PING NG', `${okN}/${e.pkts} ・ ${e.size}B`);
+  }
+
+  // ── 流量率アニメーション ─────────────────────────
+  // bps を 0..1 に正規化(1kbps〜1Gbps を対数で)。速さ・粒の数・大きさ・尾の長さに効かせる
+  const flowPhase = new Map(), flowShown = new Map();
+  let flowLastT = 0;
+  function flowNorm(bps) { return bps > 0 ? Math.max(0.04, Math.min(1, (Math.log10(bps) - 3) / 6)) : 0; }
+  function flowColor(util) { return util >= 0.8 ? '#ff3b4e' : util >= 0.5 ? '#ffab2e' : '#33d6ff'; }
+  function flowStream(key, from, to, bps, util, off, t) {
+    // 表示する流量はポーリング値へなめらかに寄せる(更新のたびに急に変わらない)
+    const prev = flowShown.get(key) ?? bps;
+    const shown = prev + (bps - prev) * 0.05; flowShown.set(key, shown);
+    const nrm = flowNorm(shown);
+    if (nrm <= 0) return;
+    const dt = flowLastT ? Math.min(100, t - flowLastT) : 16;
+    const len = Math.hypot(to[0] - from[0], to[2] - from[2]) || 1;
+    const speed = (1.2 + 9 * nrm) / len;                  // 1秒あたりリンク長の何割進むか(床の単位で 1.2〜10.2/秒)
+    const ph = ((flowPhase.get(key) || 0) + speed * dt / 1000) % 1; flowPhase.set(key, ph);
+    const n = Math.max(1, Math.round(1 + nrm * 15));       // 粒の数 1〜16
+    const col = flowColor(util || 0);
+    const dx = to[2] - from[2], dz = -(to[0] - from[0]), dl = Math.hypot(dx, dz) || 1;
+    for (let k = 0; k < n; k++) {
+      const u = (ph + k / n) % 1;
+      const x = from[0] + (to[0] - from[0]) * u + dx / dl * off, z = from[2] + (to[2] - from[2]) * u + dz / dl * off;
+      const y = from[1] + (to[1] - from[1]) * u;
+      const c = proj(x, y, z), c2 = proj(x + (to[0] - from[0]) * 0.01, y, z + (to[2] - from[2]) * 0.01);
+      if (!c || !c2) continue;
+      const ang = Math.atan2(c2.y - c.y, c2.x - c.x), sz = Math.max(2.5, Math.min(9, c.s * (0.12 + 0.12 * nrm)));
+      const fade = Math.min(1, u * 8, (1 - u) * 8);
+      ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(ang); ctx.globalAlpha = fade;
+      // 尾(流量が多いほど長い)
+      const tail = sz * (2 + 6 * nrm);
+      const g = ctx.createLinearGradient(-tail, 0, 0, 0); g.addColorStop(0, col + '00'); g.addColorStop(1, col + 'aa');
+      ctx.fillStyle = g; ctx.fillRect(-tail, -sz * 0.25, tail, sz * 0.5);
+      ctx.beginPath(); ctx.moveTo(sz * 1.6, 0); ctx.lineTo(-sz, sz * 0.7); ctx.lineTo(-sz, -sz * 0.7); ctx.closePath();
+      ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 6 + 10 * nrm; ctx.fill();
+      ctx.restore();
+    }
+  }
+  // NETWORK 画面でも、表示中の装置どうしのリンクに流量率で流す
+  function drawNetFlows(t) {
+    if (!netLinks || hostView) return;
+    for (const l of netLinks) {
+      if (l.down) continue;
+      const pa = posForDevice(l.a), pb = posForDevice(l.b);
+      if (!pa || !pb) continue;
+      const A = [pa[0], pa[1] + 0.6, pa[2]], B = [pb[0], pb[1] + 0.6, pb[2]];
+      const same = Math.hypot(A[0] - B[0], A[2] - B[2]) < 0.2;
+      if (same) continue;                                // 同じパネル上の装置どうしは線にならない
+      // 薄いガイド線
+      const ca = proj(...A), cb = proj(...B);
+      if (ca && cb) { ctx.save(); ctx.strokeStyle = 'rgba(51,214,255,0.18)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(ca.x, ca.y); ctx.lineTo(cb.x, cb.y); ctx.stroke(); ctx.restore(); }
+      flowStream(lkey(l) + '>n', A, B, l.ab_bps, l.util_ab ?? l.util, 0.18, t);
+      flowStream(lkey(l) + '<n', B, A, l.ba_bps, l.util_ba ?? l.util, 0.18, t);
+    }
+  }
+  let netLinks = null;
+  async function pollNetLinks() {
+    if (mode === 'link') return;
+    try { netLinks = (await api('/api/traffic/links?window=60')).links; } catch (e) { /* 次の周期で再試行 */ }
+  }
+  setInterval(pollNetLinks, 10000); setTimeout(pollNetLinks, 1500);
+
+  function drawLinks(t) {
+    if (!linkData) return;
+    // 床のリング
+    ctx.strokeStyle = 'rgba(51,214,255,0.12)';
+    for (const R of [4, 8, 12]) {
+      ctx.beginPath(); let f = true;
+      for (let a = 0; a <= 360; a += 6) { const p = proj(R * Math.cos(a * Math.PI / 180), 0, R * Math.sin(a * Math.PI / 180)); if (!p) continue; f ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); f = false; }
+      ctx.stroke();
+    }
+    const Y = 1.6;
+    const items = linkData.links.map(l => ({ l, A: linkPos[l.a], B: linkPos[l.b] })).filter(x => x.A && x.B);
+    for (const { l, A, B } of items) {
+      const col = STATE_COL[l.state], sel = selLink === lkey(l);
+      const pa = proj(A[0], Y, A[2]), pb = proj(B[0], Y, B[2]);
+      if (!pa || !pb) continue;
+      const tot = l.ab_bps + l.ba_bps;
+      const wdt = 2 + Math.min(14, Math.log10(1 + tot) * 1.6) * (pa.s + pb.s) / 60;
+      ctx.save();
+      if (l.state === 'down' || l.state === 'lost') { ctx.setLineDash(l.state === 'lost' ? [3, 9] : [10, 8]); ctx.globalAlpha = 0.5 + 0.5 * Math.abs(Math.sin(t * 0.004)); }
+      ctx.strokeStyle = col; ctx.lineWidth = wdt + (sel ? 3 : 0); ctx.shadowColor = col; ctx.shadowBlur = l.state === 'ok' ? 6 : 18;
+      ctx.globalAlpha *= l.state === 'ok' && !tot ? 0.35 : 0.8;
+      ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+      ctx.restore();
+      // 方向別に流量率で流す(多いほど速く・密に・大きく、色は使用率)
+      if (l.state !== 'down') {
+        flowStream(lkey(l) + '>', [A[0], Y, A[2]], [B[0], Y, B[2]], l.ab_bps, l.util_ab ?? l.util, 0.35, t);
+        flowStream(lkey(l) + '<', [B[0], Y, B[2]], [A[0], Y, A[2]], l.ba_bps, l.util_ba ?? l.util, 0.35, t);
+      }
+      // 中点: 通信量に比例した高さの六角柱 + その上に状態と量の立体プレート(右脇の文字ではなく画面内に)
+      const mx = (A[0] + B[0]) / 2, mz = (A[2] + B[2]) / 2, tot2 = l.down ? 0 : l.ab_bps + l.ba_bps;
+      const colH = 0.4 + Math.min(3.2, Math.log10(1 + tot2) * 0.42);
+      if (!l.down && l.state !== 'lost') hexColumn(mx, Y, mz, 0.42, colH, col, t);
+      const title = l.down ? 'LINK DOWN' : STATE_EN[l.state];
+      const val = l.down ? '停止' : l.state === 'lost' ? '不明' : fmtShort(tot2);
+      plate3d(mx, Y + colH + 0.9, mz, col, title, val, l.down || l.state === 'crit', t, l.down ? null : `使用率 ${(l.util * 100).toFixed(1)}%`);
+      if (l.down || l.state === 'lost' || (l.down_sources || []).length) evidenceChips(mx, Y + colH + 0.9, mz, l.evidence || {}, t);
+      if (l.down) sparksAt(mx, Y + 0.3, mz, t, '#ff3b4e');
+      if (l.alerts.length) {
+        const ap = proj(mx, Y + colH + 2.6, mz);
+        if (ap) { hexPath(ap.x, ap.y, 13); ctx.fillStyle = '#e6142d'; ctx.fill(); ctx.strokeStyle = '#ffb0b8'; ctx.stroke();
+          ctx.fillStyle = '#fff'; ctx.font = '700 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText('警', ap.x, ap.y); ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic'; }
+      }
+      // 両端: 装置のインタフェースごとの送受信(真ん中のルータはリンクごとに別のIFとして出る)
+      for (const [P, Q, ifn, out, inn] of [[A, B, l.iface_a, l.ab_bps, l.ba_bps], [B, A, l.iface_b, l.ba_bps, l.ab_bps]]) {
+        const u = 0.24, ix = P[0] + (Q[0] - P[0]) * u, iz = P[2] + (Q[2] - P[2]) * u;
+        ifTile(ix, Y + 0.95, iz, col, shortIf(ifn || '?'), l.down ? '↑停止 ↓停止' : `↑${fmtShort(out)} ↓${fmtShort(inn)}`);
+      }
+    }
+    // ルータ(六角柱)
+    const worst = {};
+    const rank = { ok: 0, warn: 1, lost: 2, crit: 3, down: 4 };
+    items.forEach(({ l }) => { for (const d of [l.a, l.b]) if (!(d in worst) || rank[l.state] > rank[worst[d]]) worst[d] = l.state; });
+    const names = {};
+    linkData.links.forEach(l => { names[l.a] = l.host_a; names[l.b] = l.host_b; });
+    Object.entries(linkPos).map(([id, P]) => ({ id, P, c: proj(...P) })).filter(x => x.c).sort((a, b) => b.c.d - a.c.d).forEach(({ id, P }) => {
+      const isLost = (linkData.unreachable || []).some(u => u.id === id);
+      const col = isLost ? STATE_COL.lost : STATE_COL[worst[id] || 'ok'];
+      if (isLost) ctx.globalAlpha = 0.35 + 0.45 * Math.abs(Math.sin(t * 0.003));   // 応答なし: 消えかけて点滅
+      const ring = (y) => Array.from({ length: 6 }, (_, k) => { const a = Math.PI / 6 + k * Math.PI / 3; return proj(P[0] + Math.cos(a) * 0.8, y, P[2] + Math.sin(a) * 0.8); });
+      const bot = ring(0), top = ring(Y + 0.4);
+      if (bot.some(v => !v) || top.some(v => !v)) return;
+      ctx.fillStyle = 'rgba(40,150,255,0.18)'; ctx.strokeStyle = col; ctx.lineWidth = 1.2;
+      for (let k = 0; k < 6; k++) { poly([bot[k], bot[(k + 1) % 6], top[(k + 1) % 6], top[k]]); ctx.fill(); ctx.stroke(); }
+      poly(top); ctx.fillStyle = isLost ? 'rgba(154,164,184,0.3)' : 'rgba(60,200,255,0.35)'; ctx.fill(); ctx.stroke();
+      ctx.globalAlpha = 1;
+      if (isLost) plate3d(P[0], Y + 3.4, P[2], STATE_COL.lost, 'NO RESPONSE', '消失', true, t, 'SNMP 応答なし');
+      const lp = proj(P[0], Y + 1.2, P[2]);
+      if (lp) {
+        ctx.fillStyle = '#fff'; ctx.font = '600 14px monospace'; ctx.textAlign = 'center';
+        ctx.fillText(names[id] || id, lp.x, lp.y);
+        const ip = devIp(id); if (ip) { ctx.fillStyle = '#7fb2d0'; ctx.font = '11px monospace'; ctx.fillText(ip, lp.x, lp.y + 14); }
+        ctx.textAlign = 'start';
+      }
+    });
+    document.getElementById('empty').style.display = 'none';
+  }
+  function setMode(m) {
+    mode = m;
+    document.getElementById('mNet').classList.toggle('on', m === 'net');
+    document.getElementById('mLink').classList.toggle('on', m === 'link');
+    document.body.classList.toggle('links', m === 'link');
+    particles = [];
+    if (m === 'link') { layoutKey = ''; cam.tdist = 36; cam.pitch = 0.8; document.getElementById('cidr').textContent = 'ROUTER LINKS'; pollLinks(); }
+    else update();
+    try { history.replaceState(null, '', m === 'link' ? '?view=links' : location.pathname); } catch (e) { /* 無くても動く */ }
+  }
+  document.getElementById('mNet').onclick = () => setMode('net');
+  document.getElementById('mLink').onclick = () => setMode('link');
+  document.getElementById('mList').onclick = (e) => { document.body.classList.toggle('showlist'); e.target.classList.toggle('on'); };
+
+  // ── メインループ ─────────────────────────────
+  function frame(t) {
+    // 操作が無い時はゆっくり回り、少しだけ上下に揺れる(止まって見えないように)
+    const idle = performance.now() - lastInput > 2500;
+    if (idle && autoSpin) cam.yaw += 0.0011;
+    cam.bob += ((idle && autoSpin ? 0.035 * Math.sin(t * 0.0005) : 0) - cam.bob) * 0.03;
+    cam.dist += (cam.tdist - cam.dist) * 0.08;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const g = ctx.createRadialGradient(W / 2, H * 0.55, 10, W / 2, H * 0.55, Math.max(W, H) * 0.75);
+    // アラートがある階層では背景ごと赤く染まる
+    g.addColorStop(0, mode !== 'link' && alertLevel ? '#2a0608' : '#071a33'); g.addColorStop(1, '#020306');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    drawFloor();
+    const nowSec = Date.now() / 1000;
+    drawGroundRing(t);
+    if (mode === 'link') drawLinks(t);
+    else { if (hostView) { alertLevel = 0; drawHost(t); } else { drawNetwork(t, nowSec); drawNetFlows(t); } drawParticles(t); }
+    drawPopups(t);
+    drawBoard(t);
+    flowLastT = t;
+    requestAnimationFrame(frame);
+  }
+
+  // ── 操作 ─────────────────────────────────────
+  // マウス: 左ドラッグ=回転 / 右ドラッグ(または Shift+ドラッグ)=平行移動 / ホイール=ズーム / ダブルクリック=視点リセット
+  // タッチ: 1本指=回転 / 2本指=ピンチでズーム+平行移動 / ダブルタップ=視点リセット
+  let down = null;
+  const ptrs = new Map();
+  let pinch = null;
+  function zoomBy(f) { lastInput = performance.now(); cam.tdist = Math.max(8, Math.min(90, cam.tdist * f)); }
+  function panBy(dx, dy) {
+    const k = cam.dist / (Math.min(W, H * 1.25) * 1.05);
+    const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw), sp = Math.max(0.35, Math.sin(cam.pitch));
+    cam.px = Math.max(-40, Math.min(40, cam.px - dx * k * cy + dy * k * sy / sp));
+    cam.pz = Math.max(-40, Math.min(40, cam.pz + dx * k * sy + dy * k * cy / sp));
+  }
+  function resetView() {
+    lastInput = performance.now();
+    cam.yaw = -0.55; cam.pitch = mode === 'link' ? 0.8 : 0.72; cam.px = 0; cam.pz = 0;
+    cam.tdist = mode === 'link' ? 36 : hostView ? 26 : viewDist();
+    if (mode === 'link' && linkData) { layoutKey = ''; layoutRouters(linkData.links); }
+  }
+  window.__cvCam = () => ({ ...cam, autoSpin });
+  cv.addEventListener('contextmenu', (e) => e.preventDefault());
+  cv.addEventListener('pointerdown', (e) => {
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    cv.setPointerCapture(e.pointerId); lastInput = performance.now();
+    if (ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()];
+      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, dist: cam.tdist };
+      if (down) down.moved = true;           // 2本指になったらタップ扱いにしない
+      return;
+    }
+    down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, yaw: cam.yaw, pitch: cam.pitch, moved: false,
+             pan: e.button === 2 || e.shiftKey };
+  });
+  cv.addEventListener('pointermove', (e) => {
+    if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && ptrs.size >= 2) {
+      lastInput = performance.now();
+      const [a, b] = [...ptrs.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y) || 1, mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      cam.tdist = Math.max(8, Math.min(90, pinch.dist * pinch.d / d));
+      panBy(mx - pinch.mx, my - pinch.my); pinch.mx = mx; pinch.my = my;
+      return;
+    }
+    if (down) {
+      lastInput = performance.now();
+      const dx = e.clientX - down.x, dy = e.clientY - down.y;
+      if (Math.abs(dx) + Math.abs(dy) > 5) { down.moved = true; cv.classList.add('drag'); }
+      if (down.moved) {
+        if (down.pan) panBy(e.clientX - down.lx, e.clientY - down.ly);
+        else {
+          cam.yaw = down.yaw + dx * 0.006;
+          cam.pitch = Math.max(0.12, Math.min(1.45, down.pitch + dy * 0.004));
+        }
+      }
+      down.lx = e.clientX; down.ly = e.clientY;
+      return;
+    }
+    if (e.pointerType === 'mouse') { lastInput = performance.now(); hover(e.clientX, e.clientY); }
+  });
+  let lastTap = 0;
+  function endPtr(e) {
+    ptrs.delete(e.pointerId);
+    if (ptrs.size < 2) pinch = null;
+    if (ptrs.size) return;
+    cv.classList.remove('drag');
+    if (down && !down.moved && e.type === 'pointerup') {
+      const now = performance.now();
+      if (now - lastTap < 320) { resetView(); lastTap = 0; }
+      else { lastTap = now; click(e.clientX, e.clientY); }
+    }
+    down = null;
+  }
+  cv.addEventListener('pointerup', endPtr);
+  cv.addEventListener('pointercancel', endPtr);
+  cv.addEventListener('wheel', (e) => { e.preventDefault(); zoomBy(e.deltaY > 0 ? 1.1 : 0.9); }, { passive: false });
+  document.getElementById('zIn').onclick = () => zoomBy(0.8);
+  document.getElementById('zOut').onclick = () => zoomBy(1.25);
+  document.getElementById('zReset').onclick = resetView;
+  document.getElementById('zSpin').onclick = (e) => { autoSpin = !autoSpin; e.currentTarget.classList.toggle('on', autoSpin); e.currentTarget.textContent = autoSpin ? '⟳' : '❚❚'; };
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === 'Escape' || e.key === 'Backspace') up();
+  });
+
+  function inPoly(x, y, pts) {
+    let inside = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      if ((pts[i].y > y) !== (pts[j].y > y) && x < (pts[j].x - pts[i].x) * (y - pts[i].y) / (pts[j].y - pts[i].y) + pts[i].x) inside = !inside;
+    }
+    return inside;
+  }
+  function pick(x, y) {
+    for (let k = pickables.length - 1; k >= 0; k--) if (inPoly(x, y, pickables[k].poly)) return pickables[k];
+    return null;
+  }
+  const tip = document.getElementById('tip');
+  function hover(x, y) {
+    if (mode === 'link') return;
+    const p = hostView ? null : pick(x, y);
+    if (!p) { tip.style.display = 'none'; return; }
+    const o = prefix.concat([p.n]);
+    const cidr = o.concat([0, 0, 0]).slice(0, 4).join('.') + '/' + (o.length * 8);
+    const info = p.info;
+    let txt = prefix.length === 3 ? o.join('.') : cidr;
+    if (info && info.hosts.length) txt += ' ・ ' + (prefix.length === 3 ? info.hosts[0].h.hostname + ' (' + info.hosts[0].itf.name + ')' : info.hosts.length + ' host');
+    if (info && info.alerts.length) txt += ' ・ アラート ' + info.alerts.length;
+    tip.textContent = txt; tip.style.display = 'block';
+    tip.style.left = Math.min(x + 14, W - tip.offsetWidth - 4) + 'px'; tip.style.top = (y + 14) + 'px';
+  }
+  function click(x, y) {
+    if (mode === 'link') return;
+    if (hostView) return;
+    const p = pick(x, y);
+    if (!p) return;
+    if (prefix.length === 3) {
+      if (p.info && p.info.hosts.length) openHost(p.info.hosts[0].h.id, p.info.hosts[0].itf.ip);
+      return;
+    }
+    if (!p.info) return;                       // 何も無いブロックには入らない
+    prefix = prefix.concat([p.n]);
+    dive();
+  }
+  function openHost(id, ip) {
+    hostView = { id, ip: ip || devIp(id) }; particles = []; cam.dist = 10; cam.tdist = 26; cam.pitch = 0.35;
+    update();
+  }
+  function viewDist() { return prefix.length === 3 ? 40 : 33; }
+  function dive() { particles = []; cam.dist = 11; cam.tdist = viewDist(); update(); }
+  function up() {
+    if (mode === 'link') return;
+    if (hostView) hostView = null;
+    else if (prefix.length) prefix = prefix.slice(0, -1);
+    else return;
+    particles = []; cam.dist = 55; cam.tdist = viewDist(); cam.pitch = Math.max(cam.pitch, 0.6);
+    update();
+  }
+  function goTo(len) { hostView = null; prefix = prefix.slice(0, len); particles = []; cam.dist = 50; cam.tdist = viewDist(); update(); }
+
+  function update() {
+    if (mode === 'link') return;
+    tip.style.display = 'none';
+    if (!hostView) cam.tdist = viewDist();
+    document.getElementById('cidr').textContent = levelCidr();
+    const cr = document.getElementById('crumbs');
+    const parts = ['/0'];
+    for (let i = 0; i < prefix.length; i++) parts.push('/' + (i + 1) * 8);
+    cr.innerHTML = parts.map((p, i) => `<span data-l="${i}">${p}</span>`).join(' &rsaquo; ') +
+      (hostView ? ' &rsaquo; /32' : '') + ((prefix.length || hostView) ? '<button id="upBtn">&uarr; 戻る</button>' : '');
+    cr.querySelectorAll('span').forEach(s => s.onclick = () => goTo(+s.dataset.l));
+    const ub = document.getElementById('upBtn'); if (ub) ub.onclick = up;
+    // 装置もトラフィックも1か所にまとまっている時は最初から絞り込む
+    document.body.classList.toggle('host', !!hostView);
+    renderCard();
+    if (primed) try { localStorage.setItem('cyberView.prefix', JSON.stringify(prefix)); } catch (e) { /* 保存できなくても動く */ }
+  }
+
+  let routeLog = [];
+  function renderAlerts() {
+    const box = document.getElementById('alerts');
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    box.innerHTML = alerts.slice(-6).reverse().map(a => {
+      const tm = new Date(a.t * 1000).toTimeString().slice(0, 8);
+      const src = (hostById[a.src] || {}).hostname || a.src;
+      return `<div class="a ${a.severity}" data-src="${esc(a.src)}"><b>${esc(a.name)}</b>
+        <small>${tm} ・ ${esc(src)}${a.dst ? ' → ' + esc(a.dst) : ''} ・ ${esc(a.detail)}</small></div>`;
+    }).join('');
+    box.innerHTML += routeLog.slice(-6).reverse().map(e => {
+      const tm = new Date(e.t * 1000).toTimeString().slice(0, 8);
+      return `<div class="a info"><b>情 INFO 経路${{ add: '追加', del: '削除', change: '変更' }[e.kind] || ''}</b>
+        <small>${tm} ・ ${esc(e.host || e.dev)} ・ ${esc(e.text)}</small></div>`;
+    }).join('');
+    box.querySelectorAll('.a').forEach(d => d.onclick = () => { if (hostById[d.dataset.src]) { prefix = octets(devIp(d.dataset.src)).slice(0, 3); openHost(d.dataset.src); } });
+  }
+
+  // ── ポーリング ───────────────────────────────
+  async function pollHosts() {
+    try {
+      const d = await api('/api/traffic/hosts');
+      hosts = d.hosts; hostById = {}; ipOwner = {};
+      for (const h of hosts) { hostById[h.id] = h; for (const i of h.interfaces) ipOwner[i.ip] = h.id; }
+      document.getElementById('sHosts').textContent = hosts.length;
+      if (hostView) renderCard();
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  async function pollFlows() {
+    try {
+      const d = await api(`/api/traffic/flowmap?since=${seq}&alert_since=${alertSeq}`);
+      links = d.links;
+      const fresh = d.events || [];
+      if (primed && fresh.length) {
+        const newest = fresh[fresh.length - 1].t;
+        for (const e of fresh) spawn(e, Math.max(0, Math.min(1800, 1800 - (newest - e.t) * 1000)));
+        fresh.slice(-6).forEach(e => { if (match(fSrc.value, e.src_ip, e.src) && match(fDst.value, e.dst_ip, e.dst)) popupForFlow(e); });
+      }
+      events = events.concat(fresh).slice(-3000);
+      alerts = alerts.concat(d.alerts || []).slice(-400);
+      if (primed && (d.alerts || []).length) sfx((d.alerts || []).some(a => a.severity === 'high' || a.severity === 'medium') ? 'alert' : 'warn');
+      if (primed) (d.alerts || []).filter(a => a.severity === 'warning').forEach(a =>
+        popup(posForDevice(a.src), '#ffab2e', `WARN ${RULE_CODE[a.rule] || 'FLAP'}`, (a.detail || '').split(': ')[0].slice(0, 22), 7000, '注'));
+      flowTotal = d.seq; seq = d.seq; alertSeq = d.alert_seq;
+      document.getElementById('sFlows').textContent = flowTotal;
+      document.getElementById('sAlerts').textContent = alerts.length;
+      document.getElementById('sLinks').textContent = links.length;
+      if (fresh.length || (d.alerts || []).length || !primed) { renderAlerts(); if (hostView) renderCard(); }
+      if (primed && (d.alerts || []).length) pollHealth();   // 新しいアラートはボードにもすぐ反映
+      if (!primed) { primed = true; if (mode !== 'link') autoFocus(); }
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  // 起動時、前回のブロックか、装置が1つのブロックにまとまっていればそこまで降りる
+  function autoFocus() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem('cyberView.prefix') || 'null'); } catch (e) { saved = null; }
+    if (Array.isArray(saved) && saved.length <= 3 && saved.every(n => Number.isInteger(n) && n >= 0 && n < 256)) {
+      prefix = saved;
+    } else {
+      const ips = hosts.flatMap(h => h.interfaces.map(i => i.ip));
+      while (prefix.length < 2 && ips.length) {
+        const s = new Set(ips.map(ip => octets(ip)[prefix.length]));
+        if (s.size !== 1) break;
+        prefix.push([...s][0]);
+      }
+    }
+    update();
+  }
+  setInterval(() => { document.getElementById('sTime').textContent = new Date().toLocaleString('ja-JP'); }, 1000);
+  fSrc.addEventListener('input', () => { particles = []; });
+  fDst.addEventListener('input', () => { particles = []; });
+
+  // 自動テスト(Playwright)用: パネル n の画面上の中心
+  window.__cvParticles = () => particles.filter(p => performance.now() >= p.born).length;
+  window.__cvPanel = (n) => {
+    const k = pickables.find(p => p.n === n);
+    return k ? { x: k.poly.reduce((a, c) => a + c.x, 0) / 4, y: k.poly.reduce((a, c) => a + c.y, 0) / 4 } : null;
+  };
+
+  pollHosts().then(pollFlows).then(() => { if (new URLSearchParams(location.search).get('view') === 'links') setMode('link'); });
+  setInterval(pollFlows, 2000);
+  setInterval(pollHosts, 5000);
+  pollHealth(); setInterval(pollHealth, 10000);
+  // ログ(Loki または内部記録)を、出した装置の上に六角プレートで浮かべる
+  let logSince = Date.now() / 1000;
+  async function pollLogs() {
+    try {
+      const d = await api(`/api/traffic/logs?since=${logSince}&limit=8`);
+      logSrc = d.source;
+      for (const r of d.logs) {
+        logSince = Math.max(logSince, r.t);
+        if (r.sev > 5) continue;
+        const m = r.msg.match(/%[\w-]+-\d-[\w]+/);
+        const col = r.recovery ? '#3dff9a' : r.sev <= 3 ? '#ff3b4e' : r.sev === 4 ? '#ffab2e' : '#7fb2ff';
+        const title = r.recovery ? 'RECOVER' : r.sev <= 3 ? 'LOG ERROR' : r.sev === 4 ? 'LOG WARN' : 'LOG';
+        popup(posForDevice(r.dev), col, title, (m ? m[0] : r.msg).slice(0, 22), 5200);
+      }
+      if (d.logs.some(r => r.sev <= 4 || r.recovery)) pollHealth();   // ログの浮上とボードを揃える
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  let logSrc = 'internal';
+  setInterval(pollLogs, 4000);
+  // 経路の追加・削除・変更を、その装置の上に INFO プレートで浮かべる
+  let routeSeq = -1;
+  const ROUTE_STYLE = { add: ['#33d6ff', 'INFO ROUTE ADD'], del: ['#9aa4b8', 'INFO ROUTE DEL'], change: ['#7fb2ff', 'INFO ROUTE CHG'] };
+  async function pollRoutes() {
+    try {
+      const d = await api(`/api/traffic/routes?since=${Math.max(0, routeSeq)}&limit=200`);
+      const first = routeSeq < 0;
+      routeSeq = d.seq;
+      if (first) return;                  // 開いた時点より前の変化は出さない
+      const byDev = {};
+      for (const e of d.events) (byDev[e.dev] = byDev[e.dev] || []).push(e);
+      for (const [dev, evs] of Object.entries(byDev)) {
+        const pos = posForDevice(dev);
+        evs.slice(0, 3).forEach(e => {
+          const [col, title] = ROUTE_STYLE[e.kind] || ROUTE_STYLE.add;
+          popup(pos, col, title, `${e.code} ${e.prefix}`, 6000, '情');
+        });
+        if (evs.length > 3) popup(pos, '#33d6ff', 'INFO ROUTES', `他 ${evs.length - 3} 件`, 6000, '情');
+      }
+      routeLog = routeLog.concat(d.events).slice(-50);
+      if (d.events.length) { renderAlerts(); sfx('info'); }
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  setInterval(pollRoutes, 3000); pollRoutes();
+
+  // ── デモ: 自動シナリオ + 合成音楽 ─────────────────────
+  // 音楽は外部ファイルを使わず Web Audio でその場で合成する(著作権の心配が無い・オフラインでも鳴る)。
+  // ブラウザの自動再生制限があるため、DEMO ボタンを押した時に鳴らし始める。
+  const post = (path) => fetch(path, { method: 'POST', headers: token ? { 'X-Session-Token': token } : {} }).then(r => r.json());
+  let AC = null, master = null, musicOn = false, musicTimer = null, demoOn = false, demoTimer = null, tourTimer = null;
+  const NOTE = (n) => 440 * Math.pow(2, (n - 69) / 12);
+  // A minor のアンビエント(Am - F - C - G)。1小節 = 4拍、BPM 92
+  const BPM = 92, BEAT = 60 / BPM;
+  const CHORDS = [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]];
+  const PENTA = [69, 72, 74, 76, 79, 81, 84];
+  function initAudio() {
+    if (AC) return;
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    const comp = AC.createDynamicsCompressor();
+    master = AC.createGain(); master.gain.value = 0.22;
+    // 簡単なディレイで広がりを出す
+    const dly = AC.createDelay(1.0), fb = AC.createGain(), wet = AC.createGain();
+    dly.delayTime.value = BEAT * 0.75; fb.gain.value = 0.35; wet.gain.value = 0.3;
+    master.connect(comp); master.connect(dly); dly.connect(fb); fb.connect(dly); dly.connect(wet); wet.connect(comp);
+    comp.connect(AC.destination);
+  }
+  function tone(freq, t, dur, type, vol, cutoff, attack) {
+    const o = AC.createOscillator(), g = AC.createGain(), f = AC.createBiquadFilter();
+    o.type = type; o.frequency.value = freq;
+    f.type = 'lowpass'; f.frequency.value = cutoff || 2000;
+    const a = attack || 0.01;
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(f); f.connect(g); g.connect(master);
+    o.start(t); o.stop(t + dur + 0.05);
+  }
+  function kick(t) {
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.frequency.setValueAtTime(110, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.25);
+    g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
+    o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.4);
+  }
+  let nextBeat = 0, beatNo = 0;
+  function scheduler() {
+    if (!AC) return;
+    while (nextBeat < AC.currentTime + 0.25) {
+      const bar = Math.floor(beatNo / 4), chord = CHORDS[bar % CHORDS.length], t = nextBeat;
+      if (beatNo % 4 === 0) {                       // 小節頭: パッドとベース
+        chord.forEach(n => { tone(NOTE(n), t, BEAT * 4.2, 'sawtooth', 0.045, 900, 1.2); tone(NOTE(n) * 1.005, t, BEAT * 4.2, 'sawtooth', 0.03, 700, 1.4); });
+        tone(NOTE(chord[0] - 24), t, BEAT * 3.6, 'sine', 0.22, 400, 0.05);
+      }
+      if (beatNo % 2 === 0) kick(t);
+      for (let k = 0; k < 2; k++) {                 // 8分のアルペジオ(ペンタトニックからランダム)
+        if (Math.random() < 0.72) tone(NOTE(PENTA[Math.floor(Math.random() * PENTA.length)]), t + k * BEAT / 2, 0.35, 'triangle', 0.07, 3000);
+      }
+      nextBeat += BEAT; beatNo++;
+    }
+  }
+  function startMusic() {
+    initAudio(); AC.resume(); musicOn = true;
+    nextBeat = AC.currentTime + 0.1;
+    if (!musicTimer) musicTimer = setInterval(scheduler, 100);
+    master.gain.setTargetAtTime(0.22, AC.currentTime, 0.5);
+    document.getElementById('demoMute').textContent = '♪';
+  }
+  function stopMusic() {
+    musicOn = false;
+    if (AC) master.gain.setTargetAtTime(0, AC.currentTime, 0.3);
+    clearInterval(musicTimer); musicTimer = null;
+    document.getElementById('demoMute').textContent = '×';
+  }
+  // 出来事の効果音(情=高いチャイム、注/警=低い音)
+  function sfx(kind) {
+    if (!musicOn || !AC) return;
+    const t = AC.currentTime + 0.02;
+    if (kind === 'info') { tone(NOTE(88), t, 0.8, 'sine', 0.12, 6000); tone(NOTE(95), t + 0.12, 0.9, 'sine', 0.09, 6000); }
+    else if (kind === 'warn') { tone(NOTE(62), t, 0.6, 'square', 0.06, 1200); tone(NOTE(62), t + 0.25, 0.6, 'square', 0.06, 1200); }
+    else { tone(NOTE(45), t, 1.2, 'sawtooth', 0.12, 800); tone(NOTE(46), t, 1.2, 'sawtooth', 0.1, 800); }
+  }
+  async function pollDemo() {
+    try {
+      const d = await api('/api/demo/status');
+      document.getElementById('demoStep').textContent = d.running ? `${d.step}(${Math.floor(d.elapsed)}秒)` : '停止';
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  // デモ中は視点を自動で巡回(NETWORK の 10.200.0.0/16 → ROUTER LINKS → …)
+  let tourStep = 0;
+  function tour() {
+    if (!demoOn || performance.now() - lastInput < 8000) return;   // 触っている間は巡回しない
+    tourStep++;
+    if (tourStep % 2) { hostView = null; prefix = [10, 200]; setMode('link'); }
+    else { setMode('net'); hostView = null; prefix = [10, 200]; update(); }
+  }
+  async function toggleDemo() {
+    demoOn = !demoOn;
+    document.body.classList.toggle('demo', demoOn);
+    document.getElementById('mDemo').classList.toggle('on', demoOn);
+    if (demoOn) {
+      startMusic();
+      try { await post('/api/demo/start'); } catch (e) { /* 表示だけ続ける */ }
+      hostView = null; prefix = [10, 200]; setMode('link');
+      pollDemo(); demoTimer = setInterval(pollDemo, 2000); tourTimer = setInterval(tour, 25000);
+    } else {
+      stopMusic();
+      try { await post('/api/demo/stop'); } catch (e) { /* 無視 */ }
+      clearInterval(demoTimer); clearInterval(tourTimer);
+    }
+  }
+  document.getElementById('mDemo').onclick = toggleDemo;
+  document.getElementById('demoMute').onclick = () => (musicOn ? stopMusic() : startMusic());
+  window.__cvDemo = () => ({ demoOn, musicOn, ctx: AC ? AC.state : null, beats: beatNo });
+  // デモの無いサーバー(スタンドアロン版など)では DEMO ボタンを出さない
+  fetch('/api/demo/status', { headers: token ? { 'X-Session-Token': token } : {} })
+    .then(r => { if (!r.ok) document.getElementById('mDemo').style.display = 'none'; })
+    .catch(() => { document.getElementById('mDemo').style.display = 'none'; });
+
+  update();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

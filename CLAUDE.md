@@ -2825,4 +2825,13 @@ README の結果表は `<!-- results:start/end -->` の間だけ自動更新)。
 直した実バグ: OSPF `network` 文の範囲をそのまま stub として広告していた(/16 で書くと経路が入らない。
 OspfEngine の Router LSA 生成で範囲内の IF サブネットに展開)、フラップ判定で最初の状態(設定時の no shutdown)を
 変化として数えていた。
+追加(v11): 実機の監視環境向け単体版 `cyber-view-standalone/`(README・`config.example.yaml`・Dockerfile・compose)。
+画面は `static/cyber_view.html` と同一ファイル、`cvs/flap_rules.py`・`cvs/link_evidence.py` は engine/ のコピー
+(ずれは `tests/test_cyber_view_standalone.py` が検出。ラボ側を直したらコピーし直す)。データは Prometheus
+(snmp_exporter の rate(ifHCIn/OutOctets)・ifOperStatus・up)/ Loki / Zabbix API(Bits received/sent・
+Operational status・problem.get・ホスト到達性)。Zabbix の Cisco テンプレートは admin shutdown の IF を LLD で
+無効化する(disable_source=1)ので down として扱う。ライブ確認は本物の Prometheus/snmp_exporter/Loki/
+Zabbix 7.0(docker、host network)で実施、記録は `docs/cyber-view-standalone.md`。このサンドボックスは HTTPS を
+独自 CA で中継するため docker build 内の pip は `extra-ca/*.crt` に `/root/.ccr/ca-bundle.crt` を置いて通す
+(証明書は .gitignore、コミットしない)。
 

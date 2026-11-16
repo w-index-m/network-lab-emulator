@@ -1,0 +1,70 @@
+# Cyber View(スタンドアロン版)の設定例
+#
+# 装置とつながり(トポロジ)は手書き。データの取り込み口は使うものだけ残す。
+# ${ENV_NAME} と書くと起動時の環境変数で置き換える(トークン等はファイルに直接書かない)。
+#
+# この例は network-lab-emulator のラボ(CR1─CR2─CR3)に合わせてある。実機では
+# 装置名・管理IP・インタフェース名・つながりを自分の環境に書き換える。
+
+title: 本番ネットワーク
+poll_interval: 10                # 秒。ログ取り込み・アラート判定の周期
+link_speed_bps: 1000000000       # 既定のリンク速度(使用率の分母)。links ごとに speed で上書き可
+
+# auth:
+#   token: ${CYBER_VIEW_TOKEN}   # 設定すると画面を http://host:8090/?token=... で開く必要がある
+
+devices:
+  # id         : この画面の中での名前(英数字)
+  # hostname   : 表示名。syslog の本文や Zabbix のホスト名との照合にも使う
+  # type       : cisco / catalyst / nexus / sir / srs 等(フラップ検知のログ形式の判定に使う)
+  # mgmt_ip    : 管理IP(= Prometheus の instance / syslog の送信元)。省略時は最初のIF
+  # zabbix_host: Zabbix 上のホスト名(省略時は hostname)
+  # interfaces : IPアドレス空間の画面に置くためのIF(name は ifName/ifDescr と同じ表記で。短縮形でも可)
+  - id: cr1
+    hostname: CR1
+    type: cisco
+    mgmt_ip: 10.240.12.1
+    interfaces:
+      - {name: GigabitEthernet0/0/0, ip: 10.240.12.1, prefix: 30, desc: WAN to CR2}
+      - {name: GigabitEthernet0/0/1, ip: 10.240.1.1, prefix: 24, desc: LAN tokyo}
+  - id: cr2
+    hostname: CR2
+    type: cisco
+    mgmt_ip: 10.240.12.2
+    interfaces:
+      - {name: GigabitEthernet0/0/0, ip: 10.240.12.2, prefix: 30}
+      - {name: GigabitEthernet0/0/1, ip: 10.240.2.1, prefix: 24}
+      - {name: GigabitEthernet0/0/2, ip: 10.240.23.1, prefix: 30}
+  - id: cr3
+    hostname: CR3
+    type: cisco
+    mgmt_ip: 10.240.23.2
+    interfaces:
+      - {name: GigabitEthernet0/0/0, ip: 10.240.23.2, prefix: 30}
+      - {name: GigabitEthernet0/0/1, ip: 10.240.3.1, prefix: 24}
+
+links:
+  - {a: cr1, a_if: GigabitEthernet0/0/0, b: cr2, b_if: GigabitEthernet0/0/0}
+  - {a: cr2, a_if: GigabitEthernet0/0/2, b: cr3, b_if: GigabitEthernet0/0/0, speed: 100000000}
+
+sources:
+  # Prometheus + snmp_exporter(if_mib): 流量 rate(ifHCIn/OutOctets)・ifOperStatus・up
+  prometheus:
+    url: http://127.0.0.1:9090
+    job: cisco-snmp              # snmp_exporter を叩いている scrape job 名
+
+  # Loki: syslog。ログのラベル(device_labels の順に探す)か本文の装置名で装置を特定する
+  loki:
+    url: http://127.0.0.1:3100
+    query: '{job=~".+"}'
+    device_labels: [device_id, host, hostname, instance]
+
+  # Zabbix: API トークン(または user/password)。「Network interfaces by SNMP」系テンプレートの
+  # Interface ...: Bits received / Bits sent / Operational status と、未解決の問題を読む
+  # zabbix:
+  #   url: http://zabbix.example.local/api_jsonrpc.php
+  #   token: ${ZABBIX_TOKEN}
+
+  # SNMP trap(linkDown / linkUp)をこの画面で直接受ける場合
+  # snmp_trap:
+  #   listen: 0.0.0.0:1162

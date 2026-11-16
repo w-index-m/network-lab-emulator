@@ -3,6 +3,14 @@
 新しいものが上。各項目の「詳細」に、その時の検証記録(実際のコマンド・出力・画面)がある。
 commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 
+## 2026-11-16(午後)— Cyber View を実機の監視環境へ持ち出せる単体版
+
+| 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
+|---|---|---|---|
+| 06:10 | **`cyber-view-standalone/`**: 画面はラボ版と同じ、データは Prometheus+snmp_exporter / Loki / Zabbix から読む単体版(FastAPI、設定は YAML、docker 対応) | 本物の Prometheus・Loki・Zabbix 7.0 を立ててライブ確認。Prometheus+Loki 構成・Zabbix だけの構成の両方で、流量・LINK DOWN(SYSLOG/POLL)・状態ボード・警報が出た | [cyber-view-standalone.md](cyber-view-standalone.md) |
+| 06:00 | Zabbix: 管理者 shutdown した IF はテンプレートの自動検出で「無効化」される → down として読むよう修正 | 最初は Zabbix が Link down を出しているのに画面は up のままだった | 同上 |
+| 06:05 | 画面: DEMO の無いサーバーでは DEMO ボタンを隠す、`?token=`、データ元表示を実際の取得元に | ラボ版にも反映 | 同上 |
+
 ## 2026-11-16 — Cyber View(モックNIRVANA)の監視機能の仕上げと機種別試験
 
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |

@@ -1,0 +1,14 @@
+# Cyber View(スタンドアロン版)を監視基盤の隣で動かす
+#   cp config.example.yaml config.yaml   # 装置・つながり・データ元を書き換える
+#   ZABBIX_TOKEN=... docker compose up -d --build
+#   → http://<このホスト>:8090/
+services:
+  cyber-view:
+    build: .
+    network_mode: host            # 構内の Prometheus / Loki / Zabbix / 装置に届くように
+    restart: unless-stopped
+    environment:
+      - ZABBIX_TOKEN=${ZABBIX_TOKEN:-}
+      - CYBER_VIEW_TOKEN=${CYBER_VIEW_TOKEN:-}
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
