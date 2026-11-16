@@ -94,7 +94,8 @@ def test_recovery_clears_syslog_evidence(triangle):
         for ln in c.get('/api/traffic/links').json()['links']:
             if {ln['a'], ln['b']} == {a, b}:
                 return ln
-    ln = _wait(lambda: (lambda x: x if x and not x['down'] else None)(link()), 10)
+    # 「断でない」と「SYSLOG の根拠が up」は別々の経路で届くので、両方そろうまで待つ(CI の遅い環境で前者だけ先に来た)
+    ln = _wait(lambda: (lambda x: x if x and not x['down'] and x['evidence'].get('SYSLOG') == 'up' else None)(link()), 20)
     assert ln and not ln['down'] and ln['evidence']['SYSLOG'] == 'up', link()
 
 
