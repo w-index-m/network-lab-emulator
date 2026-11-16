@@ -958,6 +958,7 @@ async def lifespan(app: FastAPI):
     link_sample_task = asyncio.create_task(_link_sample_loop())
     route_watch_task = asyncio.create_task(_route_watch_loop())
     valhalla_task = asyncio.create_task(_valhalla_alert_loop())
+    board_task = asyncio.create_task(_board_loop())
     # SNMP linkDown/linkUp trap の受信(/cyber-view の LINK DOWN 判定に使う)。例: 0.0.0.0:1162
     if os.environ.get('SNMP_TRAP_LISTEN', '').strip():
         from engine.link_evidence import traps as _traps
@@ -996,6 +997,7 @@ async def lifespan(app: FastAPI):
     link_sample_task.cancel()
     route_watch_task.cancel()
     valhalla_task.cancel()
+    board_task.cancel()
     auto_save_task.cancel()
     try:
         await auto_save_task
@@ -1066,6 +1068,7 @@ def _valid_token(token: str) -> bool:
 # ルート "/" と各種静的アセットはHTML/ログインJSを返すため公開し、
 # 認証はAPI（/api/*）とWebSocket側で行う。
 _NO_AUTH_PATHS = {"/", "/index.html", "/favicon.ico", "/dashboard", "/pentest", "/traffic-flow", "/cyber-view",
+                  "/nirvana-board.js",
                   "/metrics",   # Prometheus 用。認証は metrics() の中で行う(Bearer トークン)
                   "/api/login", "/api/logout", "/api/health", "/api/session/refresh"}
 
@@ -10013,19 +10016,23 @@ def _prom_url():
 async def metrics(request: Request):
     """Prometheus がスクレイプする口。認証: NETLAB_METRICS_TOKEN を設定していれば
     `Authorization: Bearer <トークン>`、無ければ通常のセッショントークン(認証無効時は不要)。"""
-    from engine.valhalla import render_metrics
-    from engine.route_watch import watcher
     mt = os.environ.get('NETLAB_METRICS_TOKEN', '').strip()
     auth = request.headers.get('Authorization', '')
     ok = _AUTH_DISABLED or (mt and auth == f'Bearer {mt}') or _valid_token(request.headers.get('X-Session-Token', ''))
     if not ok:
         return _Response(status_code=401, content='認証が必要です(Authorization: Bearer <NETLAB_METRICS_TOKEN>)')
+    text = await _metrics_text()
+    return _Response(content=text, media_type='text/plain; version=0.0.4; charset=utf-8')
+
+
+async def _metrics_text():
+    from engine.valhalla import render_metrics
+    from engine.route_watch import watcher
     links = (await traffic_links(window=60))['links']
     health = await traffic_health(window=300)
     ospf = await traffic_ospf()
     counts = {k: v for k, v in _flow_recorder.alert_counts.items() if v > 0}
-    text = render_metrics(links, health, ospf, counts, dict(watcher.counts))
-    return _Response(content=text, media_type='text/plain; version=0.0.4; charset=utf-8')
+    return render_metrics(links, health, ospf, counts, dict(watcher.counts))
 
 
 @app.get("/api/valhalla/status")
@@ -10142,6 +10149,123 @@ async def _valhalla_alert_loop():
             except Exception as e:  # noqa: BLE001
                 print(f"[valhalla] 警報の取得に失敗: {str(e)[:120]}")
         await asyncio.sleep(15)
+
+
+# ── ニルヴァーナのボード(Grafana が持つ機能: ダッシュボード・Explore・アラート・注釈) ──────────
+# 本体は engine/nirvana_board.py(データソース・内部の時系列・保存・ルール評価)と
+# engine/nirvana_board_api.py(/api/nirvana/*)。画面は /cyber-view の BOARD / EXPLORE / ALERTS
+from engine.nirvana_board import AlertEvaluator, BoardStore, InternalTSDB, Sources, send_webhook, webhook_payload  # noqa: E402
+from engine.nirvana_board_api import make_router as _make_board_router  # noqa: E402
+
+_board_tsdb = InternalTSDB()
+_board_store = BoardStore(os.environ.get('NIRVANA_BOARD_PATH') or str(Path(__file__).parent / 'nirvana_board.json'))
+
+
+def _board_internal_logs(start, end):
+    lv = {0: 'emerg', 1: 'alert', 2: 'crit', 3: 'error', 4: 'warning', 5: 'notice', 6: 'info', 7: 'debug'}
+    return [{'t': x['t'], 'host': x.get('host') or x.get('dev', ''), 'msg': x['msg'], 'level': lv.get(x.get('sev'), '')}
+            for x in _flow_recorder.logs_since(start) if x['t'] <= end]
+
+
+def _board_sources():
+    return Sources(_prom_url(), os.environ.get('LOKI_URL', '').strip(), _board_tsdb, _board_internal_logs)
+
+
+def _labels_to_devs(lab):
+    """警報のラベル(device/host_a/instance 等)から装置IDを引く"""
+    host_to_dev = {getattr(st, 'hostname', d): d for d, st in device_sessions.items()}
+    ip_to_dev = {}
+    for d, st in device_sessions.items():
+        for itf in (getattr(st, 'interfaces', {}) or {}).values():
+            if isinstance(itf, dict) and itf.get('ip'):
+                ip_to_dev.setdefault(itf['ip'], d)
+
+    def find(keys):
+        for k in keys:
+            v = lab.get(k)
+            if v in host_to_dev:
+                return host_to_dev[v]
+            if v in device_sessions:
+                return v
+            if isinstance(v, str) and v.split(':')[0] in ip_to_dev:
+                return ip_to_dev[v.split(':')[0]]
+        return None
+    return find(('device', 'host_a', 'host', 'hostname', 'router', 'a', 'instance')), find(('neighbor', 'host_b', 'b'))
+
+
+def _board_on_change(rule, inst, prev, new):
+    """ルールの状態変化: 発報したらニルヴァーナの警報(花びら RULE)に出し、連絡先へ通知(解消も通知)"""
+    if new == 'firing':
+        src, dst = _labels_to_devs(inst.get('labels') or {})
+        sev = {'critical': 'high', 'high': 'high', 'warning': 'warning', 'info': 'low'}.get(rule.get('severity', 'warning'), 'medium')
+        _flow_recorder.external_alert('nirvana_rule', f"{rule['uid']}:{inst['key']}", src, dst,
+                                      f"{rule['title']}: 値 {inst.get('value'):.4g} {rule.get('op', '>')} {rule.get('threshold')} ({inst['key']})"[:200],
+                                      severity=sev, name=f"ルール: {rule['title']}")
+    if new in ('firing',) or (new == 'normal' and prev == 'firing'):
+        for cid in rule.get('contacts') or []:
+            c = _board_store.get('contact_points', cid)
+            if not c:
+                continue
+            try:
+                send_webhook(c['url'], webhook_payload(rule, inst, new))
+            except Exception as e:  # noqa: BLE001
+                print(f"[nirvana] 通知を送れませんでした {c.get('name')}: {str(e)[:120]}")
+
+
+_board_eval = AlertEvaluator(_board_store, None, on_change=_board_on_change)
+
+
+def _board_system_annotations(start, end):
+    out = []
+    with _flow_recorder._lock:
+        alerts = [a for a in _flow_recorder.alerts if start <= a['t'] <= end]
+        links = [x for x in _flow_recorder.link_events if start <= x['t'] <= end]
+    for a in alerts:
+        out.append({'time': a['t'], 'text': f"{a.get('name')}: {a.get('detail', '')}"[:200],
+                    'tags': ['alert', a.get('source', ''), a.get('severity', '')], 'kind': 'alert'})
+    for x in links:
+        out.append({'time': x['t'], 'text': f"{x['a']} {x['iface']} {x['state']}", 'tags': ['link', x['state']], 'kind': 'link'})
+    return out
+
+
+def _board_check(request):
+    if _AUTH_DISABLED or _valid_token(request.headers.get('X-Session-Token', '')):
+        return None
+    return JSONResponse({'error': '認証が必要です'}, status_code=401)
+
+
+def _board_sources_for_eval():
+    _board_eval.sources = _board_sources()
+    return _board_eval.sources
+
+
+app.include_router(_make_board_router(_board_sources, _board_store, _board_eval,
+                                      system_annotations=_board_system_annotations, check=_board_check))
+
+
+async def _board_loop():
+    """10秒ごとに /metrics と同じ値を内部の時系列に貯め、15秒ごとにアラートルールを評価する"""
+    _board_store.ensure_default('internal')
+    n = 0
+    while True:
+        try:
+            _board_tsdb.ingest_text(await _metrics_text())
+        except Exception as e:  # noqa: BLE001
+            print(f"[nirvana] 時系列の取り込みに失敗: {str(e)[:120]}")
+        if n % 3 == 0:
+            try:
+                _board_sources_for_eval()
+                await asyncio.to_thread(_board_eval.evaluate)
+            except Exception as e:  # noqa: BLE001
+                print(f"[nirvana] ルール評価に失敗: {str(e)[:120]}")
+        n += 1
+        await asyncio.sleep(5)
+
+
+@app.get("/nirvana-board.js")
+async def nirvana_board_js():
+    return _Response(content=(static_dir / 'nirvana_board.js').read_text(encoding='utf-8'),
+                     media_type='application/javascript; charset=utf-8')
 
 
 @app.get("/api/traffic/flap-rules")

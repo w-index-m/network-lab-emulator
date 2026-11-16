@@ -8,6 +8,7 @@ Cyber View(スタンドアロン版)— 実機の監視データで NIRVANA 改�
 Prometheus / Loki / Zabbix と設定ファイル(装置・つながり)から返す。
 """
 import argparse
+import collections
 import os
 import sys
 import time
@@ -164,6 +165,80 @@ def create_app(cfg, start_collector=True):
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f'ヴァルハラ不達: {str(e)[:200]}')
         return {**d, 'now': time.time()}
+
+    # ── ボード(Grafana が持つ機能: BOARD / EXPLORE / ALERTS)。ラボ版と同じ cvs/nirvana_board*.py ──
+    import threading
+    from cvs import nirvana_board as NB
+    from cvs.nirvana_board_api import make_router
+    from cvs import valhalla as V
+    from fastapi import Request
+    loki_cfg = (cfg.get('sources') or {}).get('loki') or {}
+    tsdb = NB.InternalTSDB()
+    store = NB.BoardStore(os.environ.get('NIRVANA_BOARD_PATH') or (cfg.get('board') or {}).get('path')
+                          or str(Path(__file__).resolve().parent / 'nirvana_board.json'))
+    lv = {0: 'emerg', 1: 'alert', 2: 'crit', 3: 'error', 4: 'warning', 5: 'notice', 6: 'info', 7: 'debug'}
+
+    def board_logs(start, end):
+        return [{'t': x['t'], 'host': x.get('host', ''), 'msg': x['msg'], 'level': lv.get(x.get('sev'), '')}
+                for x in col.analytics.logs_between(start, end)]
+
+    def sources():
+        return NB.Sources(col.prom.url if col.prom else '', loki_cfg.get('url', ''), tsdb, board_logs)
+
+    def on_change(rule, inst, prev, new):
+        if new == 'firing':
+            lab = inst.get('labels') or {}
+            src = col.dev_of(lab.get('device'), lab.get('host_a'), lab.get('instance'), lab.get('a'))
+            dst = col.dev_of(lab.get('neighbor'), lab.get('host_b'), lab.get('b'))
+            sev = {'critical': 'high', 'warning': 'warning', 'info': 'low'}.get(rule.get('severity', 'warning'), 'medium')
+            col.analytics.fire('nirvana_rule', f"{rule['uid']}:{inst['key']}", src, dst,
+                               f"{rule['title']}: 値 {inst.get('value'):.4g} ({inst['key']})"[:200], severity=sev, name=f"ルール: {rule['title']}")
+        if new == 'firing' or (new == 'normal' and prev == 'firing'):
+            for cid in rule.get('contacts') or []:
+                c = store.get('contact_points', cid)
+                if c:
+                    try:
+                        NB.send_webhook(c['url'], NB.webhook_payload(rule, inst, new))
+                    except Exception as e:  # noqa: BLE001
+                        col.errors['webhook'] = str(e)[:200]
+
+    evaluator = NB.AlertEvaluator(store, None, on_change=on_change)
+
+    def board_check(request: Request):
+        if token and request.headers.get('X-Session-Token') != token:
+            return JSONResponse({'error': 'token が違います'}, status_code=401)
+        return None
+
+    def board_annotations(start, end):
+        return [{'time': a['t'], 'text': f"{a['name']}: {a.get('detail', '')}"[:200], 'tags': ['alert', a.get('source', '')], 'kind': 'alert'}
+                for a in col.analytics.alerts_between(start, end)]
+
+    app.include_router(make_router(sources, store, evaluator, system_annotations=board_annotations, check=board_check))
+    app.state.board = {'store': store, 'tsdb': tsdb, 'evaluator': evaluator}
+
+    def board_loop(stop):
+        store.ensure_default('internal')
+        n = 0
+        while not stop.wait(5 if n else 0):
+            try:
+                s = col.snapshot(60)
+                tsdb.ingest_text(V.render_metrics(s['links'], col.health(300), None,
+                                                  dict(collections.Counter((a['rule'], a['severity'], a['source']) for a in col.analytics.alerts_between(0, time.time())))))
+            except Exception as e:  # noqa: BLE001
+                col.errors['board'] = str(e)[:200]
+            if n % 3 == 0:
+                evaluator.sources = sources()
+                evaluator.evaluate()
+            n += 1
+
+    board_stop = threading.Event()
+    if start_collector:
+        threading.Thread(target=board_loop, args=(board_stop,), daemon=True).start()
+
+    @app.get('/nirvana-board.js')
+    def board_js():
+        from fastapi.responses import Response
+        return Response((WEB / 'nirvana_board.js').read_text(encoding='utf-8'), media_type='application/javascript; charset=utf-8')
 
     @app.get('/api/demo/status')
     def demo_status():

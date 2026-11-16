@@ -79,6 +79,13 @@ ZABBIX_TOKEN=xxxx docker compose up -d --build
   リポジトリの `iac/cisco-traffic-monitoring/snmp_exporter/snmp.yml`
 - ヴァルハラで発報中の警報を、警報の花に「VALHALLA」の花びらで出す(新しく出たものだけ)
 
+### BOARD / EXPLORE / ALERTS(Grafana が持つ機能)
+
+ダッシュボード(8種のパネル・変数・時間範囲・自動更新・注釈・編集)、問い合わせ(PromQL / LogQL / 内部ログ)、
+アラートルールと webhook 通知が使える。データソースは `sources.prometheus` / `sources.loki` と、collector が組み立てた
+リンク状態・状態ボードを貯める「NIRVANA 内部」。Grafana のダッシュボード JSON もそのまま取り込める。
+保存先は `nirvana_board.json`(`board.path` または `NIRVANA_BOARD_PATH` で変更)。詳細はリポジトリの `docs/nirvana-board.md`。
+
 ## ラボ版との違い
 
 - ラボ専用のもの(ping の経路の粒、ポートスキャン検知、経路の変化「情」、DEMO)は無い。DEMO ボタンは自動で隠れる。

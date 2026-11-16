@@ -497,3 +497,9 @@ NETWORK / ROUTER LINKS / OSPF のどのモードでも使える。
 - 選んだ BGM は記憶する。ブラウザは操作なしでは音を出せないので、次に開いた時は最初に画面を触った時に鳴り始める。
   `?bgm=jazz` / `?bgm=reggae` でも指定できる。
 
+## BOARD / EXPLORE / ALERTS(Grafana が持つ機能)(v18)
+
+ダッシュボード・問い合わせ・アラートルールを /cyber-view の見た目のまま使える。詳細とライブ確認は [nirvana-board.md](nirvana-board.md)。
+
+![BOARD](images/nirvana-board.png)
+

@@ -48,3 +48,5 @@ docs/reference/*.pdf
 # k6負荷試験の実行結果(--summary-export)。実行毎に生成される
 # ランタイム出力なのでgit管理しない(tools/k6_slb_load.js参照)。
 tools/k6_results/
+nirvana_board.json
+nirvana_board.json.tmp

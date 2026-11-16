@@ -2852,3 +2852,9 @@ CI(v14): `pytest.yml`/`regression.yml` は `claude/**` への push でも動く�
 スタンドアロン版は `cvs/valhalla_views.py`(snmp_exporter の生メトリクスから再生・予測・OSPF、`AlertImporter`)。
 `engine/valhalla.py` と `cyber-view-standalone/cvs/valhalla.py` は同一(テストで検出)。テストは `tests/test_valhalla_nirvana.py`。
 追加(v16): `/cyber-view` の BGM(`#zMusic`、なし/jazz/reggae/ambient、`localStorage cvBgm`・`?bgm=`、DEMO 以外でも鳴る。Web Audio 合成、`playJazz`/`playReggae`/`playAmbient`)。
+追加(v18): `/cyber-view` に Grafana 相当の **BOARD / EXPLORE / ALERTS**(`docs/nirvana-board.md`)。画面は `static/nirvana_board.js`(`GET /nirvana-board.js`、
+`window.__cvBridge` 経由で本体と連携、`body.board` で 3D を暗くして上にパネル)。本体は `engine/nirvana_board.py`(データソース internal/prometheus/loki、
+`InternalTSDB` が /metrics の値を5秒ごとに6時間分保持、小さな PromQL 評価器、`BoardStore`=`nirvana_board.json`/`NIRVANA_BOARD_PATH`、`AlertEvaluator`
+normal→pending→firing、webhook)と `engine/nirvana_board_api.py`(`/api/nirvana/*`、Grafana JSON の取り込み変換 `from_grafana`)。発報は
+`external_alert('nirvana_rule')`(花びら RULES)。スタンドアロン版は同じ2ファイルと js を `cvs/`・`web/` にコピー(ずれは `tests/test_nirvana_board.py` が検出)。
+

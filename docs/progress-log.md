@@ -3,6 +3,14 @@
 新しいものが上。各項目の「詳細」に、その時の検証記録(実際のコマンド・出力・画面)がある。
 commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 
+## 2026-11-16(深夜)— ニルヴァーナに Grafana の機能を
+
+| 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
+|---|---|---|---|
+| 13:10 | /cyber-view に **BOARD / EXPLORE / ALERTS**: ダッシュボード(8種のパネル・変数・時間範囲・自動更新・注釈・編集・取り込み/書き出し)、問い合わせ、アラートルールと webhook 通知。内部の時系列と PromQL の基本部分を自前で持ち、Prometheus が無くても動く | 3台 OSPF のリンク断でルールが発報 → 本物の webhook に firing/resolved が届き、警報の花に RULES の花びら。Grafana 用の `cisco-traffic.json` をそのまま取り込んで本物の Prometheus のデータで表示できた。3D が透けて読みにくい・スマホでパネルが重なる等を直した | [nirvana-board.md](nirvana-board.md) |
+| 12:25 | 当て字(爾琉婆亜那 / 刃流覇羅)を試したが、依頼で取り消し | — | — |
+| 12:15 | BGM(ジャズ / レゲエ / アンビエント)を DEMO 以外でも | — | [cyber-view-3d.md](cyber-view-3d.md) |
+
 ## 2026-11-16(夜)— ヴァルハラ × ニルヴァーナ
 
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |

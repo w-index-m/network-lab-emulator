@@ -126,6 +126,11 @@
   #ospfbar select { background: #061428; color: var(--ink); border: 1px solid var(--line); font: inherit; }
   #ospfbar .lg { margin-left: 10px; } #ospfbar .lg i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin: 0 4px 0 8px; }
   #ospfbar .areas b { margin-left: 8px; }
+  /* BOARD / EXPLORE / ALERTS: 3D は後ろで暗く動かし、その上にホログラムのパネルを並べる */
+  body.board #cv { filter: brightness(.3) saturate(1.2) blur(1.5px); }
+  body.board #crumbs, body.board #alerts, body.board #card, body.board #session, body.board #legend, body.board #filter,
+  body.board #linkbar, body.board #ospfbar, body.board #vhbar, body.board #empty, body.board #linkpanel, body.board #cidr,
+  body.board #zoom, body.board #bgToast, body.board #bgmToast { display: none !important; }
   /* 右脇の文字リストは既定で隠し、画面内の立体表示で見せる(LIST ボタンで出せる) */
   #alerts, #linkpanel { display: none !important; }
   body.showlist:not(.links) #alerts { display: block !important; }
@@ -167,7 +172,7 @@
 <div id="cidr" class="hud">0.0.0.0/0</div>
 <div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山)">◎</button><button id="zMusic" title="BGM を切り替え(なし/ジャズ/レゲエ/アンビエント)">♪</button></div><div id="bgmToast" class="hud"></div>
 <div id="bgToast" class="hud"></div>
-<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
+<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mBoard" title="ダッシュボード(パネル・変数・時間範囲・自動更新・注釈)">BOARD</button><button id="mExplore" title="問い合わせ(PromQL / LogQL / 内部の時系列とログ)">EXPLORE</button><button id="mAlerts" title="アラートルール・連絡先・履歴">ALERTS</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
 <div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
 <div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
   <option value="10">10秒</option><option value="60" selected>1分</option><option value="300">5分</option></select>
@@ -240,7 +245,7 @@
   let particles = [];
 
   const octets = (ip) => ip.split('.').map(Number);
-  const RULE_CODE = { valhalla: 'VH', conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR',
+  const RULE_CODE = { valhalla: 'VH', nirvana_rule: 'RULE', conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR',
     if_flap: 'IF FLAP', ospf_flap: 'OSPF FLAP', bgp_flap: 'BGP FLAP', eigrp_flap: 'EIGRP FLAP', fhrp_flap: 'FHRP FLAP',
     stp_tc_flap: 'STP TC', stp_root_flap: 'STP ROOT', mac_flap: 'MAC FLAP', errdisable_flap: 'ERRDIS', route_flap: 'RT FLAP' };
   const SEV_COL = { high: '#ff3b4e', medium: '#ffab2e', warning: '#ffab2e', low: '#ffe14d' };
@@ -702,9 +707,10 @@
     SYSLOG: { label: 'SYSLOG', sub: 'ログ', col: '#3a4450' },
     NET: { label: 'NET', sub: 'リンク監視', col: '#d98a00' },
     VALHALLA: { label: 'VALHALLA', sub: 'ヴァルハラの警報', col: '#6b3fd0' },
+    RULE: { label: 'RULES', sub: 'ボードのアラートルール', col: '#0f8f7a' },
   };
   const SOURCE_OF = { conn_scan: 'IDS', scan: 'IDS', unreach_burst: 'IDS', flood: 'IDS', large_icmp: 'IDS',
-    fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET', route_flap: 'NET', valhalla: 'VALHALLA' };
+    fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET', route_flap: 'NET', valhalla: 'VALHALLA', nirvana_rule: 'RULE' };
   function drawIcon(src, x, y, s) {
     const c = SOURCES[src].col;
     ctx.save(); ctx.strokeStyle = c; ctx.fillStyle = c; ctx.lineWidth = Math.max(1.2, s * 0.09);
@@ -726,6 +732,11 @@
       ctx.beginPath(); ctx.moveTo(x0 - s * 0.05, y0); ctx.lineTo(x, y0 - s * 0.32); ctx.lineTo(x0 + w + s * 0.05, y0); ctx.closePath(); ctx.fill();
       for (let k = 0; k < 4; k++) { const bx = x0 + w * (0.12 + k * 0.25); ctx.fillRect(bx - s * 0.04, y0 + s * 0.04, s * 0.08, h * 0.72); }
       ctx.fillRect(x0 - s * 0.05, y0 + h * 0.8, w + s * 0.1, s * 0.08);
+    } else if (src === 'RULE') {             // 計器(ボードのルール)
+      ctx.lineWidth = Math.max(1, s * 0.08);
+      ctx.beginPath(); ctx.arc(x, y - s * 0.05, s * 0.4, Math.PI * 1.05, Math.PI * 1.95); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, y - s * 0.05); ctx.lineTo(x + s * 0.26, y - s * 0.33); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y - s * 0.05, s * 0.07, 0, Math.PI * 2); ctx.fill();
     } else if (src === 'SYSLOG') {           // ログの書類
       const w = s * 0.6, h = s * 0.72, x0 = x - w / 2, y0 = y - h * 0.85;
       ctx.lineWidth = Math.max(1, s * 0.06); ctx.strokeRect(x0, y0, w, h);
@@ -1711,7 +1722,21 @@
       }
     }
   }
+  // BOARD / EXPLORE / ALERTS(Grafana が持つ機能。本体は nirvana-board.js)。3D はそのまま後ろで動かす
+  const BOARD_MODES = ['board', 'explore', 'alerts'];
+  let boardView = null;
+  function setBoardView(m) {
+    boardView = m;
+    document.body.classList.toggle('board', !!m);
+    for (const [id, v] of [['mBoard', 'board'], ['mExplore', 'explore'], ['mAlerts', 'alerts']]) document.getElementById(id).classList.toggle('on', m === v);
+    for (const [id, v] of [['mNet', 'net'], ['mLink', 'link'], ['mOspf', 'ospf']]) document.getElementById(id).classList.toggle('on', !m && mode === v);
+    if (m) { if (window.NirvanaBoard) window.NirvanaBoard.show(m); }
+    else if (window.NirvanaBoard) window.NirvanaBoard.hide();
+  }
+  window.__cvBridge = { token: () => token, setView: (m) => (BOARD_MODES.includes(m) ? setBoardView(m) : setMode(m)) };
   function setMode(m) {
+    if (BOARD_MODES.includes(m)) { setBoardView(m); return; }
+    if (boardView) setBoardView(null);
     if (m !== 'link' && vh.active) { document.body.classList.remove('vhopen'); vh.active = false; document.body.classList.remove('replaying'); }
     mode = m;
     document.getElementById('mNet').classList.toggle('on', m === 'net');
@@ -1728,6 +1753,9 @@
   document.getElementById('mNet').onclick = () => setMode('net');
   document.getElementById('mLink').onclick = () => setMode('link');
   document.getElementById('mOspf').onclick = () => setMode('ospf');
+  document.getElementById('mBoard').onclick = () => setMode('board');
+  document.getElementById('mExplore').onclick = () => setMode('explore');
+  document.getElementById('mAlerts').onclick = () => setMode('alerts');
   document.getElementById('mList').onclick = (e) => { document.body.classList.toggle('showlist'); e.target.classList.toggle('on'); };
 
   // ── メインループ ─────────────────────────────
@@ -2190,7 +2218,7 @@
     return k ? { x: k.poly.reduce((a, c) => a + c.x, 0) / 4, y: k.poly.reduce((a, c) => a + c.y, 0) / 4 } : null;
   };
 
-  pollHosts().then(pollFlows).then(() => { if (new URLSearchParams(location.search).get('view') === 'links') setMode('link'); if (new URLSearchParams(location.search).get('view') === 'ospf') setMode('ospf'); });
+  pollHosts().then(pollFlows).then(() => { if (new URLSearchParams(location.search).get('view') === 'links') setMode('link'); if (new URLSearchParams(location.search).get('view') === 'ospf') setMode('ospf'); if (BOARD_MODES.includes(new URLSearchParams(location.search).get('view'))) setMode(new URLSearchParams(location.search).get('view')); });
   setInterval(pollFlows, 2000);
   setInterval(pollHosts, 5000);
   pollHealth(); setInterval(pollHealth, 10000);
@@ -2465,5 +2493,7 @@
   requestAnimationFrame(frame);
 })();
 </script>
+<div id="nb"></div>
+<script src="nirvana-board.js"></script>
 </body>
 </html>
