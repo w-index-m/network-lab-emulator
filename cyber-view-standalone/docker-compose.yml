@@ -10,5 +10,8 @@ services:
     environment:
       - ZABBIX_TOKEN=${ZABBIX_TOKEN:-}
       - CYBER_VIEW_TOKEN=${CYBER_VIEW_TOKEN:-}
+      # BOARD のダッシュボード・アラートルール・注釈の保存先(作り直しても消えないようホスト側の ./data に置く)
+      - NIRVANA_BOARD_PATH=/data/nirvana_board.json
     volumes:
       - ./config.yaml:/config/config.yaml:ro
+      - ./data:/data

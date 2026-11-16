@@ -1,0 +1,5 @@
+# 現場ごとの設定(コミュニティ名・トークン等)と保存データはコミットしない
+config.yaml
+data/
+nirvana_board.json
+nirvana_board.json.tmp
