@@ -1,4 +1,8 @@
-# Cyber View スタンドアロン版
+# Cyber View スタンドアロン版 / Cyber View Standalone
+
+> 🇯🇵 日本語はこのすぐ下 / 🇬🇧 English is at the [end of this page](#english)
+
+![スタンドアロン版 + Prometheus / Loki](../docs/images/standalone-prom-loki-fault.png)
 
 network-lab-emulator の `/cyber-view`(NIRVANA 改風の 3D 監視画面)を、**実機の監視環境**で使うための単体版。
 エミュレータには依存せず、既にある監視基盤からデータを読む。
@@ -116,3 +120,89 @@ CPU が高い状態が続くと「注」(警告)。しきい値は `sources.snmp
   (`tests/test_cyber_view_standalone.py` がずれを検出する)。
 
 動作確認の記録(本物の Prometheus・snmp_exporter・Loki・Zabbix 7.0 で試した結果と画面): `../docs/cyber-view-standalone.md`
+
+---
+
+## English
+
+A standalone edition of network-lab-emulator's `/cyber-view` (the NIRVANA-Kai-style 3D monitoring view, called "Nirvana")
+for **real networks**. It does not depend on the emulator; it reads from the monitoring you already have.
+On screen, Prometheus is labelled **VALHALLA** (display name only; config keys such as `sources.prometheus` keep the real name).
+
+| Source | What it reads | Used for |
+|---|---|---|
+| Prometheus + snmp_exporter | `rate(ifHCIn/OutOctets)`, `ifOperStatus`, `up` | link traffic and flow animation, LINK DOWN evidence "POLL", "NO RESPONSE" |
+| Loki (syslog) | log lines | logs floating above devices, LINK DOWN evidence "SYSLOG", alerts for error and above, flap notices |
+| Zabbix (API) | `Interface …: Bits received / Bits sent / Operational status`, open problems, host reachability | traffic (when there is no Prometheus), "POLL", Zabbix problems as alerts |
+| SNMP (direct, optional) | route table (IP-FORWARD-MIB), CPU (CISCO-PROCESS-MIB) | route add/delete/change and CPU jump/recovery as "info", sustained high CPU as "notice" |
+| SNMP trap (optional) | linkDown / linkUp | LINK DOWN evidence "TRAP" |
+
+Devices and links (the topology) are written by hand in the config file.
+How to register a real Catalyst (device-side SNMP/syslog settings and checks): `docs/real-catalyst-registration.md` in the repository.
+
+### Requirements
+
+- Python 3.9+ (`pip install -r requirements.txt`: FastAPI / uvicorn / PyYAML only), or docker
+- HTTP reachability to your monitoring (Prometheus 9090 / Loki 3100 / Zabbix frontend); UDP/161 to devices if you use `sources.snmp`
+
+### Usage
+
+```bash
+cd cyber-view-standalone
+cp config.example.yaml config.yaml     # edit devices, links and sources for your network
+pip install -r requirements.txt
+ZABBIX_TOKEN=xxxx python3 server.py -c config.yaml --port 8090
+# → open http://<this host>:8090/
+```
+
+With docker:
+
+```bash
+cp config.example.yaml config.yaml
+ZABBIX_TOKEN=xxxx docker compose up -d --build
+```
+
+If your proxy uses a private CA, put its certificate (`.crt`) in `extra-ca/` before building.
+
+### Config file
+
+Every key is explained in `config.example.yaml`. In short:
+
+- **devices**: `id` (name used on screen), `hostname` (display name; also matched against syslog text and Zabbix host names),
+  `type` (`cisco` / `catalyst` / `nexus` / `sir` / `srs` …, selects the log format for flap detection),
+  `mgmt_ip` (Prometheus instance / syslog source / SNMP target), `interfaces` (placed in the IP address space view;
+  `name` uses the ifName spelling, `GigabitEthernet0/0/0` and `Gi0/0/0` are treated as the same)
+- **links**: `a` / `a_if` / `b` / `b_if`, `speed` (bps, the denominator of utilization)
+- **sources**: only the ones you use. Pass tokens through environment variables, e.g. `${ZABBIX_TOKEN}`
+- **sources.snmp**: `community`, `interval`, `full_every`, `cpu: {high: 80, jump: 20, hold: 2}` (thresholds are adjustable)
+- **auth.token** (optional): when set, open the page as `http://host:8090/?token=...`
+
+### What is saved (when updating with `git pull`)
+
+| Item | Saved | Where |
+|---|---|---|
+| Devices, links and sources | yes (your own file) | `config.yaml` (git-ignored, never overwritten by `git pull`) |
+| BOARD dashboards, alert rules, contact points, annotations, rule state history | yes | `nirvana_board.json` (`./data/` with docker) |
+| Raw SNMP values / snmpwalk results | no | only the previous value is kept in memory to compute the diff |
+| Info events, alerts, logs, traffic history | no | memory only (the last 2000 info events), lost on restart |
+| BOARD internal data source time series | no | 6 hours in memory |
+
+Long-term history lives in Prometheus (VALHALLA), Loki or Zabbix; this view only reads it.
+The first SNMP poll after a restart only takes a baseline, so it produces no info events.
+
+### More features
+
+- **VALHALLA (Prometheus)**: replay past states in 3D from `rate(ifHC*Octets)` / `ifOperStatus` history, utilization forecast,
+  OSPF adjacencies from OSPF-MIB, and VALHALLA's firing alerts as "VALHALLA" petals (`docs/valhalla-nirvana.md`).
+- **BOARD / EXPLORE / ALERTS**: Grafana-like dashboards (8 panel types, variables, time range, auto refresh, annotations),
+  queries (PromQL / LogQL / internal logs), alert rules with webhooks; Grafana dashboard JSON can be imported (`docs/nirvana-board.md`).
+
+### Differences from the lab edition
+
+- Lab-only features (ping particles, port-scan detection, DEMO) are not available. The DEMO button hides itself.
+  Route-change info appears only when `sources.snmp` is configured.
+- There is no "STATE" evidence (the emulator's internal interface state).
+- The page (`web/cyber_view.html`) and detection rules (`cvs/flap_rules.py`, `cvs/link_evidence.py`, `cvs/route_watch.py`, …)
+  are the same files as the lab edition; `tests/test_cyber_view_standalone.py` and friends detect drift.
+
+Verification records (tested against real Prometheus, snmp_exporter, Loki and Zabbix 7.0, with screenshots): `../docs/cyber-view-standalone.md`

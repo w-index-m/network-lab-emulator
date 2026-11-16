@@ -24,6 +24,7 @@
 - SNMP / Syslog / Prometheus / Grafana / Loki / Alertmanager 連携を含む運用監視の検証
 - Strix(AIペンテストエージェント)・ZGrab2・k6などセキュリティ/負荷試験ツールとの連携
 - 実機連携用のツール群（netmiko / Ansible / ncclient / pygnmi 等）
+- **モックニルヴァーナ(`/cyber-view`)**: ネットワークを 3D で見る監視画面(NIRVANA改 風)。実機の監視環境向けのスタンドアロン版あり → [下の節](#モックニルヴァーナ--cyber-viewcyber-view)
 
 ---
 
@@ -85,6 +86,104 @@ Hostname Capability・Graceful Restart/LLGR・RPKIにも対応。IPv6アドレ�
 - 実機連携
   - netmiko / paramiko を使った実機設定投入
   - route_injector / qkview / UCS 収集ツール
+
+---
+
+## モックニルヴァーナ / Cyber View(`/cyber-view`)
+
+> 🇯🇵 日本語 / 🇬🇧 English below
+
+![ネットワーク全体(IP アドレス空間)](docs/images/cyber-view-v3-ok_24.png)
+
+### 日本語
+
+NICT の NIRVANA改 を参考に作った、ネットワークを 3D で見る画面です。アプリ内では「ニルヴァーナ」と呼んでいます。
+名前・ロゴは独自のもので、実在の製品のマークは使っていません。Prometheus は画面の上では「ヴァルハラ / VALHALLA」と表示します。
+
+使い方は2通りあります。
+
+- **ラボ版**: `python app.py` を起動して `http://localhost:8000/cyber-view` を開くと、エミュレータ内の装置がそのまま映ります。
+- **スタンドアロン版(実機向け)**: `cyber-view-standalone/` を使います。既存の Prometheus(snmp_exporter)・Loki・Zabbix と、SNMP の直接取得から読み込みます。
+  実機の Catalyst を登録する手順は [docs/real-catalyst-registration.md](docs/real-catalyst-registration.md) にあります。
+
+| 画面 | できること |
+|---|---|
+| NETWORK | IP アドレス空間を /0 → /8 → /16 → /24 → 装置(/32)とクリックで掘り下げる。通信は三角形の粒、警報は六角形の「警」と検知元ごとの花びら(IDS / FW / SYSLOG / NET / VALHALLA / RULES) |
+| ROUTER LINKS | リンクごとの流量・使用率・LINK DOWN。断の検知経路(STATE / SYSLOG / TRAP / POLL)をチップで表示。SNMP が応答しない装置は「NO RESPONSE 消失」 |
+| OSPF | 隣接の状態と Dead タイマーの残り、エリア、宛先までの最短経路ツリー、SPF の再計算 |
+| SYSTEM STATUS | ネットワーク / トラフィック / セキュリティ / syslog の4観点で 正常・注意・異常 |
+| 情 / 注 | 経路の追加・削除・変更、CPU の急上昇・回復は「情」。CPU の高負荷が続く・フラップは「注」(しきい値は設定で変更可) |
+| BOARD / EXPLORE / ALERTS | Grafana 相当の機能。ダッシュボード、PromQL / LogQL の問い合わせ、アラートルールと webhook。Grafana の JSON もそのまま取り込める |
+| ヴァルハラ連携 | Prometheus の履歴から過去を 3D で再生、使用率の予測、Prometheus の警報を花びらで表示。ニルヴァーナの判定も `/metrics` で Prometheus に渡す |
+| 見た目 | 背景は 標準 / 金魚鉢 / 富士山、BGM は ジャズ / レゲエ / アンビエント、DEMO(自動シナリオ+音楽) |
+
+保存されるもの: 設定ファイル(`config.yaml`)と BOARD で作ったもの(`nirvana_board.json`)だけです。
+SNMP で取った値・情・警報・ログはメモリだけに置き、長く残す履歴は Prometheus / Loki / Zabbix 側に任せます。
+
+### English
+
+A 3D network view inspired by NICT's NIRVANA-Kai, called "Nirvana" in this app. The name and logo are original, and no
+real product marks are used. On screen, Prometheus is labelled "VALHALLA".
+
+There are two ways to use it:
+
+- **Lab edition**: run `python app.py` and open `http://localhost:8000/cyber-view`. The devices inside the emulator appear as they are.
+- **Standalone edition (for real devices)**: use `cyber-view-standalone/`. It reads from your existing Prometheus (snmp_exporter),
+  Loki and Zabbix, and can also poll devices directly over SNMP.
+  How to register a real Catalyst: [docs/real-catalyst-registration.md](docs/real-catalyst-registration.md).
+
+| View | What it does |
+|---|---|
+| NETWORK | Drill down the IP address space /0 → /8 → /16 → /24 → host (/32) by clicking. Traffic flows as triangle particles. Alerts appear as a hexagon "警" with one petal per detection source (IDS / FW / SYSLOG / NET / VALHALLA / RULES) |
+| ROUTER LINKS | Per-link traffic, utilization and LINK DOWN. Chips show which evidence saw the outage (STATE / SYSLOG / TRAP / POLL). Devices that stop answering SNMP show "NO RESPONSE" |
+| OSPF | Adjacency state with the remaining Dead timer, areas, the shortest-path tree to a destination, and SPF recalculations |
+| SYSTEM STATUS | Normal / warning / critical for four areas: network, traffic, security and syslog |
+| 情 (info) / 注 (notice) | Route add/delete/change and CPU jump/recovery appear as "info". Sustained high CPU and flapping appear as "notice". Thresholds are configurable |
+| BOARD / EXPLORE / ALERTS | Grafana-like features: dashboards, PromQL / LogQL queries, alert rules with webhooks. Grafana dashboard JSON can be imported as is |
+| VALHALLA integration | Replay past states in 3D from Prometheus history, forecast utilization, and show Prometheus alerts as petals. Nirvana's own judgements are exported to Prometheus at `/metrics` |
+| Look and feel | Backgrounds: standard / goldfish bowl / Mt. Fuji. BGM: jazz / reggae / ambient. DEMO mode (scripted scenario with music) |
+
+What is saved: only the config file (`config.yaml`) and what you build in BOARD (`nirvana_board.json`). SNMP values, info
+events, alerts and logs stay in memory; long-term history is left to Prometheus / Loki / Zabbix.
+
+### 動画 / Videos
+
+| DEMO(自動シナリオ / scripted scenario) | 流れのアニメと MAC フラップ / flow animation and a MAC flap |
+|---|---|
+| [![DEMO](docs/videos/cyber-view-demo.gif)](docs/videos/cyber-view-demo.mp4) | [![flow](docs/videos/cyber-view-flow-macflap.gif)](docs/videos/cyber-view-flow-macflap.mp4) |
+
+- [DEMO(音楽つき / with music, 1分40秒)](docs/videos/cyber-view-demo-music.mp4)
+- GIF をクリックすると mp4 が開きます / Click a GIF to open the mp4.
+
+### 画像 / Screenshots
+
+| | |
+|---|---|
+| ROUTER LINKS(正常 / normal)<br>![](docs/images/cyber-view-v3-ok_links.png) | LINK DOWN と4つの検知経路 / LINK DOWN with four evidence sources<br>![](docs/images/cyber-view-v4-linkdown-4sources.png) |
+| OSPF(隣接と最短経路 / adjacencies and SPF tree)<br>![](docs/images/cyber-view-ospf-normal.png) | OSPF の Dead タイマーのカウントダウン / Dead timer countdown<br>![](docs/images/cyber-view-ospf-deadcount.png) |
+| ポートスキャンの検知 / port scan detected<br>![](docs/images/cyber-view-v6-portscan.png) | SSH 総当たりとログインのブロック / SSH brute force and login block<br>![](docs/images/cyber-view-v7-ssh-brute.png) |
+| 経路の変化「情」/ route change info<br>![](docs/images/cyber-view-v8-route-info.png) | CPU の「情」/ CPU info<br>![](docs/images/cyber-view-cpu-info.png) |
+| フラップの警告 / flap notice<br>![](docs/images/cyber-view-v8-flap.png) | SNMP 応答なし / no SNMP response<br>![](docs/images/cyber-view-v5-no-response.png) |
+| ヴァルハラから再生 / replay from VALHALLA<br>![](docs/images/cyber-view-valhalla-replay.png) | 使用率の予測 / utilization forecast<br>![](docs/images/cyber-view-valhalla-forecast.png) |
+| BOARD(Grafana 相当 / Grafana-like)<br>![](docs/images/nirvana-board.png) | Grafana JSON の取り込み / Grafana JSON import<br>![](docs/images/nirvana-board-grafana-import.png) |
+| EXPLORE<br>![](docs/images/nirvana-explore.png) | ALERTS<br>![](docs/images/nirvana-alerts.png) |
+| 背景: 金魚鉢 / goldfish bowl<br>![](docs/images/cyber-view-bg-goldfish-ospf.png) | 背景: 富士山 / Mt. Fuji<br>![](docs/images/cyber-view-bg-fuji-ospf.png) |
+| スタンドアロン版 + Prometheus / Loki<br>![](docs/images/standalone-prom-loki-fault.png) | スタンドアロン版 + Zabbix<br>![](docs/images/standalone-zabbix-fault.png) |
+| スマホ / phone<br>![](docs/images/cyber-view-ospf-phone.png) | 装置ごとの表示 / host view<br>![](docs/images/cyber-view-host.png) |
+
+### 詳しい資料 / Documents
+
+| 内容 / Topic | 資料 / Document |
+|---|---|
+| 3D 画面の作り / 3D view | [docs/cyber-view-3d.md](docs/cyber-view-3d.md) |
+| 2D の流れ表示・侵害検知・再現 / 2D flow, detection, replay | [docs/traffic-flow-visualization.md](docs/traffic-flow-visualization.md) |
+| スタンドアロン版 / standalone edition | [cyber-view-standalone/README.md](cyber-view-standalone/README.md)、[docs/cyber-view-standalone.md](docs/cyber-view-standalone.md) |
+| 実機の Catalyst を登録 / registering a real Catalyst | [docs/real-catalyst-registration.md](docs/real-catalyst-registration.md) |
+| ヴァルハラ連携 / VALHALLA integration | [docs/valhalla-nirvana.md](docs/valhalla-nirvana.md) |
+| BOARD / EXPLORE / ALERTS | [docs/nirvana-board.md](docs/nirvana-board.md) |
+| 経路と CPU の情・注 / route and CPU info | [docs/snmp-route-cpu-info.md](docs/snmp-route-cpu-info.md) |
+| 機種 × プロトコルの試験 / vendor × protocol tests | [docs/vendor-protocol-matrix-cyber-view.md](docs/vendor-protocol-matrix-cyber-view.md)、[docs/verification/README.md](docs/verification/README.md) |
+| 作業記録 / progress log | [docs/progress-log.md](docs/progress-log.md) |
 
 ---
 
