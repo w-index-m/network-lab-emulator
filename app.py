@@ -4116,11 +4116,14 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     sir_bgp_nbr = re.match(r'^bgp\s+neighbor\s+\d+\s+(?:address\s+)?(\S+)\s+remote-as\s+(\d+)', c)
     if sir_bgp_nbr and getattr(state, '_routing_mode', '') == 'bgp':
         remote_as = int(sir_bgp_nbr.group(2))
-        peer_id = find_peer_by_link(device_id)
+        neighbor_ip = sir_bgp_nbr.group(1)
+        # 指定 IP を持つ隣接装置をピアにする(以前は常に「最初の隣接」を選んでいたため、
+        # 隣接が2台ある装置で2本目のネイバーが1本目の装置に付き、AS も食い違っていた)
+        peer_id = _find_peer_by_ip(device_id, neighbor_ip) or find_peer_by_link(device_id)
         if peer_id:
             peer_state = device_sessions.get(peer_id)
             peer_hostname = peer_state.hostname if peer_state else peer_id
-            await bgp_engine.add_neighbor(device_id, peer_id, peer_hostname, remote_as)
+            await bgp_engine.add_neighbor(device_id, peer_id, peer_hostname, remote_as, neighbor_ip)
         return
     # "neighbor 10.1.0.2 remote-as 65002" (Cisco IOS形式)
     bgp_nbr = re.match(r'^neighbor\s+([\d.]+)\s+remote-as\s+(\d+)', c)

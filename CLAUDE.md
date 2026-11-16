@@ -2810,4 +2810,11 @@ SSH/Telnetの実accept数、30秒10回)。実nmap(-sT -sV / ssh-brute)でライ�
 `GET /api/traffic/flap-rules`、severity `warning`、syslog 観点は「注意・フラップ N件」、route_watch の
 繰り返しは `route_flap`)、視点操作(待機中の自動回転+揺れ、右ドラッグ平行移動、ピンチ、ダブルクリック
 リセット、右側の ＋/－/⌂/⟳ ボタン)。テストは `tests/test_route_watch.py` / `tests/test_flap_rules.py`。
+追加(v9): Catalyst/SR-S/Si-R × STP/RIP/OSPF/BGP の正常・障害・復旧・フラップで /cyber-view の API が反応するかの
+マトリクス検証(`tools/verification/vendor_protocol_matrix.py`、結果と各状況の出力は
+`docs/vendor-protocol-matrix-cyber-view.md`、144項目すべてOK)。途中で直した実バグ: STP が有効化後に張った
+リンクを参加させない/STP 有効でもループ作成時に MAC フラップを出す/Blocking ログが約2秒ごとに繰り返す
+(engine/protocols.py StpEngine・VirtualNetwork)、Si-R の `bgp neighbor N address <ip>` が IP を無視して
+最初の隣接をピアにする(app.py)。ROUTER LINKS は連結成分ごとの輪を格子状に並べる配置に変更。
+Si-R の ether use off で lan を落とすには `ether G P vlan untag V` + `lan N vlan V` の対応付けが必要(実機仕様)。
 

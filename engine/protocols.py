@@ -142,6 +142,15 @@ class VirtualNetwork:
     def _notify_loop_events(self, a, b, iface_a, iface_b, loop_path):
         """ループ検出時: MACフラップ + ブロードキャストストームを擬似再現"""
         loop_nodes = set(loop_path) | {a, b}
+        # ループ上のスイッチが全部 STP を動かしていれば、実機は冗長リンクを Blocking にして
+        # ループにならない(MAC フラップもストームも起きない)
+        switches = [d for d in loop_nodes if self.device_types.get(d, '') in self._SWITCH_TYPES]
+        try:
+            stp_on = bool(switches) and all((stp_engine.nodes.get(d) or {}).get('enabled') for d in switches)
+        except NameError:
+            stp_on = False
+        if stp_on:
+            return
         _spawn(self._notify_mac_flap(a, b, iface_a, iface_b, loop_path))
         _spawn(self._notify_broadcast_storm(loop_nodes))
 
@@ -3555,12 +3564,23 @@ class StpEngine:
         real = vnet.interface_links.get(device_id, {}).get(peer_id)
         return real or fallback
 
+    @staticmethod
+    def _link_down(device_id: str, peer_id: str) -> bool:
+        for d, p in ((device_id, peer_id), (peer_id, device_id)):
+            iface = vnet.interface_links.get(d, {}).get(p)
+            if iface and vnet._norm_iface(iface) in {vnet._norm_iface(x) for x in vnet.down_interfaces.get(d, set())}:
+                return True
+        return False
+
     def _init_ports(self, device_id: str):
         n = self.nodes.get(device_id)
         if not n:
             return
-        # 接続済みの隣接ノードからポートを生成
+        # 接続済みの隣接ノードからポートを生成(shutdown 等で落ちているリンクは除く。
+        # 落ちたリンクは port_down がポートを消し、復旧時は port_up が作り直す)
         for i, peer_id in enumerate(vnet.get_neighbors(device_id), 1):
+            if self._link_down(device_id, peer_id):
+                continue
             port_name = self._port_name_for_peer(device_id, peer_id, f'ether {i}')
             if port_name not in n['ports']:
                 n['ports'][port_name] = {
@@ -3598,6 +3618,7 @@ class StpEngine:
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
             return
+        self._init_ports(device_id)          # 後から張られたリンクもポートにする
         pkt = {
             'type': 'stp_bpdu', 'src_id': device_id,
             'src_hostname': n['hostname'], 'mode': n['mode'],
@@ -3619,11 +3640,18 @@ class StpEngine:
         sender_bid = msg.get('bridge_id')
 
         # このポート（src_idに繋がるポート）で受信したBPDUを記録
-        port = None
-        for p in receiver['ports'].values():
-            if p['connected_to'] == src_id:
-                port = p
-                break
+        def _find_port():
+            for p in receiver['ports'].values():
+                if p['connected_to'] == src_id:
+                    return p
+            return None
+        port = _find_port()
+        if port is None and src_id in vnet.get_neighbors(receiver_id):
+            # STP 起動後に張られたリンク。実機はリンクアップした時点で STP ポートになるので、
+            # ここでポートを作って BPDU を受け付ける(以前は捨てていたため、後から足した
+            # リンクがいつまでも STP に参加せず、三角形でも Blocking が出なかった)
+            self._init_ports(receiver_id)
+            port = _find_port()
         if port is None:
             return
 
@@ -3742,6 +3770,7 @@ class StpEngine:
         n = self.nodes.get(device_id)
         if not n:
             return
+        prev_roles = {name: p.get('role') for name, p in n['ports'].items()}
 
         is_root_bridge = (n['root_bridge_id'] == n['bridge_id'])
 
@@ -3810,9 +3839,10 @@ class StpEngine:
                 port['role'] = 'DESIGNATED'
                 port['state'] = 'FORWARDING'
 
-        # ブロッキングポートがあればログ
-        for port in n['ports'].values():
-            if port['role'] == 'ALTERNATE':
+        # 新たにブロッキングになったポートだけログ(実機は状態が変わったときに1回出す。
+        # 以前は BPDU を受けるたびに再計算して毎回出していたため、約2秒ごとに同じログが並んでいた)
+        for name, port in n['ports'].items():
+            if port['role'] == 'ALTERNATE' and prev_roles.get(name) != 'ALTERNATE':
                 _spawn(vnet.send_to(device_id, {
                     'type': 'stp_log',
                     'message': f'%SPANTREE-6-PORTDPVSTP: Port {port["name"]} instance 0 '

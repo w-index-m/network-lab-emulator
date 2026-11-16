@@ -884,20 +884,41 @@
   const fmtBps = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + ' Gbps' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' Mbps'
     : b >= 1e3 ? (b / 1e3).toFixed(1) + ' kbps' : Math.round(b) + ' bps';
   const lkey = (l) => l.a + '|' + l.b;
+  let layoutKey = '';
   function layoutRouters(links) {
-    // リンクで繋がった順(BFS)に円周へ並べる
+    // つながっている装置どうし(連結成分)ごとに小さな輪にして、それを格子状に並べる。
+    // 1つの大きな輪に全部並べると、台数が多いときに装置やプレートが重なって読めなくなる
     const adj = {};
     links.forEach(l => { (adj[l.a] = adj[l.a] || []).push(l.b); (adj[l.b] = adj[l.b] || []).push(l.a); });
-    const ids = Object.keys(adj).sort(), order = [], seen = new Set();
+    const ids = Object.keys(adj).sort(), seen = new Set(), comps = [];
     for (const st of ids) {
       if (seen.has(st)) continue;
-      const q = [st]; seen.add(st);
+      const order = [], q = [st]; seen.add(st);
       while (q.length) { const v = q.shift(); order.push(v); for (const w of (adj[v] || []).sort()) if (!seen.has(w)) { seen.add(w); q.push(w); } }
+      comps.push(order);
     }
-    const R = Math.max(9, Math.min(13, order.length * 2.2));
     linkPos = {};
-    order.forEach((id, i) => { const a = i / order.length * Math.PI * 2 - Math.PI / 2; linkPos[id] = [Math.cos(a) * R, 0, Math.sin(a) * R]; });
-    if (order.length === 1) linkPos[order[0]] = [0, 0, 0];
+    if (comps.length <= 1) {
+      const order = comps[0] || [];
+      const R = Math.max(9, Math.min(13, order.length * 2.2));
+      order.forEach((id, i) => { const a = i / order.length * Math.PI * 2 - Math.PI / 2; linkPos[id] = [Math.cos(a) * R, 0, Math.sin(a) * R]; });
+      if (order.length === 1) linkPos[order[0]] = [0, 0, 0];
+    } else {
+      const radius = (n) => n <= 1 ? 0 : Math.max(3.2, n * 1.25);
+      const cell = Math.max(...comps.map(c => radius(c.length))) * 2 + 7;
+      const cols = Math.ceil(Math.sqrt(comps.length)), rows = Math.ceil(comps.length / cols);
+      comps.forEach((order, k) => {
+        const cx = (k % cols - (cols - 1) / 2) * cell, cz = (Math.floor(k / cols) - (rows - 1) / 2) * cell, R = radius(order.length);
+        order.forEach((id, i) => { const a = i / order.length * Math.PI * 2 - Math.PI / 2; linkPos[id] = [cx + Math.cos(a) * R, 0, cz + Math.sin(a) * R]; });
+      });
+    }
+    // 配置が変わったら全体が入るようにカメラを引く
+    const key = comps.map(c => c.length).join(',');
+    if (key !== layoutKey) {
+      layoutKey = key;
+      const ext = Math.max(9, ...Object.values(linkPos).map(p => Math.hypot(p[0], p[2])));
+      if (mode === 'link') { cam.px = 0; cam.pz = 0; cam.tdist = Math.max(36, ext * 2.6); }
+    }
   }
   async function pollLinks() {
     const w = +document.getElementById('lInt').value;
@@ -1289,7 +1310,7 @@
     document.getElementById('mLink').classList.toggle('on', m === 'link');
     document.body.classList.toggle('links', m === 'link');
     particles = [];
-    if (m === 'link') { cam.tdist = 36; cam.pitch = 0.8; document.getElementById('cidr').textContent = 'ROUTER LINKS'; pollLinks(); }
+    if (m === 'link') { layoutKey = ''; cam.tdist = 36; cam.pitch = 0.8; document.getElementById('cidr').textContent = 'ROUTER LINKS'; pollLinks(); }
     else update();
     try { history.replaceState(null, '', m === 'link' ? '?view=links' : location.pathname); } catch (e) { /* 無くても動く */ }
   }
@@ -1337,6 +1358,7 @@
     lastInput = performance.now();
     cam.yaw = -0.55; cam.pitch = mode === 'link' ? 0.8 : 0.72; cam.px = 0; cam.pz = 0;
     cam.tdist = mode === 'link' ? 36 : hostView ? 26 : viewDist();
+    if (mode === 'link' && linkData) { layoutKey = ''; layoutRouters(linkData.links); }
   }
   window.__cvCam = () => ({ ...cam, autoSpin });
   cv.addEventListener('contextmenu', (e) => e.preventDefault());
