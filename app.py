@@ -10123,7 +10123,7 @@ def _valhalla_import_alerts(alerts, now=None):
         detail = a['annotations'].get('summary') or a['annotations'].get('description') or a['name']
         rec = _flow_recorder.external_alert('valhalla', fp, dev, peer, f"{a['name']}: {detail}"[:200], now=now,
                                             severity=sev_map.get(str(a['severity']).lower(), 'medium'),
-                                            name=f"ヴァルハラ: {a['name']}")
+                                            name=f"刃流覇羅: {a['name']}")
         if rec:
             out.append(rec)
     for fp in list(_valhalla_seen):

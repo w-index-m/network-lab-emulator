@@ -151,7 +151,7 @@ def test_prometheus_and_loki(fake):
     assert h['network']['state'] == 'crit' and 'リンク断 1本' in h['network']['summary']
     assert h['syslog']['state'] == 'crit' and 'フラップ' in h['syslog']['summary']
     # 画面上の呼び名: Prometheus は「ヴァルハラ」(API の source 値は prometheus のまま)
-    assert '取得元 ヴァルハラ' in h['traffic']['summary']
+    assert '取得元 刃流覇羅' in h['traffic']['summary']
     logs = c.get('/api/traffic/logs?since=0&limit=10').json()
     assert logs['source'] == 'loki' and logs['logs'][-1]['host'] == 'R2'
     hosts = c.get('/api/traffic/hosts').json()['hosts']
@@ -212,4 +212,6 @@ def test_auth_token(fake):
 
 def test_prometheus_is_displayed_as_valhalla():
     html = open(os.path.join(ROOT, 'static', 'cyber_view.html'), encoding='utf-8').read()
-    assert "SRC_DISPLAY = { prometheus: 'VALHALLA'" in html and 'ヴァルハラ 不達' in html
+    # 呼び名は当て字「刃流覇羅」(ヴァルハラ)。ニルヴァーナはタイトルに「爾琉婆亜那」
+    assert "SRC_DISPLAY = { prometheus: '刃流覇羅'" in html and '刃流覇羅 不達' in html
+    assert '<div class="kanji" title="ニルヴァーナ">爾琉婆亜那</div>' in html
