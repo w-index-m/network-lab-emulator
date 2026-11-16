@@ -35,7 +35,9 @@ jobs:
         # 待ち受けるため、engine/loopback_alias.py が lo に IP を足す。これには root が要る
         # (pytest.yml と同じ理由)。一般ユーザーだと bind できずヘルスチェックが全部 down になる
         run: |
-          sudo -E env "PATH=$PATH" nohup python -m uvicorn app:app --port 8099 > server.log 2>&1 &
+          # sudo は env を引き継がないことがある(run #125 で NETLAB_AUTH_DISABLE が消えて 401)ので明示して渡す
+          sudo env "PATH=$PATH" NETLAB_AUTH_DISABLE=1 NETLAB_FAST_TIMERS=1 \
+            nohup python -m uvicorn app:app --port 8099 > server.log 2>&1 &
           echo "server started (pid $!)"
 
       - name: Wait for server to be ready

@@ -61,7 +61,7 @@ jobs:
         env:
           NETLAB_AUTH_DISABLE: '1'
         run: |
-          sudo -E env "PATH=$PATH" pytest tests/ -v \
+          sudo env "PATH=$PATH" NETLAB_AUTH_DISABLE=1 pytest tests/ -v \
             --cov=engine --cov=app \
             --cov-report=term-missing \
             --cov-report=html \
