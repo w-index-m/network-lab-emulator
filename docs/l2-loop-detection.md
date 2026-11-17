@@ -163,3 +163,23 @@ TestClient で確かめました。
 - VLAN ごとのループ(全 VLAN をまとめて1つ)
 - loopguard / UDLD
 - 実フレームの増殖(カウンタ・CPU・ログで表す)
+
+## ルーテッドポート(no switchport)は対象外
+
+Catalyst 3台を `no switchport` のルーテッドポートで三角形につなぎ、OSPF を組んだ。すると、L2 ループの警報が出てしまった
+(実機では起きない誤検知)。
+
+原因は、`no switchport` をどこにも記録しておらず、スイッチ同士のリンクはすべて L2 として扱っていたこと。
+
+直したこと:
+
+- `no switchport` を受けた IF に `routed` の印を付ける。`switchport` / `switchport mode ...` で外す。
+  印は保存・復元も対象にした。
+- 輪を探すときに、どちらかの端がルーテッドポートのリンクを除く。
+
+直した後、同じ構成で `/api/traffic/loops` が空になり、SYSTEM STATUS は「正常」になった。
+
+![Catalyst 3台の OSPF(ルーテッドポート)](images/cyber-view-catalyst3-ospf.png)
+
+画面は `/cyber-view?view=ospf&bgm=reggae` で開いた(動画: `videos/cyber-view-catalyst3-ospf-reggae.mp4`、音はページの Web Audio を録ったもの)。
+

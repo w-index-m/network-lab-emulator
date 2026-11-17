@@ -97,6 +97,11 @@ def handle_cli(device_id, state, command, engine=None):
     if dt in CISCO_LIKE:
         if mode == 'config-if' and getattr(state, 'current_if', ''):
             ifn = state.current_if
+            # no switchport(ルーテッドポート)はL2の輪に入らない。記録だけして処理は下の層に任せる
+            if cl in ('no switchport', 'switchport') or cl.startswith('switchport mode'):
+                info = (getattr(state, 'interfaces', {}) or {}).get(ifn)
+                if isinstance(info, dict):
+                    info['routed'] = cl == 'no switchport'
             m = re.match(r'^storm-control broadcast level (\d+(?:\.\d+)?)(?: (\d+(?:\.\d+)?))?$', cl)
             if m:
                 storm_cfg(state).setdefault(ifn, {'action': None})['level'] = float(m.group(1))
@@ -255,11 +260,14 @@ def _short(ifn):
 
 
 # ── 検知本体 ─────────────────────────────────────
-def find_rings(vnet, types, stp_on):
-    """スイッチどうしの生きているリンクのうち、輪の一部になっている辺(橋でない辺)を連結成分ごとに返す"""
+def find_rings(vnet, types, stp_on, routed=None):
+    """スイッチどうしの生きているリンクのうち、輪の一部になっている辺(橋でない辺)を連結成分ごとに返す。
+    routed(d, peer) が真のリンク(どちらかの端が no switchport のルーテッドポート)はL2ではないので除く"""
     nodes = [d for d, t in types.items() if t in SWITCH_TYPES]
     nset = set(nodes)
-    adj = {d: sorted(p for p in vnet.links.get(d, set()) if p in nset and vnet._edge_up(d, p)) for d in nodes}
+    routed = routed or (lambda d, p: False)
+    adj = {d: sorted(p for p in vnet.links.get(d, set())
+                     if p in nset and vnet._edge_up(d, p) and not routed(d, p) and not routed(p, d)) for d in nodes}
     # 橋の検出(Tarjan、反復版)
     disc, low, bridges, t = {}, {}, set(), [0]
     for root in nodes:
@@ -393,7 +401,12 @@ class LoopEngine:
                                  'msg': f"Port {v['ifname']} LBD port recovered. Loop detection restarted"})
                     acts.append({'do': 'recover', 'dev': d, 'iface': v['ifname'], 'cause': 'loopdetect', 'prev': v.get('prev')})
 
-        rings = find_rings(vnet, types, stp_on)
+        def routed(d, p):
+            ifn = (getattr(vnet, 'interface_links', {}).get(d) or {}).get(p)
+            info = (getattr(states.get(d), 'interfaces', {}) or {}).get(ifn) if ifn else None
+            return bool(isinstance(info, dict) and info.get('routed'))
+
+        rings = find_rings(vnet, types, stp_on, routed)
         seen = set()
         storm_ports = set()
         for r in rings:

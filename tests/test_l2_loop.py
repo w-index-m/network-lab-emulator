@@ -269,3 +269,19 @@ def test_config_is_saved_and_restored(client, tmp_path, monkeypatch):
     assert set(st0.errdisable_recovery['causes']) == {'bpduguard', 'storm-control', 'loopback'}
     assert st0.errdisable_recovery['interval'] == 120
     assert ap0.loopdetect['enabled'] and ap0.loopdetect['ports_off'] == ['3', '4']
+
+
+def test_routed_ports_are_not_an_l2_loop():
+    """no switchport のルーテッドポートで三角形に組んだ Catalyst(OSPF でよくある形)は L2 ループではない"""
+    from engine.l2_loop import find_rings
+
+    class V:
+        links = {'c1': {'c2', 'c3'}, 'c2': {'c1', 'c3'}, 'c3': {'c1', 'c2'}}
+
+        def _edge_up(self, a, b):
+            return True
+    vn = V()
+    types = {k: 'catalyst' for k in ('c1', 'c2', 'c3')}
+    assert len(find_rings(vn, types, lambda d: False)) == 1                       # L2 なら輪
+    assert find_rings(vn, types, lambda d: False, routed=lambda d, p: d == 'c1') == []   # c1 側がルーテッドなら輪は切れる
+    assert find_rings(vn, types, lambda d: False, routed=lambda d, p: True) == []

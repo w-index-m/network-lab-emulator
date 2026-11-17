@@ -460,6 +460,8 @@ def _save_config():
                 "prefix": info.get("prefix", 24),
                 "status": info.get("status", "up"),
             }
+            if info.get("routed"):      # no switchport(L2 ループ検知の対象外にする)
+                dev_data["interfaces"][ifname]["routed"] = True
         # ルートテーブルを保存（全デバイス共通）
         routes = getattr(state, "routes", [])
         if routes:
@@ -709,6 +711,8 @@ def _load_config():
                     "prefix": iinfo.get("prefix", 24),
                     "status": iinfo.get("status", "up"),
                 })
+                if iinfo.get("routed"):
+                    state.interfaces[target]["routed"] = True
             else:
                 state.interfaces[target] = iinfo
         # ルートを復元（全デバイス共通）
