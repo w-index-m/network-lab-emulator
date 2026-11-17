@@ -122,3 +122,23 @@ traceroute to 192.168.13.10 (192.168.13.10), 30 hops max, 40 byte packets
    - DR を通るときも、DR のそのリンクのコストを足す。
    - `show ip ospf interface` の Cost もインタフェースごとに出す。running-config には `ip ospf cost`・`bandwidth`・`auto-cost reference-bandwidth` を出す。
    - 確認: 3台とも `[110/2]` になった。CAT1 の Gi1/0/1 に `ip ospf cost 50` を入れると、CAT2 の LAN が CAT3 経由の `[110/3]` に切り替わった。`no ip ospf cost` で元に戻った。テストは `tests/test_ospf_interface_cost.py`。
+
+## ニルヴァーナの OSPF 画面でコストを見る
+
+ユーザーの依頼: 「ニルバーナで OSPF のコスト表示を見せて」
+
+`/cyber-view?view=ospf` で、リンクの両端の根元に、その端のインタフェースコストを札で出すようにした(`show ip ospf interface` の Cost と同じ値)。
+1 より大きい札は橙色で表示する。
+ルータの上のプレート(`O cost N → 次ホップ`)は、選んだ宛先までの合計コストで、`show ip route` の `[110/N]` と同じ。
+
+| | 画面 |
+|---|---|
+| すべて cost 1 | CAT1・CAT3 とも `O cost 2 → CAT2`(宛先 192.168.12.0/24) |
+| CAT1 Gi1/0/1 に `ip ospf cost 50` | CAT1 側の札が `cost 50` になり、CAT1 は `O cost 3 → CAT3` に切り替わった。最短経路の金色の線も CAT1→CAT3→CAT2 に移った |
+
+![すべて cost 1](images/cyber-view-ospf-cost-before.jpg)
+
+![CAT1 Gi1/0/1 に ip ospf cost 50](images/cyber-view-ospf-cost-after.jpg)
+
+API は `GET /api/traffic/ospf` の `adjacencies[].cost_a` / `cost_b`(単体版は値が無いので札を出さない)。
+

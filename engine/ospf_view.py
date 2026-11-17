@@ -89,7 +89,12 @@ def snapshot(eng, vnet, icmp, links, hostnames, dest=None, now=None):
             st = 'down'
         else:
             st = 'partial'
+        # 両端のインタフェースコスト(show ip ospf interface の Cost と同じ値)
+        _cf = getattr(eng, 'cost_for_iface', None)
+        cost_a = _cf(a, ln.get('iface_a') or '') if _cf else None
+        cost_b = _cf(b, ln.get('iface_b') or '') if _cf else None
         adjs.append({'a': a, 'b': b, 'iface_a': ln.get('iface_a'), 'iface_b': ln.get('iface_b'),
+                     'cost_a': cost_a, 'cost_b': cost_b,
                      'area': area_a, 'area_b': area_b, 'state': st, 'state_a': sa, 'state_b': sb,
                      'dead_a': da, 'dead_b': db, 'dead_interval': nodes[a]['dead_interval'],
                      'role_a': role_a, 'role_b': role_b, 'link_down': bool(ln.get('down')), 'why': why})

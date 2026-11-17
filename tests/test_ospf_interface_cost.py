@@ -98,6 +98,12 @@ def test_ip_ospf_cost_is_per_interface_and_reroutes(client):
     assert re.search(r'GigabitEthernet1/0/1 is up.*?Cost: 50', out, re.S)
     assert re.search(r'GigabitEthernet1/0/2 is up.*?Cost: 1\b', out, re.S)
     assert ' ip ospf cost 50' in _cli(client, r1, 'show running-config')
+    # ニルヴァーナの OSPF 画面(/api/traffic/ospf)も両端のIFコストを返す
+    adj = client.get('/api/traffic/ospf').json()['adjacencies']
+    a12 = next(a for a in adj if {a['a'], a['b']} == {_id(r1), _id(r2)})
+    end1 = 'cost_a' if a12['a'] == _id(r1) else 'cost_b'
+    end2 = 'cost_b' if end1 == 'cost_a' else 'cost_a'
+    assert (a12[end1], a12[end2]) == (50, 1)
     _cli(client, r1, 'configure terminal', 'interface GigabitEthernet1/0/1', 'no ip ospf cost', 'end')
     assert _wait(lambda: _ospf_routes(client, r1).get(lan2) == 2)
     assert 'ip ospf cost' not in _cli(client, r1, 'show running-config')

@@ -2141,6 +2141,21 @@
     ctx.fillText('Dead', c.x, c.y - r - 7 * sc);
     ctx.restore();
   }
+  // その端のインタフェースコスト(show ip ospf interface の Cost)。リンクの根元に置く小さな札
+  function costTag(x, y, z, cost) {
+    const c = proj(x, y, z);
+    if (!c) return;
+    const sc = Math.max(0.7, Math.min(1.2, c.s / 32));
+    const txt = 'cost ' + cost;
+    ctx.save();
+    ctx.font = `800 ${Math.round(11 * sc)}px monospace`;
+    const w = ctx.measureText(txt).width + 12 * sc, h = 17 * sc;
+    ctx.fillStyle = 'rgba(30,22,0,0.88)'; ctx.strokeStyle = cost > 1 ? '#ffab2e' : TREE_COL; ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.rect(c.x - w / 2, c.y - h / 2, w, h); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = ctx.strokeStyle; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(txt, c.x, c.y + 0.5);
+    ctx.restore();
+  }
   // 最短経路ツリーの矢印(from → to に流れる山形)
   function treeArrows(A, B, Y, t) {
     const n = 5;
@@ -2202,10 +2217,11 @@
       if (fwd) treeArrows(A, B, Y, t);
       if (back) treeArrows(B, A, Y, t);
       // 両端: それぞれの装置から見た隣接(show ip ospf neighbor の State と Dead Time)
-      for (const [P, Q, st, role, dead] of [[A, B, a.state_a, a.role_b, a.dead_a], [B, A, a.state_b, a.role_a, a.dead_b]]) {
+      for (const [P, Q, st, role, dead, cost] of [[A, B, a.state_a, a.role_b, a.dead_a, a.cost_a], [B, A, a.state_b, a.role_a, a.dead_b, a.cost_b]]) {
         const u = 0.27, ix = P[0] + (Q[0] - P[0]) * u, iz = P[2] + (Q[2] - P[2]) * u;
         const dv = dead == null ? null : Math.max(0, dead - el);
         adjBadge(ix, Y + 0.9, iz, st, role, st === 'Down' ? null : dv, a.dead_interval, st === 'Full' ? OSPF_COL.full : st === 'Down' ? OSPF_COL.down : OSPF_COL.partial, t);
+        if (cost != null) costTag(P[0] + (Q[0] - P[0]) * 0.16, Y + 0.05, P[2] + (Q[2] - P[2]) * 0.16, cost);
       }
       // 中点: 隣接の状態とエリア
       const mx = (A[0] + B[0]) / 2, mz = (A[2] + B[2]) / 2;
