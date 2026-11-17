@@ -146,7 +146,7 @@ def test_standalone_has_no_ospf_endpoint():
 def test_background_selector_in_page():
     """背景(標準/金魚鉢/富士山)の切り替えボタンと、?bg= での指定、選択の記憶"""
     html = open(os.path.join(ROOT, 'static', 'cyber_view.html'), encoding='utf-8').read()
-    assert 'id="zBg"' in html and "BG_LIST = ['default', 'goldfish', 'fuji']" in html
+    assert 'id="zBg"' in html and "BG_LIST = ['default', 'goldfish', 'fuji', 'solar']" in html and 'function drawSolar' in html and 'function drawGoldfishBowl' in html
     assert 'function drawGoldfishBowl' in html and 'function drawFuji' in html
     assert "localStorage.setItem('cvBg'" in html and "get('bg')" in html
 

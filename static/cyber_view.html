@@ -269,7 +269,7 @@
 </div>
 
 <div id="cidr" class="hud">0.0.0.0/0</div>
-<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山)">◎</button><button id="zMusic" title="BGM を切り替え(なし/ジャズ/レゲエ/アンビエント)">♪</button><button id="zFx" class="on" title="サイバー演出(六角グリッド・データの雨・火の粉・走査線・グリッチ)のオン/オフ">FX</button></div><div id="bgmToast" class="hud"></div>
+<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山/太陽系)">◎</button><button id="zMusic" title="BGM を切り替え(なし/ジャズ/レゲエ/アンビエント)">♪</button><button id="zFx" class="on" title="サイバー演出(六角グリッド・データの雨・火の粉・走査線・グリッチ)のオン/オフ">FX</button></div><div id="bgmToast" class="hud"></div>
 <div id="bgToast" class="hud"></div>
 <div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mAtk" title="ATT&amp;CK: 組織ごとの攻撃の進行度と、戦術×手法の時系列">ATT&amp;CK</button><button id="mWan" title="WAN: 回線チェック(フレッツ網の PPPoE / IPoE、遅延・ロスの推移)">WAN</button><button id="mDark" title="DARKNET: 使われていない帯に届いた通信(スキャン・DDoS の跳ね返り・設定ミス・リフレクションの準備)">DARKNET</button><button id="mWorld" title="WORLD: 地球儀(クラウド宛ての流量・Cloudflare Radar・IIJ Internet Health Report・MAWI の実トラフィック)">WORLD</button><button id="mBoard" title="ダッシュボード(パネル・変数・時間範囲・自動更新・注釈)">BOARD</button><button id="mExplore" title="問い合わせ(PromQL / LogQL / 内部の時系列とログ)">EXPLORE</button><button id="mAlerts" title="アラートルール・連絡先・履歴">ALERTS</button><button id="mAi" title="AI ログ解析: syslog を AI(LLM / クラウド AI)に読ませて、原因と対処を提案。実行は人が押す">AI</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
 <div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
@@ -2871,11 +2871,11 @@
   document.getElementById('mList').onclick = (e) => { document.body.classList.toggle('showlist'); e.target.classList.toggle('on'); };
 
   // ── メインループ ─────────────────────────────
-  // ── 背景(標準 / 金魚鉢 / 富士山)─────────────────────────
-  // 画像ファイルは使わず Canvas で描く。視点を回すと少しだけ横にずれる(奥行き感)。?bg=goldfish|fuji でも指定できる
-  const BG_LIST = ['default', 'goldfish', 'fuji'];
-  const BG_NAME = { default: '標準', goldfish: '金魚鉢', fuji: '富士山' };
-  const BG_ICON = { default: '◎', goldfish: '🐟', fuji: '🗻' };
+  // ── 背景(標準 / 金魚鉢 / 富士山 / 太陽系)─────────────────────────
+  // 画像ファイルは使わず Canvas で描く。視点を回すと少しだけ横にずれる(奥行き感)。?bg=goldfish|fuji|solar でも指定できる
+  const BG_LIST = ['default', 'goldfish', 'fuji', 'solar'];
+  const BG_NAME = { default: '標準', goldfish: '金魚鉢', fuji: '富士山', solar: '太陽系' };
+  const BG_ICON = { default: '◎', goldfish: '🐟', fuji: '🗻', solar: '🪐' };
   let bgMode = 'default';
   try {
     const q = new URLSearchParams(location.search).get('bg');
@@ -3044,9 +3044,82 @@
     }
     ctx.fillStyle = 'rgba(2,6,15,0.22)'; ctx.fillRect(0, 0, W, H);
   }
+  // 太陽系: 落ち着いた壁紙。惑星はゆっくり公転し(水星でも約1分で1周)、軌道は傾けた楕円で奥に置く
+  const SOLAR_STARS = Array.from({ length: 260 }, () => ({ x: rnd(), y: rnd(), r: 0.3 + rnd() * 1.1, p: rnd() * 6.28, c: rnd() }));
+  const PLANETS = [   // a: 軌道半径(画面幅比), r: 大きさ, T: 周期(秒), ph: 初期位相
+    { a: 0.075, r: 2.2, T: 60, ph: 0.4, col: '#b8aa9a' },                    // 水星
+    { a: 0.11, r: 3.6, T: 110, ph: 2.1, col: '#e9c98a' },                    // 金星
+    { a: 0.15, r: 3.8, T: 170, ph: 4.0, col: '#4f8fe0', moon: true },        // 地球
+    { a: 0.19, r: 2.8, T: 260, ph: 1.2, col: '#d0643c' },                    // 火星
+    { a: 0.27, r: 9.0, T: 620, ph: 5.2, col: '#d9b48a', band: true },        // 木星
+    { a: 0.35, r: 7.5, T: 980, ph: 3.1, col: '#e6d29a', ring: true },        // 土星
+    { a: 0.42, r: 5.0, T: 1500, ph: 0.9, col: '#9fdde6' },                   // 天王星
+    { a: 0.49, r: 4.8, T: 2100, ph: 2.7, col: '#4a6fe0' },                   // 海王星
+  ];
+  function drawSolar(t) {
+    const px = parallax() * 0.5, sec = t / 1000;
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, '#02030a'); bg.addColorStop(0.55, '#050a1c'); bg.addColorStop(1, '#020309');
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+    // 天の川(淡い帯)
+    ctx.save(); ctx.translate(W / 2 + px * 0.2, H * 0.4); ctx.rotate(-0.35);
+    const mw = ctx.createLinearGradient(0, -H * 0.18, 0, H * 0.18);
+    mw.addColorStop(0, 'rgba(120,110,170,0)'); mw.addColorStop(0.5, 'rgba(150,140,200,0.10)'); mw.addColorStop(1, 'rgba(120,110,170,0)');
+    ctx.fillStyle = mw; ctx.fillRect(-W, -H * 0.18, W * 2, H * 0.36); ctx.restore();
+    // 星(ゆっくり瞬く)
+    for (const s of SOLAR_STARS) {
+      const a = 0.35 + 0.35 * Math.sin(sec * 0.6 + s.p);
+      ctx.fillStyle = s.c > 0.85 ? `rgba(255,220,190,${a})` : `rgba(210,225,255,${a})`;
+      ctx.fillRect(((s.x * W + px * 0.2) % W + W) % W, s.y * H, s.r, s.r);
+    }
+    // 太陽と軌道(奥に傾いた面)
+    const cx = W * 0.5 + px, cy = horizonY() * 0.62, R = Math.max(W, 700), tilt = 0.2;
+    const glow = ctx.createRadialGradient(cx, cy, 2, cx, cy, R * 0.09);
+    glow.addColorStop(0, 'rgba(255,236,180,0.85)'); glow.addColorStop(0.25, 'rgba(255,170,60,0.35)'); glow.addColorStop(1, 'rgba(255,140,40,0)');
+    ctx.fillStyle = glow; ctx.fillRect(cx - R * 0.09, cy - R * 0.09, R * 0.18, R * 0.18);
+    const pos = (p) => {
+      const th = p.ph + sec * Math.PI * 2 / p.T;
+      return { x: cx + Math.cos(th) * p.a * R, y: cy + Math.sin(th) * p.a * R * tilt, back: Math.sin(th) < 0 };
+    };
+    ctx.lineWidth = 1;
+    for (const p of PLANETS) {
+      ctx.beginPath(); ctx.ellipse(cx, cy, p.a * R, p.a * R * tilt, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(140,170,230,0.10)'; ctx.stroke();
+    }
+    const planet = (p, q) => {
+      const r = p.r * Math.max(0.7, R / 1400) * (q.back ? 0.9 : 1);
+      const lit = Math.atan2(cy - q.y, cx - q.x);   // 太陽の方向が明るい
+      if (p.ring) {
+        ctx.beginPath(); ctx.ellipse(q.x, q.y, r * 2.2, r * 0.6, -0.3, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(230,210,160,0.45)'; ctx.lineWidth = 1.6; ctx.stroke(); ctx.lineWidth = 1;
+      }
+      const g = ctx.createRadialGradient(q.x + Math.cos(lit) * r * 0.5, q.y + Math.sin(lit) * r * 0.5, r * 0.1, q.x, q.y, r);
+      g.addColorStop(0, p.col); g.addColorStop(1, '#05070f');
+      ctx.beginPath(); ctx.arc(q.x, q.y, r, 0, Math.PI * 2); ctx.fillStyle = g; ctx.fill();
+      if (p.band) {
+        ctx.save(); ctx.beginPath(); ctx.arc(q.x, q.y, r, 0, Math.PI * 2); ctx.clip();
+        ctx.fillStyle = 'rgba(120,70,40,0.25)';
+        for (const k of [-0.4, 0.05, 0.45]) ctx.fillRect(q.x - r, q.y + k * r, r * 2, r * 0.14);
+        ctx.restore();
+      }
+      if (p.moon) {
+        const mt = sec * Math.PI * 2 / 14;
+        ctx.beginPath(); ctx.arc(q.x + Math.cos(mt) * r * 2.6, q.y + Math.sin(mt) * r * 0.8, Math.max(1, r * 0.3), 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(210,210,220,0.8)'; ctx.fill();
+      }
+    };
+    const qs = PLANETS.map(p => [p, pos(p)]);
+    for (const [p, q] of qs) if (q.back) planet(p, q);    // 太陽の奥側
+    ctx.beginPath(); ctx.arc(cx, cy, R * 0.012 + 4, 0, Math.PI * 2);
+    const sg = ctx.createRadialGradient(cx, cy, 1, cx, cy, R * 0.012 + 4);
+    sg.addColorStop(0, '#fffbe8'); sg.addColorStop(1, '#ffb347'); ctx.fillStyle = sg; ctx.fill();
+    for (const [p, q] of qs) if (!q.back) planet(p, q);   // 手前側
+    ctx.fillStyle = 'rgba(2,6,15,0.30)'; ctx.fillRect(0, 0, W, H);   // 前景(装置・リンク)が読めるよう少し暗く
+  }
   function drawBackdrop(t, alert) {
     if (bgMode === 'goldfish') drawGoldfishBowl(t);
     else if (bgMode === 'fuji') drawFuji(t);
+    else if (bgMode === 'solar') drawSolar(t);
     else {
       const g = ctx.createRadialGradient(W / 2, H * 0.55, 10, W / 2, H * 0.55, Math.max(W, H) * 0.75);
       g.addColorStop(0, alert ? '#2a0608' : '#071a33'); g.addColorStop(1, '#020306');
@@ -3191,7 +3264,7 @@
     // アラートがある階層では背景ごと赤く染まる
     drawBackdrop(t, mode === 'net' && alertLevel);
     const fxOk = !document.body.classList.contains('board');
-    if (fxOk && bgMode !== 'goldfish' && bgMode !== 'fuji') fxUnder(t, mode === 'net' && alertLevel);
+    if (fxOk && bgMode === 'default') fxUnder(t, mode === 'net' && alertLevel);
     if (mode !== 'world') drawFloor();
     const nowSec = Date.now() / 1000;
     if (mode !== 'world') drawGroundRing(t);

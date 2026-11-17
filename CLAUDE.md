@@ -2841,7 +2841,7 @@ OspfEngine の隣接(両端の state・Dead 残り=dead_interval−最終Hello�
 画面: 床のエリア円、隣接バッジ(Dead の円弧カウントダウン)、金色の矢印でツリー、DESTINATION/NO ROUTE/cost プレート、
 SPF 波紋(`_recalc_routes` で `spf_runs`/`last_spf` を記録)、差分ポップアップ。スタンドアロン版は 404 → ボタンを隠す。
 テストは `tests/test_ospf_view.py`。DR/BDR がルータ単位・DR 側だけコストが小さく出る点はエンジンの既存挙動(未修正)。
-追加(v13): `/cyber-view` の背景を 標準/金魚鉢/富士山 で切り替え(`#zBg` ボタン、`localStorage cvBg`、`?bg=goldfish|fuji`。`drawBackdrop`→`drawGoldfishBowl`/`drawFuji`、Canvas 描画で画像ファイル無し)。
+追加(v13): `/cyber-view` の背景を 標準/金魚鉢/富士山/太陽系 で切り替え(`#zBg` ボタン、`localStorage cvBg`、`?bg=goldfish|fuji|solar`。`drawBackdrop`→`drawGoldfishBowl`/`drawFuji`/`drawSolar`、Canvas 描画で画像ファイル無し。太陽系は落ち着いた壁紙として惑星がゆっくり公転、FX は標準背景のときだけ。金魚鉢はユーザー希望で残す)。
 追加(v14): `/cyber-view` の画面上の Prometheus の呼び名を「ヴァルハラ / VALHALLA」に(`SRC_DISPLAY`/`dispSrc`、スタンドアロン版は `collector.DISPLAY_NAME`)。表示だけで、`PROMETHEUS_URL`・`sources.prometheus`・API の `source:"prometheus"` は変えない。
 CI(v14): `pytest.yml`/`regression.yml` は `claude/**` への push でも動く。regression のサーバーは root(`sudo -E env PATH=$PATH`)で起動(装置IPを lo に足すため)。BIG-IP シナリオは各 pc で `python3 -m http.server 8080` を立てて実ヘルスチェック。装置削除時はその装置の http.server も止める(`stop_mock_http_servers_for_ips`)。
 追加(v15): ヴァルハラ(Prometheus)× ニルヴァーナの双方向連携(`docs/valhalla-nirvana.md`)。`GET /metrics`(`engine/valhalla.render_metrics`、
