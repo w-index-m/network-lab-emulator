@@ -6807,6 +6807,7 @@ class SnmpAgent:
             'rw_community': prev.get('rw_community', 'private'),
             'overrides': prev.get('overrides', {}),  # snmpsetで書込んだOID値
             'if_admin': prev.get('if_admin', {}),    # ifAdminStatus上書き
+            'v3': prev.get('v3'),                    # SNMPv3 の設定(engine/snmp_v3.py。装置の state.snmp_v3 と同じ dict)
         }
 
     # ── SNMP SET（RFC3512: SNMPによる機器設定）──

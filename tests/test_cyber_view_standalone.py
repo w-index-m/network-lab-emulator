@@ -31,7 +31,7 @@ def test_shared_files_are_in_sync_with_the_lab():
     """画面と検知ルールはラボ版と同じファイル。片方だけ直すとずれるので固定する"""
     assert filecmp.cmp(os.path.join(ROOT, 'static', 'cyber_view.html'), os.path.join(SA, 'web', 'cyber_view.html'), shallow=False)
     for f in ('flap_rules.py', 'link_evidence.py', 'attack_map.py', 'darknet.py', 'nexus.py', 'wan_watch.py',
-              'flow_collector.py', 'sensor_syslog.py', 'route_watch.py', 'log_ai.py', 'world_sources.py', 'world_geo.py',
+              'flow_collector.py', 'sensor_syslog.py', 'route_watch.py', 'log_ai.py', 'world_sources.py', 'world_geo.py', 'snmp_usm.py',
               'world_samples.py'):
         assert filecmp.cmp(os.path.join(ROOT, 'engine', f), os.path.join(SA, 'cvs', f), shallow=False), f
     assert filecmp.cmp(os.path.join(ROOT, 'static', 'world', 'world.json'), os.path.join(SA, 'web', 'world', 'world.json'), shallow=False)

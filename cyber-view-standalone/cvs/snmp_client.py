@@ -1,11 +1,19 @@
 """
-小さな SNMPv2c クライアント(標準ライブラリだけ。GETBULK で表を walk する / GET)
+小さな SNMP クライアント(v2c と v3。GETBULK で表を walk する / GET)
+
+v2c は標準ライブラリだけ。v3(USM: MD5/SHA/SHA-2 の認証、DES/AES の暗号)は cvs/snmp_usm.py
+(エミュレータの engine/snmp_usm.py と同じファイル)を使い、暗号には cryptography が要る。
+community の代わりに v3_user({...}) を渡すと v3 で問い合わせる。
 
 ニルヴァーナのスタンドアロン版が、実機から経路表(IP-FORWARD-MIB)と CPU(CISCO-PROCESS-MIB)を
 定期的に直接取るために使う。値は Python の型(int / str / IP 文字列)で返す。
 """
 import os
 import socket
+import threading
+import time
+
+from . import snmp_usm as usm
 
 # ── BER ──────────────────────────────────────────
 def _len(n):
@@ -81,6 +89,8 @@ class SnmpError(Exception):
 
 
 def _request(host, community, pdu_tag, oids, port=161, timeout=2.0, retries=1, non_rep=0, max_rep=25):
+    if isinstance(community, usm.V3User):
+        return _request_v3(host, community, pdu_tag, oids, port, timeout, retries, non_rep, max_rep)
     rid = int.from_bytes(os.urandom(3), 'big')
     vbs = b''.join(_tlv(0x30, _oid(o) + b'\x05\x00') for o in oids)
     pdu = _tlv(pdu_tag, _int(rid) + _int(non_rep) + _int(max_rep) + _tlv(0x30, vbs))
@@ -105,8 +115,12 @@ def _parse(data, rid):
     _t, _ver, i = _read(body, 0)
     _t, _comm, i = _read(body, i)
     _t, pdu, _ = _read(body, i)
+    return _parse_pdu(pdu, rid)
+
+
+def _parse_pdu(pdu, rid):
     _t, rid_b, j = _read(pdu, 0)
-    if int.from_bytes(rid_b, 'big', signed=True) != rid:
+    if rid is not None and int.from_bytes(rid_b, 'big', signed=True) != rid:
         return None
     _t, err, j = _read(pdu, j)
     _t, _eidx, j = _read(pdu, j)
@@ -120,6 +134,85 @@ def _parse(data, rid):
         vt, vv, _ = _read(vb, m)
         out.append((_dec_oid(ob), vt, _value(vt, vv)))
     return out
+
+
+# ── SNMPv3 ─────────────────────────────────────────
+_ENGINES = {}          # (host, port) -> (engineID, boots, 相手の時刻, こちらで受け取った時刻)
+_USERS = {}
+_LOCK = threading.Lock()
+
+
+def v3_user(spec):
+    """{user, auth, auth_password, priv, priv_password} → V3User(鍵の計算結果を使い回すため同じ設定は同じ物を返す)"""
+    key = (spec.get('user'), spec.get('auth'), spec.get('auth_password'), spec.get('priv'), spec.get('priv_password'))
+    with _LOCK:
+        if key not in _USERS:
+            _USERS[key] = usm.V3User(spec['user'], spec.get('auth'), spec.get('auth_password'),
+                                     spec.get('priv'), spec.get('priv_password'))
+        return _USERS[key]
+
+
+def _xchg(s, msg, host, port, msg_id):
+    s.sendto(msg, (host, port))
+    while True:
+        data, _a = s.recvfrom(65535)
+        try:
+            if usm.parse_message(data)['msg_id'] == msg_id:
+                return data
+        except Exception:
+            continue
+
+
+def _discover(s, host, port):
+    mid = int.from_bytes(os.urandom(3), 'big')
+    p = usm.parse_message(_xchg(s, usm.discovery_message(mid, mid), host, port, mid))
+    if not p['engine_id']:
+        raise SnmpError(f'{host}: engineID が返りません')
+    _ENGINES[(host, port)] = (p['engine_id'], p['boots'], p['time'], time.time())
+
+
+def _request_v3(host, user, pdu_tag, oids, port, timeout, retries, non_rep, max_rep):
+    rid = int.from_bytes(os.urandom(3), 'big')
+    vbs = b''.join(_tlv(0x30, _oid(o) + b'\x05\x00') for o in oids)
+    pdu = _tlv(pdu_tag, _int(rid) + _int(non_rep) + _int(max_rep) + _tlv(0x30, vbs))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(timeout)
+        tries = 0
+        while tries <= retries + 2:
+            tries += 1
+            try:
+                if (host, port) not in _ENGINES:
+                    _discover(s, host, port)
+                eid, boots, etime, t0 = _ENGINES[(host, port)]
+                akey, pkey = user.keys(eid)
+                mid = int.from_bytes(os.urandom(3), 'big')
+                msg = usm.build_message(mid, user.flags | usm.FLAG_REPORTABLE, eid, boots,
+                                        etime + int(time.time() - t0), user.user.encode(),
+                                        usm.scoped_pdu(eid, b'', pdu), auth=user.auth, akey=akey,
+                                        priv=user.priv, pkey=pkey)
+                data = _xchg(s, msg, host, port, mid)
+            except socket.timeout:
+                continue
+            try:
+                p, sp = usm.open_message(data, user)
+                _ceid, _cn, tag, body = usm.parse_scoped_pdu(sp)
+            except Exception as e:
+                raise SnmpError(f'{host}: SNMPv3 の応答を確かめられません({e})')
+            if tag == 0xA8:                                   # Report
+                rows = _parse_pdu(body, None) if body else []
+                oid = rows[0][0] if rows else ''
+                if oid == usm.OID_NOT_IN_TIME_WINDOWS and p['flags'] & usm.FLAG_AUTH:
+                    _ENGINES[(host, port)] = (p['engine_id'], p['boots'], p['time'], time.time())
+                    continue                                  # 時刻を合わせてやり直す
+                if oid == usm.OID_UNKNOWN_ENGINE_IDS:
+                    _ENGINES.pop((host, port), None)
+                    continue
+                raise SnmpError(f'{host}: SNMPv3 で断られました({usm.REPORT_NAMES.get(oid, oid)}。'
+                                'ユーザー名・パスワード・方式・安全レベルを確認)')
+            out = _parse_pdu(body, rid)
+            if out is not None:
+                return out
+    raise SnmpError(f'{host}: 応答がありません(SNMPv3 のユーザー・ACL・UDP/{port} を確認)')
 
 
 def get(host, community, oids, **kw):

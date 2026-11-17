@@ -82,6 +82,12 @@ sources:
   # 経路の追加・削除・変更と CPU の急上昇・回復が「情」、CPU が高い状態が続くと「注」(警告)になる
   # snmp:
   #   community: netlab-ro           # 装置ごとに変えるなら devices[].snmp_community
+  #   v3:                            # SNMPv3 で取るなら(書いた場合は community を使わない。装置ごとは devices[].snmp_v3)
+  #     user: nms
+  #     auth: sha                    # md5 / sha / sha224 / sha256 / sha384 / sha512
+  #     auth_password: ${SNMP_AUTH_PASS}
+  #     priv: aes                    # des / aes(=128) / aes192 / aes256(Blumenthal)/ aes192c / aes256c(Cisco の Reeder 方式)
+  #     priv_password: ${SNMP_PRIV_PASS}
   #   interval: 60                   # 秒
   #   full_every: 5                  # 経路数が変わらなくても N 回に1回は経路表全体を取り直す
   #   cpu: {high: 80, jump: 20, hold: 2}   # high% 以上が hold 回続くと注、前回から jump 以上上がると情

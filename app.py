@@ -504,6 +504,11 @@ def _save_config():
         # IOS の login block-for / on-failure log
         if getattr(state, "login_block", None):
             dev_data["login_block"] = state.login_block
+        # SNMPv3: 局所化した鍵だけを保存する(パスワードは持っていない。実機と同じ)
+        _v3 = getattr(state, "snmp_v3", None)
+        if isinstance(_v3, dict) and (_v3.get("users") or _v3.get("groups") or _v3.get("views")
+                                      or _v3.get("engine_id_set")):
+            dev_data["snmp_v3"] = _v3
         # L2 ループ対策: storm-control・errdisable recovery・APRESIA loopdetect
         for _k in ("storm_control", "errdisable_recovery", "loopdetect"):
             if getattr(state, _k, None):
@@ -736,6 +741,8 @@ def _load_config():
             state.threat_detection = dev_data["threat_detection"]
         if dev_data.get("login_block"):
             state.login_block = dev_data["login_block"]
+        if isinstance(dev_data.get("snmp_v3"), dict):
+            state.snmp_v3 = dev_data["snmp_v3"]
         for _k in ("storm_control", "errdisable_recovery", "loopdetect"):
             if dev_data.get(_k):
                 setattr(state, _k, dev_data[_k])
@@ -984,6 +991,8 @@ async def lifespan(app: FastAPI):
     # 実SNMP(UDP/161, v2c)エージェントを各装置ごとに起動
     from engine.snmp_udp_agent import start_all_snmp_agents
     from engine.protocols import snmp_agent as _snmp_agent_instance
+    from engine import snmp_v3 as _snmpv3_mod
+    _snmpv3_mod.state_lookup = device_sessions.get
     snmp_transports = await start_all_snmp_agents(device_sessions, _snmp_agent_instance)
     print(f"[SNMP] 実UDPエージェント起動: {len(snmp_transports)}台 "
           f"({', '.join(f'{d}={ip}' for d, (_, ip) in snmp_transports.items())})")
@@ -1894,6 +1903,15 @@ async def cli_command(body: dict):
     l2_out = _l2.handle_cli(device_id, state, command)
     if l2_out is not None:
         return {"output": l2_out, "mode": state.mode, "hostname": state.hostname}
+
+    # ── SNMPv3(snmp-server user/group/view/engineID、show snmp user|group|engineID|view) ──
+    from engine import snmp_v3 as _snmpv3
+    _snmpv3.state_lookup = device_sessions.get
+    v3_out = await asyncio.to_thread(_snmpv3.handle, device_id, state, command)   # 鍵の生成に数十ミリ秒かかる
+    if v3_out is not None:
+        if device_id in snmp_agent.devices:
+            snmp_agent.devices[device_id]['v3'] = _snmpv3.config(state, device_id)
+        return {"output": v3_out, "mode": state.mode, "hostname": state.hostname}
 
     # ── プロトコル動的show（エンジンが起動していればエンジンの出力を優先）──
     proto_output = await handle_protocol_show(device_id, command, state)
@@ -6192,6 +6210,10 @@ def _build_running_config(device_id: str, state) -> str:
         _fxl = _fx_lines(state, 'nexus')
         if _fxl:
             lines.extend(_fxl + [''])
+        from engine.snmp_v3 import running_config_lines as _v3_lines
+        _v3l = _v3_lines(state, nxos=True)
+        if _v3l:
+            lines.extend(_v3l + [''])
         lines.append('! end')
         return '\n'.join(lines)
 
@@ -6795,6 +6817,12 @@ def _build_running_config(device_id: str, state) -> str:
             for h in hosts:
                 lines.append(f'snmp-server host {h["host"]} {h["traps"]} '
                               f'version {h["version"]} {h["community"]}')
+        from engine.snmp_v3 import running_config_lines as _v3_lines
+        _v3l = _v3_lines(state)
+        if _v3l:
+            if not (comms or hosts or loc or cont):
+                lines.append('!')
+            lines.extend(_v3l)
         lines.append('!')
         lines.append('end')
     else:
@@ -7986,6 +8014,11 @@ def _register_icmp(device_id: str):
                         community=_comm,
                         communities=_ro + _rw,   # RWでも読み取りはできる
                         rw_communities=_rw)
+    # SNMPv3(USM)のユーザー・グループ・view(engine/snmp_v3.py)
+    if device_id in snmp_agent.devices:
+        from engine import snmp_v3 as _snmpv3
+        if state.device_type in _snmpv3.V3_TYPES:
+            snmp_agent.devices[device_id]['v3'] = _snmpv3.config(state, device_id)
     # ifXTable の ifAlias(= interface の description)
     if device_id in snmp_agent.devices:
         snmp_agent.devices[device_id]['if_alias'] = {

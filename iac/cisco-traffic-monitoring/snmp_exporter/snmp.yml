@@ -7,6 +7,18 @@ auths:
   netlab_v2:
     community: netlab-ro        # Cisco側: snmp-server community netlab-ro RO
     version: 2
+  # SNMPv3(authPriv)。使うときは prometheus.yml の params.auth を [netlab_v3] にする。
+  # Cisco側: snmp-server group NETLAB-V3 v3 priv
+  #          snmp-server user netlab-v3 NETLAB-V3 v3 auth sha Netlab-Auth1 priv aes 128 Netlab-Priv1
+  # (ラボ用の値。本番ではパスワードを変え、--config.expand-environment-variables と ${...} で渡す)
+  netlab_v3:
+    version: 3
+    security_level: authPriv
+    username: netlab-v3
+    auth_protocol: SHA
+    password: Netlab-Auth1
+    priv_protocol: AES
+    priv_password: Netlab-Priv1
 
 modules:
   cisco_if:

@@ -2,3 +2,4 @@ fastapi>=0.100
 uvicorn>=0.23
 PyYAML>=6.0
 anthropic>=2.0          # AI ログ解析で Claude を使う時(NIRVANA_AI_PROVIDER=claude / ANTHROPIC_API_KEY)
+cryptography>=3.4      # SNMPv3 の暗号(DES / AES)。認証だけ(authNoPriv)なら無くても動く

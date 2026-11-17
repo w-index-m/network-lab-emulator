@@ -11,6 +11,8 @@
   community / port / interval(秒, 既定 60)/ full_every(既定 5)/ timeout
   cpu: {high: 80, jump: 20, hold: 2}
 装置ごとに devices[].snmp_community で上書きできる。
+SNMPv3 なら v3: {user, auth: sha, auth_password, priv: aes, priv_password}(装置ごとは devices[].snmp_v3)。
+v3 を書いた装置には community を使わない。パスワードは ${ENV} で渡す。
 """
 import ipaddress
 import threading
@@ -61,6 +63,7 @@ class SnmpPoller:
         src = (cfg.get('sources') or {}).get('snmp') or {}
         self.enabled = bool(src)
         self.community = src.get('community', 'public')
+        self.v3 = src.get('v3') or None
         self.port = int(src.get('port', 161))
         self.interval = float(src.get('interval', 60))
         self.full_every = int(src.get('full_every', 5))
@@ -81,6 +84,9 @@ class SnmpPoller:
         return {'port': self.port, 'timeout': self.timeout, 'retries': 1}
 
     def _comm(self, d):
+        v3 = d.get('snmp_v3') or (None if d.get('snmp_community') else self.v3)
+        if v3:
+            return SC.v3_user(v3)
         return d.get('snmp_community') or self.community
 
     def ifnames(self, d, now):

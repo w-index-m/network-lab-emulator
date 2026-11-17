@@ -1,5 +1,5 @@
 """
-実SNMP(UDP/161, v2c)エージェント
+実SNMP(UDP/161, v1/v2c/v3)エージェント(v3 は engine/snmp_v3.py)
 
 engine/protocols.py の SnmpAgent（内部シミュレーション、get/getnext/walk済み
 実装あり）を、本物のSNMP v2cワイヤプロトコル(BER符号化)でUDP応答できるように
@@ -237,6 +237,19 @@ class SnmpDeviceProtocol(asyncio.DatagramProtocol):
         self.transport = transport
 
     def datagram_received(self, data: bytes, addr):
+        # SNMPv3(USM)は別の処理へ(engine/snmp_v3.py)
+        from engine import snmp_usm
+        if snmp_usm.is_v3(data):
+            import sys
+            from engine import snmp_v3
+            try:
+                response = snmp_v3.process(data, self.device_id, self.snmp_agent, sys.modules[__name__])
+            except Exception as e:   # 壊れた要求で待ち受けごと落ちないように
+                print(f'[SNMPv3] {self.device_id}: 要求を処理できません: {e}')
+                response = None
+            if response and self.transport:
+                self.transport.sendto(response, addr)
+            return
         try:
             version, community, pdu_tag, request_id, p2, p3, oids = decode_request(data)
         except Exception:
