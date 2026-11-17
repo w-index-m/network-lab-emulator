@@ -2883,3 +2883,6 @@ Arista `sflow destination`/`sflow run`、IOS `ip flow-export destination`/`ip fl
 `show sflow`/`show ip flow export`、running-config・保存)。`logging host <ip> transport udp port <n>` を解釈。Nexus の SNMP は mgmt0 で受ける。
 テストは `tests/test_flow_export_and_nirvana_iac.py`。docker build 内の pip には `cyber-view-standalone/extra-ca/` に CA を置く(コミットしない)。
 
+追加(v23): `/cyber-view` の混雑時の表示(`docs/cyber-view-3d.md` 末尾)。`popup()` は同じ場所・同じ種類を `×N` にまとめ、1か所3枚まで(`+N`)。
+`plateAt` は `placePlate` で重ならない位置へずらす(フレーム開始の `platesBeginFrame` で HUD 要素と SYSTEM STATUS の板を障害物に登録、置けなければ描かない、戻り値 `{y,w,h}`)。
+641〜1800px 幅ではメニューを詰め CIDR をメニューの下へ。負荷のかけ方は DEMO + 8並列の ping(スキャン風/9000B×3000/通常)。

@@ -195,6 +195,13 @@
     padding: 4px 8px; font-size: 12px; display: none; white-space: nowrap; }
   #empty { left: 50%; top: 58%; transform: translateX(-50%); color: var(--dim); font-size: 13px; text-align: center;
     display: none; }
+  /* 中くらいの幅では上のメニューが左の状態表示・右の CIDR と重なるので、メニューを詰めて CIDR をメニューの下へ */
+  @media (min-width: 641px) and (max-width: 1800px) {
+    #modes button { padding: 5px 9px; letter-spacing: .05em; }
+    #cidr { top: 46px; font-size: clamp(26px, 3.4vw, 52px); }
+    #crumbs { top: calc(46px + clamp(26px, 3.4vw, 52px) + 8px); }
+    #alerts { top: calc(46px + clamp(26px, 3.4vw, 52px) + 34px); }
+  }
   @media (max-width: 640px) {
     #status { font-size: 11px; } #status .links { display: none; }
     #alerts { top: auto; bottom: 108px; right: 8px; width: 60vw; max-height: 30vh; overflow: hidden; }
@@ -1197,10 +1204,41 @@
     if (ly) { ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.fillRect(ly.x - 2, ly.y - 2, 4, 4); }
   }
   // 押し出した横長の六角プレート(画面に正対、奥行き付き)。big=true は脈動+太字
+  // ── プレートの置き場所(1フレームごと): 先に置いたプレート・上のメニュー・状態ボード等と重ねない ──
+  let plateBoxes = [], plateBlock = [];
+  const PLATE_HUD = ['modes', 'status', 'cidr', 'crumbs', 'zoom', 'resp', 'legend', 'filter', 'alerts'];
+  function platesBeginFrame() {
+    plateBoxes = [];
+    plateBlock = [];
+    for (const id of PLATE_HUD) {
+      const el = document.getElementById(id);
+      if (!el || el.offsetParent === null) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) plateBlock.push({ x: r.left - 6, y: r.top - 6, w: r.width + 12, h: r.height + 12 });
+    }
+    if (health && mode !== 'atk' && W >= 640 && !document.body.classList.contains('board')) {
+      plateBlock.push({ x: 10, y: 140, w: 340, h: 70 + 70 * health.categories.length });   // SYSTEM STATUS の板
+    }
+  }
+  function placePlate(cx, cy, w, h) {
+    const hit = (y) => [...plateBoxes, ...plateBlock].some(b => cx - w / 2 < b.x + b.w && cx + w / 2 > b.x && y - h / 2 < b.y + b.h && y + h / 2 > b.y);
+    const step = h + 6;
+    // 上へずらす → だめなら下へ。画面外・メニューより上には置かない(置けなければ描かない)
+    for (const dir of [-1, 1]) {
+      for (let k = 0; k < 6; k++) {
+        const y = cy + dir * k * step;
+        if (y - h / 2 < 0 || y + h / 2 > H) break;
+        if (!hit(y)) { plateBoxes.push({ x: cx - w / 2, y: y - h / 2, w, h }); return y; }
+      }
+    }
+    return null;
+  }
   function plateAt(cx, cy, sc, col, title, val, big, t, sub) {
     ctx.font = `800 ${Math.round(17 * sc)}px monospace`;
     const tw = Math.max(ctx.measureText(val).width, (ctx.font = `800 ${Math.round(13 * sc)}px sans-serif`, ctx.measureText(title).width));
     const w = Math.max(118 * sc, tw + 46 * sc), h = 50 * sc, d = 9 * sc, cut = 18 * sc;
+    cy = placePlate(cx, cy, w + d, h + d + (sub && sc > 0.8 ? 14 * sc : 0));
+    if (cy == null) return null;
     const shape = (ox, oy) => [[-w / 2 + cut, -h / 2], [w / 2 - cut, -h / 2], [w / 2, 0], [w / 2 - cut, h / 2], [-w / 2 + cut, h / 2], [-w / 2, 0]].map(([a, b]) => [cx + a + ox, cy + b + oy]);
     const fr = shape(0, 0), bk = shape(d * 0.6, d);
     ctx.save();
@@ -1224,13 +1262,18 @@
     ctx.shadowColor = col; ctx.shadowBlur = 8; ctx.fillText(val, cx, cy + h * 0.18); ctx.shadowBlur = 0;
     if (sub && sc > 0.8) { ctx.fillStyle = '#9fc6dd'; ctx.font = `${Math.round(10 * sc)}px sans-serif`; ctx.fillText(sub, cx, cy + h / 2 + 10 * sc); }
     ctx.restore();
+    return { y: cy, w, h };
   }
   function plate3d(x, y, z, col, title, val, big, t, sub, ox) {
     const c = proj(x, y, z), b = proj(x, y - 0.9, z);
     if (!c) return;
     ox = ox || 0;
-    if (b) { ctx.strokeStyle = col + '88'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(c.x + ox, c.y); ctx.stroke(); ctx.setLineDash([]); }
-    plateAt(c.x + ox, c.y, Math.max(0.7, Math.min(1.5, c.s / 26)), col, title, val, big, t, sub);
+    const r = plateAt(c.x + ox, c.y, Math.max(0.7, Math.min(1.5, c.s / 26)), col, title, val, big, t, sub);
+    if (r && b) {        // 引き出し線はプレートの下端まで(プレートの上を横切らない)
+      ctx.save(); ctx.globalCompositeOperation = 'destination-over';
+      ctx.strokeStyle = col + '88'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(c.x + ox, r.y + r.h / 2); ctx.stroke(); ctx.setLineDash([]);
+      ctx.restore();
+    }
   }
   function ifTile(x, y, z, col, name, val) {
     const c = proj(x, y, z);
@@ -1263,30 +1306,36 @@
   let popups = [];
   function popup(pos, col, title, val, ttl, mark) {
     if (!pos) return;
-    popups.push({ pos: pos.slice(), col, title, val, born: performance.now(), ttl: ttl || 3600, mark });
+    const now = performance.now();
+    ttl = ttl || 3600;
+    // 同じ場所・同じ種類の表示がまだ出ていれば、新しく積まずに「×件数」でまとめる
+    const same = popups.find(p => p.title === title && p.col === col && p.mark === mark && now - p.born < p.ttl * 0.6 &&
+                                  Math.abs(p.pos[0] - pos[0]) + Math.abs(p.pos[1] - pos[1]) + Math.abs(p.pos[2] - pos[2]) < 0.05);
+    if (same) { same.n = (same.n || 1) + 1; same.val = val; same.born = now - same.ttl * 0.1; return; }
+    popups.push({ pos: pos.slice(), col, title, val, born: now, ttl, mark, n: 1 });
     if (popups.length > 40) popups.splice(0, popups.length - 40);
   }
   function drawPopups(t) {
     const now = performance.now();
     popups = popups.filter(p => now - p.born < p.ttl);
-    // 同じ場所(または近く)に出るものは縦に積む
-    const placed = [];
-    for (const p of popups) {
+    // 1か所に出すのは新しい順に3枚まで(残りは件数だけ「+N」で示す)。重なりは placePlate がずらす
+    const items = [];
+    for (const p of popups.slice().reverse()) {          // 新しい順
       const u = (now - p.born) / p.ttl;
       const c = proj(p.pos[0], p.pos[1] + 1.2 + u * 2.2, p.pos[2]);
-      if (!c) continue;
-      let y = c.y;
-      while (placed.some(q => Math.abs(q.x - c.x) < 160 && Math.abs(q.y - y) < 48)) y -= 50;
-      placed.push({ x: c.x, y });
+      if (c) items.push({ p, u, c, spot: `${Math.round(c.x / 120)},${Math.round(c.y / 120)}` });
+    }
+    const total = {}, shown = {};
+    for (const it of items) total[it.spot] = (total[it.spot] || 0) + 1;
+    for (const { p, u, c, spot } of items) {
+      shown[spot] = (shown[spot] || 0) + 1;
+      if (shown[spot] > 3) continue;
       ctx.save(); ctx.globalAlpha = u < 0.1 ? u * 10 : u > 0.75 ? (1 - u) * 4 : 1;
       const px = c.x + (mode === 'net' && !hostView ? -230 : 0);
-      plateAt(px, y, 0.82, p.col, p.title, p.val, false, t);
-      if (p.mark) {                               // 「情」「注」の六角マークをプレートの左に
-        ctx.font = '800 14px monospace';
-        const tw = Math.max(ctx.measureText(p.val).width, (ctx.font = '800 11px sans-serif', ctx.measureText(p.title).width));
-        const half = Math.max(118 * 0.82, tw + 46 * 0.82) / 2;
-        markHex(px - half - 16, y, 17, p.col, p.mark, t);
-      }
+      const more = shown[spot] === 3 ? total[spot] - 3 : 0;
+      const title = p.title + (p.n > 1 ? ` ×${p.n}` : '') + (more > 0 ? `  +${more}` : '');
+      const r = plateAt(px, c.y, 0.82, p.col, title, p.val, false, t);
+      if (r && p.mark) markHex(px - r.w / 2 - 16, r.y, 17, p.col, p.mark, t);   // 「情」「注」の六角マークをプレートの左に
       ctx.restore();
     }
     // 直近60秒に経路が変わった装置には「情」のバッジを立てておく
@@ -2456,6 +2505,7 @@
     drawFloor();
     const nowSec = Date.now() / 1000;
     drawGroundRing(t);
+    platesBeginFrame();
     if (mode === 'link') { drawLinks(t); drawForecast(t); }
     else if (mode === 'ospf') { drawOspf(t); drawParticles(t); }
     else if (mode === 'dark') { drawDarknet(t); }
