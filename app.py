@@ -4195,17 +4195,39 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         ospf_engine.set_priority(device_id, int(ospf_pri.group(1)))
         return
     # "ip ospf cost <n>" — インタフェースコスト
+    # config-if で打てばそのインタフェースだけ(実機どおり)。IF外なら装置全体。
+    _cost_if = (getattr(state, 'current_if', '') or '') if state.mode.startswith('config-if') else ''
     ospf_cost = re.match(r'^(?:ip\s+)?ospf\s+cost\s+(\d+)', c)
     if ospf_cost:
-        ospf_engine.set_cost(device_id, int(ospf_cost.group(1)))
+        ospf_engine.set_cost(device_id, int(ospf_cost.group(1)), _cost_if)
+        if _cost_if and _cost_if in state.interfaces:
+            state.interfaces[_cost_if]['ospf_cost'] = int(ospf_cost.group(1))
         return
-    # "auto-cost reference-bandwidth <n>" — ref-bwでコスト自動計算
+    if re.match(r'^no\s+(?:ip\s+)?ospf\s+cost', c):
+        ospf_engine.clear_cost(device_id, _cost_if)
+        if _cost_if and _cost_if in state.interfaces:
+            state.interfaces[_cost_if].pop('ospf_cost', None)
+        return
+    # "bandwidth <kbps>"(config-if) — IOS はこの値からOSPFコストを計算する
+    _bw = re.match(r'^(no\s+)?bandwidth(?:\s+(\d+))?$', c)
+    if _bw and _cost_if and (_bw.group(1) or _bw.group(2)):
+        kbps = 0 if _bw.group(1) else int(_bw.group(2))
+        ospf_engine.set_bandwidth(device_id, _cost_if, kbps)
+        if _cost_if in state.interfaces:
+            if kbps:
+                state.interfaces[_cost_if]['bandwidth'] = kbps
+            else:
+                state.interfaces[_cost_if].pop('bandwidth', None)
+        return
+    # "auto-cost reference-bandwidth <Mbps>" — 参照帯域。コスト = 参照帯域 ÷ IF帯域
     auto_cost = re.match(r'^auto-cost\s+reference-bandwidth\s+(\d+)', c)
     if auto_cost and getattr(state, '_routing_mode', '') == 'ospf':
-        ref_bw = int(auto_cost.group(1))
-        # デフォルト1Gbps想定でコスト計算
-        cost = max(1, ref_bw // 1000)
-        ospf_engine.set_cost(device_id, cost)
+        ospf_engine.set_reference_bandwidth(device_id, int(auto_cost.group(1)))
+        state.ospf_ref_bw = int(auto_cost.group(1))
+        if state.device_type in ('cisco', 'catalyst', 'wlc'):
+            # IOS が実際に出す注意
+            return ('% OSPF: Reference bandwidth is changed.\n'
+                    '        Please ensure reference bandwidth is consistent across all routers.')
         return
     # "passive-interface <iface>" / "passive-interface default"
     passive = re.match(r'^passive-interface\s+(\S+)', c)
@@ -6502,6 +6524,10 @@ def _build_running_config(device_id: str, state) -> str:
                 for _dir in ('in', 'out'):
                     if iinfo.get(f'acl_{_dir}'):
                         lines.append(f' ip access-group {iinfo[f"acl_{_dir}"]} {_dir}')
+                if iinfo.get('bandwidth'):
+                    lines.append(f' bandwidth {iinfo["bandwidth"]}')
+                if iinfo.get('ospf_cost') is not None:
+                    lines.append(f' ip ospf cost {iinfo["ospf_cost"]}')
                 from engine.nac import switch_running_config_interface
                 lines.extend(switch_running_config_interface(state, ifname))
                 # PPPoEサーバ: Virtual-Template配下の設定
@@ -6605,6 +6631,8 @@ def _build_running_config(device_id: str, state) -> str:
                                  if net in nets), on['area_id'])
                 _aid_disp = on.get('area_display', {}).get(_aid_net, _aid_net)
                 lines.append(f' network {_n} {_wc} area {_aid_disp}')
+            if on.get('ref_bw'):
+                lines.append(f' auto-cost reference-bandwidth {on["ref_bw"]}')
             for _aid, _atype in sorted(on.get('area_types', {}).items()):
                 if _atype in ('nssa', 'stub'):
                     lines.append(f' area {_aid} {_atype}')

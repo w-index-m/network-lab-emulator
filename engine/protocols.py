@@ -1068,7 +1068,7 @@ class OspfEngine:
     """
     OSPF完全実装（Cisco IOS XE / Catalyst 9300準拠）
     - DR/BDR選出（priority比較 → RouterID比較、priority=0はDR非対象）
-    - コスト計算（ref-bw 100Mbps ÷ 帯域幅、デフォルト=10）
+    - コスト計算（インタフェースごと: ip ospf cost > ref-bw(IOS 100Mbps / NX-OS 40Gbps) ÷ bandwidth、EOS 等は 10）
     - dead_interval = hello_interval × 4（Cisco仕様）
     - マルチエリア（area 0/1、ABRがSummary LSA生成）
     - passive-interface（Helloを送らない）
@@ -1105,7 +1105,13 @@ class OspfEngine:
                 'priority': 1,    # DR選出優先度（0=DR非対象）
                 'dr': None,       # 現在のDR device_id
                 'bdr': None,      # 現在のBDR device_id
-                'interface_cost': 10,   # デフォルトコスト（100M ÷ 1G）
+                # 帯域からコストを決められない機種の既定コスト。
+                # `ip ospf cost` をインタフェース外で打ったときもここに入る。
+                'interface_cost': 10,
+                'cost_manual': False,  # 装置全体に ip ospf cost を指定済みか
+                'if_costs': {},        # 正規化IF名 -> ip ospf cost
+                'if_bandwidth': {},    # 正規化IF名 -> bandwidth <kbps>
+                'ref_bw': None,        # auto-cost reference-bandwidth (Mbps)。None=機種の既定
                 'redistributed': {},
                 'abr': False,     # ABR（マルチエリア）フラグ
                 'summary_routes': [],  # ABRが生成するSummary LSA
@@ -1150,9 +1156,129 @@ class OspfEngine:
         n['auth_mode'] = mode
         n['auth_key'] = key
 
-    def set_cost(self, device_id: str, cost: int):
+    def set_cost(self, device_id: str, cost: int, iface: str = ''):
+        """ip ospf cost。インタフェースを指定すればそのIFだけ、無ければ装置全体。"""
         n = self._node(device_id)
-        n['interface_cost'] = cost
+        if iface:
+            n['if_costs'][vnet._norm_iface(iface)] = cost
+        else:
+            n['interface_cost'] = cost
+            n['cost_manual'] = True
+        self._refresh_lsa(device_id)
+
+    def clear_cost(self, device_id: str, iface: str = ''):
+        """no ip ospf cost"""
+        n = self._node(device_id)
+        if iface:
+            n['if_costs'].pop(vnet._norm_iface(iface), None)
+        else:
+            n['interface_cost'] = 10
+            n['cost_manual'] = False
+        self._refresh_lsa(device_id)
+
+    def set_reference_bandwidth(self, device_id: str, mbps: int):
+        """auto-cost reference-bandwidth <Mbps>"""
+        n = self._node(device_id)
+        n['ref_bw'] = max(1, int(mbps))
+        self._refresh_lsa(device_id)
+
+    def set_bandwidth(self, device_id: str, iface: str, kbps: int):
+        """インタフェースの bandwidth <kbps>(IOS はこれでコストが変わる)"""
+        n = self._node(device_id)
+        if kbps:
+            n['if_bandwidth'][vnet._norm_iface(iface)] = int(kbps)
+        else:
+            n['if_bandwidth'].pop(vnet._norm_iface(iface), None)
+        self._refresh_lsa(device_id)
+
+    def _refresh_lsa(self, device_id: str):
+        n = self.nodes.get(device_id)
+        if not n or not n.get('enabled'):
+            return
+        # コスト変更を即座に経路へ反映する(自分の属する全エリアでフラッディング→SPF)
+        areas = set(self.area_networks.get(device_id, {})) or {n.get('area_id')}
+        for a in areas:
+            try:
+                self._flood_lsdb_area(a)
+            except Exception:
+                pass
+
+    # IOS の既定 bandwidth(kbps)。名前から決める
+    @staticmethod
+    def if_bandwidth_kbps(dtype: str, iface: str) -> int:
+        s = (iface or '').lower()
+        table = (
+            (('hundredgig', 'hu'), 100_000_000),
+            (('fortygig', 'fo'), 40_000_000),
+            (('twentyfivegig', 'twe'), 25_000_000),
+            (('tengig', 'te', 'xe-'), 10_000_000),
+            (('gigabitethernet', 'gi', 'ge-', 'vlan', 'port-channel', 'po', 'mgmt', 'lan'), 1_000_000),
+            (('fastethernet', 'fa'), 100_000),
+            (('serial', 'se'), 1544),
+            (('tunnel', 'tu'), 100),
+            (('loopback', 'lo'), 8_000_000),
+        )
+        for prefixes, bw in table:
+            for pre in prefixes:
+                if s.startswith(pre) and (len(pre) > 2 or s[len(pre):len(pre) + 1].isdigit()):
+                    return bw
+        if s.startswith('ethernet') or s.startswith('eth'):
+            # NX-OS の EthernetX/Y は 10G、Arista は 1G、IOS の Ethernet0 は 10M
+            if dtype == 'nexus':
+                return 10_000_000
+            if dtype in ('cisco', 'catalyst', 'wlc', 'asa'):
+                return 10_000
+            return 1_000_000
+        return 1_000_000
+
+    # 帯域からコストを計算する機種と、その既定の reference-bandwidth(Mbps)
+    _REF_BW_DEFAULT = {'cisco': 100, 'catalyst': 100, 'wlc': 100, 'asa': 100,
+                       'juniper': 100, 'nexus': 40_000}
+
+    def cost_for_iface(self, device_id: str, iface: str) -> int:
+        """インタフェースの OSPF コスト(実機と同じ決め方)。
+        1. ip ospf cost <n>(そのIF)  2. 装置全体の ip ospf cost
+        3. reference-bandwidth ÷ bandwidth(切り捨て、最小1)
+        4. 帯域から決めない機種は既定値(Arista EOS は 10)"""
+        n = self.nodes.get(device_id) or {}
+        key = vnet._norm_iface(iface) if iface else ''
+        if key and key in n.get('if_costs', {}):
+            return n['if_costs'][key]
+        if n.get('cost_manual'):
+            return n.get('interface_cost', 10)
+        dtype = vnet.device_types.get(device_id, '')
+        ref = n.get('ref_bw') or self._REF_BW_DEFAULT.get(dtype)
+        if not ref or not iface:
+            return n.get('interface_cost', 10)
+        bw = n.get('if_bandwidth', {}).get(key) or self.if_bandwidth_kbps(dtype, iface)
+        return max(1, min(65535, (ref * 1000) // max(1, bw)))
+
+    def _iface_for_net(self, device_id: str, net: str) -> str:
+        import ipaddress as _ipa
+        try:
+            nw = _ipa.ip_network(net, strict=False)
+        except ValueError:
+            return ''
+        best = ''
+        for k, v in icmp_engine.device_ips.get(device_id, {}).get('interfaces', {}).items():
+            if not (isinstance(v, dict) and v.get('ip')):
+                continue
+            try:
+                if _ipa.ip_address(v['ip']) in nw:
+                    if vnet._norm_iface(k) not in {vnet._norm_iface(x) for x in
+                                                   vnet.down_interfaces.get(device_id, set())}:
+                        return k
+                    best = best or k
+            except ValueError:
+                continue
+        return best
+
+    def cost_for_net(self, device_id: str, net: str) -> int:
+        return self.cost_for_iface(device_id, self._iface_for_net(device_id, net))
+
+    def cost_toward(self, device_id: str, peer_id: str) -> int:
+        """隣接 peer へ向いたインタフェースのコスト"""
+        return self.cost_for_iface(device_id, vnet.interface_links.get(device_id, {}).get(peer_id, ''))
 
     def set_router_id(self, device_id: str, router_id: str):
         """router ospf 配下の `router-id X.X.X.X` に対応。
@@ -1402,7 +1528,7 @@ class OspfEngine:
             # このエリアがNSSAなら、再配信経路はType-7(NSSA-External)。
             # 受信側でE2ではなくN2として表示する判断材料に使う。
             'area_is_nssa': self.is_area_nssa(device_id),
-            'cost': n['interface_cost'],
+            'cost': self.cost_toward(device_id, ''),
             'auth_mode': n.get('auth_mode', ''),
             'auth_key': n.get('auth_key', ''),
         }
@@ -1692,7 +1818,7 @@ class OspfEngine:
                 'type': 'stub',           # Type3: Stub Network
                 'link_id': parts[0],      # ネットワークアドレス
                 'link_data': mask,        # サブネットマスク
-                'metric': n['interface_cost'],
+                'metric': self.cost_for_net(device_id, net),
                 'network': net,
                 # このnetworkのエリア(ABRでは他エリアの経路をO IAにする判断材料)
                 'area': next((a for a, nets in self.area_networks.get(device_id, {}).items()
@@ -1710,7 +1836,7 @@ class OspfEngine:
                     'type': 'transit',    # Type2: Transit (DR接続)
                     'link_id': nbr.router_id,  # DRのルーターID
                     'link_data': n['router_id'],
-                    'metric': n['interface_cost'],
+                    'metric': self.cost_toward(device_id, nid),
                     'neighbor_id': nid,
                 })
             else:
@@ -1719,7 +1845,7 @@ class OspfEngine:
                     'type': 'p2p',        # Type1: Point-to-Point
                     'link_id': nbr.router_id,
                     'link_data': '255.255.255.255',
-                    'metric': n['interface_cost'],
+                    'metric': self.cost_toward(device_id, nid),
                     'neighbor_id': nid,
                 })
 
@@ -1800,7 +1926,7 @@ class OspfEngine:
                     'type': 'summary',
                     'network': net,
                     'network_mask': mask,
-                    'metric': n['interface_cost'],
+                    'metric': self.cost_for_net(device_id, net),
                     'area_id': area_id,
                 }]
             )
@@ -1878,7 +2004,18 @@ class OspfEngine:
                     for link in lsa.links:
                         for att_rid in link.get('attached_routers', []):
                             if att_rid != my_rid and att_rid not in visited:
-                                link_cost = cost + 1
+                                # DR からネットワーク経由で接続ルーターへ: DR のそのリンクの
+                                # コスト(ネットワーク→ルーターは0)。以前は一律 +1 で、
+                                # DR を経由する経路だけコストが小さく出ていた
+                                _dr_cost = None
+                                for _l in (n['lsdb'].get(f'{cur_rid}:1:{cur_rid}') or
+                                           OspfLsa(1, '', '', 0, 0, 0)).links:
+                                    if _l.get('type') in ('transit', 'p2p') and _l.get('link_id') == att_rid:
+                                        _dr_cost = _l.get('metric', 10)
+                                        break
+                                if _dr_cost is None:
+                                    continue
+                                link_cost = cost + _dr_cost
                                 new_nh = nh if nh else att_rid
                                 new_via = via if via != 'direct' else att_rid
                                 if att_rid not in dist or dist[att_rid][0] > link_cost:
@@ -2288,7 +2425,7 @@ class OspfEngine:
             lines.append(f'{name} is {state_str}, line protocol is {proto}')
             lines.append(f'  Internet Address {ip}/{prefix}, Area {self.area_for_ip(device_id, ip)}')
             lines.append(f'  Process ID {n["process_id"]}, Router ID {n["router_id"]}, '
-                         f'Network Type BROADCAST, Cost: {n["interface_cost"]}')
+                         f'Network Type BROADCAST, Cost: {self.cost_for_iface(device_id, name)}')
             lines.append(f'  Transmit Delay is 1 sec, State {role}, '
                          f'Priority {n["priority"]}')
             lines.append(f'  Designated Router (ID) {n["router_id"]}, '

@@ -33,9 +33,9 @@ C        10.10.13.0/30 is directly connected, GigabitEthernet1/0/2
 L        10.10.13.1/32 is directly connected, GigabitEthernet1/0/2
 C        192.168.11.0/24 is directly connected, Vlan10
 L        192.168.11.1/32 is directly connected, Vlan10
-O        10.10.23.0/30 [110/20] via 10.10.12.2, GigabitEthernet1/0/1
-O        192.168.12.0/24 [110/20] via 10.10.12.2, GigabitEthernet1/0/1
-O        192.168.13.0/24 [110/20] via 10.10.13.2, GigabitEthernet1/0/2
+O        10.10.23.0/30 [110/2] via 10.10.12.2, GigabitEthernet1/0/1
+O        192.168.12.0/24 [110/2] via 10.10.12.2, GigabitEthernet1/0/1
+O        192.168.13.0/24 [110/2] via 10.10.13.2, GigabitEthernet1/0/2
 
 CAT2# show ip route
 Gateway of last resort is not set
@@ -45,9 +45,9 @@ C        10.10.23.0/30 is directly connected, GigabitEthernet1/0/1
 L        10.10.23.1/32 is directly connected, GigabitEthernet1/0/1
 C        192.168.12.0/24 is directly connected, Vlan10
 L        192.168.12.1/32 is directly connected, Vlan10
-O        10.10.13.0/30 [110/20] via 10.10.12.1, GigabitEthernet1/0/2
-O        192.168.11.0/24 [110/20] via 10.10.12.1, GigabitEthernet1/0/2
-O        192.168.13.0/24 [110/20] via 10.10.23.2, GigabitEthernet1/0/1
+O        10.10.13.0/30 [110/2] via 10.10.12.1, GigabitEthernet1/0/2
+O        192.168.11.0/24 [110/2] via 10.10.12.1, GigabitEthernet1/0/2
+O        192.168.13.0/24 [110/2] via 10.10.23.2, GigabitEthernet1/0/1
 
 CAT3# show ip route
 Gateway of last resort is not set
@@ -57,9 +57,9 @@ C        10.10.23.0/30 is directly connected, GigabitEthernet1/0/2
 L        10.10.23.2/32 is directly connected, GigabitEthernet1/0/2
 C        192.168.13.0/24 is directly connected, Vlan10
 L        192.168.13.1/32 is directly connected, Vlan10
-O        10.10.12.0/30 [110/11] via 10.10.23.1, GigabitEthernet1/0/2
-O        192.168.11.0/24 [110/11] via 10.10.13.1, GigabitEthernet1/0/1
-O        192.168.12.0/24 [110/11] via 10.10.23.1, GigabitEthernet1/0/2
+O        10.10.12.0/30 [110/2] via 10.10.23.1, GigabitEthernet1/0/2
+O        192.168.11.0/24 [110/2] via 10.10.13.1, GigabitEthernet1/0/1
+O        192.168.12.0/24 [110/2] via 10.10.23.1, GigabitEthernet1/0/2
 
 PC1$ ping -c 3 192.168.13.10
 3 packets transmitted, 3 received, 0% packet loss, time 3000ms
@@ -84,7 +84,9 @@ traceroute to 192.168.13.10 (192.168.13.10), 30 hops max, 40 byte packets
 - PC どうしの ping はすべて通った。
 - traceroute は CAT1 → CAT3 → PC3 の順で届いた。
 
-CAT3 だけコストが 11 と出る(ほかは 20)のは、OSPF エンジンの既存の癖で、今回は直していない。
+コストは実機の IOS と同じく、相手の LAN まで `[110/2]` になる。GigabitEthernet と Vlan はどちらも cost 1 なので、リンク 1 + 相手の Vlan10 1 = 2。
+
+当初は CAT1 と CAT2 が `[110/20]`、CAT3 だけ `[110/11]` と出ていた。これは後から直した(下の「4. OSPF のコスト」)。
 
 ![ニルヴァーナの OSPF 画面(宛先 192.168.11.0/24 への最短経路)](images/cyber-view-catalyst3-ospf-segments.png)
 
@@ -106,3 +108,17 @@ CAT3 だけコストが 11 と出る(ほかは 20)のは、OSPF エンジンの�
    - 修正: 宛先が最後のルータの直結先なら、最後の行に宛先(PC3 (192.168.13.10))を出す。IOS 形式・Linux 形式の両方を直した。
 
 テスト: `tests/test_pc_gateway_and_traceroute_last_hop.py`、`tests/test_l2_loop.py::test_routed_ports_are_not_an_l2_loop`。
+
+4. **OSPF のコスト**(後から直した)
+   - 症状: CAT1 と CAT2 は `[110/20]`、CAT3 だけ `[110/11]` と出た。実機なら3台とも `[110/2]`。
+   - 原因は2つ。
+     - コストがインタフェースごとではなく、ルータ単位で一律 10 だった。
+     - SPF が DR の Network LSA をたどるときだけ、コストを決め打ちで +1 していた。CAT3 は DR だったので、CAT3 を通る経路だけ 10+1 になっていた。
+   - 修正: コストをインタフェースごとに実機と同じ決め方で計算する。優先順は次のとおり。
+     1. インタフェースの `ip ospf cost`
+     2. 参照帯域(IOS は 100Mbps、NX-OS は 40Gbps、`auto-cost reference-bandwidth` で変更)÷ 帯域(`bandwidth` で変更)。小数は切り捨てで、最小は 1。
+   - 例: Gi・Vlan は 1、FastEthernet は 1、Serial は 64、Tunnel は 1000。NX-OS の 10G Ethernet は 4。
+   - Arista EOS は既定の 10 のまま。Si-R など、帯域からコストを決める仕様を確かめていない機種も、これまでどおり 10。
+   - DR を通るときも、DR のそのリンクのコストを足す。
+   - `show ip ospf interface` の Cost もインタフェースごとに出す。running-config には `ip ospf cost`・`bandwidth`・`auto-cost reference-bandwidth` を出す。
+   - 確認: 3台とも `[110/2]` になった。CAT1 の Gi1/0/1 に `ip ospf cost 50` を入れると、CAT2 の LAN が CAT3 経由の `[110/3]` に切り替わった。`no ip ospf cost` で元に戻った。テストは `tests/test_ospf_interface_cost.py`。
