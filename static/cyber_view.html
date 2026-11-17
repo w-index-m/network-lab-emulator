@@ -39,7 +39,15 @@
   .hud * { pointer-events: auto; }
   #status { top: 12px; left: 16px; font-size: 13px; line-height: 1.55; text-shadow: 0 0 6px #000; }
   #status b { color: #fff; font-weight: 600; }
-  #status .brand { font-size: 15px; letter-spacing: .32em; color: var(--cyan); }
+  #status .brand { font-size: 15px; letter-spacing: .32em; color: var(--cyan); position: relative;
+    text-shadow: 0 0 8px rgba(51,214,255,.8), 0 0 18px rgba(51,214,255,.35); animation: cvBrand 6s infinite steps(1); }
+  @keyframes cvBrand {
+    0%, 91%, 100% { text-shadow: 0 0 8px rgba(51,214,255,.8), 0 0 18px rgba(51,214,255,.35); transform: none; }
+    92% { text-shadow: -2px 0 #ff2a4a, 2px 0 #33d6ff; transform: translateX(1px) skewX(-8deg); }
+    94% { text-shadow: 2px 0 #ff2a4a, -2px 0 #33d6ff; transform: translateX(-2px); }
+    96% { opacity: .55; }
+  }
+  @media (prefers-reduced-motion: reduce) { #status .brand { animation: none; } }
   #status a { color: var(--dim); text-decoration: none; margin-right: 10px; }
   #status a:hover { color: var(--cyan); }
   #cidr { top: 6px; right: 18px; text-align: right; font-size: clamp(26px, 5.4vw, 64px); font-weight: 700;
@@ -233,7 +241,7 @@
 </div>
 
 <div id="cidr" class="hud">0.0.0.0/0</div>
-<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山)">◎</button><button id="zMusic" title="BGM を切り替え(なし/ジャズ/レゲエ/アンビエント)">♪</button></div><div id="bgmToast" class="hud"></div>
+<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山)">◎</button><button id="zMusic" title="BGM を切り替え(なし/ジャズ/レゲエ/アンビエント)">♪</button><button id="zFx" class="on" title="サイバー演出(六角グリッド・データの雨・火の粉・走査線・グリッチ)のオン/オフ">FX</button></div><div id="bgmToast" class="hud"></div>
 <div id="bgToast" class="hud"></div>
 <div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mAtk" title="ATT&amp;CK: 組織ごとの攻撃の進行度と、戦術×手法の時系列">ATT&amp;CK</button><button id="mWan" title="WAN: 回線チェック(フレッツ網の PPPoE / IPoE、遅延・ロスの推移)">WAN</button><button id="mDark" title="DARKNET: 使われていない帯に届いた通信(スキャン・DDoS の跳ね返り・設定ミス・リフレクションの準備)">DARKNET</button><button id="mBoard" title="ダッシュボード(パネル・変数・時間範囲・自動更新・注釈)">BOARD</button><button id="mExplore" title="問い合わせ(PromQL / LogQL / 内部の時系列とログ)">EXPLORE</button><button id="mAlerts" title="アラートルール・連絡先・履歴">ALERTS</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
 <div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
@@ -1030,6 +1038,15 @@
       const c = at(u), c2 = at(Math.min(1, u + 0.02));
       if (!c || !c2) continue;
       const ang = Math.atan2(c2.y - c.y, c2.x - c.x), sz = Math.max(3, Math.min(9, c.s * 0.22));
+      const ct = fxOn ? at(Math.max(0, u - 0.08)) : null;
+      if (ct) {                                 // 光の尾(加算合成)
+        ctx.save(); ctx.globalCompositeOperation = 'lighter';
+        const tg = ctx.createLinearGradient(ct.x, ct.y, c.x, c.y);
+        tg.addColorStop(0, p.col + '00'); tg.addColorStop(1, p.col + 'cc');
+        ctx.strokeStyle = tg; ctx.lineWidth = sz * 0.9; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(ct.x, ct.y); ctx.lineTo(c.x, c.y); ctx.stroke();
+        ctx.restore();
+      }
       ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(ang);
       ctx.beginPath(); ctx.moveTo(sz * 1.6, 0); ctx.lineTo(-sz, sz * 0.7); ctx.lineTo(-sz, -sz * 0.7); ctx.closePath();
       ctx.fillStyle = p.col; ctx.shadowColor = p.col; ctx.shadowBlur = 8; ctx.fill();
@@ -1212,7 +1229,7 @@
     plateBlock = [];
     for (const id of PLATE_HUD) {
       const el = document.getElementById(id);
-      if (!el || el.offsetParent === null) continue;
+      if (!el || !el.getClientRects().length || getComputedStyle(el).visibility === 'hidden') continue;   // fixed 配置は offsetParent が null なので使わない
       const r = el.getBoundingClientRect();
       if (r.width > 0 && r.height > 0) plateBlock.push({ x: r.left - 6, y: r.top - 6, w: r.width + 12, h: r.height + 12 });
     }
@@ -2493,6 +2510,114 @@
   document.getElementById('zBg').title = `背景: ${BG_NAME[bgMode]}(押すと切り替え)`;
   window.__cvBg = (m) => { if (m) setBg(m); return bgMode; };
 
+  // ── サイバー演出(FX): 六角グリッド・データの雨・火の粉・走査線・グリッチ ──
+  // ?fx=0 / localStorage cvFx=0 で切れる。動きを減らす設定(prefers-reduced-motion)ではグリッチと雨を止める
+  let fxOn = true;
+  try { if (localStorage.getItem('cvFx') === '0') fxOn = false; } catch (e) { /* 読めなくても既定で動かす */ }
+  if (new URLSearchParams(location.search).get('fx') === '0') fxOn = false;
+  const fxCalm = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let fxHex = null, fxHexRed = null, fxScan = null, fxEmber = null, fxKey = '';
+  const fxRain = [], fxEmbers = [];
+  const FX_GLYPH = '0123456789ABCDEF警情注:/.<>[]';
+  function fxPrepare() {
+    const key = `${W}x${H}`;
+    if (key === fxKey) return;
+    fxKey = key;
+    // 六角グリッド(1枚描いて使い回す)
+    const hexGrid = (col) => {
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      const g = c.getContext('2d'), r = 22, hw = Math.sqrt(3) * r;
+      g.strokeStyle = col; g.lineWidth = 1;
+      for (let row = 0, y = 0; y < H + r * 2; row++, y += r * 1.5) {
+        for (let x = (row % 2) * hw / 2; x < W + hw; x += hw) {
+          g.beginPath();
+          for (let k = 0; k < 6; k++) { const a = Math.PI / 6 + k * Math.PI / 3; g.lineTo(x + r * Math.cos(a), y + r * Math.sin(a)); }
+          g.closePath(); g.stroke();
+        }
+      }
+      return c;
+    };
+    fxHex = hexGrid('rgba(51,214,255,0.10)'); fxHexRed = hexGrid('rgba(255,59,78,0.13)');
+    fxEmber = document.createElement('canvas'); fxEmber.width = fxEmber.height = 32;
+    const eg = fxEmber.getContext('2d'), gr = eg.createRadialGradient(16, 16, 0, 16, 16, 16);
+    gr.addColorStop(0, 'rgba(255,236,150,1)'); gr.addColorStop(0.35, 'rgba(255,150,40,0.6)'); gr.addColorStop(1, 'rgba(255,60,0,0)');
+    eg.fillStyle = gr; eg.fillRect(0, 0, 32, 32);
+    // 走査線 + 周辺減光
+    fxScan = document.createElement('canvas'); fxScan.width = W; fxScan.height = H;
+    const s = fxScan.getContext('2d');
+    for (let y = 0; y < H; y += 3) { s.fillStyle = 'rgba(0,0,0,0.16)'; s.fillRect(0, y, W, 1); }
+    const v = s.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
+    v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.55)');
+    s.fillStyle = v; s.fillRect(0, 0, W, H);
+    fxRain.length = 0;
+    for (let i = 0, n = Math.round(W / 46); i < n; i++) fxRain.push({ x: (i + Math.random()) * 46, y: Math.random() * H, v: 0.4 + Math.random() * 1.2, len: 6 + (Math.random() * 14 | 0) });
+  }
+  // 背景の上・3D の下: 六角グリッドの脈動とデータの雨
+  function fxUnder(t, alert) {
+    if (!fxOn) return;
+    fxPrepare();
+    ctx.save();
+    ctx.globalAlpha = 0.55 + 0.45 * Math.sin(t * 0.0012);
+    ctx.drawImage(alert ? fxHexRed : fxHex, 0, 0, W, H);
+    // 走るスキャンバンド
+    const by = ((t * 0.06) % (H + 200)) - 100;
+    const bg = ctx.createLinearGradient(0, by - 60, 0, by + 60);
+    const bc = alert ? '255,59,78' : '51,214,255';
+    bg.addColorStop(0, `rgba(${bc},0)`); bg.addColorStop(0.5, `rgba(${bc},0.07)`); bg.addColorStop(1, `rgba(${bc},0)`);
+    ctx.globalAlpha = 1; ctx.fillStyle = bg; ctx.fillRect(0, by - 60, W, 120);
+    if (!fxCalm) {
+      ctx.font = '12px monospace'; ctx.textAlign = 'center';
+      for (const d of fxRain) {
+        d.y += d.v * (alert ? 2.2 : 1);
+        if (d.y - d.len * 14 > H) { d.y = -10; d.x = Math.random() * W; }
+        for (let k = 0; k < d.len; k++) {
+          const yy = d.y - k * 14; if (yy < -14 || yy > H) continue;
+          const a = (1 - k / d.len) * (k ? 0.14 : 0.42);
+          ctx.fillStyle = alert ? `rgba(255,${k ? 70 : 200},${k ? 80 : 160},${a})` : `rgba(${k ? 51 : 200},${k ? 214 : 250},255,${a})`;
+          ctx.fillText(FX_GLYPH[(Math.floor(t / 90) + k * 7 + (d.x | 0)) % FX_GLYPH.length], d.x, yy);
+        }
+      }
+    }
+    ctx.restore();
+  }
+  // 3D の上: 火の粉(警報中)、走査線・周辺減光、ときどきグリッチ
+  function fxOver(t, alert) {
+    if (!fxOn) return;
+    fxPrepare();
+    ctx.save();
+    // 火の粉: 警報の量に応じて湧き、ゆらゆら昇って消える
+    const want = alert ? Math.min(90, 18 + alert * 4) : 0;
+    while (fxEmbers.length < want) fxEmbers.push({ x: W * (0.2 + Math.random() * 0.6), y: H * (0.35 + Math.random() * 0.6), v: 0.3 + Math.random() * 0.9, r: 1.5 + Math.random() * 3, ph: Math.random() * 6.3, life: 0 });
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = fxEmbers.length - 1; i >= 0; i--) {
+      const e = fxEmbers[i];
+      e.life += 1; e.y -= e.v; e.x += Math.sin(t * 0.002 + e.ph) * 0.4;
+      const a = Math.min(1, e.life / 30) * Math.max(0, 1 - e.life / 420);
+      if (a <= 0 || e.y < -10 || fxEmbers.length > want + 4 && i < 4) { fxEmbers.splice(i, 1); continue; }
+      ctx.globalAlpha = a; ctx.drawImage(fxEmber, e.x - e.r * 4, e.y - e.r * 4, e.r * 8, e.r * 8);
+    }
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+    ctx.drawImage(fxScan, 0, 0, W, H);
+    // グリッチ: 数秒に一度、帯状に横ずれ + 赤/水色のにじみ(警報中は頻度を上げる)
+    if (!fxCalm) {
+      const period = alert ? 2600 : 7000, ph = t % period;
+      if (ph < 140) {
+        const seed = Math.floor(t / period);
+        for (let k = 0; k < 4; k++) {
+          const y = ((seed * 9301 + k * 49297) % 233280) / 233280 * H, h = 6 + ((seed + k) % 5) * 7;
+          const dx = (((seed + k) % 2) ? 1 : -1) * (8 + ((seed * 7 + k) % 24));
+          ctx.drawImage(cv, 0, y * DPR, W * DPR, h * DPR, dx, y, W, h);
+          ctx.fillStyle = k % 2 ? 'rgba(255,40,70,0.10)' : 'rgba(51,214,255,0.10)'; ctx.fillRect(0, y, W, h);
+        }
+      }
+    }
+    ctx.restore();
+  }
+  const zFx = document.getElementById('zFx');
+  zFx.classList.toggle('on', fxOn);
+  zFx.onclick = () => { window.__cvFx(!fxOn); zFx.classList.toggle('on', fxOn); };
+  window.__cvFx = (on) => { if (on !== undefined) { fxOn = !!on; try { localStorage.setItem('cvFx', fxOn ? '1' : '0'); } catch (e) { /* 保存できなくても切り替える */ } } return { on: fxOn, embers: fxEmbers.length, rain: fxRain.length }; };
+
   function frame(t) {
     // 操作が無い時はゆっくり回り、少しだけ上下に揺れる(止まって見えないように)
     const idle = performance.now() - lastInput > 2500;
@@ -2502,6 +2627,8 @@
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     // アラートがある階層では背景ごと赤く染まる
     drawBackdrop(t, mode === 'net' && alertLevel);
+    const fxOk = !document.body.classList.contains('board');
+    if (fxOk && bgMode !== 'goldfish' && bgMode !== 'fuji') fxUnder(t, mode === 'net' && alertLevel);
     drawFloor();
     const nowSec = Date.now() / 1000;
     drawGroundRing(t);
@@ -2514,6 +2641,7 @@
     else { if (hostView) { alertLevel = 0; drawHost(t); } else { drawNetwork(t, nowSec); drawNetFlows(t); } drawParticles(t); }
     drawPopups(t);
     drawBoard(t);
+    if (fxOk) fxOver(t, mode === 'net' ? alertLevel : 0);
     flowLastT = t;
     requestAnimationFrame(frame);
   }

@@ -2886,3 +2886,5 @@ Arista `sflow destination`/`sflow run`、IOS `ip flow-export destination`/`ip fl
 追加(v23): `/cyber-view` の混雑時の表示(`docs/cyber-view-3d.md` 末尾)。`popup()` は同じ場所・同じ種類を `×N` にまとめ、1か所3枚まで(`+N`)。
 `plateAt` は `placePlate` で重ならない位置へずらす(フレーム開始の `platesBeginFrame` で HUD 要素と SYSTEM STATUS の板を障害物に登録、置けなければ描かない、戻り値 `{y,w,h}`)。
 641〜1800px 幅ではメニューを詰め CIDR をメニューの下へ。負荷のかけ方は DEMO + 8並列の ping(スキャン風/9000B×3000/通常)。
+追加(v24): `/cyber-view` の FX(`fxUnder`/`fxOver`、`#zFx`・`?fx=0`・`cvFx`・`window.__cvFx`): 六角グリッド・データの雨・火の粉・光の尾・走査線・グリッチ。HUD の障害物判定は fixed 要素のため `getClientRects()` で見る(offsetParent は null)。
+テスト実行前に `saved_config.json` があると前回の装置(FID-SSH 等)が混ざり bigip 等が落ちる(既知)。全体テストの前に退避する。
