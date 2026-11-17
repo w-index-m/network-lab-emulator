@@ -1,3 +1,4 @@
 fastapi>=0.100
 uvicorn>=0.23
 PyYAML>=6.0
+anthropic>=2.0          # AI ログ解析で Claude を使う時(NIRVANA_AI_PROVIDER=claude / ANTHROPIC_API_KEY)

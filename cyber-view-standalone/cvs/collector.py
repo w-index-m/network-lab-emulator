@@ -57,6 +57,8 @@ class Collector:
         self._prev_down = {}
         self.hist = defaultdict(lambda: deque(maxlen=400))
         self.valhalla_alerts = AlertImporter()
+        from .legacy_sources import LegacyRates
+        self.legacy = LegacyRates(cfg, self.devs, lambda k: self.dev_of(k))   # MRTG・Cacti
         from .snmp_poll import SnmpPoller
         self.snmp = SnmpPoller(cfg, self.analytics, self.errors)   # 経路表・CPU を実機から直接(sources.snmp)
         from .security import SiteSecurity
@@ -166,14 +168,26 @@ class Collector:
             except Exception as e:  # noqa: BLE001
                 self.errors['zabbix'] = str(e)[:200]
 
+        legacy = {}
+        if self.legacy.enabled():
+            legacy = self.legacy.rates(now)
+            for k in ('mrtg', 'cacti'):
+                if k in self.legacy.errors:
+                    self.errors[k] = self.legacy.errors[k]
+                else:
+                    self.errors.pop(k, None)
+
         def end_rate(dev, ifn):
-            """(in_bps, out_bps, 取得元)"""
+            """(in_bps, out_bps, 取得元)。Prometheus → Zabbix → MRTG / Cacti の順"""
             k = (self.devs[dev].get('mgmt_ip'), norm_if(ifn))
             if k in rates and (rates[k][0] is not None or rates[k][1] is not None):
                 return rates[k][0], rates[k][1], 'prometheus'
             z = zitems.get(dev, {}).get(norm_if(ifn))
             if z and ('in_bps' in z or 'out_bps' in z):
                 return z.get('in_bps'), z.get('out_bps'), 'zabbix'
+            lg = legacy.get((dev, norm_if(ifn)))
+            if lg:
+                return lg[0], lg[1], lg[2]
             return None, None, None
 
         # 検知経路

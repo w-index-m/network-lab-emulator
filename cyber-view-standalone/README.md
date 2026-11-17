@@ -27,6 +27,17 @@ network-lab-emulator の `/cyber-view`(NIRVANA 改風の 3D 監視画面)を、*
 
 ## 使い方
 
+いちばん簡単なのはインストーラー。Prometheus(+snmp_exporter)・Loki・Zabbix・MRTG・Cacti・Ollama・AI の鍵を探し、
+見つかった装置とつながり(同じ /30・/31)から `config.yaml` の下書きを作って venv に入れる:
+
+```bash
+./install.sh --detect-only     # 何が見つかるかだけ
+./install.sh                   # config.yaml を作って起動の仕方を表示(既存の config.yaml は --force が無ければ上書きしない)
+./install.sh --service         # systemd に登録(root)/ --docker で docker compose
+```
+
+手で入れる場合:
+
 ```bash
 cd cyber-view-standalone
 cp config.example.yaml config.yaml     # 装置・つながり・データ元を自分の環境に書き換える
@@ -124,11 +135,17 @@ CPU が高い状態が続くと「注」(警告)。しきい値は `sources.snmp
 
 ## ラボ版との違い
 
+- MRTG・Cacti・Zabbix の取り込み口は単体版だけ(取り込み順は Prometheus → Zabbix → MRTG / Cacti)。
+- AI ログ解析は単体版でも使えるが、提案されたコマンドは表示とコピーだけ(装置にはログインしない)。
+- 地球儀(WORLD)は単体版でも使える(MAWI の再生はラボ版だけ)。
+
 - ラボ専用のもの(ping の経路の粒、ポートスキャン検知、DEMO)は無い。経路の変化「情」は `sources.snmp` を書いたときだけ出る。DEMO ボタンは自動で隠れる。
 - 検知経路の「STATE」(エミュレータ内部の IF 状態)は無い。
 - 画面(`web/cyber_view.html`)と検知ルール(`cvs/flap_rules.py`・`cvs/link_evidence.py`)はラボ版と同じファイル。
   ラボ側を直したら `cp static/cyber_view.html cyber-view-standalone/web/` 等で揃える
   (`tests/test_cyber_view_standalone.py` がずれを検出する)。
+
+MRTG・Cacti・インストーラー・AI ログ解析: `../docs/nirvana-addon-monitoring-ai.md`
 
 動作確認の記録(本物の Prometheus・snmp_exporter・Loki・Zabbix 7.0 で試した結果と画面): `../docs/cyber-view-standalone.md`
 

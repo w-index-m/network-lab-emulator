@@ -52,6 +52,9 @@ RULES = {
     'syslog_error': {'name': '装置が error 以上のログを出力', 'severity': 'medium',
                      'window': 0, 'threshold': 3, 'cooldown': 60,
                      'desc': 'syslog 重要度3(error)以下のメッセージ(復旧通知は除く)'},
+    'ai_finding': {'name': 'AI のログ解析で重大な所見', 'severity': 'high',
+                   'window': 0, 'threshold': 0, 'cooldown': 0,
+                   'desc': 'AI(LLM)が syslog を読んで重要度 high 以上と判断した。提案は人が確認してから実行する'},
     'nirvana_rule': {'name': 'ニルヴァーナのアラートルール', 'severity': 'medium',
                      'window': 0, 'threshold': 0, 'cooldown': 0,
                      'desc': 'ボード(ALERTS)で作ったルールの条件を満たした。重要度はルールの severity に従う'},
@@ -111,7 +114,7 @@ FLAP_RULE_IDS = {_r['id'] for _r in _FLAP_RULES + [_ROUTE_FLAP]}
 # 検知元(センサー)。/cyber-view の六角形の花びらはこの単位でまとめる
 RULE_SOURCE = {**{_k: 'SYSLOG' for _k in FLAP_RULE_IDS}, 'route_flap': 'NET', 'conn_scan': 'IDS', 'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
                'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'valhalla': 'VALHALLA', 'nirvana_rule': 'RULE', 'cpu_high': 'NET', 'wan_slow': 'NET', 'wan_loss': 'NET', 'login_brute': 'IDS', 'nexus_finding': 'NEXUS', 'ext_sensor': 'SENSOR', 'login_after_fail': 'IDS', 'exfil': 'IDS',
-               'l2_loop': 'LOOP', 'ihr_outage': 'WORLD', 'ihr_delay': 'WORLD', 'radar_anomaly': 'WORLD', 'darknet_scan': 'DARKNET', 'darknet_backscatter': 'DARKNET', 'darknet_misconfig': 'DARKNET', 'darknet_reflection': 'DARKNET'}
+               'l2_loop': 'LOOP', 'ihr_outage': 'WORLD', 'ihr_delay': 'WORLD', 'radar_anomaly': 'WORLD', 'ai_finding': 'AI', 'darknet_scan': 'DARKNET', 'darknet_backscatter': 'DARKNET', 'darknet_misconfig': 'DARKNET', 'darknet_reflection': 'DARKNET'}
 SECURITY_SOURCES = {'IDS', 'FW', 'DARKNET', 'SENSOR', 'NEXUS'}
 _TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')
 # 復旧を知らせるメッセージ(実機のCiscoでは up も %LINK-3 なので重要度だけでは区別できない)

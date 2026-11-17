@@ -276,7 +276,7 @@ class DShieldClient:
         self.n = n
 
     def snapshot(self, geo):
-        from engine.world_sources import http_json
+        from .world_sources import http_json
         d = (self._fetch or http_json)(f'{self.base}/topips/records/{self.n}?json')
         rows = d if isinstance(d, list) else next((v for v in d.values() if isinstance(v, list)), []) if isinstance(d, dict) else []
         items = []
@@ -347,7 +347,7 @@ class AtlasClient:
         self._mesh = {}                     # 宛先アンカー id -> [msm id]
 
     def _get(self, path, **params):
-        from engine.world_sources import http_json
+        from .world_sources import http_json
         q = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
         url = path if path.startswith('http') else f'{self.base}{path}'
         return (self._fetch or http_json)(url + (('&' if '?' in url else '?') + q if q else ''), timeout=30)
@@ -478,7 +478,7 @@ class AtlasClient:
 
 def load_sample_geo(geo):
     """見本の都市DB(見本の DShield・RIPE Atlas の IP にだけ当たる小さな表)"""
-    from engine import world_samples as ws
+    from . import world_samples as ws
     geo.load_rows(csv.reader(io.StringIO(ws.GEO_CSV)), 'sample')
     geo.status['state'] = 'sample'
     return geo

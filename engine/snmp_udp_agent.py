@@ -52,6 +52,11 @@ def _tlv(tag: int, value: bytes) -> bytes:
 def _encode_int(n: int, tag: int = TAG_INTEGER) -> bytes:
     if n == 0:
         body = b'\x00'
+    elif n < 0:
+        # 負の INTEGER(request-id は符号付き32ビット。Perl の SNMP_Session = MRTG / cfgmaker は負の値もよく使う)。
+        # 以前は to_bytes(signed=False) で例外になり応答を返せず、cfgmaker が半分ほど「応答なし」になっていた
+        nbytes = max(1, (n + 1).bit_length() // 8 + 1)
+        body = n.to_bytes(nbytes, 'big', signed=True)
     else:
         # 符号無し値(Counter32等)も含め、最上位ビットが立つ場合は0x00でパディング
         nbytes = max(1, (n.bit_length() + 8) // 8)

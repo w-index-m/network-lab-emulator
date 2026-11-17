@@ -10762,6 +10762,101 @@ async def _response_run(alert, action, auto=False):
     return rec
 
 
+# ── AI ログ解析: syslog を AI(Claude / OpenAI 互換 / Ollama)に読ませ、原因と対処を提案。実行は人が押す ──
+def _ai_devices():
+    return [{'id': d, 'hostname': getattr(st, 'hostname', d), 'type': getattr(st, 'device_type', '?')}
+            for d, st in device_sessions.items()]
+
+
+def _ai_rows(minutes, device=None, now=None):
+    now = now or time.time()
+    rows = [dict(r) for r in _flow_recorder.logs_since(now - minutes * 60)]
+    # ニルヴァーナ自身の検知(総当たり・スキャン・ループ等)も、ログと同じ形で AI に渡す
+    for a in list(_flow_recorder.alerts):
+        if a['t'] >= now - minutes * 60 and a.get('rule') != 'ai_finding':
+            dev = a.get('src') if a.get('src') in device_sessions else a.get('dst') if a.get('dst') in device_sessions else None
+            rows.append({'t': a['t'], 'dev': dev or a.get('src'), 'host': _resp_hostname(dev) if dev else a.get('src'),
+                         'sev': 4 if a.get('severity') == 'high' else 5,
+                         'msg': f"%NIRVANA-{4 if a.get('severity') == 'high' else 5}-ALERT: {a.get('name', a.get('rule'))}: {a.get('detail', '')}"})
+    loki = os.environ.get('LOKI_URL')
+    if loki:
+        try:
+            from engine.link_stats import loki_logs
+            rows += [{'t': r['t'], 'host': r.get('host') or r.get('dev'), 'dev': r.get('dev'), 'msg': r['msg']}
+                     for r in loki_logs(loki, now - minutes * 60, now)]
+        except Exception as e:  # noqa: BLE001 - Loki に届かなければ内部のログだけで
+            print(f"[ai] loki: {e}")
+    if device:
+        d = device.lower()
+        rows = [r for r in rows if str(r.get('dev', '')).lower() == d or str(r.get('host', '')).lower() == d]
+    return rows
+
+
+@app.get("/api/ai/status")
+async def ai_status():
+    from engine.log_ai import provider_config
+    cfg = provider_config()
+    return {'provider': cfg['provider'], 'model': cfg['model'], 'cloud': cfg['cloud'],
+            'apply': os.environ.get('NIRVANA_AI_APPLY', '1') != '0', 'redact_ips': os.environ.get('NIRVANA_AI_REDACT_IPS', '1') != '0'}
+
+
+@app.post("/api/ai/logs/analyze")
+async def ai_logs_analyze(request: Request):
+    """body: {minutes: 30, device: 省略可, use_ai: true, max_lines: 200}"""
+    from engine.log_ai import analyst
+    body = await request.json()
+    minutes = max(1, min(1440, int(body.get('minutes', 30))))
+    rows = _ai_rows(minutes, body.get('device'))
+    rec = await asyncio.to_thread(analyst.analyze, rows, _ai_devices(), bool(body.get('use_ai', True)),
+                                  max(20, min(1000, int(body.get('max_lines', 200)))))
+    for f in rec['findings']:
+        if f['severity'] in ('critical', 'high'):
+            _flow_recorder.external_alert('ai_finding', f"{rec['id']}:{f['device']}:{f['title']}", f.get('device_id') or f['device'],
+                                          '', f"[{rec['provider']}] {f['title']}: {f['cause']}"[:300],
+                                          severity='high', name=f"AI: {f['title']}"[:80])
+    return {**rec, 'minutes': minutes}
+
+
+@app.get("/api/ai/logs/history")
+async def ai_logs_history():
+    from engine.log_ai import analyst
+    return {'history': [{k: h[k] for k in ('id', 't', 'provider', 'model', 'error', 'summary', 'stats')}
+                        | {'findings': len(h['findings']), 'actions': len(h['actions'])} for h in reversed(analyst.history)]}
+
+
+@app.post("/api/ai/logs/apply")
+async def ai_logs_apply(request: Request):
+    """AI が提案した対処を装置に入れる。body: {id, action, confirm: true}。危険なコマンドを含むものは入れない"""
+    from engine.log_ai import analyst
+    if os.environ.get('NIRVANA_AI_APPLY', '1') == '0':
+        return JSONResponse({'error': 'NIRVANA_AI_APPLY=0 のため実行できません(提案の表示だけ)'}, status_code=403)
+    body = await request.json()
+    rec = analyst.get(int(body.get('id', 0)))
+    if not rec:
+        return JSONResponse({'error': '解析結果が見つかりません'}, status_code=404)
+    try:
+        act = rec['actions'][int(body.get('action', -1))]
+    except (IndexError, ValueError, TypeError):
+        return JSONResponse({'error': '対処の番号が正しくありません'}, status_code=400)
+    if not body.get('confirm'):
+        return JSONResponse({'error': 'confirm: true が必要です(人が確認してから入れる)'}, status_code=400)
+    if not act['executable'] or act['device_id'] not in device_sessions:
+        return JSONResponse({'error': f"実行できない対処です({'危険なコマンドを含む: ' + ', '.join(act['blocked']) if act['blocked'] else '装置が不明'})"},
+                            status_code=400)
+    dev = act['device_id']
+    steps = (['configure terminal'] + act['commands'] + ['end']) if act['mode'] == 'config' else list(act['commands'])
+    outputs = []
+    for cmd in steps:
+        r = await cli_command({'device_id': dev, 'command': cmd})
+        out = (r or {}).get('output', '') if isinstance(r, dict) else ''
+        outputs.append({'command': cmd, 'output': out[:2000]})
+    host = _resp_hostname(dev)
+    _flow_recorder.record_log(dev, host, 5, f"%NIRVANA-5-AI_APPLY: AI の提案「{act['title']}」を実行 ({len(act['commands'])} 行)", now=time.time())
+    applied = {'t': time.time(), 'action': int(body['action']), 'device': host, 'outputs': outputs, 'rollback': act['rollback']}
+    rec['applied'].append(applied)
+    return applied
+
+
 def _alert_by_seq(seq):
     return next((a for a in list(_flow_recorder.alerts) if a.get('seq') == seq), None)
 
@@ -10894,8 +10989,9 @@ async def world_state():
     """地球儀: 拠点の場所・クラウド宛ての流量(リージョン別)・Radar・IHR・MAWI の再生状況"""
     from engine.world_sources import world
     from engine.mawi import replayer
+    from engine.darknet import darknet
     lat, lon = _site_latlon()
-    d = world.snapshot()
+    d = world.snapshot(darknet)
     d['site'] = {'name': _site_name(), 'lat': lat, 'lon': lon}
     d['mawi'] = replayer.status()
     return d
@@ -10905,7 +11001,8 @@ async def world_state():
 async def world_refresh():
     from engine.world_sources import world
     await asyncio.to_thread(world.refresh, str(_WORLD_CACHE))
-    return {'alerts': len(_world_alerts()), **world.snapshot()}
+    from engine.darknet import darknet
+    return {'alerts': len(_world_alerts()), **world.snapshot(darknet)}
 
 
 @app.get("/api/world/anchors")

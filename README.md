@@ -126,6 +126,7 @@ NICT の NIRVANA改 を参考に作った、ネットワークを 3D で見る�
 | L2 LOOP | スイッチの輪(STP で止まっていない)を1秒で検知。赤く脈打つ輪・嵐の粒・使用率 約90%・MAC フラップ・「警」+ LOOP の花びら。止め方は実機と同じ storm-control / BPDU guard / errdisable recovery / APRESIA loopdetect、RESPONSE の「ループ遮断」。止まると「情 LOOP CLEARED」と止めた理由 |
 | WORLD | 地球儀。自社から AWS / Google Cloud の各リージョンへの流量(公開 IP 帯で判定)、Cloudflare Radar の世界の HTTP 流量・L7 攻撃の弧・異常、IIJ IHR の日本の AS の遅延・障害、MAWI(日米回線の本物の pcap)の再生。取れないときは理由を表示、`NETLAB_WORLD_SAMPLE=1` で見本 |
 | WORLD(都市) | 都市 → 都市の本物の経路と遅延(RIPE Atlas の traceroute。例 ニューヨーク→ロンドン→…→モスクワ 119 ms)、攻撃元の都市(自分に来たダークネット・ログイン失敗・フローの送信元、SANS ISC DShield の報告件数)、Cloudflare Radar の L3(DDoS)攻撃の国。IP → 都市は DB-IP City Lite(都市単位の精度はおおむね5〜8割)。他人どうしの都市間の流量は公開されていないので出さない |
+| AI ログ解析 | **AI** ボタン。syslog とニルヴァーナの検知を AI(Claude・OpenAI 互換・Ollama)に読ませ、要約・所見・対処の CLI を提案。パスワード等と IP を伏せてから送る。危険なコマンドは実行不可、実行は人が確認して押す(ラボ版)。AI が無ければルールで解析 |
 | SYSTEM STATUS | ネットワーク / トラフィック / セキュリティ / syslog の4観点で 正常・注意・異常 |
 | 情 / 注 | 経路の追加・削除・変更、CPU の急上昇・回復は「情」。CPU の高負荷が続く・フラップは「注」(しきい値は設定で変更可) |
 | BOARD / EXPLORE / ALERTS | Grafana 相当の機能。ダッシュボード、PromQL / LogQL の問い合わせ、アラートルールと webhook。Grafana の JSON もそのまま取り込める |
@@ -159,6 +160,7 @@ There are two ways to use it:
 | L2 LOOP | Detects a switch ring not blocked by STP within a second: a pulsing red ring, storm particles, ~90% utilization, MAC flaps, and a "警" with a LOOP petal. Stopped the way real gear does it (storm-control, BPDU guard, errdisable recovery, APRESIA loopdetect) or by the RESPONSE "loop cut"; then "LOOP CLEARED" with the reason |
 | WORLD | A globe: traffic from your site to each AWS / Google Cloud region (matched against the published IP ranges), Cloudflare Radar's top HTTP countries, L7 attack arcs and anomalies, IIJ IHR delay/outage events for Japanese ASes, and replay of MAWI (real trans-Pacific pcap). Shows why a source is unavailable; `NETLAB_WORLD_SAMPLE=1` fills in samples |
 | WORLD (cities) | Real city-to-city paths and latency (RIPE Atlas traceroutes, e.g. New York → London → … → Moscow, 119 ms), attack-source cities (darknet, failed logins and flows reaching your site; SANS ISC DShield report counts), and Cloudflare Radar L3 (DDoS) countries. IP → city via DB-IP City Lite (roughly 50–80% city accuracy). Third-party city-to-city traffic volume is not published anywhere, so it is not shown |
+| AI log analysis | The **AI** button sends syslog and Nirvana's own detections to an AI (Claude, OpenAI-compatible, Ollama) for a summary, findings and proposed CLI fixes. Secrets and IPs are masked before sending; dangerous commands are never executable and a human confirms every fix (lab). Falls back to rules without an AI |
 | SYSTEM STATUS | Normal / warning / critical for four areas: network, traffic, security and syslog |
 | 情 (info) / 注 (notice) | Route add/delete/change and CPU jump/recovery appear as "info". Sustained high CPU and flapping appear as "notice". Thresholds are configurable |
 | BOARD / EXPLORE / ALERTS | Grafana-like features: dashboards, PromQL / LogQL queries, alert rules with webhooks. Grafana dashboard JSON can be imported as is |
@@ -202,6 +204,7 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | 背景: 金魚鉢 / goldfish bowl<br>![](docs/images/cyber-view-bg-goldfish-ospf.png) | 背景: 富士山 / Mt. Fuji<br>![](docs/images/cyber-view-bg-fuji-ospf.png) |
 | スタンドアロン版 + Prometheus / Loki<br>![](docs/images/standalone-prom-loki-fault.png) | スタンドアロン版 + Zabbix<br>![](docs/images/standalone-zabbix-fault.png) |
 | スマホ / phone<br>![](docs/images/cyber-view-ospf-phone.png) | 装置ごとの表示 / host view<br>![](docs/images/cyber-view-host.png) |
+| AI ログ解析 / AI log analysis<br>![](docs/images/cyber-view-ai-panel.jpg) | MRTG・Cacti で動く単体版 / standalone on MRTG + Cacti<br>![](docs/images/standalone-mrtg-cacti-links.jpg) |
 | WORLD 都市 → 都市の経路 / city-to-city paths<br>![](docs/images/cyber-view-world-city-europe.jpg) | 攻撃元の都市 / attack-source cities<br>![](docs/images/cyber-view-world-city-asia.jpg) |
 | WORLD(クラウド宛て・Radar・IHR)/ WORLD globe<br>![](docs/images/cyber-view-world.jpg) | MAWI の再生(NETWORK)/ MAWI replay<br>![](docs/images/cyber-view-world-net-mawi.jpg) |
 | L2 ループ発生 / L2 loop in progress<br>![](docs/images/l2-loop-links.jpg) | storm-control が2秒で止めた / stopped by storm-control in 2 s<br>![](docs/images/l2-loop-storm-control.jpg) |
@@ -224,6 +227,7 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | ☐ | CPU の「情」「注」のしきい値(80% / +20)は仮の値。実機で調整が必要 | CPU info/notice thresholds (80% / +20) are provisional and need tuning on real devices |
 | ☐ | README の動画は GIF。再生プレーヤーにするには github.com の編集画面で mp4 をドラッグ&ドロップする | README videos are GIFs; for an inline player, drag and drop the mp4 in the github.com editor |
 | ☐ | STP のテストが GitHub の CI でだけ時々失敗する(調査用の出力を仕込み済み) | An STP test fails intermittently only on GitHub CI (diagnostics are in place) |
+| ☐ | AI ログ解析: 本物の Claude / Groq / Ollama の答えの質は未確認(この作業環境から届かない。公式 SDK の送信内容は手元の代役で確認)。インストーラーの systemd 登録・--docker は未確認 | AI log analysis: answer quality from real Claude / Groq / Ollama not yet checked (unreachable here; the official SDK's requests were checked against a local stand-in). Installer systemd and --docker paths not yet run |
 | ☐ | WORLD の都市: 本物の RIPE Atlas・DB-IP・DShield・Radar L3 はこの作業環境では遮断され未確認(見本と、本物のダークネット・SSH ログイン失敗で表示確認) | WORLD cities: real RIPE Atlas, DB-IP, DShield and Radar L3 are blocked here and not yet verified live (checked with samples plus real darknet packets and SSH login failures) |
 | ☐ | WORLD: 本物の Cloudflare Radar(要トークン)・IIJ IHR・MAWI・Google Cloud の IP 帯は、この作業環境では通信がブロックされ未確認(形は公開スキーマで確認、見本で表示確認) | WORLD: real Cloudflare Radar (token needed), IIJ IHR, MAWI and Google Cloud ranges are blocked here and not yet verified live (formats checked against public schemas, display checked with samples) |
 | ☐ | L2 ループ: 並列リンクと EtherChannel を区別しない(1本と数える)、VLAN ごとのループ・loopguard・UDLD は未対応。APRESIA の loopdetect の文言は D-Link 系に合わせた(実機の版で違う可能性) | L2 loop: parallel links are not told apart from EtherChannel (counted once); per-VLAN loops, loopguard and UDLD are not modelled; APRESIA loopdetect wording follows the D-Link style (may differ by model/OS) |
@@ -256,6 +260,7 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | ニルヴァーナで見る監視スタックの IaC(docker compose)/ Nirvana monitoring stack IaC | [docs/nirvana-monitoring-iac.md](docs/nirvana-monitoring-iac.md)(`iac/nirvana-monitoring/`) |
 | L2 ループの検知と止め方 / L2 loop detection and stopping | [docs/l2-loop-detection.md](docs/l2-loop-detection.md) |
 | WORLD(クラウド・Radar・IHR・MAWI)/ WORLD globe | [docs/world-view.md](docs/world-view.md) |
+| 既存の監視に足す(MRTG・Cacti・インストーラー・AI ログ解析)/ Add-on for existing monitoring | [docs/nirvana-addon-monitoring-ai.md](docs/nirvana-addon-monitoring-ai.md) |
 | このプロジェクトの立ち位置(NIRVANA改のリイマジン)/ What this is: a re-imagining of NIRVANA-Kai | [docs/reimagining-nirvana.md](docs/reimagining-nirvana.md) |
 | FX・通信が多いときの表示 / FX and heavy-traffic display | [docs/cyber-view-3d.md](docs/cyber-view-3d.md)(末尾 / at the end) |
 | 機種 × プロトコルの試験 / vendor × protocol tests | [docs/vendor-protocol-matrix-cyber-view.md](docs/vendor-protocol-matrix-cyber-view.md)、[docs/verification/README.md](docs/verification/README.md) |

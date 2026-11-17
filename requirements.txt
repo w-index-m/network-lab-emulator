@@ -18,3 +18,4 @@ paramiko>=3.4
 # YAMLか検証するのに使う。transitive依存(uvicorn[standard]等)で
 # 既に入っていることが多いが、paramikoと同じ理由で明示しておく。
 PyYAML>=6.0
+anthropic>=2.0  # AI ログ解析(engine/log_ai.py)で Claude を使う時だけ import する

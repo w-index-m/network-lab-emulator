@@ -153,6 +153,20 @@
   #darkpanel .cat i { display: block; height: 7px; } #darkpanel .cat b { text-align: right; font-family: monospace; color: #fff; }
   #darkpanel .ev { font-family: monospace; font-size: 11px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   @media (max-width: 640px) { #darkpanel { top: auto; bottom: 60px; right: 8px; width: 70vw; max-height: 34vh; } #darkbar input { width: 110px; } }
+  #aipanel { top: 120px; right: 88px; width: min(440px, 46vw); max-height: calc(100vh - 150px); overflow: auto; display: none; font-size: 12px; z-index: 30;
+    background: rgba(8,4,24,.94); border: 1px solid #9b4dff; padding: 10px; box-shadow: 0 0 24px rgba(155,77,255,.35); }
+  body.ai #aipanel { display: block; } body.ai #worldpanel { display: none; }
+  #aipanel h4 { margin: 8px 0 4px; color: #e6d6ff; letter-spacing: .08em; font-size: 12px; }
+  #aipanel .row { display: flex; gap: 4px; margin: 4px 0; flex-wrap: wrap; align-items: center; }
+  #aipanel select, #aipanel button { background: rgba(20,8,40,.9); color: #e6d6ff; border: 1px solid #6b3fd0; padding: 3px 8px; font: 12px sans-serif; cursor: pointer; }
+  #aipanel button.go { background: #6b3fd0; color: #fff; }
+  #aipanel .f { border-left: 3px solid var(--dim); padding: 3px 6px; margin: 4px 0; background: rgba(255,255,255,.03); }
+  #aipanel .f.critical, #aipanel .f.high { border-color: #ff3b4e; } #aipanel .f.medium { border-color: #ffab2e; } #aipanel .f.low, #aipanel .f.info { border-color: #4fe3ff; }
+  #aipanel pre { margin: 3px 0; padding: 4px 6px; background: rgba(0,0,0,.45); color: #c9f7ff; white-space: pre-wrap; font: 11px monospace; }
+  #aipanel .risk { font-size: 10px; padding: 0 4px; border: 1px solid; margin-left: 4px; }
+  #aipanel .risk.read { color: #5dffa8; } #aipanel .risk.caution { color: #ffab2e; } #aipanel .risk.blocked { color: #ff3b4e; }
+  #aipanel .dim { color: var(--dim); }
+  @media (max-width: 640px) { #aipanel { top: auto; bottom: 60px; right: 8px; width: 92vw; max-height: 50vh; } }
   #worldpanel { top: 120px; right: 88px; width: min(360px, 42vw); max-height: calc(100vh - 150px); overflow: auto; display: none; font-size: 12px; }
   body.world #worldpanel { display: block; }
   #worldpanel h4 { margin: 0 0 6px; color: #fff; letter-spacing: .1em; font-size: 12px; }
@@ -257,7 +271,7 @@
 <div id="cidr" class="hud">0.0.0.0/0</div>
 <div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山)">◎</button><button id="zMusic" title="BGM を切り替え(なし/ジャズ/レゲエ/アンビエント)">♪</button><button id="zFx" class="on" title="サイバー演出(六角グリッド・データの雨・火の粉・走査線・グリッチ)のオン/オフ">FX</button></div><div id="bgmToast" class="hud"></div>
 <div id="bgToast" class="hud"></div>
-<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mAtk" title="ATT&amp;CK: 組織ごとの攻撃の進行度と、戦術×手法の時系列">ATT&amp;CK</button><button id="mWan" title="WAN: 回線チェック(フレッツ網の PPPoE / IPoE、遅延・ロスの推移)">WAN</button><button id="mDark" title="DARKNET: 使われていない帯に届いた通信(スキャン・DDoS の跳ね返り・設定ミス・リフレクションの準備)">DARKNET</button><button id="mWorld" title="WORLD: 地球儀(クラウド宛ての流量・Cloudflare Radar・IIJ Internet Health Report・MAWI の実トラフィック)">WORLD</button><button id="mBoard" title="ダッシュボード(パネル・変数・時間範囲・自動更新・注釈)">BOARD</button><button id="mExplore" title="問い合わせ(PromQL / LogQL / 内部の時系列とログ)">EXPLORE</button><button id="mAlerts" title="アラートルール・連絡先・履歴">ALERTS</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
+<div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mAtk" title="ATT&amp;CK: 組織ごとの攻撃の進行度と、戦術×手法の時系列">ATT&amp;CK</button><button id="mWan" title="WAN: 回線チェック(フレッツ網の PPPoE / IPoE、遅延・ロスの推移)">WAN</button><button id="mDark" title="DARKNET: 使われていない帯に届いた通信(スキャン・DDoS の跳ね返り・設定ミス・リフレクションの準備)">DARKNET</button><button id="mWorld" title="WORLD: 地球儀(クラウド宛ての流量・Cloudflare Radar・IIJ Internet Health Report・MAWI の実トラフィック)">WORLD</button><button id="mBoard" title="ダッシュボード(パネル・変数・時間範囲・自動更新・注釈)">BOARD</button><button id="mExplore" title="問い合わせ(PromQL / LogQL / 内部の時系列とログ)">EXPLORE</button><button id="mAlerts" title="アラートルール・連絡先・履歴">ALERTS</button><button id="mAi" title="AI ログ解析: syslog を AI(LLM / クラウド AI)に読ませて、原因と対処を提案。実行は人が押す">AI</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
 <div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
 <div id="linkbar" class="hud">更新 <select id="lInt" aria-label="更新間隔">
   <option value="10">10秒</option><option value="60" selected>1分</option><option value="300">5分</option></select>
@@ -280,6 +294,7 @@
   <span class="lg"><i style="background:#3b6bff"></i>TCP<i style="background:#ffe14d"></i>UDP<i style="background:#ff3b3b"></i>ICMP</span></div>
 <div id="darkpanel" class="hud"></div>
 <div id="worldpanel" class="hud"></div>
+<div id="aipanel" class="hud"></div>
 <div id="resp" class="hud"></div>
 <div id="atkpanel" class="hud"></div>
 <div id="wanpanel" class="hud"></div>
@@ -805,11 +820,14 @@
     NEXUS: { label: 'NEXUS', sub: '複数拠点の横断分析', col: '#1f8fbf' },
     SENSOR: { label: 'SENSOR', sub: 'セキュリティ製品', col: '#b8325c' },
     LOOP: { label: 'LOOP', sub: 'L2ループ', col: '#e0402e' },
+    WORLD: { label: 'WORLD', sub: 'インターネット全体(IHR・Radar)', col: '#2a8fd8' },
+    AI: { label: 'AI', sub: 'AI のログ解析', col: '#9b4dff' },
   };
   const SOURCE_OF = { conn_scan: 'IDS', scan: 'IDS', unreach_burst: 'IDS', flood: 'IDS', large_icmp: 'IDS',
     fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET', route_flap: 'NET', valhalla: 'VALHALLA', nirvana_rule: 'RULE',
     darknet_scan: 'DARKNET', darknet_backscatter: 'DARKNET', darknet_misconfig: 'DARKNET', darknet_reflection: 'DARKNET',
-    login_brute: 'IDS', login_after_fail: 'IDS', exfil: 'IDS', nexus_finding: 'NEXUS', ext_sensor: 'SENSOR', l2_loop: 'LOOP' };
+    login_brute: 'IDS', login_after_fail: 'IDS', exfil: 'IDS', nexus_finding: 'NEXUS', ext_sensor: 'SENSOR', l2_loop: 'LOOP',
+    ihr_outage: 'WORLD', ihr_delay: 'WORLD', radar_anomaly: 'WORLD', ai_finding: 'AI' };
   function drawIcon(src, x, y, s) {
     const c = SOURCES[src].col;
     ctx.save(); ctx.strokeStyle = c; ctx.fillStyle = c; ctx.lineWidth = Math.max(1.2, s * 0.09);
@@ -852,6 +870,21 @@
       const cx = x, cy = y - s * 0.2, R = s * 0.42;
       for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + R * Math.cos(a), cy + R * Math.sin(a)); ctx.stroke(); }
       for (const r of [0.35, 0.68, 1]) { ctx.beginPath(); for (let k = 0; k <= 8; k++) { const a = k * Math.PI / 4; const px = cx + R * r * Math.cos(a), py = cy + R * r * Math.sin(a); k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.stroke(); }
+    } else if (src === 'WORLD') {            // 地球(経線と緯線)
+      ctx.lineWidth = Math.max(1, s * 0.06);
+      const cx = x, cy = y - s * 0.2, R = s * 0.36;
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(cx, cy, R * 0.45, R, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.stroke();
+    } else if (src === 'AI') {               // 回路のチップ(AI)
+      ctx.lineWidth = Math.max(1, s * 0.06);
+      const cx = x, cy = y - s * 0.2, h = s * 0.26;
+      ctx.strokeRect(cx - h, cy - h, h * 2, h * 2);
+      for (const k of [-0.5, 0, 0.5]) {
+        ctx.beginPath(); ctx.moveTo(cx + k * h * 1.4, cy - h); ctx.lineTo(cx + k * h * 1.4, cy - h * 1.5);
+        ctx.moveTo(cx + k * h * 1.4, cy + h); ctx.lineTo(cx + k * h * 1.4, cy + h * 1.5); ctx.stroke();
+      }
+      ctx.font = `bold ${Math.round(s * 0.26)}px sans-serif`; ctx.textAlign = 'center'; ctx.fillText('AI', cx, cy + s * 0.09);
     } else if (src === 'LOOP') {             // ぐるぐる回る矢印(ループ)
       ctx.lineWidth = Math.max(1.2, s * 0.08);
       const cx = x, cy = y - s * 0.2, R = s * 0.32;
@@ -896,7 +929,7 @@
     const r = Math.max(13, Math.min(46, c.s * 0.75));
     // 検知元ごとにまとめる
     const bySrc = {};
-    for (const a of list) { const sname = a.source || SOURCE_OF[a.rule] || 'IDS'; (bySrc[sname] = bySrc[sname] || []).push(a); }
+    for (const a of list) { let sname = a.source || SOURCE_OF[a.rule] || 'IDS'; if (!SOURCES[sname]) sname = 'IDS'; (bySrc[sname] = bySrc[sname] || []).push(a); }
     const srcs = Object.keys(bySrc).sort((a, b) => bySrc[b].length - bySrc[a].length);
     // 黄色の多重六角(ゆっくり脈動)
     ctx.save();
@@ -2769,6 +2802,72 @@
   document.getElementById('mBoard').onclick = () => setMode('board');
   document.getElementById('mExplore').onclick = () => setMode('explore');
   document.getElementById('mAlerts').onclick = () => setMode('alerts');
+  // ── AI ログ解析: syslog を AI に読ませ、原因と対処(CLI)を提案。実行は人が確認してから ──
+  let aiStatus = null, aiLast = null, aiBusy = false;
+  const aiEsc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
+  const aiPost = (path, body) => fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { 'X-Session-Token': token } : {}) },
+    body: JSON.stringify(body) }).then(r => r.json());
+  async function aiOpen() {
+    try { aiStatus = await api('/api/ai/status'); } catch (e) { aiStatus = { provider: 'unavailable' }; }
+    aiRender();
+  }
+  function aiRender() {
+    const el = document.getElementById('aipanel'); if (!el) return;
+    const st = aiStatus || {};
+    const prov = st.provider === 'rules' ? '<span style="color:#ffab2e">AI 未設定(ルールで解析)</span>'
+      : st.provider === 'unavailable' ? '<span style="color:#ff3b4e">この画面では使えません</span>'
+      : `<span style="color:#5dffa8">${aiEsc(st.provider)} ・ ${aiEsc(st.model)}</span>${st.cloud ? ' <span class="dim">(クラウドへ送る前にパスワード等' + (st.redact_ips ? '・IPアドレス' : '') + 'を伏せる)</span>' : ''}`;
+    const devs = (hosts || []).map(h => `<option value="${aiEsc(h.id)}">${aiEsc(h.hostname || h.id)}</option>`).join('');
+    let h = `<h4 style="margin-top:0">AI ログ解析</h4><div class="dim">${prov}</div>
+      <div class="row">期間 <select id="aiMin"><option>15</option><option selected>30</option><option>60</option><option>180</option><option>1440</option></select>分
+      装置 <select id="aiDev"><option value="">すべて</option>${devs}</select>
+      <button class="go" id="aiGo">${aiBusy ? '解析中…' : '解析'}</button><button id="aiClose">閉じる</button></div>`;
+    const r = aiLast;
+    if (r && r.error && !r.summary) h += `<div style="color:#ff3b4e">${aiEsc(r.error)}</div>`;
+    if (r && r.summary !== undefined) {
+      h += `<div class="dim">#${r.id} ・ ${r.provider === 'rules' ? 'ルール' : aiEsc(r.provider + ' ' + (r.model || ''))} ・ ログ ${r.stats.rows}行 → 送信 ${r.stats.sent}行${r.redacted_ips ? ` ・ IP ${r.redacted_ips}件を伏せた` : ''}</div>`;
+      if (r.error) h += `<div style="color:#ffab2e">AI を使えずルールで解析: ${aiEsc(r.error)}</div>`;
+      h += `<h4>要約</h4><div>${aiEsc(r.summary)}</div>`;
+      if (r.findings.length) h += '<h4>所見</h4>' + r.findings.map(f => `<div class="f ${aiEsc(f.severity)}"><b>${aiEsc(f.severity.toUpperCase())}</b> ${aiEsc(f.device)} ・ ${aiEsc(f.title)}<div class="dim">${aiEsc(f.cause)}</div>`
+        + (f.evidence || []).map(e => `<pre>${aiEsc(e)}</pre>`).join('') + '</div>').join('');
+      if (r.actions.length) h += '<h4>対処の提案(人が確認してから実行)</h4>' + r.actions.map((a, i) => `<div class="f"><b>${aiEsc(a.device)}</b> ・ ${aiEsc(a.title)}
+          <span class="risk ${a.risk}">${({ read: '確認だけ', caution: '設定変更・要確認', blocked: '実行不可' })[a.risk]}</span><div class="dim">${aiEsc(a.why)}</div>
+          <pre>${a.mode === 'config' ? 'configure terminal\n' : ''}${aiEsc(a.commands.join('\n'))}${a.mode === 'config' ? '\nend' : ''}</pre>`
+        + (a.rollback.length ? `<div class="dim">戻し方</div><pre>${aiEsc(a.rollback.join('\n'))}</pre>` : '')
+        + (a.blocked.length ? `<div style="color:#ff3b4e">危険なコマンドを含むため実行できません: ${aiEsc(a.blocked.join(', '))}</div>` : '')
+        + `<div class="row">${a.executable && st.apply ? `<button data-ai-run="${i}">実行</button>` : ''}<button data-ai-copy="${i}">コピー</button></div>`
+        + ((r.applied || []).filter(x => x.action === i).map(x => '<pre>' + aiEsc(x.outputs.map(o => '# ' + o.command + '\n' + o.output).join('\n')) + '</pre>').join('')) + '</div>').join('');
+      h += `<details><summary class="dim">AI に送ったログ(${r.stats.sent}行)</summary><pre>${aiEsc(r.sent_text)}</pre></details>`;
+      h += '<div class="dim">AI の答えは提案です。実機に入れる前に必ず内容を確かめてください。</div>';
+    }
+    el.innerHTML = h;
+    document.getElementById('aiGo').onclick = aiAnalyze;
+    document.getElementById('aiClose').onclick = () => { document.body.classList.remove('ai'); document.getElementById('mAi').classList.remove('on'); };
+    el.querySelectorAll('[data-ai-copy]').forEach(b => b.onclick = () => {
+      const a = r.actions[+b.dataset.aiCopy]; const txt = (a.mode === 'config' ? ['configure terminal', ...a.commands, 'end'] : a.commands).join('\n');
+      try { navigator.clipboard.writeText(txt); b.textContent = 'コピーしました'; } catch (e) { prompt('コピーしてください', txt); }
+    });
+    el.querySelectorAll('[data-ai-run]').forEach(b => b.onclick = async () => {
+      const i = +b.dataset.aiRun, a = r.actions[i];
+      if (!confirm(`${a.device} に次を入れます。よろしいですか?\n\n${a.commands.join('\n')}\n\n戻し方:\n${a.rollback.join('\n') || '(なし)'}`)) return;
+      const res = await aiPost('/api/ai/logs/apply', { id: r.id, action: i, confirm: true }).catch(e => ({ error: String(e) }));
+      if (res.error) { alert(res.error); return; }
+      (r.applied = r.applied || []).push(res); aiRender();
+    });
+  }
+  async function aiAnalyze() {
+    if (aiBusy) return;
+    aiBusy = true; aiRender();
+    const body = { minutes: +document.getElementById('aiMin').value, device: document.getElementById('aiDev').value || undefined };
+    try { aiLast = await aiPost('/api/ai/logs/analyze', body); } catch (e) { aiLast = { error: String(e) }; }
+    aiBusy = false; aiRender();
+  }
+  window.__cvAi = () => ({ status: aiStatus, last: aiLast });
+  document.getElementById('mAi').onclick = (e) => {
+    const on = document.body.classList.toggle('ai'); e.target.classList.toggle('on', on);
+    if (on) aiOpen();
+  };
+  if (new URLSearchParams(location.search).get('ai') === '1') { document.body.classList.add('ai'); document.getElementById('mAi').classList.add('on'); aiOpen(); }
   document.getElementById('mList').onclick = (e) => { document.body.classList.toggle('showlist'); e.target.classList.toggle('on'); };
 
   // ── メインループ ─────────────────────────────

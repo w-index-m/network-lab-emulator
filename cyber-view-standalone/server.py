@@ -8,6 +8,7 @@ Cyber View(スタンドアロン版)— 実機の監視データで NIRVANA 改�
 Prometheus / Loki / Zabbix と設定ファイル(装置・つながり)から返す。
 """
 import argparse
+import asyncio
 import collections
 import os
 import sys
@@ -293,6 +294,118 @@ def create_app(cfg, start_collector=True):
     def board_js():
         from fastapi.responses import Response
         return Response((WEB / 'nirvana_board.js').read_text(encoding='utf-8'), media_type='application/javascript; charset=utf-8')
+
+    # ── WORLD(地球儀): クラウド宛ての流量・Radar・IHR・都市の粒度(RIPE Atlas・攻撃元の都市)。ラボ版と同じ cvs/world_* ──
+    from cvs.world_sources import world
+    wcfg = cfg.get('world') or {}
+    site = cfg.get('site') or {}
+    world_cache = str(Path(wcfg.get('cache_dir') or (Path(__file__).parent / 'data' / 'world')))
+    if wcfg.get('pairs'):
+        world.set_pairs(wcfg['pairs'])
+    col.sec.world = world                      # フローを地球儀へ(security.on_flow)
+
+    def world_loop(stop):
+        world.ensure_geo(world_cache)
+        while not stop.wait(5):
+            try:
+                if wcfg.get('enabled', True) and world.enabled() and world.due():
+                    world.refresh(world_cache)
+            except Exception as e:  # noqa: BLE001
+                col.errors['world'] = str(e)[:200]
+            stop.wait(55)
+
+    if start_collector and wcfg.get('enabled', True):
+        threading.Thread(target=world_loop, args=(board_stop,), daemon=True).start()
+
+    @app.get('/static/world/world.json')
+    def world_map():
+        from fastapi.responses import FileResponse
+        return FileResponse(WEB / 'world' / 'world.json', media_type='application/json')
+
+    @app.get('/api/world')
+    def world_state(x_session_token: str = Header(None)):
+        check(x_session_token)
+        d = world.snapshot(col.sec.darknet)
+        d['site'] = {'name': site.get('name') or cfg.get('title') or 'SITE', 'lat': float(site.get('lat', 35.68)),
+                     'lon': float(site.get('lon', 139.69))}
+        d['mawi'] = {'running': False, 'available': False}
+        return d
+
+    @app.post('/api/world/refresh')
+    def world_refresh(x_session_token: str = Header(None)):
+        check(x_session_token)
+        world.refresh(world_cache)
+        return world.snapshot(col.sec.darknet)
+
+    @app.post('/api/world/paths')
+    async def world_paths(request: Request, x_session_token: str = Header(None)):
+        check(x_session_token)
+        body = await request.json()
+        pairs = world.set_pairs(body.get('pairs') or [])
+        if not pairs:
+            return JSONResponse({'error': '都市の組(from / to)を1つ以上指定してください'}, status_code=400)
+        await asyncio.to_thread(world.refresh_city)
+        return {'pairs': pairs, 'atlas': world.atlas}
+
+    @app.get('/api/world/anchors')
+    def world_anchors(q: str = '', x_session_token: str = Header(None)):
+        check(x_session_token)
+        lst, n = world.anchor_list(q)
+        return {'anchors': lst, 'count': n}
+
+    @app.get('/api/world/geo')
+    def world_geo(ip: str, x_session_token: str = Header(None)):
+        check(x_session_token)
+        return {'ip': ip, 'geo': world.geo.lookup(ip), 'db': world.geo.status}
+
+    @app.post('/api/mawi/replay')
+    def mawi_replay():
+        return JSONResponse({'error': 'MAWI の再生はラボ版だけです(単体版は自分の NetFlow / sFlow を地球儀に出します)'}, status_code=404)
+
+    # ── AI ログ解析(cvs/log_ai.py はラボ版の engine/log_ai.py と同じ)。単体版は装置にログインしないので実行はしない ──
+    from cvs.log_ai import analyst, provider_config
+
+    def ai_devices():
+        return [{'id': d['id'], 'hostname': d['hostname'], 'type': d.get('type', '?')} for d in cfg['devices']]
+
+    @app.get('/api/ai/status')
+    def ai_status(x_session_token: str = Header(None)):
+        check(x_session_token)
+        c = provider_config()
+        return {'provider': c['provider'], 'model': c['model'], 'cloud': c['cloud'], 'apply': False,
+                'redact_ips': os.environ.get('NIRVANA_AI_REDACT_IPS', '1') != '0'}
+
+    @app.post('/api/ai/logs/analyze')
+    async def ai_analyze(request: Request, x_session_token: str = Header(None)):
+        check(x_session_token)
+        body = await request.json()
+        minutes = max(1, min(1440, int(body.get('minutes', 30))))
+        now = time.time()
+        rows = [dict(r) for r in col.analytics.logs_between(now - minutes * 60, now)]
+        for a in col.analytics.alerts_between(now - minutes * 60, now):
+            if a.get('rule') == 'ai_finding':
+                continue
+            dev = a.get('src') if a.get('src') in col.devs else a.get('dst') if a.get('dst') in col.devs else None
+            rows.append({'t': a['t'], 'dev': dev or a.get('src'), 'host': col.devs[dev]['hostname'] if dev else a.get('src'),
+                         'sev': 4 if a.get('severity') == 'high' else 5,
+                         'msg': f"%NIRVANA-4-ALERT: {a.get('name', a.get('rule'))}: {a.get('detail', '')}"})
+        if body.get('device'):
+            want = str(body['device']).lower()
+            rows = [r for r in rows if str(r.get('dev', '')).lower() == want or str(r.get('host', '')).lower() == want]
+        rec = await asyncio.to_thread(analyst.analyze, rows, ai_devices(), bool(body.get('use_ai', True)),
+                                      max(20, min(1000, int(body.get('max_lines', 200)))))
+        for a in rec['actions']:
+            a['executable'] = False                 # 単体版は表示とコピーだけ
+        return {**rec, 'minutes': minutes}
+
+    @app.get('/api/ai/logs/history')
+    def ai_history(x_session_token: str = Header(None)):
+        check(x_session_token)
+        return {'history': [{k: h[k] for k in ('id', 't', 'provider', 'model', 'error', 'summary', 'stats')} for h in reversed(analyst.history)]}
+
+    @app.post('/api/ai/logs/apply')
+    def ai_apply():
+        return JSONResponse({'error': '単体版は装置に入れません(コマンドをコピーして使ってください)'}, status_code=403)
 
     @app.get('/api/demo/status')
     def demo_status():

@@ -65,6 +65,19 @@ sources:
   #   url: http://zabbix.example.local/api_jsonrpc.php
   #   token: ${ZABBIX_TOKEN}
 
+  # MRTG(cfgmaker が作った mrtg.cfg を読み、Target の装置・IF とこの設定の devices を自動で対応づける)。
+  # LogFormat が rrdtool なら .rrd を rrdtool fetch で読む(rrdtool コマンドが要る)
+  # mrtg:
+  #   cfg: /etc/mrtg.cfg
+  #   stale: 900                     # これより古い値(秒)は出さない(MRTG が止まっていても 0 と見せない)
+
+  # Cacti(Interface - Traffic のデータソースの RRD。traffic_in / traffic_out)。どのファイルがどの IF かは
+  # Cacti の DB にしか無いので、ここに書く(install.sh は見つけたファイルをコメントで下書きに出す)
+  # cacti:
+  #   rra_dir: /var/lib/cacti/rra
+  #   targets:
+  #     - {device: cr1, if: GigabitEthernet0/0/0, file: cr1_traffic_in_12.rrd}
+
   # SNMP で装置に直接問い合わせ、経路表(IP-FORWARD-MIB)と CPU(CISCO-PROCESS-MIB)を定期取得する。
   # 経路の追加・削除・変更と CPU の急上昇・回復が「情」、CPU が高い状態が続くと「注」(警告)になる
   # snmp:
@@ -90,3 +103,16 @@ sources:
   # SNMP trap(linkDown / linkUp)をこの画面で直接受ける場合
   # snmp_trap:
   #   listen: 0.0.0.0:1162
+
+# 地球儀(WORLD): 拠点の位置と、外の情報源(クラウドの IP 範囲・Cloudflare Radar・IIJ IHR・RIPE Atlas・
+# DShield・DB-IP の都市 DB)。届かない元は「取れない」と表示する。CLOUDFLARE_API_TOKEN 等は環境変数で
+# site: {name: 東京, lat: 35.68, lon: 139.76, country: JP, asn: 2497}
+# world:
+#   enabled: true
+#   cache_dir: data/world
+#   pairs: [[JP, US], [US, RU]]        # Atlas で見る国の組
+
+# AI ログ解析(画面の AI ボタン)。鍵は環境変数で渡す(ここには書かない):
+#   ANTHROPIC_API_KEY(Claude)/ GROQ_API_KEY・OPENAI_API_KEY・NIRVANA_AI_BASE_URL+NIRVANA_AI_KEY / OLLAMA_URL
+#   NIRVANA_AI_PROVIDER=claude|openai|ollama|rules、NIRVANA_AI_MODEL、NIRVANA_AI_REDACT_IPS=0(IP を伏せない)
+# 単体版は装置にログインしないので、提案されたコマンドは表示とコピーだけ(実行はしない)

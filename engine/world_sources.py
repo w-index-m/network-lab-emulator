@@ -254,7 +254,7 @@ class WorldState:
         self._lock = threading.Lock()
         self._last = 0
         self.cloud_seen = {}     # (provider, region) -> {'bytes', 'flows', 'last', 'service'}
-        from engine.world_geo import DEFAULT_PAIRS, AtlasClient, GeoCity, PeerTracker
+        from .world_geo import DEFAULT_PAIRS, AtlasClient, GeoCity, PeerTracker
         self.geo = GeoCity()
         self.peers = PeerTracker()
         self.dshield = {'status': 'off'}
@@ -276,7 +276,7 @@ class WorldState:
         def run():
             self.geo.ensure(cache_dir, fetch=self.geo_fetch_enabled())
             if not self.geo.ready() and os.environ.get('NETLAB_WORLD_SAMPLE', '') == '1':
-                from engine.world_geo import load_sample_geo
+                from .world_geo import load_sample_geo
                 why = self.geo.status.get('detail', '')
                 load_sample_geo(self.geo)
                 self.geo.status['detail'] = f'見本の都市DB(本物は {why})'[:200]
@@ -290,7 +290,7 @@ class WorldState:
 
     def refresh_city(self, dshield=None, atlas=None):
         """都市の粒度: DShield の攻撃元、RIPE Atlas の都市間経路"""
-        from engine.world_geo import DShieldClient
+        from .world_geo import DShieldClient
         if not self.enabled() and dshield is None and atlas is None:
             self.dshield = {'status': 'off', 'detail': 'NETLAB_WORLD_FETCH=0', 'cities': []}
             self.atlas = {'status': 'off', 'detail': 'NETLAB_WORLD_FETCH=0', 'paths': []}
@@ -303,8 +303,8 @@ class WorldState:
             except Exception as e:  # noqa: BLE001
                 val = {'status': 'error', 'detail': str(e)[:200], 'paths': [], 'cities': []}
             if sample and val.get('status') != 'ok':
-                from engine import world_geo as wg
-                from engine import world_samples as ws
+                from . import world_geo as wg
+                from . import world_samples as ws
                 real = val
                 c = wg.DShieldClient(fetch=ws.dshield_fetch) if name == 'dshield' else wg.AtlasClient(fetch=ws.atlas_fetch)
                 val = run(c)
@@ -343,7 +343,7 @@ class WorldState:
                 val = {'status': 'error', 'detail': str(e)[:200]}
             if sample and val.get('status') != 'ok':
                 # 見本データ(本物の応答の形のまま同じ読み取り処理を通す)。画面には SAMPLE と出す
-                from engine import world_samples as ws
+                from . import world_samples as ws
                 real = val
                 val = (RadarClient(token='sample', fetch=ws.fake_fetch(ws.RADAR)) if name == 'radar'
                        else IhrClient(fetch=ws.fake_fetch(ws.IHR))).snapshot()
@@ -382,12 +382,13 @@ class WorldState:
                             'age': round(now - s['last'], 1)})
         return sorted(out, key=lambda x: -x['bytes'])
 
-    def snapshot(self):
-        try:
-            from engine.darknet import darknet
-            self.peers.pull_darknet(darknet)
-        except Exception:  # noqa: BLE001
-            pass
+    def snapshot(self, darknet=None):
+        """darknet: ダークネットの観測(ラボは engine.darknet.darknet、単体版は SiteSecurity.darknet)"""
+        if darknet is not None:
+            try:
+                self.peers.pull_darknet(darknet)
+            except Exception:  # noqa: BLE001
+                pass
         return {'radar': self.radar, 'ihr': self.ihr, 'cloud': {'loaded': self.cloud.loaded, 'regions': self.cloud_snapshot()},
                 'geo': self.geo.status, 'peers': self.peers.snapshot(self.geo), 'dshield': self.dshield,
                 'atlas': self.atlas, 'pairs': self.pairs, 'fetch': self.enabled(), 'last_refresh': self._last or None}

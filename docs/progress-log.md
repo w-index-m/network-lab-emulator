@@ -3,6 +3,12 @@
 新しいものが上。各項目の「詳細」に、その時の検証記録(実際のコマンド・出力・画面)がある。
 commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 
+## 2026-11-17(明け方)— 既存の監視に足す(MRTG・Cacti・インストーラー)と AI ログ解析
+
+| 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
+|---|---|---|---|
+| 06:40 | 単体版に MRTG・Cacti の取り込み口、地球儀、インストーラー(Prometheus / Loki / Zabbix / MRTG / Cacti / Ollama を探して config.yaml を作る)。syslog を AI に読ませて対処を提案する「AI」パネル | 本物の cfgmaker で**エミュレータの SNMP が負の request-id に応答していなかった**(半分が応答なし)・ipAddrTable の列不足を発見して修正。AI の提案した `no shutdown` を実際に装置へ入れて復旧。画面に WORLD の花びらが無く、本物の警報で落ちるところだったのも修正 | [nirvana-addon-monitoring-ai.md](nirvana-addon-monitoring-ai.md) |
+
 ## 2026-11-17(深夜)— WORLD 地球儀(クラウド・Radar・IHR・MAWI)
 
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |

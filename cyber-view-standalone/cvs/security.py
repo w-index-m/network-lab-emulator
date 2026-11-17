@@ -131,6 +131,11 @@ class SiteSecurity:
             self.darknet.observe(fl['src'], fl['dst'], fl['proto'], fl.get('sport', 0), fl.get('dport', 0),
                                  fl.get('tcp_flags', 0), length=fl.get('bytes', 0), via=fl.get('via', 'flow'))
         s_dev, d_dev = self.col.dev_of(fl['src']), self.col.dev_of(fl['dst'])
+        w = getattr(self, 'world', None)            # 地球儀(server.py が入れる)。宛先がクラウドなら流量、外→自分なら送信元の都市
+        if w is not None:
+            w.observe_flow(fl['dst'], int(fl.get('bytes', 0)))
+            if not s_dev and d_dev:
+                w.peers.observe(fl['src'], 'flow', max(1, int(fl.get('packets', 1))), int(fl.get('bytes', 0)))
         self.flow_seq += 1
         pk = max(1, int(fl.get('packets', 1)))
         self.flow_events.append({'seq': self.flow_seq, 't': fl['t'], 'src': s_dev or fl['src'], 'dst': d_dev,

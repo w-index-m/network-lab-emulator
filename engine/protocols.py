@@ -6937,9 +6937,16 @@ class SnmpAgent:
         # 監視側(ニルヴァーナのスタンドアロン版など)が定期的に取り、経路の追加・削除・変更を「情」として出す。
         # 新しい inetCidrRouteTable(4.24.7)と、古い機種向けの ipCidrRouteTable(4.24.4)の両方を出す。
         mib.extend(_route_mib(device_id, [n for n, _ in ifaces]))
-        # ── ip group: ipAdEntAddr (1.3.6.1.2.1.4.20.1.1.<ip>) ──
-        for ip in info.get('ips', {}):
-            mib.append((f'1.3.6.1.2.1.4.20.1.1.{ip}', 'IpAddress', ip))
+        # ── ip group: ipAddrTable (1.3.6.1.2.1.4.20.1.<列>.<ip>) ──
+        # ipAdEntAddr に加えて ipAdEntIfIndex・ipAdEntNetMask も出す(MRTG の cfgmaker はこれで IP → IF を
+        # 対応づける。以前はアドレスの列だけで、cfgmaker の出力が全部「Ip: 'No Ip'」になっていた)
+        if_index = {ii.get('ip'): i for i, (_n, ii) in enumerate(ifaces, 1) if ii.get('ip')}
+        for ip, prefix in info.get('ips', {}).items():
+            mask = '.'.join(str((0xFFFFFFFF << (32 - int(prefix)) & 0xFFFFFFFF) >> s & 0xFF) for s in (24, 16, 8, 0))
+            mib.append((f'1.3.6.1.2.1.4.20.1.1.{ip}', 'IpAddress', ip))                       # ipAdEntAddr
+            if ip in if_index:
+                mib.append((f'1.3.6.1.2.1.4.20.1.2.{ip}', 'INTEGER', str(if_index[ip])))      # ipAdEntIfIndex
+            mib.append((f'1.3.6.1.2.1.4.20.1.3.{ip}', 'IpAddress', mask))                     # ipAdEntNetMask
         # OID を数値順にソート
         def _key(entry):
             return [int(x) if x.isdigit() else 0 for x in entry[0].split('.')]
