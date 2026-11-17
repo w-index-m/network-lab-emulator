@@ -172,6 +172,20 @@ class RadarClient:
         out['attacks'] = [{'from': x.get('originCountryAlpha2'), 'from_name': x.get('originCountryName'),
                            'to': x.get('targetCountryAlpha2'), 'to_name': x.get('targetCountryName'),
                            'share': float(x.get('value', 0) or 0)} for x in atk.get('top_0', [])]
+        # L3(DDoS): 送信元の国・標的の国(top/attacks は送信元だけを返す版があるので、標的があれば組にする)
+        try:
+            l3 = self._get('/attacks/layer3/top/attacks', dateRange=date_range, limit=limit, format='json')
+            org = self._get('/attacks/layer3/top/locations/origin', dateRange=date_range, limit=limit, format='json')
+            tgt = self._get('/attacks/layer3/top/locations/target', dateRange=date_range, limit=limit, format='json')
+            out['l3'] = {
+                'pairs': [{'from': x.get('originCountryAlpha2'), 'to': x.get('targetCountryAlpha2'),
+                           'share': float(x.get('value', 0) or 0)} for x in l3.get('top_0', []) if x.get('targetCountryAlpha2')],
+                'origins': [{'cc': x.get('originCountryAlpha2'), 'name': x.get('originCountryName'),
+                             'share': float(x.get('value', 0) or 0)} for x in org.get('top_0', [])],
+                'targets': [{'cc': x.get('targetCountryAlpha2'), 'name': x.get('targetCountryName'),
+                             'share': float(x.get('value', 0) or 0)} for x in tgt.get('top_0', [])]}
+        except Exception as e:  # noqa: BLE001 - L3 だけ取れないことはある
+            out['l3'] = {'pairs': [], 'origins': [], 'targets': [], 'error': str(e)[:160]}
         try:
             an = self._get('/traffic_anomalies', dateRange='7d', limit=10, format='json')
             out['anomalies'] = [{'cc': (x.get('locationDetails') or {}).get('code')
@@ -240,6 +254,77 @@ class WorldState:
         self._lock = threading.Lock()
         self._last = 0
         self.cloud_seen = {}     # (provider, region) -> {'bytes', 'flows', 'last', 'service'}
+        from engine.world_geo import DEFAULT_PAIRS, AtlasClient, GeoCity, PeerTracker
+        self.geo = GeoCity()
+        self.peers = PeerTracker()
+        self.dshield = {'status': 'off'}
+        self.atlas = {'status': 'off', 'paths': []}
+        self.atlas_client = AtlasClient()
+        self.pairs = [dict(p) for p in DEFAULT_PAIRS]
+        self._geo_thread = None
+
+    def geo_fetch_enabled(self):
+        return self.enabled() and os.environ.get('NETLAB_GEOIP_FETCH', '1') != '0'
+
+    def ensure_geo(self, cache_dir=None, wait=False):
+        """都市DB(DB-IP City Lite)を裏で読む。数十秒〜数分かかるので画面を止めない"""
+        if self.geo.ready() or (self._geo_thread and self._geo_thread.is_alive()):
+            return self.geo.status
+        if not self.enabled() and not os.environ.get('NETLAB_GEOIP_DB'):
+            return self.geo.status
+
+        def run():
+            self.geo.ensure(cache_dir, fetch=self.geo_fetch_enabled())
+            if not self.geo.ready() and os.environ.get('NETLAB_WORLD_SAMPLE', '') == '1':
+                from engine.world_geo import load_sample_geo
+                why = self.geo.status.get('detail', '')
+                load_sample_geo(self.geo)
+                self.geo.status['detail'] = f'見本の都市DB(本物は {why})'[:200]
+            if self.geo.ready() and self.enabled():
+                self.refresh_city()           # 都市DBが揃ったので、都市に置き直す
+        self._geo_thread = threading.Thread(target=run, daemon=True, name='geoip')
+        self._geo_thread.start()
+        if wait:
+            self._geo_thread.join()
+        return self.geo.status
+
+    def refresh_city(self, dshield=None, atlas=None):
+        """都市の粒度: DShield の攻撃元、RIPE Atlas の都市間経路"""
+        from engine.world_geo import DShieldClient
+        if not self.enabled() and dshield is None and atlas is None:
+            self.dshield = {'status': 'off', 'detail': 'NETLAB_WORLD_FETCH=0', 'cities': []}
+            self.atlas = {'status': 'off', 'detail': 'NETLAB_WORLD_FETCH=0', 'paths': []}
+            return
+        sample = os.environ.get('NETLAB_WORLD_SAMPLE', '') == '1'
+        for name, run in (('dshield', lambda c: c.snapshot(self.geo)), ('atlas', lambda c: c.snapshot(self.pairs, self.geo))):
+            client = (dshield or DShieldClient()) if name == 'dshield' else (atlas or self.atlas_client)
+            try:
+                val = run(client)
+            except Exception as e:  # noqa: BLE001
+                val = {'status': 'error', 'detail': str(e)[:200], 'paths': [], 'cities': []}
+            if sample and val.get('status') != 'ok':
+                from engine import world_geo as wg
+                from engine import world_samples as ws
+                real = val
+                c = wg.DShieldClient(fetch=ws.dshield_fetch) if name == 'dshield' else wg.AtlasClient(fetch=ws.atlas_fetch)
+                val = run(c)
+                val.update(status='sample', detail=f"見本データ(本物は {real.get('status')}: {real.get('detail', '')})"[:200])
+                if name == 'atlas':
+                    self._atlas_sample = c
+            setattr(self, name, val)
+
+    def anchor_list(self, q=''):
+        c = self.atlas_client if self.atlas_client.anchors else getattr(self, '_atlas_sample', self.atlas_client)
+        return c.anchor_list(q), len(c.anchors)
+
+    def set_pairs(self, pairs):
+        clean = []
+        for p in pairs or []:
+            a, b = str(p.get('from', '')).strip()[:60], str(p.get('to', '')).strip()[:60]
+            if a and b:
+                clean.append({'from': a, 'to': b})
+        self.pairs = clean[:8]
+        return self.pairs
 
     def enabled(self):
         return os.environ.get('NETLAB_WORLD_FETCH', '1') != '0'
@@ -264,6 +349,8 @@ class WorldState:
                        else IhrClient(fetch=ws.fake_fetch(ws.IHR))).snapshot()
                 val.update(status='sample', detail=f"見本データ(本物は {real.get('status')}: {real.get('detail', '')})"[:200])
             setattr(self, name, val)
+        self.ensure_geo(cache_dir)
+        self.refresh_city()
         self._last = time.time()
 
     def due(self, now=None):
@@ -296,8 +383,14 @@ class WorldState:
         return sorted(out, key=lambda x: -x['bytes'])
 
     def snapshot(self):
+        try:
+            from engine.darknet import darknet
+            self.peers.pull_darknet(darknet)
+        except Exception:  # noqa: BLE001
+            pass
         return {'radar': self.radar, 'ihr': self.ihr, 'cloud': {'loaded': self.cloud.loaded, 'regions': self.cloud_snapshot()},
-                'fetch': self.enabled(), 'last_refresh': self._last or None}
+                'geo': self.geo.status, 'peers': self.peers.snapshot(self.geo), 'dshield': self.dshield,
+                'atlas': self.atlas, 'pairs': self.pairs, 'fetch': self.enabled(), 'last_refresh': self._last or None}
 
 
 world = WorldState()

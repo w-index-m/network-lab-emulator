@@ -10816,9 +10816,11 @@ def _on_flow(f):
     pk = max(1, int(f.get('packets', 1)))
     _flow_recorder.record_flow(s_dev or f['src'], f['dst'], d_dev, [x for x in (s_dev, d_dev) if x], True,
                                pk, max(1, int(f.get('bytes', 0)) // pk), f['proto'], src_ip=f['src'], via=f.get('via'))
-    if f.get('via') != 'mawi':          # MAWI のアドレスは匿名化されている(クラウドの判定に使わない)
+    if f.get('via') != 'mawi':          # MAWI のアドレスは匿名化されている(クラウド・都市の判定に使わない)
         from engine.world_sources import world as _world
         _world.observe_flow(f['dst'], int(f.get('bytes', 0)))
+        if not s_dev and d_dev:           # 外 → 自分の装置: 送信元の都市を地球儀へ
+            _world.peers.observe(f['src'], 'flow', pk, int(f.get('bytes', 0)))
 
 
 # ── WORLD(地球儀): クラウドの IP 帯・Cloudflare Radar・IIJ Internet Health Report・MAWI の再生 ──
@@ -10876,6 +10878,7 @@ def _world_alerts(now=None):
 
 async def _world_loop():
     from engine.world_sources import world
+    world.ensure_geo(str(_WORLD_CACHE))       # 都市DB(手元の NETLAB_GEOIP_DB か保存済み)を裏で読む
     while True:
         try:
             if world.enabled() and world.due():
@@ -10903,6 +10906,33 @@ async def world_refresh():
     from engine.world_sources import world
     await asyncio.to_thread(world.refresh, str(_WORLD_CACHE))
     return {'alerts': len(_world_alerts()), **world.snapshot()}
+
+
+@app.get("/api/world/anchors")
+async def world_anchors(q: str = ''):
+    """RIPE Atlas のアンカー(都市)の候補。画面の都市の入力欄の候補に使う"""
+    from engine.world_sources import world
+    lst, n = world.anchor_list(q)
+    return {'anchors': lst, 'count': n}
+
+
+@app.post("/api/world/paths")
+async def world_paths(request: Request):
+    """都市 → 都市の経路の組を入れ替えて取り直す。body: {pairs: [{from: 'New York', to: 'Moscow'}, ...]}"""
+    from engine.world_sources import world
+    body = await request.json()
+    pairs = world.set_pairs(body.get('pairs') or [])
+    if not pairs:
+        return JSONResponse({'error': '都市の組(from / to)を1つ以上指定してください'}, status_code=400)
+    await asyncio.to_thread(world.refresh_city)
+    return {'pairs': pairs, 'atlas': world.atlas}
+
+
+@app.get("/api/world/geo")
+async def world_geo_lookup(ip: str):
+    """IP → 都市(DB-IP City Lite)。都市DBが無ければ null"""
+    from engine.world_sources import world
+    return {'ip': ip, 'geo': world.geo.lookup(ip), 'db': world.geo.status}
 
 
 @app.post("/api/mawi/replay")
@@ -11268,6 +11298,8 @@ def _on_auth(device_id, src_ip, ok, user, now):
         return
     lst.append(now)
     _auth_fail[key] = lst
+    from engine.world_sources import world as _world
+    _world.peers.observe(src_ip, 'login', 1, now=now)      # ログインに失敗した外部の送信元は地球儀へ
     if len([t for t in lst if now - t < 60]) >= 3:
         _flow_recorder.external_alert('login_brute', src_ip, src_ip, device_id,
                                       f'{src_ip} → {_resp_hostname(device_id)}: ログイン失敗 {len(lst)}回(user {user})', now=now)

@@ -7,6 +7,7 @@ commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
 |---|---|---|---|
+| 04:30 | 「中国からアメリカ、アメリカの都市からロシアの都市レベルの通信がわかるといい」→ WORLD を都市の粒度に。RIPE Atlas の都市間 traceroute、攻撃元の都市(自分に来た相手・DShield)、Radar L3、IP → 都市(DB-IP City Lite) | 都市間の「流量」はどこも公開していないので、経路・遅延・攻撃の件数で代えた。本物のダークネットのパケットと SSH ログイン失敗が都市 → LAB の弧に。プレートがパネルの下に潜る・欧州の都市名が重なる・見本の数字に印が無いのを直した | [world-view.md](world-view.md) 後半 |
 | 03:05 | 「インターネットのトラフィックも出せる？」→ /cyber-view に **WORLD**。AWS / GCP のリージョン別流量(公開 IP 帯)、Cloudflare Radar、IIJ IHR、MAWI の pcap 再生 | 本物の AWS IP 帯(10758)でラボの ping が東京・バージニア等の弧に。Radar / IHR / MAWI / GCP はこの環境でブロック → 理由を表示、見本モードを用意。MAWI の匿名化アドレスが AWS 帯に当たって数えられていたのを除外、IHR の同じ障害の重複、弧が画面外に飛ぶのを直した | [world-view.md](world-view.md) |
 
 ## 2026-11-17(夜)— 通信が多いときの表示 / サイバー演出 FX / L2 ループ検知

@@ -77,3 +77,92 @@ MAWI を再生中の NETWORK ビュー(紫が MAWI のフロー):
 - Cloudflare Radar(CC BY-NC 4.0。表示に出典を出す)、IIJ Internet Health Report、MAWI Working Group Traffic Archive
   (WIDE プロジェクト)、AWS / Google Cloud の公開 IP 帯一覧、Natural Earth(パブリックドメイン)・world-atlas(ISC)・
   i18n-iso-countries(MIT)。
+
+---
+
+# 都市の粒度(都市 → 都市の経路・攻撃元の都市・L3 攻撃)
+
+依頼「チャイナからアメリカ、アメリカの都市からロシアの都市レベルの通信がわかるといいなぁ」への対応。
+
+**先に結論**: 他人どうしの都市間の「流量」は、どこも公開していない(通信事業者の機密・個人情報)。
+代わりに、公開されていて都市の粒度で取れる3つを地球儀に重ねた。
+
+| 何を | どこから | 地球儀での見え方 | 数字の意味 |
+|---|---|---|---|
+| ① 都市 → 都市の**本物の経路と遅延** | RIPE Atlas のアンカー(各都市に置かれた計測用サーバー)どうしが常に測っている traceroute(Anchoring Mesh)。閲覧はキー不要 | 通過した都市を順に結ぶ色付きの弧、都市ごとの遅延(ms)、到着点のプレート「NEW YORK → MOSCOW 119 ms」 | 遅延とホップ数。**通信量ではない** |
+| ② **攻撃元の都市** | (a) 自分の拠点に来た外部の相手(ダークネットに届いた送信元・NetFlow/sFlow の外からの相手・SSH/Telnet のログイン失敗) (b) SANS ISC / DShield の公開 API(世界中のセンサーに届いた攻撃の送信元 IP 上位) | (a) 都市 → SITE の赤い弧とプレート「MOSCOW → LAB 48件」 (b) 都市に立つ橙の柱とプレート「DSHIELD Beijing 80,550件」 | (a) 自分が観測した本物の件数 (b) DShield の**報告件数**(センサーが送ったファイアウォールのログの行数。攻撃の回数そのものではない) |
+| ③ 国 → 国の **L3(DDoS)攻撃** | Cloudflare Radar `/radar/attacks/layer3/top/locations/origin`・`/target`(要トークン) | 送信元の国に紫の点線の柱、標的の国に紫の輪 | Cloudflare が止めた L3 攻撃に占める割合(%) |
+
+IP → 都市は DB-IP の「IP to City Lite」(CC BY 4.0、毎月更新、キー不要、約 130MB の CSV.gz)。
+初回は裏でダウンロードして読み込み(数十秒〜数分)、`data/world/geoip-city.pkl` に保存して次から数秒で読む。
+**精度は都市単位でおおむね5〜8割、ロシア・中国はもっと粗い**(画面にも出す)。ルーターの IP は会社の本社の
+場所になることもあるので、①の途中の都市は目安(両端はアンカーの本当の場所)。
+
+![都市の粒度(アジア側)](images/cyber-view-world-city-asia.jpg)
+
+ヨーロッパ側(ニューヨーク → ロンドン → フランクフルト → ストックホルム → ヘルシンキ → モスクワ、119 ms):
+
+![都市の粒度(ヨーロッパ側)](images/cyber-view-world-city-europe.jpg)
+
+アメリカ側(香港 → 東京 → シアトル → サンノゼ → ロサンゼルス):
+
+![都市の粒度(アメリカ側)](images/cyber-view-world-city-america.jpg)
+
+(画像は見本モード。プレートの下に「見本 SAMPLE」と出ている数字は作り物。「MOSCOW → LAB」「上海・北京からの
+ログイン失敗」は本物のパケットとログイン試行で、都市への当てはめだけが見本の都市DB。)
+
+## 操作
+
+- 右のパネル「地球儀に重ねるもの」で 都市間の経路 / 攻撃元の都市 / L3攻撃 / L7攻撃 / クラウド を切り替え
+  (`localStorage cvWorldLayers`)。
+- 「都市 → 都市の経路」の欄で 出発・到着 の都市を入れて「追加」(候補はアンカーのある都市)、✕ で外す。
+  都市名(部分一致)・国コード(`RU`)・アンカー名のどれでも。最大8組。既定は ニューヨーク→モスクワ、
+  香港→ロサンゼルス、東京→フランクフルト。
+- 中国本土にはアンカーがほとんど無いので、「中国 → アメリカ」の経路は香港などで代える。中国からの攻撃元は②で見る。
+
+## 仕組み
+
+- `engine/world_geo.py`
+  - `GeoCity`: CSV(`ip_start, ip_end, continent, country, stateprov, city, latitude, longitude`)を IPv4 だけ
+    配列に持ち二分探索。`NETLAB_GEOIP_DB`(手元の CSV / CSV.gz)→ 保存済み → DB-IP の今月・先月の版、の順。
+  - `PeerTracker`: 外部の相手を IP ごとに数え(私設・CGNAT・ループバックは除く)、都市ごとにまとめる。
+    ダークネットは `darknet.events` から、ログイン失敗は `app._on_auth`、フローは `app._on_flow`(外 → 自分の装置のみ、MAWI は除く)。
+  - `DShieldClient`: `https://isc.sans.edu/api/topips/records/200?json`(IP は0埋め)。
+  - `AtlasClient`: `/api/v2/anchors/` → 宛先アンカーの `/api/v2/anchor-measurements/?target=<id>`(無ければ
+    `/api/v2/measurements/?target=<fqdn>&type=traceroute` で Mesh を探す)→ `/api/v2/measurements/<id>/latest/?probe_ids=<出発アンカーの probe>`。
+    結果の読み方は RIPE-NCC の ripe-atlas-sagan に合わせた。60km 以内の連続する都市は1つにまとめる
+    (DB-IP の「Frankfurt am Main」とアンカーの「Frankfurt」など)。
+- `engine/world_sources.py`: `WorldState` が10分ごとに Radar(L3 を追加)・IHR・DShield・Atlas を取り直す。
+  都市DBが後から揃ったら、その時点で都市に置き直す。
+
+| API | |
+|---|---|
+| `GET /api/world` | 追加: `geo`(都市DBの状態)・`peers`・`dshield`・`atlas`・`pairs`、`radar.l3` |
+| `POST /api/world/paths` | `{"pairs": [{"from": "New York", "to": "Moscow"}]}` で組を入れ替えて取り直す(空は 400) |
+| `GET /api/world/anchors?q=` | アンカーのある都市の候補 |
+| `GET /api/world/geo?ip=` | IP → 都市 |
+
+| 環境変数 | |
+|---|---|
+| `NETLAB_GEOIP_DB` | 手元の DB-IP City Lite の CSV / CSV.gz(ダウンロードしない) |
+| `NETLAB_GEOIP_FETCH=0` | 都市DBを取りに行かない(メモリが少ない環境向け。読み込むと約 100MB 増える) |
+
+## ライブ検証(この作業環境で)
+
+- この作業環境からは `atlas.ripe.net`・`download.db-ip.com`・`isc.sans.edu`・`api.cloudflare.com` がすべて
+  遮断(接続拒否)。応答の形は Cloudflare の openapi.json、RIPE-NCC の ripe-atlas-cousteau / sagan で確認し、
+  見本モード(`NETLAB_WORLD_SAMPLE=1`、IP は文書用の帯 192.0.2.0/24・198.51.100.0/24 だけ)で表示を確認した。
+- **本物の通信で確認したもの**: lo に 198.51.100.1 / .4 / .8 を足し、
+  - `tools/darknet_traffic.py --src 198.51.100.8 scan` で本物のパケットをダークネット(10.250.0.0/24、lo に引き込み)へ48個 →
+    `peers` に Moscow(darknet 48)、地球儀に「MOSCOW → LAB 48件」の赤い弧。
+  - paramiko で Cisco の実 SSH(203.0.113.2:22)へ送信元 198.51.100.4・.1 から誤パスワード4回ずつ → Shanghai・Beijing
+    (login 4)。同時に既存の総当たり検知と RESPONSE パネルも出た。
+  - `POST /api/world/paths` で「東京 → モスクワ」(見本に計測なし)→「経路の計測結果がまだありません」、
+    「北京 → モスクワ」→「アンカーが見つかりません: Beijing」、空 → 400。
+- **未確認**: 本物の DB-IP / RIPE Atlas / DShield / Radar L3 のデータでの表示。作成済みの環境
+  「network-lab-emulator」に上の4ホストを許可して、新しいセッションで確認する。
+
+テスト: `tests/test_world_city.py`(10件。外部へは出ない)。
+
+出典: IP Geolocation by DB-IP(https://db-ip.com、CC BY 4.0)、RIPE Atlas(RIPE NCC)、SANS Internet Storm Center / DShield、
+Cloudflare Radar(CC BY-NC 4.0)。

@@ -1250,7 +1250,7 @@
   // 押し出した横長の六角プレート(画面に正対、奥行き付き)。big=true は脈動+太字
   // ── プレートの置き場所(1フレームごと): 先に置いたプレート・上のメニュー・状態ボード等と重ねない ──
   let plateBoxes = [], plateBlock = [];
-  const PLATE_HUD = ['modes', 'status', 'cidr', 'crumbs', 'zoom', 'resp', 'legend', 'filter', 'alerts'];
+  const PLATE_HUD = ['modes', 'status', 'cidr', 'crumbs', 'zoom', 'resp', 'legend', 'filter', 'alerts', 'worldpanel'];
   function platesBeginFrame() {
     plateBoxes = [];
     plateBlock = [];
@@ -1579,9 +1579,13 @@
   }
   // ── WORLD: 地球儀(クラウド宛ての流量・Cloudflare Radar・IIJ Internet Health Report・MAWI の再生) ──
   // 地図は static/world/world.json(Natural Earth 1:110m)。拠点の場所は NIRVANA_SITE_LATLON(既定 東京)
-  let worldMap = null, worldData = null, worldAt = 0;
+  let worldMap = null, worldData = null, worldAt = 0, worldAnchors = null;
   const WR = 11, WY = 0;                          // 地球の半径と中心の高さ
   const CLOUD_COL = { aws: '#ff9900', gcp: '#4f8cff' };
+  const ROUTE_COL = ['#ffd166', '#7dff6a', '#4fe3ff', '#ff8ad8', '#ffffff'];
+  // 地球儀に重ねるもの(パネルのチェックで切り替え。localStorage cvWorldLayers)
+  const worldLayers = Object.assign({ route: true, attack: true, l3: true, l7: true, cloud: true },
+    (() => { try { return JSON.parse(localStorage.getItem('cvWorldLayers') || '{}'); } catch (e) { return {}; } })());
   async function pollWorld() {
     try {
       if (!worldMap) worldMap = await fetch('/static/world/world.json').then(r => r.json());
@@ -1641,6 +1645,7 @@
     }
     ctx.restore();
   }
+  const smp = (src) => (src && src.status === 'sample') ? '見本 SAMPLE ・ ' : '';   // 見本データのプレートには必ず書く
   function cc2ll(cc) { const c = worldMap && worldMap.countries[cc]; return c ? [c[2], c[3], c[1] || c[0]] : null; }
   function drawWorld(t) {
     if (!worldMap) { if (performance.now() - worldAt > 3000) { worldAt = performance.now(); pollWorld(); } return; }
@@ -1671,7 +1676,7 @@
     if (!d) return;
     const S = d.site;
     // Radar: 国ごとの HTTP 流量の割合(柱)と、L7 攻撃(送信元国 → 標的国の赤い弧)
-    const rad0 = d.radar || {};
+    const rad0 = d.radar || {}, WL0 = worldLayers;
     (rad0.locations || []).slice(0, 15).forEach((x, i) => {
       const ll = cc2ll(x.cc); if (!ll) return;
       const base = geo(ll[0], ll[1], 0), top = geo(ll[0], ll[1], Math.min(0.45, 0.02 + x.share / 40));
@@ -1679,14 +1684,14 @@
       const a = proj(...base), b = proj(...top); if (!a || !b) return;
       ctx.save(); ctx.strokeStyle = '#33d6ff'; ctx.lineWidth = 4; ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 12;
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.restore();
-      if (i < 5) plate3d(top[0], top[1] + 0.6, top[2], '#33d6ff', `RADAR HTTP ${x.cc}`, `${x.share.toFixed(1)}%`, false, t, ll[2]);
+      if (i < 5) plate3d(top[0], top[1] + 0.6, top[2], '#33d6ff', `RADAR HTTP ${x.cc}`, `${x.share.toFixed(1)}%`, false, t, smp(rad0) + ll[2]);
     });
-    (rad0.attacks || []).slice(0, 12).forEach((x, i) => {
+    if (WL0.l7) (rad0.attacks || []).slice(0, 12).forEach((x, i) => {
       const a = cc2ll(x.from), b = cc2ll(x.to); if (!a || !b || x.from === x.to) return;
       worldArc(a[0], a[1], b[0], b[1], '#ff3b4e', t, { w: 1 + Math.min(4, x.share / 4), dots: 2 + Math.round(x.share / 3), phase: i * 0.13, speed: 0.0003 });
     });
     // クラウド宛ての流量: 拠点 → リージョン
-    for (const r of (d.cloud && d.cloud.regions) || []) {
+    for (const r of WL0.cloud ? (d.cloud && d.cloud.regions) || [] : []) {
       if (!r.place) continue;
       const col = CLOUD_COL[r.provider] || '#ffd166', live = r.age < 60;
       worldArc(S.lat, S.lon, r.place.lat, r.place.lon, col, t, { alpha: live ? 0.9 : 0.35, w: live ? 2.2 : 1, dots: live ? 2 + Math.min(10, Math.round(Math.log10(1 + r.bps))) : 0, speed: 0.0004 });
@@ -1700,6 +1705,80 @@
       const m = arcPoint(unit(35.0, 139.9), unit(37.4, -122.1), 0.5, 0.12);
       if (facing(m)) plate3d(m[0], m[1] + 1.2, m[2], '#c58bff', 'MAWI 実トラフィック', `${mw.played || 0}/${mw.seconds || 0}s`,
         true, t, Object.entries(mw.protocols || {}).slice(0, 3).map(([k, v]) => `${k} ${v}`).join(' ・ '));
+    }
+    // ── 都市の粒度 ──
+    const WL = worldLayers;
+    // RIPE Atlas: 都市 → 都市の本物の経路(通過した都市を順に弧で結ぶ)
+    const routeLabels = [];
+    if (WL.route) {
+      ((d.atlas || {}).paths || []).forEach((pth, k) => {
+        const cs = pth.cities || []; if (cs.length < 2) return;
+        const col = ROUTE_COL[k % ROUTE_COL.length];
+        for (let i = 0; i + 1 < cs.length; i++) {
+          worldArc(cs[i].lat, cs[i].lon, cs[i + 1].lat, cs[i + 1].lon, col, t, { w: 2.4, dots: 2, h: 0.04, phase: i * 0.2 + k * 0.07, speed: 0.0006, alpha: 0.95 });
+        }
+        cs.forEach((c, i) => {
+          const p = geo(c.lat, c.lon, 0.01); if (!facing(p)) return;
+          const q = proj(...p); if (!q) return;
+          ctx.save(); ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 10;
+          ctx.beginPath(); ctx.arc(q.x, q.y, c.end ? 5 : 3, 0, Math.PI * 2); ctx.fill();
+          // 都市名は近くに別の名前が出ていれば省く(ヨーロッパは都市が密集する)
+          if (!c.end && !routeLabels.some(([x, y]) => Math.abs(x - q.x) < 90 && Math.abs(y - q.y) < 14)) {
+            routeLabels.push([q.x, q.y]);
+            ctx.font = '11px monospace'; ctx.fillStyle = 'rgba(230,250,255,0.85)'; ctx.shadowBlur = 0;
+            ctx.fillText(`${c.city}${c.rtt != null ? ' ' + Math.round(c.rtt) + 'ms' : ''}`, q.x + 6, q.y - 4); }
+          ctx.restore();
+        });
+        const last = cs[cs.length - 1], p = geo(last.lat, last.lon, 0.03);
+        if (facing(p)) plate3d(p[0], p[1] + 0.9, p[2], col, `${cs[0].city} → ${last.city}`.toUpperCase(),
+          pth.rtt != null ? `${Math.round(pth.rtt)} ms` : '--', false, t, `${smp(d.atlas)}${pth.hop_count || 0} hops ・ 経由 ${Math.max(0, cs.length - 2)}都市${pth.reached ? '' : ' ・ 未到達'}`);
+      });
+    }
+    // Radar L3(DDoS): 送信元の国は紫の柱、標的の国は紫の輪。組が取れれば弧
+    const l3 = rad0.l3 || {};
+    if (WL.l3) {
+      (l3.origins || []).slice(0, 8).forEach((x) => {
+        const ll = cc2ll(x.cc); if (!ll) return;
+        const base = geo(ll[0], ll[1], 0), top = geo(ll[0], ll[1], Math.min(0.4, 0.02 + x.share / 50));
+        if (!facing(base)) return;
+        const a = proj(...base), b = proj(...top); if (!a || !b) return;
+        ctx.save(); ctx.strokeStyle = '#d65cff'; ctx.lineWidth = 3; ctx.shadowColor = '#d65cff'; ctx.shadowBlur = 12;
+        ctx.setLineDash([4, 3]); ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.restore();
+      });
+      (l3.targets || []).slice(0, 6).forEach((x) => {
+        const ll = cc2ll(x.cc); if (!ll) return;
+        const p = geo(ll[0], ll[1], 0.004); if (!facing(p)) return;
+        const c = proj(...p); if (!c) return;
+        const r = 6 + Math.min(18, x.share / 2) + 3 * Math.sin(t * 0.004);
+        ctx.save(); ctx.strokeStyle = '#d65cff'; ctx.lineWidth = 2; ctx.globalAlpha = 0.8; ctx.shadowColor = '#d65cff'; ctx.shadowBlur = 10;
+        ctx.beginPath(); ctx.ellipse(c.x, c.y, r, r * 0.5, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+      });
+      (l3.pairs || []).slice(0, 10).forEach((x, i) => {
+        const a = cc2ll(x.from), b = cc2ll(x.to); if (!a || !b || x.from === x.to) return;
+        worldArc(a[0], a[1], b[0], b[1], '#d65cff', t, { w: 1 + Math.min(4, x.share / 4), dots: 2, phase: i * 0.17, speed: 0.00035 });
+      });
+    }
+    // 攻撃元の都市(DShield: 世界のセンサーに届いた攻撃の送信元。行き先は非公開なので点と柱だけ)
+    const ds = d.dshield || {};
+    if (WL.attack) {
+      (ds.cities || []).slice(0, 40).forEach((c, i) => {
+        const base = geo(c.lat, c.lon, 0), top = geo(c.lat, c.lon, Math.min(0.35, 0.015 + Math.log10(1 + c.weight) * 0.05));
+        if (!facing(base)) return;
+        const a = proj(...base), b = proj(...top); if (!a || !b) return;
+        ctx.save(); ctx.strokeStyle = '#ff6b3d'; ctx.lineWidth = 2.5; ctx.shadowColor = '#ff6b3d'; ctx.shadowBlur = 10;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        ctx.fillStyle = '#ff6b3d'; ctx.beginPath(); ctx.arc(a.x, a.y, 2.5, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+        if (i < 3) plate3d(top[0], top[1] + 0.5, top[2], '#ff6b3d', `DSHIELD ${c.city || c.cc}`, `${c.weight.toLocaleString()}件`, false, t, `${smp(ds)}${c.cc} ・ ${c.ips} IP ・ 報告件数`);
+      });
+      // 自分の拠点に来た外部の相手(ダークネット・フロー・ログイン失敗): 都市 → SITE の弧
+      ((d.peers || {}).cities || []).slice(0, 20).forEach((c, i) => {
+        worldArc(c.lat, c.lon, S.lat, S.lon, '#ff3b4e', t, { alpha: c.live ? 0.95 : 0.4, w: c.live ? 2.4 : 1.2, dots: c.live ? 4 : 1, phase: i * 0.11, speed: 0.0005 });
+        const p = geo(c.lat, c.lon, 0.02);
+        if (i < 4 && facing(p)) {
+          const kinds = Object.entries(c.kinds || {}).map(([k, v]) => `${({ darknet: 'ダークネット', flow: 'フロー', login: 'ログイン失敗' })[k] || k} ${v}`).join(' ・ ');
+          plate3d(p[0], p[1] + 0.9, p[2], '#ff3b4e', `${(c.city || c.cc).toUpperCase()} → ${S.name}`, `${c.weight}件`, c.live, t, (d.geo && d.geo.state === 'sample' ? '都市は見本 ・ ' : '') + kinds);
+        }
+      });
     }
     // 拠点
     const sp = geo(S.lat, S.lon, 0.01);
@@ -1745,10 +1824,41 @@
     if (rd.status === 'ok' || rd.status === 'sample') {
       h += '<div class="ev">HTTP 流量の多い国: ' + (rd.locations || []).slice(0, 6).map(x => `${esc(x.cc)} ${x.share.toFixed(1)}%`).join(' ・ ') + '</div>';
       h += '<div class="ev">L7 攻撃: ' + (rd.attacks || []).slice(0, 4).map(x => `${esc(x.from)}→${esc(x.to)} ${x.share.toFixed(1)}%`).join(' ・ ') + '</div>';
+      const l3p = rd.l3 || {};
+      h += '<div class="ev">L3(DDoS)送信元: ' + (l3p.origins || []).slice(0, 5).map(x => `${esc(x.cc)} ${x.share.toFixed(1)}%`).join(' ・ ')
+        + ' ／ 標的: ' + (l3p.targets || []).slice(0, 4).map(x => `${esc(x.cc)} ${x.share.toFixed(1)}%`).join(' ・ ') + '</div>';
       h += `<div class="ev">通信の異常(7日): ${(rd.anomalies || []).length}件</div>`;
     }
     if (rd.status !== 'ok') h += `<div class="ev">${esc(rd.detail || '')}</div>`;
     h += '</div>';
+    // 表示の切り替え
+    const LY = [['route', '都市間の経路'], ['attack', '攻撃元の都市'], ['l3', 'L3攻撃'], ['l7', 'L7攻撃'], ['cloud', 'クラウド']];
+    h = `<div class="box"><h4>地球儀に重ねるもの</h4><div class="row" style="flex-wrap:wrap">` + LY.map(([k, n]) =>
+      `<label style="white-space:nowrap"><input type="checkbox" data-wl="${k}" ${worldLayers[k] ? 'checked' : ''} style="flex:none"> ${n}</label>`).join('') + '</div></div>' + h;
+    // RIPE Atlas: 都市 → 都市の経路
+    const at = d.atlas || {};
+    h += `<div class="box"><h4>都市 → 都市の経路(RIPE ATLAS) ${st(at)}</h4>`;
+    (at.paths || []).forEach((p, k) => {
+      const col = ROUTE_COL[k % ROUTE_COL.length], pr = p.pair || {};
+      h += `<div class="ev"><span style="color:${col}">■</span> ${esc(pr.from)} → ${esc(pr.to)} `
+        + (p.error ? `<span class="ng">${esc(p.error)}</span>` : `${p.rtt != null ? Math.round(p.rtt) + ' ms' : '--'} ・ ${p.hop_count} hops${p.reached ? '' : ' ・ 未到達'}`)
+        + ` <a href="#" data-rm="${k}" style="color:var(--dim)">✕</a></div>`;
+      if (p.cities) h += `<div class="ev" style="color:var(--dim)">　${p.cities.map(c => esc(c.city) + (c.rtt != null && !c.end ? ' ' + Math.round(c.rtt) : '')).join(' → ')}</div>`;
+    });
+    h += `<div class="row"><input id="wFrom" list="wAnchors" placeholder="出発 例 New York"><input id="wTo" list="wAnchors" placeholder="到着 例 Moscow"><button id="wAdd">追加</button></div><datalist id="wAnchors"></datalist>`;
+    if (at.status !== 'ok') h += `<div class="ev">${esc(at.detail || '')}</div>`;
+    h += `<div class="ev" style="color:var(--dim)">アンカー ${at.anchors || 0}台。各都市の計測用サーバーどうしの traceroute(Anchoring Mesh)。通信量ではなく経路と遅延</div></div>`;
+    // 攻撃元の都市
+    const ds = d.dshield || {}, pe = d.peers || {}, gs = d.geo || {};
+    h += `<div class="box"><h4>攻撃元の都市</h4>`;
+    h += `<div class="ev">都市DB: ${gs.state === 'ready' ? '<span class="ok">' + (gs.rows || 0).toLocaleString() + '帯</span>' : gs.state === 'sample' ? '<span class="warn">見本 SAMPLE</span>'
+      : gs.state === 'downloading' ? '<span class="warn">ダウンロード中 ' + fmtBytes(gs.bytes || 0) + '</span>' : gs.state === 'parsing' ? '<span class="warn">読み込み中</span>'
+      : '<span class="ng">' + esc(gs.state || 'なし') + '</span>'} ${esc(gs.detail || '')}</div>`;
+    h += `<div class="ev">自分の拠点へ(ダークネット・フロー・ログイン失敗): ${pe.ips || 0} IP` + ((pe.cities || []).length
+      ? ' ・ ' + pe.cities.slice(0, 5).map(c => `${esc(c.city || c.cc)}(${esc(c.cc)}) ${c.weight}`).join(' ・ ') : '') + (pe.unlocated ? ` ・ 都市不明 ${pe.unlocated}` : '') + '</div>';
+    h += `<div class="ev">DSHIELD ${st(ds)} 世界のセンサーへの攻撃元 上位: ` + (ds.cities || []).slice(0, 6).map(c => `${esc(c.city || c.cc)}(${esc(c.cc)}) ${c.weight.toLocaleString()}`).join(' ・ ') + '</div>';
+    if (ds.status !== 'ok' && ds.detail) h += `<div class="ev">${esc(ds.detail)}</div>`;
+    h += `<div class="ev" style="color:var(--dim)">都市は IP からの推定(都市単位でおおむね5〜8割、ロシア・中国はもっと粗い)。${esc(gs.attribution || '')}</div></div>`;
     h += `<div class="box"><h4>IIJ INTERNET HEALTH REPORT ${st(ih)}</h4>`;
     if (ih.status === 'ok' || ih.status === 'sample') {
       h += `<div class="ev">障害(disco) ${(ih.outages || []).length}件 ・ 遅延の異常 ${(ih.delay_alarms || []).length}件(直近${ih.hours}時間、国内主要 AS)</div>`;
@@ -1762,7 +1872,12 @@
     if (mw.source) h += `<div class="ev">${esc(mw.phase || '')} ${mw.packets || 0} pkt ・ ${mw.played || 0}/${mw.seconds || 0} 秒 ${mw.error ? '・ ' + esc(mw.error) : ''}</div>`
       + `<div class="ev">${Object.entries(mw.protocols || {}).slice(0, 4).map(([k, v]) => esc(k) + ' ' + v).join(' ・ ')}</div>`;
     h += '<div class="ev">アドレスは匿名化済み(国の判定には使わない)。通信は NETWORK に流れる</div></div>';
+    // 15秒ごとに描き直すので、入力中の文字とフォーカスは引き継ぐ
+    const keep = {}, act = document.activeElement && document.activeElement.id;
+    ['wFrom', 'wTo', 'wStamp'].forEach((id) => { const x = document.getElementById(id); if (x) keep[id] = x.value; });
     el.innerHTML = h;
+    Object.entries(keep).forEach(([id, v]) => { const x = document.getElementById(id); if (x) x.value = v; });
+    if (act && keep[act] !== undefined) { const x = document.getElementById(act); if (x) x.focus(); }
     const play = document.getElementById('wPlay');
     if (play) play.onclick = async () => {
       const v = document.getElementById('wStamp').value.trim();
@@ -1772,6 +1887,33 @@
       if (r.error) alert(r.error);
       pollWorld();
     };
+    el.querySelectorAll('[data-wl]').forEach((cb) => { cb.onchange = () => {
+      worldLayers[cb.dataset.wl] = cb.checked;
+      try { localStorage.setItem('cvWorldLayers', JSON.stringify(worldLayers)); } catch (e) { /* 保存できなくても切り替える */ }
+    }; });
+    const postPairs = async (pairs) => {
+      const r = await fetch('/api/world/paths', { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { 'X-Session-Token': token } : {}) },
+        body: JSON.stringify({ pairs }) }).then(x => x.json()).catch(() => ({}));
+      if (r.error) alert(r.error);
+      pollWorld();
+    };
+    const add = document.getElementById('wAdd');
+    if (add) add.onclick = () => {
+      const a = document.getElementById('wFrom').value.trim(), b = document.getElementById('wTo').value.trim();
+      if (a && b) postPairs([...(d.pairs || []), { from: a, to: b }]);
+    };
+    el.querySelectorAll('[data-rm]').forEach((x) => { x.onclick = (ev) => {
+      ev.preventDefault(); const k = +x.dataset.rm; const ps = (d.pairs || []).filter((_, i) => i !== k);
+      if (ps.length) postPairs(ps);
+    }; });
+    const dl = document.getElementById('wAnchors');
+    if (dl && !(worldAnchors && worldAnchors.length)) api('/api/world/anchors').then((r) => { worldAnchors = r.anchors || []; fillAnchors(); }).catch(() => {});
+    else fillAnchors();
+    function fillAnchors() {
+      const box = document.getElementById('wAnchors'); if (!box || !worldAnchors) return;
+      const seen = new Set();
+      box.innerHTML = worldAnchors.filter(a => a.city && !seen.has(a.city) && seen.add(a.city)).map(a => `<option value="${esc(a.city)}">${esc(a.cc)}</option>`).join('');
+    }
     const stop = document.getElementById('wStop');
     if (stop) stop.onclick = () => fetch('/api/mawi/stop', { method: 'POST', headers: token ? { 'X-Session-Token': token } : {} }).then(pollWorld);
   }
