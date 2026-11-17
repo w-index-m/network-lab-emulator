@@ -5409,6 +5409,14 @@ class IcmpEngine:
 
             # 次ホップデバイスとIPを解決
             next_hop_device, next_hop_ip = self._resolve_next_hop_detail(current, dest_ip)
+            if current == src_id:
+                # ホストが ICMP Redirect を受けて覚えた経路(Linux の cache <redirected>)を優先する。
+                # 覚えたゲートウェイへのリンクが落ちていれば使わない
+                from engine import icmp_redirect as _redir
+                _c = _redir.cached_gateway(src_id, dest_ip)
+                if _c and _c.get('gw_dev') and _c['gw_dev'] in (set(vnet.links.get(src_id, set())) | set(self._l2_segment_peers(src_id))) \
+                        and self._find_device_owning_ip(_c['gw_ip']) == _c['gw_dev']:
+                    next_hop_device, next_hop_ip = _c['gw_dev'], _c['gw_ip']
             if not next_hop_device:
                 # 経路なし: 現在デバイスがタイムアウト
                 cur_ip = next(iter(cur_info.get('ips', {})), '?')
@@ -5650,12 +5658,34 @@ class IcmpEngine:
             self._ip_in_network(next_ip, my_ip, prefix)
             for my_ip, prefix in src_info.get('ips', {}).items()
         )
-        if on_src_subnet:
-            self._icmp_stats(first_hop)['redirect_sent'] += count
-            self._icmp_stats(src_id)['redirect_rcvd'] += count
+        if not on_src_subnet:
+            return
+        # R1 が H から受けた IF(H のアドレスを含むサブネットの IF)。その IF に no ip redirects があれば送らない
+        r_if, h_ip = '', ''
+        for name, info in self.device_ips.get(first_hop, {}).get('interfaces', {}).items():
+            if not (isinstance(info, dict) and info.get('ip')):
+                continue
+            for my_ip, prefix in src_info.get('ips', {}).items():
+                if self._ip_in_network(my_ip, info['ip'], int(info.get('prefix', 24))):
+                    r_if, h_ip = name, my_ip
+                    break
+            if r_if:
+                break
+        from engine import icmp_redirect as _redir
+        sent = not _redir.is_disabled(first_hop, r_if)
+        # ホスト(Linux)は最初の Redirect で経路を覚え、残りのパケットは直接 R2 へ行く → Redirect は1回
+        n = (1 if vnet.device_types.get(src_id) in _redir.HOST_TYPES else count) if sent else 0
+        if sent:
+            self._icmp_stats(first_hop)['redirect_sent'] += n
+            self._icmp_stats(src_id)['redirect_rcvd'] += n
+        names = {d: self.device_ips.get(d, {}).get('hostname', d) for d in (first_hop, src_id, next_device)}
+        _redir.record(first_hop, r_if, src_id, h_ip, dest_ip, next_ip, next_device, sent, n or count, names)
 
     def traceroute(self, src_id: str, dest_ip: str) -> dict:
         result = self.trace_path(src_id, dest_ip)
+        if result.get('hops'):
+            # traceroute のプローブも R1 経由なら Redirect を受ける(実機と同じ)
+            self._maybe_generate_redirect(src_id, dest_ip, result['hops'], 1)
         return {'reachable': result['reachable'],
                 'reason': result.get('reason', ''), 'hops': result['hops'],
                 'dest_device': result.get('dest_device')}   # 最後の行(宛先そのもの)の名前に使う

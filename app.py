@@ -462,6 +462,8 @@ def _save_config():
             }
             if info.get("routed"):      # no switchport(L2 ループ検知の対象外にする)
                 dev_data["interfaces"][ifname]["routed"] = True
+            if info.get("no_redirects"):   # no ip redirects
+                dev_data["interfaces"][ifname]["no_redirects"] = True
         # ルートテーブルを保存（全デバイス共通）
         routes = getattr(state, "routes", [])
         if routes:
@@ -713,8 +715,13 @@ def _load_config():
                 })
                 if iinfo.get("routed"):
                     state.interfaces[target]["routed"] = True
+                if iinfo.get("no_redirects"):
+                    state.interfaces[target]["no_redirects"] = True
             else:
                 state.interfaces[target] = iinfo
+        if any(isinstance(v, dict) and v.get("no_redirects") for v in state.interfaces.values()):
+            from engine import icmp_redirect as _redir
+            _redir.restore_from_state(dev_id, state)
         # ルートを復元（全デバイス共通）
         if dev_data.get("routes"):
             state.routes = dev_data["routes"]
@@ -1907,6 +1914,12 @@ async def cli_command(body: dict):
     l2_out = _l2.handle_cli(device_id, state, command)
     if l2_out is not None:
         return {"output": l2_out, "mode": state.mode, "hostname": state.hostname}
+
+    # ── ICMP Redirect(ルータの no ip redirects、PC の ip route get / ip route flush cache) ──
+    from engine import icmp_redirect as _redir
+    redir_out = _redir.handle_cli(device_id, state, command)
+    if redir_out is not None:
+        return {"output": redir_out, "mode": state.mode, "hostname": state.hostname}
 
     # ── SNMPv3(snmp-server user/group/view/engineID、show snmp user|group|engineID|view) ──
     from engine import snmp_v3 as _snmpv3
@@ -6524,6 +6537,8 @@ def _build_running_config(device_id: str, state) -> str:
                 for _dir in ('in', 'out'):
                     if iinfo.get(f'acl_{_dir}'):
                         lines.append(f' ip access-group {iinfo[f"acl_{_dir}"]} {_dir}')
+                if iinfo.get('no_redirects'):
+                    lines.append(' no ip redirects')
                 if iinfo.get('bandwidth'):
                     lines.append(f' bandwidth {iinfo["bandwidth"]}')
                 if iinfo.get('ospf_cost') is not None:
@@ -11539,6 +11554,15 @@ async def traffic_routes(since: int = 0, limit: int = 100):
     evs = watcher.since(since, max(1, min(int(limit), 500)))
     return {'events': [{**e, 'text': describe(e)} for e in evs], 'seq': watcher.seq,
             'interval': ROUTE_WATCH_INTERVAL}
+
+
+@app.get("/api/traffic/redirects")
+async def traffic_redirects(since: int = 0, limit: int = 100):
+    """/cyber-view 用: ICMP Redirect の発生記録(since=<seq> 以降)。
+    sent=False は、そのルータの IF に no ip redirects があって送らなかったもの。"""
+    from engine import icmp_redirect as _redir
+    evs = _redir.since(int(since), max(1, min(int(limit), 500)))
+    return {'events': evs, 'seq': _redir.seq}
 
 
 @app.get("/api/traffic/history")

@@ -3,6 +3,12 @@
 新しいものが上。各項目の「詳細」に、その時の検証記録(実際のコマンド・出力・画面)がある。
 commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 
+## 2026-11-17(夕方)— ICMP Redirect
+
+| 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
+|---|---|---|---|
+| 16:05 | ICMP Redirect を発生ごとに記録し、サイバービューに描く。PC は Redirect を受けて経路を覚える(`cache <redirected>`)、`no ip redirects` で抑止 | 1回目の ping だけ R1 経由で Redirect 1回、以後は R2 へ直接。`no ip redirects` で R1 経由のまま。画面は橙の弧と「5」の粒 → 水色の NEW PATH、抑止は灰色+× | [icmp-redirect.md](icmp-redirect.md) |
+
 ## 2026-11-17(昼)— OSPF のコスト表記
 
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
