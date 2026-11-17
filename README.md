@@ -260,6 +260,7 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | ニルヴァーナで見る監視スタックの IaC(docker compose)/ Nirvana monitoring stack IaC | [docs/nirvana-monitoring-iac.md](docs/nirvana-monitoring-iac.md)(`iac/nirvana-monitoring/`) |
 | L2 ループの検知と止め方 / L2 loop detection and stopping | [docs/l2-loop-detection.md](docs/l2-loop-detection.md) |
 | WORLD(クラウド・Radar・IHR・MAWI)/ WORLD globe | [docs/world-view.md](docs/world-view.md) |
+| Zenn 向けまとめ(できること・できないこと・面白いこと)/ Article draft for Zenn | [docs/zenn/articles/mock-nirvana.md](docs/zenn/articles/mock-nirvana.md) |
 | SNMPv3(USM・DES/AES・SHA-2・view)/ SNMPv3 | [docs/snmpv3.md](docs/snmpv3.md) |
 | 既存の監視に足す(MRTG・Cacti・インストーラー・AI ログ解析)/ Add-on for existing monitoring | [docs/nirvana-addon-monitoring-ai.md](docs/nirvana-addon-monitoring-ai.md) |
 | このプロジェクトの立ち位置(NIRVANA改のリイマジン)/ What this is: a re-imagining of NIRVANA-Kai | [docs/reimagining-nirvana.md](docs/reimagining-nirvana.md) |
