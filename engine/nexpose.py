@@ -625,6 +625,10 @@ class NexposeEngine:
         elif status == 'stop' and ctl is not None:
             ctl['stop'].set()
             ctl['pause'].clear()          # 一時停止中でもすぐ抜けられるように
+        if status == 'stop' and not scan.get('endTime'):
+            # stopped と見せた時点で終了時刻も入れる(以前は評価中の装置が終わるまで endTime が空で、
+            # status は stopped なのに endTime が無い瞬間があった。終了時はスレッドが正確な値で上書きする)
+            scan['endTime'] = _iso(time.time())
         scan['status'] = new
         return True, None
 
