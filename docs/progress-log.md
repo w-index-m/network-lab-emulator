@@ -3,6 +3,14 @@
 新しいものが上。各項目の「詳細」に、その時の検証記録(実際のコマンド・出力・画面)がある。
 commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 
+## 2026-11-17(夜)— 通信が多いときの表示 / サイバー演出 FX / L2 ループ検知
+
+| 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
+|---|---|---|---|
+| 00:30 | 本家 NIRVANA改の写真を見て「通信増えたらこうなる？」→ DEMO + 8並列の ping で負荷をかけて確認し、重なりを直した | 同じ結果を「×N」にまとめ、1か所3枚まで、プレートどうし・メニューと重ねない。HUD を避ける判定が fixed 要素で効いていなかった(offsetParent が null)のも直した | [cyber-view-3d.md](cyber-view-3d.md)(末尾) |
+| 01:10 | 「cyber 感増しで」→ **FX**(六角グリッド・データの雨・警報中の火の粉・光の尾・走査線・グリッチ) | FX オフ 16.7 fps → オン 15.0 fps。火の粉を画像の貼り付けにして軽くした。全体テスト前に `saved_config.json` を退避しないと前回の装置が混ざって落ちる(既知)ことを再確認 | 同上 |
+| 02:15 | **L2 ループ検知**(`engine/l2_loop.py`)。輪の検知・嵐・警報 LOOP・ROUTER LINKS の赤い輪・storm-control / BPDU guard / errdisable recovery / APRESIA loopdetect・RESPONSE のループ遮断 | 3台の Catalyst で使用率 92%、storm-control action shutdown で2秒で止まり、30秒ごとに recovery → 再ループ → 再停止(実機と同じ)。以前は輪ができると storm-control 未設定のポートにも偽の ERR_DISABLE を出し、しかも止めていなかったのを直した | [l2-loop-detection.md](l2-loop-detection.md) |
+
 ## 2026-11-17(昼)— ニルヴァーナで見る監視スタックの IaC
 
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |

@@ -155,8 +155,6 @@ class VirtualNetwork:
         _spawn(self._notify_broadcast_storm(loop_nodes))
 
     def add_link(self, a: str, b: str, iface_a: str = None, iface_b: str = None):
-        # リンク追加前にループ（既存パス）を検出
-        loop_path = self._has_path(a, b) if b not in self.links.get(a, set()) else []
         self.links[a].add(b)
         self.links[b].add(a)
         if iface_a:
@@ -171,8 +169,8 @@ class VirtualNetwork:
             self.link_ifaces[a][b].add(iface_a)
         if iface_b:
             self.link_ifaces[b][a].add(iface_b)
-        if loop_path:
-            self._notify_loop_events(a, b, iface_a or a, iface_b or b, loop_path)
+        # ループの検知・MAC フラップ・ストーム・止め方は engine/l2_loop.py が1秒ごとに見る
+        # (リンク追加時だけでなく no shutdown で輪ができた場合も、止まった場合も扱うため)
 
     def ifaces_between(self, a: str, b: str) -> set:
         """a から b へ向かう **すべての** ローカルIF名を返す。

@@ -504,6 +504,10 @@ def _save_config():
         # IOS の login block-for / on-failure log
         if getattr(state, "login_block", None):
             dev_data["login_block"] = state.login_block
+        # L2 ループ対策: storm-control・errdisable recovery・APRESIA loopdetect
+        for _k in ("storm_control", "errdisable_recovery", "loopdetect"):
+            if getattr(state, _k, None):
+                dev_data[_k] = getattr(state, _k)
         # Juniper Junos: candidate/committed両方を保存。実機のJunosも
         # commit前のcandidate configはセッションを跨いで残る(exitで
         # 破棄確認が出るのと同じ理由)ため、candidateも含めて復元する。
@@ -732,6 +736,9 @@ def _load_config():
             state.threat_detection = dev_data["threat_detection"]
         if dev_data.get("login_block"):
             state.login_block = dev_data["login_block"]
+        for _k in ("storm_control", "errdisable_recovery", "loopdetect"):
+            if dev_data.get(_k):
+                setattr(state, _k, dev_data[_k])
         # Juniper Junos: candidate/committed設定とSSH/NETCONF有効化
         # フラグを復元(_save_configの対)。実リスナー自体の再起動は
         # BIG-IP/ALBと同じく後段でまとめて行う。
@@ -963,6 +970,7 @@ async def lifespan(app: FastAPI):
     auto_save_task = asyncio.create_task(_auto_save_loop())
     link_sample_task = asyncio.create_task(_link_sample_loop())
     route_watch_task = asyncio.create_task(_route_watch_loop())
+    l2loop_task = asyncio.create_task(_l2loop_loop())
     valhalla_task = asyncio.create_task(_valhalla_alert_loop())
     board_task = asyncio.create_task(_board_loop())
     # SNMP linkDown/linkUp trap の受信(/cyber-view の LINK DOWN 判定に使う)。例: 0.0.0.0:1162
@@ -1880,6 +1888,12 @@ async def cli_command(body: dict):
     if nac_out is not None:
         return {"output": nac_out, "mode": state.mode, "hostname": state.hostname}
 
+    # ── L2 ループ対策(storm-control・errdisable recovery・APRESIA loopdetect) ──
+    from engine import l2_loop as _l2
+    l2_out = _l2.handle_cli(device_id, state, command)
+    if l2_out is not None:
+        return {"output": l2_out, "mode": state.mode, "hostname": state.hostname}
+
     # ── プロトコル動的show（エンジンが起動していればエンジンの出力を優先）──
     proto_output = await handle_protocol_show(device_id, command, state)
     if proto_output is not None:
@@ -2151,6 +2165,8 @@ async def cli_command(body: dict):
         if _flap_action == 'down':
             await _flap_interface_down(device_id, state, iface_for_flap)
         elif _flap_action == 'up':
+            from engine.l2_loop import loops as _l2loops
+            _l2loops.forget_port(device_id, iface_for_flap)   # shutdown → no shutdown で err-disable を解く(実機と同じ)
             await _flap_interface_up(device_id, state, iface_for_flap)
     for iface_for_flap in _flap_targets:
         _n = vnet._norm_iface(iface_for_flap)
@@ -6235,6 +6251,11 @@ def _build_running_config(device_id: str, state) -> str:
         if _lg:
             lines.extend(_lg)
             lines.append('!')
+        from engine.l2_loop import running_config_global as _l2_glob
+        _l2g = _l2_glob(state)
+        if _l2g:
+            lines.extend(_l2g)
+            lines.append('!')
         # AAA（モデルベースAAAの前提。NETCONF/RESTCONFを使うには必要）
         if getattr(state, 'aaa_new_model', False):
             lines.append('aaa new-model')
@@ -6474,6 +6495,8 @@ def _build_running_config(device_id: str, state) -> str:
                     lines.append(' spanning-tree portfast')
                 if pcfg.get('bpduguard') or port_stp.get('bpduguard'):
                     lines.append(' spanning-tree bpduguard enable')
+                from engine.l2_loop import running_config_iface as _l2_if
+                lines.extend(_l2_if(state, ifname))
                 if pcfg.get('root_guard') or port_stp.get('root_guard'):
                     lines.append(' spanning-tree guard root')
                 # LACP channel-group
@@ -9931,7 +9954,13 @@ async def traffic_links(window: int = 60, routers_only: bool = True):
     return {'links': out, 'window': window, 'now': now,
             'source': 'prometheus' if prom else 'internal',
             'prometheus_url': prom_url or None, 'prometheus_error': prom_err,
-            'sample_interval': 10, 'trap_listen': _link_traps_listen(), 'unreachable': unreachable}
+            'sample_interval': 10, 'trap_listen': _link_traps_listen(), 'unreachable': unreachable,
+            'loops': _l2loops_snapshot()}
+
+
+def _l2loops_snapshot():
+    from engine.l2_loop import loops
+    return loops.snapshot(_resp_hostname, exists=lambda d: d in device_sessions)
 
 
 def _link_traps_listen():
@@ -9957,8 +9986,12 @@ async def traffic_health(window: int = 300):
     down_r = [f"{nodes[x['a']]['hostname']} ⇄ {nodes[x['b']]['hostname']}" for x in routers if x['down']]
     down_t = [f"{nodes[x['a']]['hostname']} ⇄ {nodes[x['b']]['hostname']}" for x in links
               if x['down'] and x not in routers]
-    st = 'crit' if down_r or unreachable else 'warn' if down_t else 'ok'
+    from engine.l2_loop import loops as _l2loops
+    l2act = [x for x in _l2loops.active.values() if all(d in device_sessions for d in x['devices'])]
+    st = 'crit' if down_r or unreachable or l2act else 'warn' if down_t else 'ok'
     summ = []
+    if l2act:
+        summ.append(f'L2ループ {len(l2act)}件')
     if down_r or down_t:
         summ.append(f'リンク断 {len(down_r) + len(down_t)}本')
     if unreachable:
@@ -9966,7 +9999,8 @@ async def traffic_health(window: int = 300):
     cats.append({'key': 'network', 'label': 'ネットワーク', 'state': st,
                  'summary': ' ・ '.join(summ) if summ else f'リンク {len(links)}本 すべて up',
                  'unreachable': unreachable,
-                 'details': [f"応答なし: {u['hostname']} ({u['instance']})" for u in unreachable] +
+                 'details': [f"L2ループ: {' - '.join(x['hostnames'])}" for x in l2act] +
+                            [f"応答なし: {u['hostname']} ({u['instance']})" for u in unreachable] +
                             [f'断: {x}' for x in down_r + down_t][:5] +
                             [f"検知: {nodes[x['a']]['hostname']} ⇄ {nodes[x['b']]['hostname']} = "
                              f"{' / '.join(x['down_sources'])}" for x in links if x['down']][:3]})
@@ -10126,6 +10160,104 @@ def _route_watch_tick(now=None):
     watcher.forget(set(device_sessions))
     _get_cpu_watch().forget(set(device_sessions))
     return new
+
+
+async def _l2loop_tick(now=None):
+    """L2 ループの検知・嵐・止め方(engine/l2_loop.py)の副作用をここで行う"""
+    from engine.l2_loop import loops
+    from engine.protocols import snmp_agent as _snmp
+    acts = loops.tick(vnet, device_sessions, stp_engine, now=now)
+    for a in acts:
+        try:
+            await _l2loop_apply(a, _snmp)
+        except Exception as e:  # noqa: BLE001
+            print(f"[l2-loop] {a.get('do')}: {e}")
+    return acts
+
+
+def _l2_dev_log(dev, sev, msg):
+    st = device_sessions.get(dev)
+    dt = getattr(st, 'device_type', '')
+    if dt in ('catalyst', 'cisco', 'srs'):
+        _cisco_log(dev, msg)
+    elif dt == 'nexus':
+        _nxos_log(dev, msg)
+    elif dt == 'apresia':
+        _apresia_log(dev, msg)
+    _flow_recorder.record_log(dev, getattr(st, 'hostname', dev), sev, msg, now=time.time())
+
+
+async def _l2loop_apply(a, _snmp):
+    kind = a['do']
+    if kind == 'log':
+        _l2_dev_log(a['dev'], a['sev'], a['msg'])
+        st = device_sessions.get(a['dev'])
+        if st is not None:
+            lvl = {2: 'critical', 3: 'errors', 4: 'warnings'}.get(a['sev'], 'notifications')
+            await syslog_dispatcher.emit(a['dev'], st.hostname, lvl, a['msg'])
+    elif kind == 'storm':
+        dp_engine.bump(a['dev'], a['iface'], 'in', pkts=a['pps'], size=64)
+        dp_engine.bump(a['dev'], a['iface'], 'out', pkts=a['pps'], size=64)
+    elif kind == 'cpu':
+        for d in a['devs']:
+            _snmp.add_cpu_load(d, 15)
+    elif kind == 'alert':
+        _flow_recorder.external_alert('l2_loop', a['key'], a['src'], None, a['detail'], now=time.time())
+    elif kind == 'trap':
+        st = device_sessions.get(a['dev'])
+        if st is not None:   # CISCO-PORT-STORM-CONTROL-MIB cpscEventRev1
+            await snmp_dispatcher.emit(a['dev'], st.hostname, '1.3.6.1.4.1.9.9.362.0.2', f"{a['iface']} broadcast storm")
+    elif kind in ('errdisable', 'recover'):
+        dev, ifn = a['dev'], a['iface']
+        st = device_sessions.get(dev)
+        if st is None:
+            return
+        itf = (getattr(st, 'interfaces', {}) or {}).get(ifn)
+        if kind == 'errdisable':
+            if isinstance(itf, dict):
+                itf['status'] = a['status']
+                itf['err_reason'] = a['cause']
+            await _flap_interface_down(dev, st, ifn)
+            _l2_dev_log(dev, 3, f'%LINK-3-UPDOWN: Interface {ifn}, changed state to down')
+            _l2_dev_log(dev, 5, f'%LINEPROTO-5-UPDOWN: Line protocol on Interface {ifn}, changed state to down')
+        else:
+            if isinstance(itf, dict):
+                itf['status'] = a.get('prev') if a.get('prev') not in (None, 'err-disabled', 'loop-blocked') else 'connected'
+                itf.pop('err_reason', None)
+            await _flap_interface_up(dev, st, ifn)
+            _l2_dev_log(dev, 3, f'%LINK-3-UPDOWN: Interface {ifn}, changed state to up')
+            _l2_dev_log(dev, 5, f'%LINEPROTO-5-UPDOWN: Line protocol on Interface {ifn}, changed state to up')
+        n = vnet._norm_iface(ifn)
+        for peer, pif in list(vnet.interface_links.get(dev, {}).items()):
+            if vnet._norm_iface(pif) == n:
+                _flow_recorder.record_link(dev, peer, ifn, 'down' if kind == 'errdisable' else 'up')
+    elif kind == 'cleared':
+        lp = a['loop']
+        if lp['resolved_by'].startswith('リンクの切断'):   # ニルヴァーナの RESPONSE で切ったなら、そう書く
+            from engine.response import store as _rs
+            cut = [r for r in list(_rs.records) if r.get('kind') == 'loopcut' and r.get('status') in ('running', 'active')
+                   and r.get('t', 0) >= lp['since'] - 1]
+            if cut:
+                lp['resolved_by'] = 'RESPONSE: ' + cut[-1]['label']
+        _flow_recorder.record_log(lp['devices'][0], _resp_hostname(lp['devices'][0]), 5,
+                                  f"%NIRVANA-5-LOOP_CLEARED: L2ループ解消({lp['duration']}秒): {lp['resolved_by']}",
+                                  now=time.time())
+
+
+async def _l2loop_loop():
+    while True:
+        try:
+            await _l2loop_tick()
+        except Exception as e:  # noqa: BLE001
+            print(f"[l2-loop] {e}")
+        await asyncio.sleep(1)
+
+
+@app.get("/api/traffic/loops")
+async def traffic_loops():
+    """L2 ループ: 発生中・最近止まったもの(どうやって止まったか)・遮断中のポート"""
+    from engine.l2_loop import loops
+    return loops.snapshot(_resp_hostname, exists=lambda d: d in device_sessions)
 
 
 async def _route_watch_loop():
@@ -10513,7 +10645,7 @@ async def darknet_clear():
 
 
 # ── 警報からの対処(遮断・隔離、/cyber-view の RESPONSE) ──
-_RESP_SOURCES = {'IDS', 'FW', 'DARKNET'}
+_RESP_SOURCES = {'IDS', 'FW', 'DARKNET', 'LOOP'}
 
 
 def _resp_suspect(alert):
@@ -10535,9 +10667,30 @@ def _resp_hostname(dev):
     return getattr(device_sessions.get(dev), 'hostname', dev)
 
 
+def _loop_response_plan(alert):
+    """L2 ループの警報: 輪の上のリンクを1本 shutdown して輪を切る(Cisco 系の側で)"""
+    from engine.l2_loop import loops
+    lp = loops.active.get(alert.get('key') or '') or next(
+        (x for x in loops.active.values() if alert.get('src') in x['devices']), None)
+    acts = []
+    if lp:
+        for e in lp['edges']:
+            for d, ifn, other in ((e['a'], e['ia'], e['b']), (e['b'], e['ib'], e['a'])):
+                if getattr(device_sessions.get(d), 'device_type', '') not in ('catalyst', 'cisco', 'nexus'):
+                    continue
+                acts.append({'id': f'loopcut:{d}:{ifn}', 'kind': 'loopcut', 'target': d,
+                             'label': f'ループ遮断: {_resp_hostname(d)} の {ifn} を shutdown({_resp_hostname(d)} ⇄ {_resp_hostname(other)} を切る)',
+                             'steps': [(d, 'configure terminal'), (d, f'interface {ifn}'), (d, 'shutdown'), (d, 'end')],
+                             'undo': [(d, 'configure terminal'), (d, f'interface {ifn}'), (d, 'no shutdown'), (d, 'end')]})
+                break
+    return {'alert': alert, 'suspect': {'device': alert.get('src'), 'ip': None}, 'actions': acts}
+
+
 def _response_plan(alert):
     """この警報に対して取れる対処の候補(本物の CLI コマンドと、元に戻すコマンド)"""
     from engine.response import ACL_NAME
+    if alert.get('rule') == 'l2_loop':
+        return _loop_response_plan(alert)
     dev, ip = _resp_suspect(alert)
     acts = []
     cisco = lambda d: getattr(device_sessions.get(d), 'device_type', '') in ('cisco', 'catalyst')  # noqa: E731

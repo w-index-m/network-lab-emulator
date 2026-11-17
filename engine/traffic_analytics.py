@@ -88,6 +88,9 @@ RULES = {
                  'desc': '出口までのパケットロスが続けてしきい値以上(NETLAB_WAN_LOSS、既定 5%)'},
     'ext_sensor': {'name': 'セキュリティ製品のアラート', 'severity': 'medium', 'window': 0, 'threshold': 0, 'cooldown': 30,
                    'desc': 'UTM・次世代FW・IDS(FortiGate / ASA / Snort・Suricata / Palo Alto)が syslog で出したアラート'},
+    'l2_loop': {'name': 'L2ループ検知', 'severity': 'high', 'window': 0, 'threshold': 0, 'cooldown': 0,
+                'desc': 'スイッチどうしのリンクで輪ができ、STP で止まっていない(MAC フラップ・ブロードキャストストーム)。'
+                        'engine/l2_loop.py が1秒ごとに輪を探す'},
     'cpu_high': {'name': 'CPU 高負荷', 'severity': 'warning',
                  'window': 0, 'threshold': 80, 'cooldown': 300,
                  'desc': 'CPU 使用率(cpmCPUTotal5minRev)が続けてしきい値以上。しきい値は NETLAB_CPU_HIGH / _HOLD'},
@@ -102,7 +105,7 @@ FLAP_RULE_IDS = {_r['id'] for _r in _FLAP_RULES + [_ROUTE_FLAP]}
 # 検知元(センサー)。/cyber-view の六角形の花びらはこの単位でまとめる
 RULE_SOURCE = {**{_k: 'SYSLOG' for _k in FLAP_RULE_IDS}, 'route_flap': 'NET', 'conn_scan': 'IDS', 'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
                'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'valhalla': 'VALHALLA', 'nirvana_rule': 'RULE', 'cpu_high': 'NET', 'wan_slow': 'NET', 'wan_loss': 'NET', 'login_brute': 'IDS', 'nexus_finding': 'NEXUS', 'ext_sensor': 'SENSOR', 'login_after_fail': 'IDS', 'exfil': 'IDS',
-               'darknet_scan': 'DARKNET', 'darknet_backscatter': 'DARKNET', 'darknet_misconfig': 'DARKNET', 'darknet_reflection': 'DARKNET'}
+               'l2_loop': 'LOOP', 'darknet_scan': 'DARKNET', 'darknet_backscatter': 'DARKNET', 'darknet_misconfig': 'DARKNET', 'darknet_reflection': 'DARKNET'}
 SECURITY_SOURCES = {'IDS', 'FW', 'DARKNET', 'SENSOR', 'NEXUS'}
 _TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')
 # 復旧を知らせるメッセージ(実機のCiscoでは up も %LINK-3 なので重要度だけでは区別できない)

@@ -789,11 +789,12 @@
     DARKNET: { label: 'DARKNET', sub: 'ダークネット観測', col: '#4a2a7a' },
     NEXUS: { label: 'NEXUS', sub: '複数拠点の横断分析', col: '#1f8fbf' },
     SENSOR: { label: 'SENSOR', sub: 'セキュリティ製品', col: '#b8325c' },
+    LOOP: { label: 'LOOP', sub: 'L2ループ', col: '#e0402e' },
   };
   const SOURCE_OF = { conn_scan: 'IDS', scan: 'IDS', unreach_burst: 'IDS', flood: 'IDS', large_icmp: 'IDS',
     fw_shun: 'FW', syslog_error: 'SYSLOG', link_down: 'NET', route_flap: 'NET', valhalla: 'VALHALLA', nirvana_rule: 'RULE',
     darknet_scan: 'DARKNET', darknet_backscatter: 'DARKNET', darknet_misconfig: 'DARKNET', darknet_reflection: 'DARKNET',
-    login_brute: 'IDS', login_after_fail: 'IDS', exfil: 'IDS', nexus_finding: 'NEXUS', ext_sensor: 'SENSOR' };
+    login_brute: 'IDS', login_after_fail: 'IDS', exfil: 'IDS', nexus_finding: 'NEXUS', ext_sensor: 'SENSOR', l2_loop: 'LOOP' };
   function drawIcon(src, x, y, s) {
     const c = SOURCES[src].col;
     ctx.save(); ctx.strokeStyle = c; ctx.fillStyle = c; ctx.lineWidth = Math.max(1.2, s * 0.09);
@@ -836,6 +837,17 @@
       const cx = x, cy = y - s * 0.2, R = s * 0.42;
       for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + R * Math.cos(a), cy + R * Math.sin(a)); ctx.stroke(); }
       for (const r of [0.35, 0.68, 1]) { ctx.beginPath(); for (let k = 0; k <= 8; k++) { const a = k * Math.PI / 4; const px = cx + R * r * Math.cos(a), py = cy + R * r * Math.sin(a); k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.stroke(); }
+    } else if (src === 'LOOP') {             // ぐるぐる回る矢印(ループ)
+      ctx.lineWidth = Math.max(1.2, s * 0.08);
+      const cx = x, cy = y - s * 0.2, R = s * 0.32;
+      for (const a0 of [0, Math.PI]) {
+        ctx.beginPath(); ctx.arc(cx, cy, R, a0 + 0.25, a0 + Math.PI - 0.25); ctx.stroke();
+        const ax = cx + R * Math.cos(a0 + Math.PI - 0.25), ay = cy + R * Math.sin(a0 + Math.PI - 0.25);
+        const dir = a0 + Math.PI - 0.25 + Math.PI / 2;
+        ctx.beginPath(); ctx.moveTo(ax + Math.cos(dir) * s * 0.14, ay + Math.sin(dir) * s * 0.14);
+        ctx.lineTo(ax + Math.cos(dir + 2.4) * s * 0.14, ay + Math.sin(dir + 2.4) * s * 0.14);
+        ctx.lineTo(ax + Math.cos(dir - 2.4) * s * 0.14, ay + Math.sin(dir - 2.4) * s * 0.14); ctx.closePath(); ctx.fill();
+      }
     } else if (src === 'SYSLOG') {           // ログの書類
       const w = s * 0.6, h = s * 0.72, x0 = x - w / 2, y0 = y - h * 0.85;
       ctx.lineWidth = Math.max(1, s * 0.06); ctx.strokeRect(x0, y0, w, h);
@@ -1254,6 +1266,7 @@
     ctx.font = `800 ${Math.round(17 * sc)}px monospace`;
     const tw = Math.max(ctx.measureText(val).width, (ctx.font = `800 ${Math.round(13 * sc)}px sans-serif`, ctx.measureText(title).width));
     const w = Math.max(118 * sc, tw + 46 * sc), h = 50 * sc, d = 9 * sc, cut = 18 * sc;
+    cx = Math.max(w / 2 + 8, Math.min(W - w / 2 - 8, cx));     // 画面の左右からはみ出さない
     cy = placePlate(cx, cy, w + d, h + d + (sub && sc > 0.8 ? 14 * sc : 0));
     if (cy == null) return null;
     const shape = (ox, oy) => [[-w / 2 + cut, -h / 2], [w / 2 - cut, -h / 2], [w / 2, 0], [w / 2 - cut, h / 2], [-w / 2 + cut, h / 2], [-w / 2, 0]].map(([a, b]) => [cx + a + ox, cy + b + oy]);
@@ -1520,6 +1533,7 @@
         ifTile(ix, Y + 0.95, iz, col, shortIf(ifn || '?'), l.down ? '↑停止 ↓停止' : `↑${fmtShort(out)} ↓${fmtShort(inn)}`);
       }
     }
+    drawLoops(t, Y);
     // ルータ(六角柱)
     const worst = {};
     const rank = { ok: 0, warn: 1, lost: 2, crit: 3, down: 4 };
@@ -1547,6 +1561,96 @@
       }
     });
     document.getElementById('empty').style.display = 'none';
+  }
+  // ── L2 ループ: 輪を赤く脈打たせ、嵐の粒を輪の中でぐるぐる回す(/api/traffic/loops を2秒ごと) ──
+  let loopData = null;
+  const loopSeen = new Set(), loopClearedSeen = new Set();
+  async function pollLoops() {
+    try {
+      const d = await api('/api/traffic/loops');
+      d._at = performance.now();
+      loopData = d;
+      for (const lp of d.active) {
+        if (loopSeen.has(lp.key + '@' + lp.since)) continue;
+        loopSeen.add(lp.key + '@' + lp.since);
+        const pos = posForDevice(lp.devices[0]);
+        if (pos) popup(pos, '#ff3b4e', 'L2 LOOP 発生', lp.hostnames.join(' - '), 6000, '警');
+      }
+      for (const lp of d.recent) {
+        if (loopClearedSeen.has(lp.key + '@' + lp.until)) continue;
+        loopClearedSeen.add(lp.key + '@' + lp.until);
+        if (d.now - lp.until > 20) continue;          // 開いた時点で古いものは出さない
+        const pos = posForDevice(lp.devices[0]);
+        if (pos) popup(pos, '#5dffa8', `LOOP CLEARED ・ ${lp.duration}s`, lp.resolved_by, 9000, '情');
+      }
+    } catch (e) { /* 次の周期で */ }
+  }
+  setInterval(pollLoops, 2000);
+  window.__cvLoops = () => loopData;
+  function drawLoops(t, Y) {
+    const d = loopData;
+    if (!d) return;
+    const P = (id) => linkPos[id];
+    for (const lp of d.active) {
+      const pts = lp.devices.map(P);
+      if (pts.some(p => !p)) continue;
+      // 輪の辺: 赤く太く脈打つ(加算合成)
+      const pulse = 0.55 + 0.45 * Math.abs(Math.sin(t * 0.006));
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      for (const e of lp.edges) {
+        const A = P(e.a), B = P(e.b), pa = proj(A[0], Y, A[2]), pb = proj(B[0], Y, B[2]);
+        if (!pa || !pb) continue;
+        ctx.strokeStyle = `rgba(255,40,60,${0.35 * pulse})`; ctx.lineWidth = 26 * (pa.s + pb.s) / 60; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+        ctx.strokeStyle = `rgba(255,120,120,${0.9 * pulse})`; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+      }
+      // 嵐の粒: 輪を一周する順(単純な輪)か、各辺を往復
+      const loopsPath = lp.order ? [lp.order.concat([lp.order[0]])] : lp.edges.map(e => [e.a, e.b, e.a]);
+      for (const path of loopsPath) {
+        const seg = path.length - 1;
+        for (let k = 0; k < 28; k++) {
+          const u = ((t * 0.00035 + k / 28) % 1) * seg, i = Math.floor(u), f = u - i;
+          const A = P(path[i]), B = P(path[i + 1]);
+          if (!A || !B) continue;
+          const c = proj(A[0] + (B[0] - A[0]) * f, Y + 0.15 * Math.sin(k + t * 0.01), A[2] + (B[2] - A[2]) * f);
+          if (!c) continue;
+          const r = Math.max(2, c.s * 0.12);
+          const g = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, r * 3);
+          g.addColorStop(0, 'rgba(255,240,200,0.95)'); g.addColorStop(0.4, 'rgba(255,70,60,0.7)'); g.addColorStop(1, 'rgba(255,0,0,0)');
+          ctx.fillStyle = g; ctx.fillRect(c.x - r * 3, c.y - r * 3, r * 6, r * 6);
+        }
+      }
+      ctx.restore();
+      // 輪の真ん中に大きなプレート
+      const cx = pts.reduce((a, p) => a + p[0], 0) / pts.length, cz = pts.reduce((a, p) => a + p[2], 0) / pts.length;
+      const age = Math.round(d.now - lp.since + (performance.now() - (d._at || performance.now())) / 1000);
+      plate3d(cx, Y + 4.2, cz, '#ff3b4e', 'L2 LOOP 発生中', `${age}s ・ ${lp.devices.length}台`, true, t, 'MACフラップ / ブロードキャストストーム');
+    }
+    // 遮断中のポート(err-disable / LBD Block)
+    for (const b of d.blocked) {
+      const A = P(b.dev);
+      if (!A) continue;
+      const l = (linkData && linkData.links || []).find(x => (x.a === b.dev && shortIf(x.iface_a || '') === shortIf(b.iface)) || (x.b === b.dev && shortIf(x.iface_b || '') === shortIf(b.iface)));
+      const other = l ? P(l.a === b.dev ? l.b : l.a) : null;
+      const u = 0.24, x = other ? A[0] + (other[0] - A[0]) * u : A[0], z = other ? A[2] + (other[2] - A[2]) * u : A[2];
+      plate3d(x, Y + 2.3, z, '#ffab2e', b.cause === 'loopdetect' ? 'LBD BLOCK' : 'ERR-DISABLED', shortIf(b.iface), false, t, b.cause);
+    }
+    // 止まった直後のループ: 緑の輪が消えていく
+    for (const lp of d.recent) {
+      const age = d.now - lp.until;
+      if (age > 20) continue;
+      ctx.save(); ctx.globalAlpha = Math.max(0, 1 - age / 20);
+      for (const e of lp.edges) {
+        const A = P(e.a), B = P(e.b);
+        if (!A || !B) continue;
+        const pa = proj(A[0], Y, A[2]), pb = proj(B[0], Y, B[2]);
+        if (!pa || !pb) continue;
+        ctx.strokeStyle = '#5dffa8'; ctx.lineWidth = 4; ctx.setLineDash([6, 6]); ctx.shadowColor = '#5dffa8'; ctx.shadowBlur = 14;
+        ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
+      }
+      ctx.restore();
+    }
   }
   // ── OSPF: 隣接状態(Dead タイマー)・エリア・宛先への最短経路ツリー ─────────
   // /api/traffic/ospf を2秒ごとに読む。隣接・経路はエンジンが持っているもの(show ip ospf neighbor /
@@ -2199,7 +2303,7 @@
     try { respState = await api('/api/response'); } catch (e) { return; }
     if (!respState || !respState.records) { respState = null; return; }   // 対処の無いサーバー(スタンドアロン版)
     // 対処の候補がある、いちばん新しい警報を出す(候補は警報ごとに覚えておく)
-    const sec = alerts.filter(a => ['IDS', 'FW', 'DARKNET', 'SENSOR', 'NEXUS'].includes(SOURCE_OF[a.rule]) && a.seq > respClosed);
+    const sec = alerts.filter(a => ['IDS', 'FW', 'DARKNET', 'SENSOR', 'NEXUS', 'LOOP'].includes(SOURCE_OF[a.rule]) && a.seq > respClosed);
     for (const a of sec.slice(-8).reverse()) {
       if (!(a.seq in respPlans)) { try { respPlans[a.seq] = await api('/api/response/plan?seq=' + a.seq); } catch (e) { respPlans[a.seq] = null; } }
       const p = respPlans[a.seq];
