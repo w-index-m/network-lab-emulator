@@ -7116,6 +7116,26 @@ class SnmpAgent:
             if ip in if_index:
                 mib.append((f'1.3.6.1.2.1.4.20.1.2.{ip}', 'INTEGER', str(if_index[ip])))      # ipAdEntIfIndex
             mib.append((f'1.3.6.1.2.1.4.20.1.3.{ip}', 'IpAddress', mask))                     # ipAdEntNetMask
+        # ── ICMP グループ(RFC 1213 / IP-MIB の icmp 1.3.6.1.2.1.5)──
+        # show ip traffic と同じ icmp_engine の回数。ICMP Redirect は icmpInRedirects(.7)・icmpOutRedirects(.20)。
+        # 監視側は前回との差(Prometheus なら increase)で Redirect の発生を検知できる
+        st = icmp_engine.icmp_stats.get(device_id, {})
+        g = lambda k: int(st.get(k, 0))  # noqa: E731
+        in_msgs = g('echo_rcvd') + g('echo_reply_rcvd') + g('unreachable_rcvd') + g('redirect_rcvd')
+        out_msgs = g('echo_sent') + g('echo_reply_sent') + g('unreachable_sent') + g('redirect_sent')
+        icmp_cols = {1: in_msgs, 2: 0, 3: g('unreachable_rcvd'), 4: 0, 5: 0, 6: 0, 7: g('redirect_rcvd'),
+                     8: g('echo_rcvd'), 9: g('echo_reply_rcvd'), 10: 0, 11: 0, 12: 0, 13: 0,
+                     14: out_msgs, 15: 0, 16: g('unreachable_sent'), 17: 0, 18: 0, 19: 0, 20: g('redirect_sent'),
+                     21: g('echo_sent'), 22: g('echo_reply_sent'), 23: 0, 24: 0, 25: 0, 26: 0}
+        for col, val in icmp_cols.items():
+            mib.append((f'1.3.6.1.2.1.5.{col}.0', 'Counter32', str(val % (1 << 32))))
+        # icmpMsgStatsTable(5.30.1.<3=InPkts|4=OutPkts>.<ipVersion=1>.<type>): 種類(type)ごとの回数
+        for typ, (i, o) in {0: (g('echo_reply_rcvd'), g('echo_reply_sent')),
+                            3: (g('unreachable_rcvd'), g('unreachable_sent')),
+                            5: (g('redirect_rcvd'), g('redirect_sent')),
+                            8: (g('echo_rcvd'), g('echo_sent'))}.items():
+            mib.append((f'1.3.6.1.2.1.5.30.1.3.1.{typ}', 'Counter32', str(i % (1 << 32))))
+            mib.append((f'1.3.6.1.2.1.5.30.1.4.1.{typ}', 'Counter32', str(o % (1 << 32))))
         # OID を数値順にソート
         def _key(entry):
             return [int(x) if x.isdigit() else 0 for x in entry[0].split('.')]
@@ -7199,6 +7219,7 @@ class SnmpAgent:
         'interfaces': '1.3.6.1.2.1.2', 'ifdescr': '1.3.6.1.2.1.2.2.1.2',
         'ifoperstatus': '1.3.6.1.2.1.2.2.1.8', 'ifnumber': '1.3.6.1.2.1.2.1',
         'ip': '1.3.6.1.2.1.4', 'ipaddrtable': '1.3.6.1.2.1.4.20',
+        'icmp': '1.3.6.1.2.1.5', 'icmpinredirects': '1.3.6.1.2.1.5.7', 'icmpoutredirects': '1.3.6.1.2.1.5.20',
         'mib-2': '1.3.6.1.2.1', 'mib2': '1.3.6.1.2.1',
         # CISCO-PROCESS-MIB（CPU使用率、Cisco系のみ）
         'cpmcputotal5sec': '1.3.6.1.4.1.9.9.109.1.1.1.1.3',

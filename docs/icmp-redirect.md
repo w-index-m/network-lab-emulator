@@ -78,6 +78,73 @@ ROUTER LINKS にはホスト(PC)が表示されないことがあります。そ
 
 ![no ip redirects で抑止](images/cyber-view-icmp-redirect-off.jpg)
 
+## SNMP ポーリングで検知する(ヴァルハラ = Prometheus)
+
+ユーザーの質問: 「ICMP redirect もどうやって検知するか、SNMP ポーリングで検知できそう?」
+
+標準の IP-MIB(RFC 1213)の ICMP グループに、Redirect の回数があります。
+エミュレータの SNMP エージェントは、この ICMP グループを `show ip traffic` と同じ値で返します。
+
+| OID | 名前 | 意味 |
+|---|---|---|
+| `1.3.6.1.2.1.5.20.0` | icmpOutRedirects | その装置が**送った** Redirect の累計 |
+| `1.3.6.1.2.1.5.7.0` | icmpInRedirects | その装置が**受けた** Redirect の累計 |
+| `1.3.6.1.2.1.5.30.1.4.1.5` | icmpMsgStatsOutPkts(IPv4・type 5) | 新しい表の形。中身は icmpOutRedirects と同じ |
+
+ICMP グループのほかの列(Echo・Echo Reply・Destination Unreachable)も返します。icmpMsgStatsTable には type 0・3・5・8 の行があります。
+
+### 本物の net-snmp
+
+```
+$ snmpget -v2c -c public -On 192.168.50.1 1.3.6.1.2.1.5.20.0 1.3.6.1.2.1.5.7.0 1.3.6.1.2.1.5.30.1.4.1.5
+.1.3.6.1.2.1.5.20.0 = Counter32: 1          ← R1 が PC1 に Redirect を1回送った
+.1.3.6.1.2.1.5.7.0 = Counter32: 0
+.1.3.6.1.2.1.5.30.1.4.1.5 = Counter32: 1
+```
+
+### 本物の snmp_exporter(v0.28.0)とヴァルハラ(Prometheus v2.54.1)
+
+`iac/cisco-traffic-monitoring/` に、次の2つを足しました。
+
+- `snmp_exporter/snmp.yml` の `cisco_if` モジュールで、icmpInRedirects・icmpOutRedirects を取る(counter)。
+- `prometheus/alert_rules.yml` に、警報 `CiscoIcmpRedirectSent` を足す。
+
+```yaml
+- alert: CiscoIcmpRedirectSent
+  expr: increase(icmpOutRedirects{job="cisco-snmp"}[5m]) > 0
+  labels: {severity: info}
+```
+
+確かめた結果です。
+
+```
+$ curl 'http://127.0.0.1:9126/snmp?target=192.168.50.1&module=cisco_if&auth=netlab_v2' | grep ^icmp
+icmpInRedirects 0
+icmpOutRedirects 1
+  (PC1 で ip route flush cache → ping すると 2 に増えた)
+
+$ promtool check rules alert_rules.yml
+  SUCCESS: 13 rules found
+
+Prometheus /api/v1/alerts:
+CiscoIcmpRedirectSent firing RD-R1 が ICMP Redirect を送信(5分で 1 回)
+```
+
+ヴァルハラの firing は、ニルヴァーナが15秒ごとに取り込みます(`_valhalla_alert_loop`)。取り込んだ警報は、VALHALLA の花びらとして画面に出ます。
+
+### SNMP で分かること・分からないこと
+
+- **分かる**: どのルータが Redirect を出しているか(回数)。同じセグメントにゲートウェイが2台あって遠回りしている、という設計の問題に気づけます。
+- **分からない**:
+  - 誰に・どの宛先で・どのゲートウェイを指したか。
+  - ポーリング間隔より細かい時刻。
+- **苦手**: ゲートウェイではない機器が出す偽の Redirect(攻撃)。受ける側はふつう SNMP エージェントを持たない PC です。エミュレータの pc も、実機と同じく SNMP では見えません。
+- **補い方**:
+  - フロー: NetFlow なら宛先ポート欄に `type×256+code`(1280〜1283)が入る。
+  - パケット取得・IDS の Redirect ルール。
+  - ホスト側の `nstat`(IcmpInRedirects)や `ip route get`。
+  - このラボなら、`GET /api/traffic/redirects` に相手・宛先・ゲートウェイまで記録されています。
+
 ## 作り
 
 - `engine/icmp_redirect.py`
@@ -94,7 +161,8 @@ ROUTER LINKS にはホスト(PC)が表示されないことがあります。そ
   - `GET /api/traffic/redirects`
   - running-config の ` no ip redirects`
   - 保存・復元: `interfaces[*].no_redirects`
-- テスト: `tests/test_icmp_redirect.py`
+- SNMP: `SnmpAgent._build_mib` に ICMP グループ(5.1〜5.26)と icmpMsgStatsTable(5.30)
+- テスト: `tests/test_icmp_redirect.py`(SNMP と IaC の定義も)
 
 ## スコープ外
 

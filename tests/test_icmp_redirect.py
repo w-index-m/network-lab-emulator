@@ -120,3 +120,37 @@ def test_cyber_view_draws_redirects():
     html = open(os.path.join(os.path.dirname(__file__), '..', 'static', 'cyber_view.html'), encoding='utf-8').read()
     assert '/api/traffic/redirects' in html and 'function drawRedirects' in html
     assert "'ICMP REDIRECT'" in html and 'cache <redirected>' in html and 'no ip redirects' in html
+
+
+def test_snmp_icmp_mib_counts_redirects(client):
+    """SNMP の ICMP グループ(icmpOutRedirects .20 / icmpInRedirects .7 / icmpMsgStatsTable type 5)"""
+    from engine.protocols import snmp_agent
+    sw, r1, r2, pc, sv, dest = _lab(client, 're', 15)
+    oid_out, oid_in, oid_msg = '1.3.6.1.2.1.5.20.0', '1.3.6.1.2.1.5.7.0', '1.3.6.1.2.1.5.30.1.4.1.5'
+
+    def val(dev, oid):
+        r = snmp_agent.get(_id(dev), oid)
+        return int(r[2]) if isinstance(r, tuple) else None
+
+    assert val(r1, oid_out) == 0
+    _cli(client, pc, 'ping -c 3 ' + dest)
+    assert val(r1, oid_out) == 1 and val(r1, oid_msg) == 1     # ホストが覚えるので1回だけ
+    assert val(r1, oid_in) == 0
+    _cli(client, pc, 'ip route flush cache')
+    _cli(client, pc, 'ping -c 1 ' + dest)
+    assert val(r1, oid_out) == 2
+    walked = [o for o, _t, _v in snmp_agent.walk(_id(r1), '1.3.6.1.2.1.5')]
+    assert oid_out in walked and oid_in in walked
+
+
+def test_iac_collects_and_alerts_on_redirects():
+    import yaml
+    base = os.path.join(os.path.dirname(__file__), '..', 'iac', 'cisco-traffic-monitoring')
+    snmp = yaml.safe_load(open(os.path.join(base, 'snmp_exporter', 'snmp.yml'), encoding='utf-8'))
+    mod = snmp['modules']['cisco_if']
+    assert '1.3.6.1.2.1.5.20.0' in mod['get'] and '1.3.6.1.2.1.5.7.0' in mod['get']
+    names = {m['name']: m for m in mod['metrics']}
+    assert names['icmpOutRedirects']['oid'] == '1.3.6.1.2.1.5.20' and names['icmpOutRedirects']['type'] == 'counter'
+    rules = yaml.safe_load(open(os.path.join(base, 'prometheus', 'alert_rules.yml'), encoding='utf-8'))
+    exprs = {r.get('alert'): r['expr'] for g in rules['groups'] for r in g['rules'] if r.get('alert')}
+    assert 'icmpOutRedirects' in exprs['CiscoIcmpRedirectSent'] and 'increase(' in exprs['CiscoIcmpRedirectSent']
