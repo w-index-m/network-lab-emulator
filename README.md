@@ -172,6 +172,11 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 |---|---|
 | [![DEMO](docs/videos/cyber-view-demo.gif)](docs/videos/cyber-view-demo.mp4) | [![flow](docs/videos/cyber-view-flow-macflap.gif)](docs/videos/cyber-view-flow-macflap.mp4) |
 
+| Catalyst の L2 ループ検知 / Catalyst L2 loop detection |
+|---|
+| [![L2 loop](docs/videos/cyber-view-l2-loop-catalyst.gif)](docs/videos/cyber-view-l2-loop-catalyst.mp4) |
+
+- [Catalyst の L2 ループ検知(80秒・字幕つき / 80 s with captions)](docs/videos/cyber-view-l2-loop-catalyst.mp4): 輪ができる → 嵐 → storm-control で err-disable → errdisable recovery で再ループ・再停止 → RESPONSE のループ遮断 / ring forms → storm → storm-control err-disable → recovery, re-loop, re-stop → RESPONSE loop cut
 - [DEMO(音楽つき / with music, 1分40秒)](docs/videos/cyber-view-demo-music.mp4)
 - GIF をクリックすると mp4 が開きます / Click a GIF to open the mp4.
 

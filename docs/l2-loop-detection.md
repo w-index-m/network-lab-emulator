@@ -9,6 +9,10 @@
 - storm-control を設定していないポートにも `%PM-4-ERR_DISABLE` を出していた。しかも実際にはポートを止めていなかった。
 - APRESIA の `loopdetect` は設定と show だけで、実際には何も止めなかった。
 
+[![Catalyst の L2 ループ検知](videos/cyber-view-l2-loop-catalyst.gif)](videos/cyber-view-l2-loop-catalyst.mp4)
+
+動画(80秒・字幕つき): [videos/cyber-view-l2-loop-catalyst.mp4](videos/cyber-view-l2-loop-catalyst.mp4)
+
 ## 何をするか
 
 `engine/l2_loop.py` の `LoopEngine` が1秒ごとに、スイッチ(catalyst / nexus / srs / apresia)どうしの「生きているリンク」で輪を探します。橋でない辺を Tarjan 法で求め、連結成分ごとに1つのループとして扱います。
