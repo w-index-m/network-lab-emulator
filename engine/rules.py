@@ -10688,6 +10688,13 @@ Key Version         : A
                         ip = hop.get('ip', '?')
                         lines.append(f" {hop_num}  {host} ({ip})  {rtts[0]} ms  {rtts[1]} ms  {rtts[2]} ms")
                     hop_num += 1
+                # 宛先が最後のルータの直結先なら、最後の行に宛先そのものを出す(実機の traceroute と同じ)
+                last = hops_to_show[-1].get('ip') if hops_to_show else None
+                if result.get('reachable') and result.get('reason') == 'connected' and last != dest:
+                    dd = result.get('dest_device')
+                    host = (_icmp_engine.device_ips.get(dd, {}) or {}).get('hostname') if dd else None
+                    rtts = [round(hop_num * random.uniform(0.5, 2.0) + random.uniform(0, 3), 3) for _ in range(3)]
+                    lines.append(f" {hop_num}  {host or dest} ({dest})  {rtts[0]} ms  {rtts[1]} ms  {rtts[2]} ms")
                 if not result['reachable'] and not any(h.get('timeout') for h in hops_to_show):
                     lines.append(f" {hop_num}  * * *  (destination unreachable)")
                 return "\n".join(lines)

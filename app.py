@@ -7650,6 +7650,14 @@ def _format_traceroute(dest: str, result: dict) -> str:
             lines.append(f" {hop_num}  {host} ({ip})  "
                          f"{rtts[0]} ms  {rtts[1]} ms  {rtts[2]} ms")
         hop_num += 1
+    # 宛先が最後のルータの直結先なら、実機と同じく最後の行に宛先そのものを出す
+    # (trace_path は宛先をホップに含めないため、以前は最後のルータで終わって見えた)
+    last = result['hops'][-1].get('ip') if result['hops'] else None
+    if result.get('reachable') and result.get('reason') == 'connected' and last != dest:
+        dd = result.get('dest_device')
+        host = (icmp_engine.device_ips.get(dd, {}) or {}).get('hostname') if dd else None
+        rtts = [round(hop_num * random.uniform(0.5, 2.0) + random.uniform(0, 3), 3) for _ in range(3)]
+        lines.append(f" {hop_num}  {host or dest} ({dest})  {rtts[0]} ms  {rtts[1]} ms  {rtts[2]} ms")
     if not result['reachable'] and not any(h.get('timeout') for h in result['hops']):
         lines.append(f" {hop_num}  * * *  (destination unreachable)")
     return '\n'.join(lines)
@@ -8089,6 +8097,13 @@ def _register_icmp(device_id: str):
     # PC: デフォルトゲートウェイをrib_engineに登録
     if state.device_type == 'pc':
         gw = getattr(state, 'gateway', '')
+        # `ip route add default via X` でゲートウェイを変えたら、前のデフォルト経路を外す
+        # (以前は残ったままで、古いゲートウェイ(既定の 192.168.1.1)へ送り続けて ping が届かなかった)
+        rn = rib_engine.nodes.get(device_id)
+        if rn:
+            for old in [r for r in rn['static_routes']
+                        if r.network == '0.0.0.0' and r.prefix == 0 and r.next_hop != gw]:
+                rib_engine.remove_static_route(device_id, '0.0.0.0', 0, old.next_hop)
         if gw:
             rib_engine.add_static_route(device_id, state.hostname,
                                         '0.0.0.0', 0, gw, 1)

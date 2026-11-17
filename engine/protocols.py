@@ -5520,7 +5520,8 @@ class IcmpEngine:
     def traceroute(self, src_id: str, dest_ip: str) -> dict:
         result = self.trace_path(src_id, dest_ip)
         return {'reachable': result['reachable'],
-                'reason': result.get('reason', ''), 'hops': result['hops']}
+                'reason': result.get('reason', ''), 'hops': result['hops'],
+                'dest_device': result.get('dest_device')}   # 最後の行(宛先そのもの)の名前に使う
 
 
 icmp_engine = IcmpEngine()
