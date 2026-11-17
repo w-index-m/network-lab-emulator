@@ -973,6 +973,7 @@ async def lifespan(app: FastAPI):
     l2loop_task = asyncio.create_task(_l2loop_loop())
     valhalla_task = asyncio.create_task(_valhalla_alert_loop())
     board_task = asyncio.create_task(_board_loop())
+    world_task = asyncio.create_task(_world_loop())
     # SNMP linkDown/linkUp trap の受信(/cyber-view の LINK DOWN 判定に使う)。例: 0.0.0.0:1162
     if os.environ.get('SNMP_TRAP_LISTEN', '').strip():
         from engine.link_evidence import traps as _traps
@@ -7136,6 +7137,8 @@ def _record_flow_event(src_id: str, dest_ip: str, path: list, ping_result: dict,
     _flow_recorder.record_flow(src_id, dest_ip, dst_dev, [d for d in path if d],
                                bool(ping_result.get('reachable')), count, size, proto,
                                src_ip=_src_ip_toward(src_id, path))
+    from engine.world_sources import world as _world
+    _world.observe_flow(dest_ip, count * size)          # 宛先がクラウド(AWS / Google Cloud)なら地球儀へ
 
 
 def _flow_export_ping(src_id, dest_ip, path, count, size):
@@ -10812,7 +10815,126 @@ def _on_flow(f):
         _exfil_observe(s_dev, f['dst'], 1, int(f.get('bytes', 0)))
     pk = max(1, int(f.get('packets', 1)))
     _flow_recorder.record_flow(s_dev or f['src'], f['dst'], d_dev, [x for x in (s_dev, d_dev) if x], True,
-                               pk, max(1, int(f.get('bytes', 0)) // pk), f['proto'], src_ip=f['src'])
+                               pk, max(1, int(f.get('bytes', 0)) // pk), f['proto'], src_ip=f['src'], via=f.get('via'))
+    if f.get('via') != 'mawi':          # MAWI のアドレスは匿名化されている(クラウドの判定に使わない)
+        from engine.world_sources import world as _world
+        _world.observe_flow(f['dst'], int(f.get('bytes', 0)))
+
+
+# ── WORLD(地球儀): クラウドの IP 帯・Cloudflare Radar・IIJ Internet Health Report・MAWI の再生 ──
+_WORLD_CACHE = Path(__file__).parent / 'data' / 'world'
+_world_alerted = set()
+
+
+def _site_latlon():
+    try:
+        lat, lon = (float(x) for x in os.environ.get('NIRVANA_SITE_LATLON', '35.68,139.69').split(','))
+        return lat, lon
+    except ValueError:
+        return 35.68, 139.69
+
+
+def _world_alerts(now=None):
+    """IHR の障害・遅延の異常と、Radar の通信の異常(日本)を、新しく見えたものだけ警報にする"""
+    from engine.world_sources import world
+    now = now or time.time()
+    out = []
+    if world.ihr.get('status') != 'ok' and world.radar.get('status') != 'ok':
+        return out                       # 見本データ(sample)や取得失敗からは警報を作らない
+    for o in (world.ihr.get('outages') or []) if world.ihr.get('status') == 'ok' else []:
+        k = ('ihr_outage', o.get('stream'), o.get('start'))
+        if k in _world_alerted:
+            continue
+        _world_alerted.add(k)
+        out.append(_flow_recorder.external_alert(
+            'ihr_outage', f"{o.get('stream')}|{o.get('start')}", f"AS{o['stream']}" if str(o.get('stream', '')).isdigit()
+            else o.get('stream'), None, f"{o.get('type')} {o.get('stream')}: probe {o.get('probes')}/{o.get('total')} が切断"
+            f"({o.get('start')} 〜 {o.get('end') or '継続中'})", now=now))
+    for a in ((world.ihr.get('delay_alarms') or []) if world.ihr.get('status') == 'ok' else [])[:10]:
+        if a.get('deviation', 0) < 10:
+            continue
+        k = ('ihr_delay', a.get('asn'), a.get('t'), a.get('to'))
+        if k in _world_alerted:
+            continue
+        _world_alerted.add(k)
+        out.append(_flow_recorder.external_alert(
+            'ihr_delay', f"{a.get('asn')}|{a.get('t')}|{a.get('to')}", f"AS{a.get('asn')}", a.get('to'),
+            f"AS{a.get('asn')} {a.get('as_name') or ''} → {a.get('to')}: 遅延の異常 deviation {a.get('deviation'):.1f}", now=now))
+    for a in ((world.radar.get('anomalies') or []) if world.radar.get('status') == 'ok' else []):
+        if a.get('cc') != 'JP':
+            continue
+        k = ('radar', a.get('asn'), a.get('start'))
+        if k in _world_alerted:
+            continue
+        _world_alerted.add(k)
+        out.append(_flow_recorder.external_alert(
+            'radar_anomaly', f"{a.get('asn')}|{a.get('start')}", f"AS{a['asn']}" if a.get('asn') else 'JP', None,
+            f"{a.get('type')} {a.get('name') or ''}: 通信の異常({a.get('status')}、{a.get('start')} 〜 {a.get('end') or '継続中'})",
+            now=now))
+    return [x for x in out if x]
+
+
+async def _world_loop():
+    from engine.world_sources import world
+    while True:
+        try:
+            if world.enabled() and world.due():
+                await asyncio.to_thread(world.refresh, str(_WORLD_CACHE))
+                _world_alerts()
+        except Exception as e:  # noqa: BLE001
+            print(f"[world] {e}")
+        await asyncio.sleep(60)
+
+
+@app.get("/api/world")
+async def world_state():
+    """地球儀: 拠点の場所・クラウド宛ての流量(リージョン別)・Radar・IHR・MAWI の再生状況"""
+    from engine.world_sources import world
+    from engine.mawi import replayer
+    lat, lon = _site_latlon()
+    d = world.snapshot()
+    d['site'] = {'name': _site_name(), 'lat': lat, 'lon': lon}
+    d['mawi'] = replayer.status()
+    return d
+
+
+@app.post("/api/world/refresh")
+async def world_refresh():
+    from engine.world_sources import world
+    await asyncio.to_thread(world.refresh, str(_WORLD_CACHE))
+    return {'alerts': len(_world_alerts()), **world.snapshot()}
+
+
+@app.post("/api/mawi/replay")
+async def mawi_replay(request: Request):
+    """MAWI の pcap を再生する。body: {stamp: '202411151400'} か {source: URL / ローカルのパス}、limit、speed、topk、loop"""
+    from engine.mawi import replayer, mawi_url
+    body = await request.json()
+    src = body.get('source') or (mawi_url(str(body['stamp'])) if body.get('stamp') else None)
+    if not src:
+        return JSONResponse({'error': 'stamp(例 202411151400)か source を指定してください'}, status_code=400)
+    if not src.startswith(('http://', 'https://')) and not os.path.isfile(src):
+        return JSONResponse({'error': f'ファイルがありません: {src}'}, status_code=400)
+    try:
+        replayer.start(src, _on_flow, limit=max(100, min(int(body.get('limit', 200000)), 5_000_000)),
+                       speed=max(0.1, min(float(body.get('speed', 1)), 100)), topk=max(1, min(int(body.get('topk', 40)), 500)),
+                       loop=bool(body.get('loop', False)))
+    except RuntimeError as e:
+        return JSONResponse({'error': str(e)}, status_code=409)
+    return replayer.status()
+
+
+@app.post("/api/mawi/stop")
+async def mawi_stop():
+    from engine.mawi import replayer
+    replayer.stop()
+    return {'ok': True}
+
+
+@app.get("/api/mawi/status")
+async def mawi_status():
+    from engine.mawi import replayer
+    return replayer.status()
 
 
 class _SyslogRx:

@@ -91,6 +91,12 @@ RULES = {
     'l2_loop': {'name': 'L2ループ検知', 'severity': 'high', 'window': 0, 'threshold': 0, 'cooldown': 0,
                 'desc': 'スイッチどうしのリンクで輪ができ、STP で止まっていない(MAC フラップ・ブロードキャストストーム)。'
                         'engine/l2_loop.py が1秒ごとに輪を探す'},
+    'ihr_outage': {'name': 'インターネットの障害(IHR)', 'severity': 'warning', 'window': 0, 'threshold': 0, 'cooldown': 0,
+                   'desc': 'IIJ Internet Health Report が日本・国内主要 AS で接続断(RIPE Atlas の probe の切断)を検知'},
+    'ihr_delay': {'name': '国内 AS の遅延の異常(IHR)', 'severity': 'warning', 'window': 0, 'threshold': 0, 'cooldown': 0,
+                  'desc': 'IIJ Internet Health Report の network_delay の異常(deviation が大きい)'},
+    'radar_anomaly': {'name': 'インターネットの通信の異常(Cloudflare Radar)', 'severity': 'warning', 'window': 0,
+                      'threshold': 0, 'cooldown': 0, 'desc': 'Cloudflare Radar の traffic anomalies(国・AS の通信量の急減など)'},
     'cpu_high': {'name': 'CPU 高負荷', 'severity': 'warning',
                  'window': 0, 'threshold': 80, 'cooldown': 300,
                  'desc': 'CPU 使用率(cpmCPUTotal5minRev)が続けてしきい値以上。しきい値は NETLAB_CPU_HIGH / _HOLD'},
@@ -105,7 +111,7 @@ FLAP_RULE_IDS = {_r['id'] for _r in _FLAP_RULES + [_ROUTE_FLAP]}
 # 検知元(センサー)。/cyber-view の六角形の花びらはこの単位でまとめる
 RULE_SOURCE = {**{_k: 'SYSLOG' for _k in FLAP_RULE_IDS}, 'route_flap': 'NET', 'conn_scan': 'IDS', 'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
                'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'valhalla': 'VALHALLA', 'nirvana_rule': 'RULE', 'cpu_high': 'NET', 'wan_slow': 'NET', 'wan_loss': 'NET', 'login_brute': 'IDS', 'nexus_finding': 'NEXUS', 'ext_sensor': 'SENSOR', 'login_after_fail': 'IDS', 'exfil': 'IDS',
-               'l2_loop': 'LOOP', 'darknet_scan': 'DARKNET', 'darknet_backscatter': 'DARKNET', 'darknet_misconfig': 'DARKNET', 'darknet_reflection': 'DARKNET'}
+               'l2_loop': 'LOOP', 'ihr_outage': 'WORLD', 'ihr_delay': 'WORLD', 'radar_anomaly': 'WORLD', 'darknet_scan': 'DARKNET', 'darknet_backscatter': 'DARKNET', 'darknet_misconfig': 'DARKNET', 'darknet_reflection': 'DARKNET'}
 SECURITY_SOURCES = {'IDS', 'FW', 'DARKNET', 'SENSOR', 'NEXUS'}
 _TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')
 # 復旧を知らせるメッセージ(実機のCiscoでは up も %LINK-3 なので重要度だけでは区別できない)
@@ -134,13 +140,15 @@ class FlowRecorder:
         self.device_type_of = None                 # fn(dev) -> device_type(app が設定)
 
     # ── 記録 ──────────────────────────────────────
-    def record_flow(self, src, dst_ip, dst, path, ok, pkts, size, proto='icmp', now=None, src_ip=None):
+    def record_flow(self, src, dst_ip, dst, path, ok, pkts, size, proto='icmp', now=None, src_ip=None, via=None):
         now = time.time() if now is None else now
         with self._lock:
             self.seq += 1
             ev = {'seq': self.seq, 't': now, 'proto': proto, 'src': src, 'src_ip': src_ip, 'dst_ip': dst_ip,
                   'dst': dst, 'path': list(path), 'ok': bool(ok), 'pkts': pkts,
                   'size': size, 'bytes': pkts * size, 'alerts': []}
+            if via:
+                ev['via'] = via          # sflow / netflow / mawi(ping の結果ではない通信)
             self.events.append(ev)
             for a in self._detect_flow(ev):
                 ev['alerts'].append(a['seq'])

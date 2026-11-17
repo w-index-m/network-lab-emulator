@@ -124,6 +124,7 @@ NICT の NIRVANA改 を参考に作った、ネットワークを 3D で見る�
 | RESPONSE | 警報から遮断・隔離。本物の CLI を装置に入れる(line vty の access-class / Null0 / 隣の装置の shutdown)、解除、自動対処、警報の前後の通信記録(pcap) |
 | WAN | 回線チェック。フレッツ網の PPPoE / IPoE(MAP-E)/ IPsec の状態と、経路ごとの遅延・ロスの推移(夜間の PPPoE 混雑を再現、実機版は本物の ping) |
 | L2 LOOP | スイッチの輪(STP で止まっていない)を1秒で検知。赤く脈打つ輪・嵐の粒・使用率 約90%・MAC フラップ・「警」+ LOOP の花びら。止め方は実機と同じ storm-control / BPDU guard / errdisable recovery / APRESIA loopdetect、RESPONSE の「ループ遮断」。止まると「情 LOOP CLEARED」と止めた理由 |
+| WORLD | 地球儀。自社から AWS / Google Cloud の各リージョンへの流量(公開 IP 帯で判定)、Cloudflare Radar の世界の HTTP 流量・L7 攻撃の弧・異常、IIJ IHR の日本の AS の遅延・障害、MAWI(日米回線の本物の pcap)の再生。取れないときは理由を表示、`NETLAB_WORLD_SAMPLE=1` で見本 |
 | SYSTEM STATUS | ネットワーク / トラフィック / セキュリティ / syslog の4観点で 正常・注意・異常 |
 | 情 / 注 | 経路の追加・削除・変更、CPU の急上昇・回復は「情」。CPU の高負荷が続く・フラップは「注」(しきい値は設定で変更可) |
 | BOARD / EXPLORE / ALERTS | Grafana 相当の機能。ダッシュボード、PromQL / LogQL の問い合わせ、アラートルールと webhook。Grafana の JSON もそのまま取り込める |
@@ -155,6 +156,7 @@ There are two ways to use it:
 | RESPONSE | Block or quarantine from an alert by pushing real CLI to devices (line vty access-class / Null0 / shut the neighbour's port), undo, automatic rules, and a capture (pcap) around the alert |
 | WAN | Line check: PPPoE / IPoE (MAP-E) / IPsec state over FLET'S and per-path latency and loss history (evening PPPoE congestion is reproduced in the lab; the standalone edition uses real pings) |
 | L2 LOOP | Detects a switch ring not blocked by STP within a second: a pulsing red ring, storm particles, ~90% utilization, MAC flaps, and a "警" with a LOOP petal. Stopped the way real gear does it (storm-control, BPDU guard, errdisable recovery, APRESIA loopdetect) or by the RESPONSE "loop cut"; then "LOOP CLEARED" with the reason |
+| WORLD | A globe: traffic from your site to each AWS / Google Cloud region (matched against the published IP ranges), Cloudflare Radar's top HTTP countries, L7 attack arcs and anomalies, IIJ IHR delay/outage events for Japanese ASes, and replay of MAWI (real trans-Pacific pcap). Shows why a source is unavailable; `NETLAB_WORLD_SAMPLE=1` fills in samples |
 | SYSTEM STATUS | Normal / warning / critical for four areas: network, traffic, security and syslog |
 | 情 (info) / 注 (notice) | Route add/delete/change and CPU jump/recovery appear as "info". Sustained high CPU and flapping appear as "notice". Thresholds are configurable |
 | BOARD / EXPLORE / ALERTS | Grafana-like features: dashboards, PromQL / LogQL queries, alert rules with webhooks. Grafana dashboard JSON can be imported as is |
@@ -198,6 +200,7 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | 背景: 金魚鉢 / goldfish bowl<br>![](docs/images/cyber-view-bg-goldfish-ospf.png) | 背景: 富士山 / Mt. Fuji<br>![](docs/images/cyber-view-bg-fuji-ospf.png) |
 | スタンドアロン版 + Prometheus / Loki<br>![](docs/images/standalone-prom-loki-fault.png) | スタンドアロン版 + Zabbix<br>![](docs/images/standalone-zabbix-fault.png) |
 | スマホ / phone<br>![](docs/images/cyber-view-ospf-phone.png) | 装置ごとの表示 / host view<br>![](docs/images/cyber-view-host.png) |
+| WORLD(クラウド宛て・Radar・IHR)/ WORLD globe<br>![](docs/images/cyber-view-world.jpg) | MAWI の再生(NETWORK)/ MAWI replay<br>![](docs/images/cyber-view-world-net-mawi.jpg) |
 | L2 ループ発生 / L2 loop in progress<br>![](docs/images/l2-loop-links.jpg) | storm-control が2秒で止めた / stopped by storm-control in 2 s<br>![](docs/images/l2-loop-storm-control.jpg) |
 | L2 ループの警報(NETWORK)/ loop alert<br>![](docs/images/l2-loop-network.jpg) | RESPONSE のループ遮断 / RESPONSE loop cut<br>![](docs/images/l2-loop-response-cut.jpg) |
 | FX(サイバー演出、警報中)/ FX during alerts<br>![](docs/images/cyber-view-fx.jpg) | 通信が多いとき(直した後)/ heavy traffic (after the fix)<br>![](docs/images/cyber-view-busy-after.jpg) |
@@ -218,6 +221,7 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | ☐ | CPU の「情」「注」のしきい値(80% / +20)は仮の値。実機で調整が必要 | CPU info/notice thresholds (80% / +20) are provisional and need tuning on real devices |
 | ☐ | README の動画は GIF。再生プレーヤーにするには github.com の編集画面で mp4 をドラッグ&ドロップする | README videos are GIFs; for an inline player, drag and drop the mp4 in the github.com editor |
 | ☐ | STP のテストが GitHub の CI でだけ時々失敗する(調査用の出力を仕込み済み) | An STP test fails intermittently only on GitHub CI (diagnostics are in place) |
+| ☐ | WORLD: 本物の Cloudflare Radar(要トークン)・IIJ IHR・MAWI・Google Cloud の IP 帯は、この作業環境では通信がブロックされ未確認(形は公開スキーマで確認、見本で表示確認) | WORLD: real Cloudflare Radar (token needed), IIJ IHR, MAWI and Google Cloud ranges are blocked here and not yet verified live (formats checked against public schemas, display checked with samples) |
 | ☐ | L2 ループ: 並列リンクと EtherChannel を区別しない(1本と数える)、VLAN ごとのループ・loopguard・UDLD は未対応。APRESIA の loopdetect の文言は D-Link 系に合わせた(実機の版で違う可能性) | L2 loop: parallel links are not told apart from EtherChannel (counted once); per-VLAN loops, loopguard and UDLD are not modelled; APRESIA loopdetect wording follows the D-Link style (may differ by model/OS) |
 | ☐ | 本家 NIRVANA改 ほど「警」で埋まらない(同じ組み合わせの警報は一定時間まとめる) | Fewer "警" than the original NIRVANA-Kai, because repeated alerts are grouped for a cooldown |
 
@@ -247,6 +251,7 @@ events, alerts and logs stay in memory; long-term history is left to Prometheus 
 | 遮断・ATT&CK・複数拠点・回線チェック・フロー / response, ATT&CK, nexus, WAN, flows | [docs/nirvana-response-attack-nexus-wan-flow.md](docs/nirvana-response-attack-nexus-wan-flow.md) |
 | ニルヴァーナで見る監視スタックの IaC(docker compose)/ Nirvana monitoring stack IaC | [docs/nirvana-monitoring-iac.md](docs/nirvana-monitoring-iac.md)(`iac/nirvana-monitoring/`) |
 | L2 ループの検知と止め方 / L2 loop detection and stopping | [docs/l2-loop-detection.md](docs/l2-loop-detection.md) |
+| WORLD(クラウド・Radar・IHR・MAWI)/ WORLD globe | [docs/world-view.md](docs/world-view.md) |
 | FX・通信が多いときの表示 / FX and heavy-traffic display | [docs/cyber-view-3d.md](docs/cyber-view-3d.md)(末尾 / at the end) |
 | 機種 × プロトコルの試験 / vendor × protocol tests | [docs/vendor-protocol-matrix-cyber-view.md](docs/vendor-protocol-matrix-cyber-view.md)、[docs/verification/README.md](docs/verification/README.md) |
 | 作業記録 / progress log | [docs/progress-log.md](docs/progress-log.md) |

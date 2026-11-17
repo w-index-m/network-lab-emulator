@@ -50,3 +50,4 @@ docs/reference/*.pdf
 tools/k6_results/
 nirvana_board.json
 nirvana_board.json.tmp
+data/world/

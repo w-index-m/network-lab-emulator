@@ -1,5 +1,6 @@
 import os
 os.environ['NETLAB_FAST_TIMERS'] = '1'
+os.environ.setdefault('NETLAB_WORLD_FETCH', '0')   # WORLD の外部データ(AWS / Radar / IHR)をテスト中は取りに行かない
 import sys
 import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
