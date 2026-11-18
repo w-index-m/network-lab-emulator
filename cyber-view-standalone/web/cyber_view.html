@@ -3252,6 +3252,7 @@
     }
     ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
     ctx.drawImage(fxScan, 0, 0, W, H);
+    fxEmergency(t, alert);
     // グリッチ: 数秒に一度、帯状に横ずれ + 赤/水色のにじみ(警報中は頻度を上げる)
     if (!fxCalm) {
       const period = alert ? 2600 : 7000, ph = t % period;
@@ -3267,6 +3268,40 @@
     }
     ctx.restore();
   }
+  // 複数の障害が同時に起きたとき: 画面の上下の縁に、赤い六角パネル(EMERGENCY ▲▼)を並べる。
+  // 1件なら従来の表現(異常・六角柱・火の粉)のまま。2〜3件で1段、4〜7件で2段、8件以上で3段。
+  // 描くのは canvas の縁だけで、操作できる要素(DOM)は上に載るので邪魔にならない。復旧して件数が減れば段も減る
+  let emForce = null, emDrawn = 0;
+  function emRows(level) { return level >= 8 ? 3 : level >= 4 ? 2 : level >= 2 ? 1 : 0; }
+  function fxEmergency(t, level) {
+    const rows = emRows(emForce !== null ? emForce : level);
+    emDrawn = 0;
+    if (!rows) return;
+    const r = Math.max(24, Math.min(W, H) * 0.04), hw = Math.sqrt(3) * r, dyy = r * 1.5;
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '700 10px sans-serif';
+    const emFont = Math.min(r * 0.3, 10 * (hw * 0.8) / ctx.measureText('EMERGENCY').width);     // 六角の幅に収まる大きさ
+    for (let side = 0; side < 2; side++) {
+      for (let row = 0; row < rows; row++) {
+        const cy = side ? H - r - row * dyy : r + row * dyy;
+        for (let x = hw / 2 + (row % 2) * hw / 2, k = 0; x < W + hw; x += hw, k++) {
+          const ph = fxCalm ? 1 : 0.5 + 0.5 * Math.sin(t * 0.004 - (k + row * 3 + side * 5) * 0.55);
+          ctx.beginPath();
+          for (let i = 0; i < 6; i++) { const ang = Math.PI / 6 + i * Math.PI / 3; ctx.lineTo(x + r * 0.96 * Math.cos(ang), cy + r * 0.96 * Math.sin(ang)); }
+          ctx.closePath();
+          ctx.fillStyle = `rgba(255,50,75,${0.10 + 0.22 * ph})`; ctx.fill();
+          ctx.strokeStyle = `rgba(255,100,115,${0.55 + 0.4 * ph})`; ctx.lineWidth = 1.5; ctx.stroke();
+          ctx.fillStyle = `rgba(255,225,228,${0.55 + 0.4 * ph})`;
+          ctx.font = `700 ${emFont.toFixed(1)}px sans-serif`; ctx.fillText('EMERGENCY', x, cy);
+          ctx.font = `${(r * 0.26).toFixed(1)}px sans-serif`; ctx.fillText('\u25B2', x, cy - r * 0.5); ctx.fillText('\u25BC', x, cy + r * 0.5);
+          emDrawn++;
+        }
+      }
+    }
+    ctx.restore();
+  }
+  window.__cvEmergency = (level) => { if (level !== undefined) emForce = level; return { rows: emRows(emForce !== null ? emForce : alertLevel), drawn: emDrawn, level: alertLevel }; };
   const zFx = document.getElementById('zFx');
   zFx.classList.toggle('on', fxOn);
   zFx.onclick = () => { window.__cvFx(!fxOn); zFx.classList.toggle('on', fxOn); };
