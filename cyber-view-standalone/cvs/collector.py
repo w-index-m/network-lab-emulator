@@ -2,6 +2,7 @@
 監視データを集めて、画面(cyber_view.html)が使う形にまとめる
 
 - 流量: Prometheus(snmp_exporter の ifHCIn/OutOctets)→ 無ければ Zabbix(Bits received/sent)
+  → 無ければ SNMP 直接(sources.snmp.traffic: 実機の ifHCIn/OutOctets の差)→ MRTG / Cacti
 - リンク断の検知経路: SYSLOG(Loki のログ)/ TRAP(この画面が受ける SNMP trap)/
   POLL(Prometheus の ifOperStatus、Zabbix の Operational status)。STATE はラボ専用なので無し
 - 応答なし: Prometheus の up=0、Zabbix のインタフェース到達性=応答なし
@@ -177,14 +178,19 @@ class Collector:
                 else:
                     self.errors.pop(k, None)
 
+        sn = self.snmp.traffic_snapshot(window) if self.snmp.traffic_on else {'rates': {}, 'oper': {}, 'counters': {}, 'lost': {}}
+
         def end_rate(dev, ifn):
-            """(in_bps, out_bps, 取得元)。Prometheus → Zabbix → MRTG / Cacti の順"""
+            """(in_bps, out_bps, 取得元)。Prometheus → Zabbix → SNMP 直接 → MRTG / Cacti の順"""
             k = (self.devs[dev].get('mgmt_ip'), norm_if(ifn))
             if k in rates and (rates[k][0] is not None or rates[k][1] is not None):
                 return rates[k][0], rates[k][1], 'prometheus'
             z = zitems.get(dev, {}).get(norm_if(ifn))
             if z and ('in_bps' in z or 'out_bps' in z):
                 return z.get('in_bps'), z.get('out_bps'), 'zabbix'
+            sr = sn['rates'].get((dev, norm_if(ifn)))
+            if sr and (sr[0] is not None or sr[1] is not None):
+                return sr[0], sr[1], 'snmp'
             lg = legacy.get((dev, norm_if(ifn)))
             if lg:
                 return lg[0], lg[1], lg[2]
@@ -210,7 +216,9 @@ class Collector:
             for ifn, z in ifs.items():
                 if z.get('oper'):
                     note('POLL', dev, ifn, now, z['oper'])
-        lost = {}
+        for (dev, ifn), st in sn['oper'].items():
+            note('POLL', dev, ifn, now, st)
+        lost = dict(sn['lost'])
         for inst, ok in up.items():
             d = self.dev_of(inst)
             if d and not ok:
@@ -257,6 +265,7 @@ class Collector:
         unreachable = [{'id': d, 'hostname': self.devs[d]['hostname'], 'instance': inst} for d, inst in lost.items()]
         return {'now': now, 'window': window, 'links': links, 'unreachable': unreachable,
                 'oper': oper, 'zitems': zitems, 'counters': counters,
+                'snmp_oper': sn['oper'], 'snmp_counters': sn['counters'],
                 'sources_used': sorted({x for ln in links for x in ln['source'].split('+') if x != 'none'})}
 
     def _series(self, key, step=60):
@@ -334,8 +343,10 @@ class Collector:
                 if not i.get('ip'):
                     continue
                 k = (d.get('mgmt_ip'), norm_if(i['name']))
-                st = snap['oper'].get(k) or (snap['zitems'].get(d['id'], {}).get(norm_if(i['name'])) or {}).get('oper')
-                cin, cout = snap['counters'].get(k, (0, 0))
+                sk = (d['id'], norm_if(i['name']))
+                st = (snap['oper'].get(k) or (snap['zitems'].get(d['id'], {}).get(norm_if(i['name'])) or {}).get('oper')
+                      or snap['snmp_oper'].get(sk))
+                cin, cout = snap['counters'].get(k) or snap['snmp_counters'].get(sk, (0, 0))
                 ifs.append({'name': i['name'], 'ip': i['ip'], 'prefix': int(i['prefix']), 'desc': i.get('desc', ''),
                             'up': st != 'down', 'in_bytes': cin, 'out_bytes': cout})
             if ifs:

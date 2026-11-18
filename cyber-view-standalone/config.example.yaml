@@ -18,6 +18,8 @@ devices:
   # hostname   : 表示名。syslog の本文や Zabbix のホスト名との照合にも使う
   # type       : cisco / catalyst / nexus / sir / srs 等(フラップ検知のログ形式の判定に使う)
   # mgmt_ip    : 管理IP(= Prometheus の instance / syslog の送信元)。省略時は最初のIF
+  # snmp       : false にすると SNMP の問い合わせ対象から外す(監視用の PC など、SNMP に応答しない装置。
+  #              画面のアドレス空間・リンクには載る。リンクの流量は相手側の装置のカウンタを使う)
   # zabbix_host: Zabbix 上のホスト名(省略時は hostname)
   # interfaces : IPアドレス空間の画面に置くためのIF(name は ifName/ifDescr と同じ表記で。短縮形でも可)
   - id: cr1
@@ -91,6 +93,9 @@ sources:
   #   interval: 60                   # 秒
   #   full_every: 5                  # 経路数が変わらなくても N 回に1回は経路表全体を取り直す
   #   cpu: {high: 80, jump: 20, hold: 2}   # high% 以上が hold 回続くと注、前回から jump 以上上がると情
+  #   # 流量も SNMP で直接取る(Prometheus / Zabbix が無い環境向け)。IF-MIB の ifHCIn/OutOctets の差から bps を出す。
+  #   # リンクの流量・LINK DOWN の検知経路 POLL(ifOperStatus)・応答なし(2回続けて無応答)に使う
+  #   traffic: true                  # 間隔を変えるなら traffic: {interval: 10}(秒)
   #   # CPU の OID(機種固有の MIB を使う時。装置ごとなら devices[].snmp_cpu_oid)。無ければ Cisco → hrProcessorLoad
   #   # cpu: {oid: 1.3.6.1.4.1.1182....}
 

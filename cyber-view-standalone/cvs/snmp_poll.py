@@ -13,12 +13,20 @@
 装置ごとに devices[].snmp_community で上書きできる。
 SNMPv3 なら v3: {user, auth: sha, auth_password, priv: aes, priv_password}(装置ごとは devices[].snmp_v3)。
 v3 を書いた装置には community を使わない。パスワードは ${ENV} で渡す。
+SNMP に応答しない装置(監視用の PC など)は devices[].snmp: false で問い合わせから外す。
+
+流量(任意。Prometheus / Zabbix が無い環境向け):
+  traffic: true                  # または traffic: {interval: 10}(秒。既定 10)
+  IF-MIB の ifHCIn/OutOctets(64bit。無い機種は 32bit の ifIn/OutOctets)と ifOperStatus を直接読み、
+  前回との差から bps を出す。リンクの流量・LINK DOWN の検知経路「POLL」・応答なし(2回続けて無応答)に使う。
+  取得元は画面で「snmp」と出る(Prometheus → Zabbix → snmp → MRTG/Cacti の順に使う)。
 """
 import ipaddress
 import threading
 import time
 
 from . import snmp_client as SC
+from .link_evidence import norm_if
 from .route_watch import CpuWatch, RouteWatcher
 
 INET_ROUTE = '1.3.6.1.2.1.4.24.7.1'
@@ -27,6 +35,10 @@ ROUTE_NUM = ['1.3.6.1.2.1.4.24.6.0', '1.3.6.1.2.1.4.24.3.0']
 RFC1213_ROUTE = '1.3.6.1.2.1.4.21.1'      # ipRouteTable(古い機種。宛先ごとに1行、経路数の OID は無い)
 HR_CPU = '1.3.6.1.2.1.25.3.3.1.2'         # HOST-RESOURCES-MIB hrProcessorLoad(Cisco 以外の多くの機種)
 IFNAME = '1.3.6.1.2.1.31.1.1.1.1'
+IF_HC_IN, IF_HC_OUT = '1.3.6.1.2.1.31.1.1.1.6', '1.3.6.1.2.1.31.1.1.1.10'      # ifHCInOctets / ifHCOutOctets(64bit)
+IF_IN, IF_OUT = '1.3.6.1.2.1.2.2.1.10', '1.3.6.1.2.1.2.2.1.16'                # ifInOctets / ifOutOctets(32bit)
+IF_OPER = '1.3.6.1.2.1.2.2.1.8'                                               # ifOperStatus
+LOST_AFTER = 2           # 流量の取得に続けて失敗した回数(これで「応答なし」にする)
 CPU_5MIN = '1.3.6.1.4.1.9.9.109.1.1.1.1.8'
 PROTO = {1: 'other', 2: 'connected', 3: 'static', 8: 'rip', 9: 'isis', 13: 'ospf', 14: 'bgp', 16: 'eigrp'}
 
@@ -59,6 +71,8 @@ def parse_old_index(idx):
 
 
 class SnmpPoller:
+    HIST_MAX = 400           # IF ごとに持つ積算カウンタの履歴数(10 秒間隔なら約 1 時間ぶん)
+
     def __init__(self, cfg, analytics, errors):
         src = (cfg.get('sources') or {}).get('snmp') or {}
         self.enabled = bool(src)
@@ -71,7 +85,16 @@ class SnmpPoller:
         c = src.get('cpu') or {}
         self.cpu_high, self.cpu_jump, self.cpu_hold = float(c.get('high', 80)), float(c.get('jump', 20)), int(c.get('hold', 2))
         self.cpu_oid = c.get('oid')
-        self.devs = [d for d in cfg['devices'] if d.get('mgmt_ip')]
+        self.devs = [d for d in cfg['devices'] if d.get('mgmt_ip') and d.get('snmp') is not False]
+        t = src.get('traffic')
+        self.traffic_on = bool(t)
+        self.traffic_interval = float(t.get('interval', 10)) if isinstance(t, dict) else 10.0
+        self._acc = {}           # (装置, ifIndex) -> {'last': (in, out, 32bit か), 'tin', 'tout': 積算バイト, 'hist': [(時刻, tin, tout)]}
+        self._keys = {}          # (装置, ifIndex) -> 正規化IF名
+        self._oper = {}          # (装置, 正規化IF名) -> 'up' | 'down'
+        self._counters = {}      # (装置, 正規化IF名) -> (in_bytes, out_bytes)
+        self._fails = {}         # 装置 -> 続けて失敗した回数
+        self._tlock = threading.Lock()
         self.analytics, self.errors = analytics, errors
         self.watch = RouteWatcher()
         self._n = {}             # 装置 -> 前回の経路数
@@ -173,6 +196,111 @@ class SnmpPoller:
         """CPU の変化を「情」(経路と同じ流れ)と警告(注)にする(判定は route_watch.CpuWatch)"""
         return self.cpuw.observe(d['id'], d['hostname'], v, now=now)
 
+    # ── 流量(IF-MIB のカウンタを直接読む) ──
+    def _counters_of(self, d):
+        """({ifIndex: (in, out)}, 32bit か)。64bit(ifHC*)を先に、無ければ 32bit"""
+        host, comm = d['mgmt_ip'], self._comm(d)
+        for cin, cout, is32 in ((IF_HC_IN, IF_HC_OUT, False), (IF_IN, IF_OUT, True)):
+            ins = {int(o.rsplit('.', 1)[1]): v for o, v in SC.walk(host, comm, cin, **self._kw()) if isinstance(v, int)}
+            if not ins:
+                continue
+            outs = {int(o.rsplit('.', 1)[1]): v for o, v in SC.walk(host, comm, cout, **self._kw()) if isinstance(v, int)}
+            return {i: (v, outs.get(i)) for i, v in ins.items()}, is32
+        return {}, False
+
+    def traffic_device(self, d, now):
+        """1台ぶんの流量・状態を更新する。取れなければ例外(呼び出し側で数える)"""
+        cnt, is32 = self._counters_of(d)
+        if not cnt:
+            raise SC.SnmpError('IF-MIB のカウンタが取れません(応答なし、または ifTable が空)')
+        names = self.ifnames(d, now)
+        oper = {}
+        for o, v in SC.walk(d['mgmt_ip'], self._comm(d), IF_OPER, **self._kw()):
+            idx = int(o.rsplit('.', 1)[1])
+            if v == 1:
+                oper[idx] = 'up'
+            elif v in (2, 7):                      # Prometheus 版と同じ(それ以外は判定に使わない)
+                oper[idx] = 'down'
+        ops, byts = {}, {}
+        for idx, (cin, cout) in cnt.items():
+            nm = names.get(idx)
+            if not nm:
+                continue
+            k = norm_if(nm)
+            byts[(d['id'], k)] = (cin, cout or 0)
+            if idx in oper:
+                ops[(d['id'], k)] = oper[idx]
+            with self._tlock:                  # 画面側(traffic_snapshot)が別スレッドで読むので、更新はロックの中で
+                self._accumulate((d['id'], idx), cin, cout, is32, now)
+                self._keys[(d['id'], idx)] = k
+        with self._tlock:
+            self._oper.update(ops)
+            self._counters.update(byts)
+
+    def _accumulate(self, key, cin, cout, is32, now):
+        """カウンタの差を積算していく。32bit は折り返しを補正、64bit が減ったのは再起動なのでその回は捨てる
+        (積算値は減らないので、あとで窓の両端の差を取れば再起動をまたいでも正しい)"""
+        a = self._acc.get(key)
+        if a is None or a['last'][2] != is32:
+            a = self._acc[key] = {'last': (cin, cout, is32), 'tin': 0, 'tout': 0, 'hist': []}
+        else:
+            wrap = 2 ** 32 if is32 else 2 ** 64
+
+            def delta(cur, old):
+                if cur is None or old is None:
+                    return 0
+                if cur >= old:
+                    return cur - old
+                return cur + wrap - old if is32 else 0
+            a['tin'] += delta(cin, a['last'][0])
+            a['tout'] += delta(cout, a['last'][1])
+            a['last'] = (cin, cout, is32)
+        a['hist'].append((now, a['tin'], a['tout']))
+        if len(a['hist']) > self.HIST_MAX:
+            del a['hist'][:len(a['hist']) - self.HIST_MAX]
+
+    def _rate_of(self, key, window):
+        """window 秒ぶんの平均 bps(Prometheus の rate(...[window]) と同じ考え方)。2 点が無ければ None"""
+        h = self._acc.get(key, {}).get('hist') or []
+        if len(h) < 2:
+            return None
+        last = h[-1]
+        pts = [x for x in h if x[0] >= last[0] - window]
+        if len(pts) < 2:                       # window が取得間隔より短いときは直近の 2 点
+            pts = h[-2:]
+        dt = pts[-1][0] - pts[0][0]
+        if dt <= 0:
+            return None
+        return (pts[-1][1] - pts[0][1]) * 8 / dt, (pts[-1][2] - pts[0][2]) * 8 / dt
+
+    def traffic_tick(self, now=None):
+        now = time.time() if now is None else now
+        for d in self.devs:
+            key = f"snmp-traffic:{d['id']}"
+            try:
+                self.traffic_device(d, now)
+                self._fails[d['id']] = 0
+                self.errors.pop(key, None)
+            except Exception as e:  # noqa: BLE001 - 1台取れなくても他は続ける
+                self._fails[d['id']] = self._fails.get(d['id'], 0) + 1
+                self.errors[key] = str(e)[:200]
+
+    def traffic_snapshot(self, window=60):
+        """画面用: {'rates': {(装置, IF): (in_bps, out_bps)}, 'oper': ..., 'counters': ..., 'lost': {装置: mgmt_ip}}
+        rates は直近 window 秒の平均(ping のような一瞬の通信が 0 と山を行き来しないように)"""
+        with self._tlock:
+            lost = {d['id']: d['mgmt_ip'] for d in self.devs if self._fails.get(d['id'], 0) >= LOST_AFTER}
+            rates = {}
+            for key, nm in self._keys.items():
+                if key[0] in lost:             # 応答なしの装置の古い値は出さない
+                    continue
+                r = self._rate_of(key, window)
+                if r is not None:
+                    rates[(key[0], nm)] = r
+            # 応答なしの装置の古い値は出さない
+            keep = lambda m: {k: v for k, v in m.items() if k[0] not in lost}  # noqa: E731
+            return {'rates': rates, 'oper': keep(self._oper), 'counters': keep(self._counters), 'lost': lost}
+
     def tick(self, now=None):
         now = time.time() if now is None else now
         new = []
@@ -194,6 +322,12 @@ class SnmpPoller:
                 self.tick()
                 self._stop.wait(self.interval)
         threading.Thread(target=loop, daemon=True, name='cvs-snmp').start()
+        if self.traffic_on:
+            def tloop():
+                while not self._stop.is_set():
+                    self.traffic_tick()
+                    self._stop.wait(self.traffic_interval)
+            threading.Thread(target=tloop, daemon=True, name='cvs-snmp-traffic').start()
 
     def stop(self):
         self._stop.set()

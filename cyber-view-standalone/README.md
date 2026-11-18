@@ -102,6 +102,31 @@ ZABBIX_TOKEN=xxxx docker compose up -d --build
 ipCidrRouteTable)と CPU(cpmCPUTotal5minRev)を定期取得する。経路の追加・削除・変更と CPU の急上昇・回復が「情」、
 CPU が高い状態が続くと「注」(警告)。しきい値は `sources.snmp.cpu`。詳細はリポジトリの `docs/snmp-route-cpu-info.md`。
 
+#### 流量も SNMP で直接取る(`sources.snmp.traffic`)
+
+Prometheus も Zabbix も無い環境(実機を 1〜2 台つないで試す、など)向け。`traffic: true`(間隔を変えるなら
+`traffic: {interval: 10}`、秒)を足すと、IF-MIB の `ifHCInOctets` / `ifHCOutOctets`(64bit。無い機種は 32bit)と
+`ifOperStatus` を直接読み、前回との差から bps を出す。
+
+- リンクの流量・流れのアニメ、LINK DOWN の検知経路「POLL」、応答なし(2 回続けて取れなかったとき)に使う。
+  取得元は画面で `snmp` と出る(Prometheus → Zabbix → SNMP → MRTG / Cacti の順で、先に取れたものを使う)
+- 1 回目は基準を取るだけで、流量は 2 回目から出る。装置の再起動でカウンタが戻ったときの 1 回は捨てる
+- 初期値は無効(`traffic` を書いたときだけ動く)。`interval` ごとに装置へ数回 walk するので、台数が多い環境では間隔を広げる
+- `links` には両端の IF を書く。片側が SNMP に応答しない装置(監視用の PC など)なら、その装置に `snmp: false` を書く
+  (問い合わせから外れる。画面のアドレス空間・リンクには載り、流量は相手側の装置のカウンタを使う)
+
+```yaml
+devices:
+  - {id: cat01, hostname: CAT-01, type: catalyst, mgmt_ip: 192.168.1.254,
+     interfaces: [{name: Vlan263, ip: 192.168.1.254, prefix: 24}]}
+  - {id: pc, hostname: MY-PC, type: pc, snmp: false,
+     interfaces: [{name: Ethernet, ip: 192.168.1.10, prefix: 24}]}
+links:
+  - {a: pc, a_if: Ethernet, b: cat01, b_if: GigabitEthernet0/4, speed: 1000000000}
+sources:
+  snmp: {community: netlab-ro, interval: 60, traffic: true}
+```
+
 ### ATT&CK・ネクサス・ダークネット・フロー・外部センサー・回線チェック
 
 - **ATT&CK**: 警報を ATT&CK の戦術・手法に結びつけ、拠点・装置ごとの進行度を出す(設定不要)
@@ -135,7 +160,7 @@ CPU が高い状態が続くと「注」(警告)。しきい値は `sources.snmp
 
 ## ラボ版との違い
 
-- MRTG・Cacti・Zabbix の取り込み口は単体版だけ(取り込み順は Prometheus → Zabbix → MRTG / Cacti)。
+- MRTG・Cacti・Zabbix の取り込み口は単体版だけ(取り込み順は Prometheus → Zabbix → SNMP 直接(`sources.snmp.traffic`)→ MRTG / Cacti)。
 - AI ログ解析は単体版でも使えるが、提案されたコマンドは表示とコピーだけ(装置にはログインしない)。
 - 地球儀(WORLD)は単体版でも使える(MAWI の再生はラボ版だけ)。
 
