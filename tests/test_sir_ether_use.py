@@ -138,9 +138,9 @@ class TestLinkTrapSuppression:
         sent = []
         orig = m.snmp_dispatcher.emit
 
-        async def _spy(device_id, hostname, oid, msg):
+        async def _spy(device_id, hostname, oid, msg, **kw):   # kw = 送信元 IP・ifDescr・ifIndex
             sent.append((device_id, oid))
-            return await orig(device_id, hostname, oid, msg)
+            return await orig(device_id, hostname, oid, msg, **kw)
 
         m.snmp_dispatcher.emit = _spy
         try:
