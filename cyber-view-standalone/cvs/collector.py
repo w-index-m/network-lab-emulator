@@ -55,6 +55,7 @@ class Collector:
         self._zbx_seen = set()
         self._zbx_hosts = {}
         self._prev_down = {}
+        self._prev_lost = set()
         self.hist = defaultdict(lambda: deque(maxlen=400))
         self.valhalla_alerts = AlertImporter()
         from .legacy_sources import LegacyRates
@@ -293,7 +294,19 @@ class Collector:
                 self.analytics.fire('link_down', f"{ln['a']}|{ln['iface_a']}", ln['a'], ln['b'],
                                     f"{ln['host_a']} {ln['iface_a']} ⇄ {ln['host_b']} {ln['iface_b']} が down "
                                     f"(検知: {' / '.join(ln['down_sources'])})", now=now)
+            elif was and not ln['down']:      # 復旧は「情」
+                self.snmp.watch.note(ln['a'], ln['host_a'], 'link_up',
+                                     f"{ln['iface_a']} ⇄ {ln['host_b']} {ln['iface_b']}", code='LINK', now=now)
             self._prev_down[key] = ln['down']
+        # ヴァルハラの取得で応答しなくなった装置は「警」、戻ったら「情」
+        cur = {u['id']: u for u in snap['unreachable']}
+        for d, u in cur.items():
+            if d not in self._prev_lost:
+                self.analytics.fire('snmp_lost', d, d, None, f"{u['hostname']} が SNMP に応答しない({u['instance']})", now=now)
+        for d in self._prev_lost - set(cur):
+            if d in self.devs:
+                self.snmp.watch.note(d, self.devs[d]['hostname'], 'snmp_ok', 'SNMP の応答が戻った', code='SNMP', now=now)
+        self._prev_lost = set(cur)
         return snap
 
     def start(self):

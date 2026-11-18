@@ -106,6 +106,8 @@ Hostname Capability・Graceful Restart/LLGR・RPKIにも対応。IPv6アドレ�
 ### 日本語
 
 NICT の NIRVANA改 を参考に作った、ネットワークを 3D で見る画面です。アプリ内では「ニルヴァーナ」と呼んでいます。
+
+**紹介資料**: [docs/nirvana-introduction.md](docs/nirvana-introduction.md)(PowerPoint 版: [docs/nirvana-introduction.pptx](docs/nirvana-introduction.pptx))。取り込めるデータ、ヴァルハラとの連携、「情」「注」「警」の出し方、4つの経路の見え方、流量と粒の動き、スキンをまとめています。
 名前・ロゴは独自のもので、実在の製品のマークは使っていません。Prometheus は画面の上では「ヴァルハラ / VALHALLA」と表示します。
 
 使い方は2通りあります。
@@ -140,6 +142,8 @@ SNMP で取った値・情・警報・ログはメモリだけに置き、長く
 
 A 3D network view inspired by NICT's NIRVANA-Kai, called "Nirvana" in this app. The name and logo are original, and no
 real product marks are used. On screen, Prometheus is labelled "VALHALLA".
+
+Introduction (Japanese): [docs/nirvana-introduction.md](docs/nirvana-introduction.md), PowerPoint: [docs/nirvana-introduction.pptx](docs/nirvana-introduction.pptx).
 
 There are two ways to use it:
 

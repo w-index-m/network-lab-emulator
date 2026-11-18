@@ -2209,6 +2209,8 @@ async def cli_command(body: dict):
         for _peer, _pif in list(vnet.interface_links.get(device_id, {}).items()):
             if vnet._norm_iface(_pif) == _n:
                 _flow_recorder.record_link(device_id, _peer, iface_for_flap, _flap_action)
+                if _flap_action == 'up':
+                    _note_link_up(device_id, iface_for_flap, _peer, _pif)
     if _flap_targets and ospf_engine.nodes.get(device_id, {}).get('enabled'):
         # 隣接に関係ないLAN側IFのup/downでも、そのstubの広告/撤回は要る
         _register_icmp(device_id)
@@ -3277,6 +3279,13 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         buf = proto_log_buffer.setdefault(device_id, [])
         buf.append({'type': 'acl_log',
                     'message': f'access-list {num}: {action} {src}'})
+        return
+    # ACL を丸ごと消す: "no access-list 20" / "no ip access-list standard|extended <名前>" / NX-OS "no ip access-list <名前>"
+    # (以前は黙って無視され、作り直すつもりの行が古い ACL に追記されていた)
+    m_no_acl = re.match(r'^no\s+(?:ip\s+access-list(?:\s+(?:standard|extended))?|access-list)\s+(\S+)\s*$', orig, re.I)
+    if m_no_acl:
+        ipfilter_engine.delete_acl(device_id, m_no_acl.group(1))
+        filter_engine.clear_prefix_list(device_id, m_no_acl.group(1))
         return
     # Cisco拡張ACL: "access-list 100 permit tcp any host 10.0.0.1 eq 80"
     ext_acl = re.match(
@@ -10011,6 +10020,37 @@ _NON_ROUTER_TYPES = {'pc', 'netattest', 'alb'}
 _EVIDENCE_ORDER = ('STATE', 'SYSLOG', 'TRAP', 'POLL')
 
 
+
+def _note_link_up(dev, iface, peer, peer_if):
+    """リンクの復旧を「情」で知らせる(断は link_down の「警」)"""
+    try:
+        from engine.route_watch import watcher as _rw
+        h = getattr(device_sessions.get(dev), 'hostname', dev)
+        ph = getattr(device_sessions.get(peer), 'hostname', peer)
+        _rw.note(dev, h, 'link_up', f'{iface} ⇄ {ph} {peer_if}', code='LINK')
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_snmp_lost_prev = set()
+
+
+def _note_snmp_reachability(lost, nodes, now):
+    """ヴァルハラの取得で応答しなくなった装置を「警」(snmp_lost)、戻った装置を「情」にする"""
+    cur = set(lost)
+    for d in cur - _snmp_lost_prev:
+        _flow_recorder.external_alert('snmp_lost', d, d, None,
+                                      f"{nodes[d]['hostname']} が SNMP に応答しない({lost[d]})", now=now)
+    try:
+        from engine.route_watch import watcher as _rw
+        for d in _snmp_lost_prev - cur:
+            if d in nodes:
+                _rw.note(d, nodes[d]['hostname'], 'snmp_ok', 'SNMP の応答が戻った', code='SNMP', now=now)
+    except Exception:  # noqa: BLE001
+        pass
+    _snmp_lost_prev.clear()
+    _snmp_lost_prev.update(cur)
+
 async def _annotate_link_evidence(links, nodes, now):
     """各リンクに、どの経路(STATE/SYSLOG/TRAP/POLL)が断を示しているかを付ける。
     どれか1つでも「最後に見た状態が down」ならリンクは断(ln['down']=True)。"""
@@ -10069,6 +10109,7 @@ async def _annotate_link_evidence(links, nodes, now):
         ln['down_sources'] = [k for k in _EVIDENCE_ORDER if ev[k] == 'down']
         ln['down'] = bool(ln['down_sources'])
         ln['lost'] = [nodes[d]['hostname'] for d in lost_ends]
+    _note_snmp_reachability(lost, nodes, now)
     return [{'id': d, 'hostname': nodes[d]['hostname'], 'instance': inst} for d, inst in lost.items()]
 
 
@@ -10419,6 +10460,8 @@ async def _l2loop_apply(a, _snmp):
         for peer, pif in list(vnet.interface_links.get(dev, {}).items()):
             if vnet._norm_iface(pif) == n:
                 _flow_recorder.record_link(dev, peer, ifn, 'down' if kind == 'errdisable' else 'up')
+                if kind != 'errdisable':
+                    _note_link_up(dev, ifn, peer, pif)
     elif kind == 'cleared':
         lp = a['loop']
         if lp['resolved_by'].startswith('リンクの切断'):   # ニルヴァーナの RESPONSE で切ったなら、そう書く

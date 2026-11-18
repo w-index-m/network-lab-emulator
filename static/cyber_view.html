@@ -352,7 +352,7 @@
   let particles = [];
 
   const octets = (ip) => ip.split('.').map(Number);
-  const RULE_CODE = { valhalla: 'VH', nirvana_rule: 'RULE', conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR',
+  const RULE_CODE = { valhalla: 'VH', nirvana_rule: 'RULE', conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', snmp_lost: 'SNMP', fw_shun: 'SHUN', syslog_error: 'ERR',
     if_flap: 'IF FLAP', ospf_flap: 'OSPF FLAP', bgp_flap: 'BGP FLAP', eigrp_flap: 'EIGRP FLAP', fhrp_flap: 'FHRP FLAP',
     stp_tc_flap: 'STP TC', stp_root_flap: 'STP ROOT', mac_flap: 'MAC FLAP', errdisable_flap: 'ERRDIS', route_flap: 'RT FLAP',
     cpu_high: 'CPU HIGH', wan_slow: 'WAN SLOW', wan_loss: 'WAN LOSS' };
@@ -1178,7 +1178,9 @@
       src.title = d.prometheus_error || (d.prometheus_url ? 'ヴァルハラ(Prometheus): ' + d.prometheus_url
         : 'ヴァルハラ(Prometheus)未接続 — PROMETHEUS_URL 未設定: エミュレータのIFカウンタ(SNMPのifHCOctetsと同じ値)');
     } catch (e) { /* 次の周期で再試行 */ }
-    nextPoll = Date.now() + w * 1000;
+    // 断・応答なしのリンクがある間は10秒ごとに取り直す(検知経路のチップが揃っていく様子と復旧を早く映す)
+    const bad = linkData && (linkData.links || []).some(l => l.down || l.state === 'lost');
+    nextPoll = Date.now() + (bad ? Math.min(10, w) : w) * 1000;
   }
   setInterval(() => {
     if (mode !== 'link') return;
@@ -3485,6 +3487,7 @@
       if (hostView) renderCard();
     } catch (e) { /* 次の周期で再試行 */ }
   }
+  const LINK_STATE_RULES = new Set(['link_down', 'snmp_lost']);
   async function pollFlows() {
     try {
       const d = await api(`/api/traffic/flowmap?since=${seq}&alert_since=${alertSeq}`);
@@ -3506,6 +3509,8 @@
       document.getElementById('sLinks').textContent = links.length;
       if (fresh.length || (d.alerts || []).length || !primed) { renderAlerts(); if (hostView) renderCard(); }
       if (primed && (d.alerts || []).length) pollHealth();   // 新しいアラートはボードにもすぐ反映
+      // リンク断・応答なしの「警」はリンク図にもすぐ反映(定期の取り直しは1分ごとで、ボードと食い違って見えるため)
+      if (primed && mode === 'link' && (d.alerts || []).some(a => LINK_STATE_RULES.has(a.rule))) pollLinks();
       if (!primed) { primed = true; if (mode === 'net') autoFocus(); }
     } catch (e) { /* 次の周期で再試行 */ }
   }
@@ -3562,7 +3567,8 @@
   // 経路の追加・削除・変更を、その装置の上に INFO プレートで浮かべる
   let routeSeq = -1;
   const ROUTE_STYLE = { add: ['#33d6ff', 'INFO ROUTE ADD'], del: ['#9aa4b8', 'INFO ROUTE DEL'], change: ['#7fb2ff', 'INFO ROUTE CHG'],
-    cpu_up: ['#ffab2e', 'INFO CPU UP'], cpu_ok: ['#3dff9a', 'INFO CPU OK'] };
+    cpu_up: ['#ffab2e', 'INFO CPU UP'], cpu_ok: ['#3dff9a', 'INFO CPU OK'],
+    link_up: ['#3dff9a', 'INFO LINK UP'], snmp_ok: ['#3dff9a', 'INFO SNMP OK'] };
   async function pollRoutes() {
     try {
       const d = await api(`/api/traffic/routes?since=${Math.max(0, routeSeq)}&limit=200`);
@@ -3571,6 +3577,7 @@
       if (first) return;                  // 開いた時点より前の変化は出さない
       const byDev = {};
       for (const e of d.events) (byDev[e.dev] = byDev[e.dev] || []).push(e);
+      if (mode === 'link' && d.events.some(e => e.kind === 'link_up' || e.kind === 'snmp_ok')) pollLinks();   // 復旧の「情」も同じ
       for (const [dev, evs] of Object.entries(byDev)) {
         const pos = posForDevice(dev);
         evs.slice(0, 3).forEach(e => {

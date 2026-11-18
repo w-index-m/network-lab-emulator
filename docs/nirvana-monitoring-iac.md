@@ -197,6 +197,16 @@ $ snmpget -v3 ... --clientaddr=10.99.0.9 10.240.12.1 sysName.0            → Ti
 **残っていること**: SNMPv2c の community・trap 送信先・trap-source は、エミュレータの設定の保存(`saved_config.json`)に入っていません(以前からの範囲です)。ラボは `deploy.sh up` のたびに設定し直すので影響はありません。
 
 
+### 画面での見え方と、そのために直したこと(2026-11-18 追記)
+
+各項目が画面でどう出るかは [nirvana-introduction.md](nirvana-introduction.md) の「4つの経路は画面でどう見えるか」に、同じスタックで撮った画像つきでまとめました。撮影の途中で、次の4点を直しました。
+
+- **リンクの復旧と SNMP の応答に「情」「警」が無かった**: リンク断は「警」になるのに、復旧は何も出ませんでした。ヴァルハラで応答しなくなった装置も、灰色の NO RESPONSE になるだけで警報がありませんでした。リンクの復旧を「情 INFO LINK UP」、応答なしを「警 SNMP」(`snmp_lost`、花びら NET)、応答の回復を「情 INFO SNMP OK」にしました(単体版の `Collector.tick` とラボ版の `_note_snmp_reachability` / `_note_link_up`)。どちらも状態が変わったときに1回だけ出ます。
+- **SYSTEM STATUS は断なのに、リンク図は NORMAL のまま**: リンク図は「更新 1分」ごとにしか取り直さないので、断の反映が最大1分遅れていました。リンク断・応答なしの「警」と、復旧の「情」が届いたらすぐ取り直し、断や応答なしのリンクがある間は10秒ごとに取り直すようにしました。
+- **`no access-list 20` が効かない**: 番号付き ACL を丸ごと消すコマンドが黙って無視され、作り直すつもりの行が古い ACL に追記されていました。実機どおり ACL 全体を消すようにしました(`no ip access-list standard|extended <名前>` も同じ)。
+- **撮影の手順の誤り**: ACL で収集元を外した時間がニルヴァーナの判定の周期(10秒)より短く、「警」が出る前に戻していました。「警」が出たのを確かめてから戻すようにしました。
+
+
 ## テスト
 
 `tests/test_flow_export_and_nirvana_iac.py` で確かめていること:
@@ -207,3 +217,4 @@ $ snmpget -v3 ... --clientaddr=10.99.0.9 10.240.12.1 sysName.0            → Ti
 - Arista の sFlow と、`logging host ... transport udp port` の解釈。
 - IaC のファイル同士の整合: compose の参照先が実在すること、snmp_exporter とヴァルハラのポート、ジョブ名、Loki と syslog のポート、ヴァルハラとニルヴァーナが同じ装置を見ていること、ラボのフロー送出先と受け口の一致。
 - `tests/test_snmp_trap_and_acl.py`: TRAP の送信先の並び・trap-source と ifDescr・本物の UDP で送信元 IP が装置の IP になること・v2c / v3 の ACL(IOS と NX-OS)・NX-OS の `ip access-list`・IaC の TRAP と ACL の設定。
+- `tests/test_nirvana_info_alert_marks.py`: リンク断の「警」と復旧の「情」、SNMP 応答なしの「警」と回復の「情」(単体版・ラボ版)、`no access-list`、画面の新しい「情」とリンク図の取り直し。

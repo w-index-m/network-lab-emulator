@@ -7295,6 +7295,13 @@ class IpFilterEngine:
         rules[:] = keep
         return changed
 
+    def delete_acl(self, device_id: str, acl_name: str):
+        """`no access-list <番号>` / `no ip access-list ... <名前>`: ACL を丸ごと消す(実機と同じく、適用先の参照は残る)"""
+        found = acl_name in self.acls.get(device_id, {})
+        self.acls.get(device_id, {}).pop(acl_name, None)
+        self.acl_kind.get(device_id, {}).pop(acl_name, None)
+        return found
+
     def apply_acl(self, device_id: str, iface: str, direction: str, acl_name: str):
         self.applied[device_id][(iface, direction)] = acl_name
 
