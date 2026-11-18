@@ -12,7 +12,7 @@
 {% set grafana_port = s.get('grafana_port', 3000) %}
 {% set prom_version = s.get('prom_version', '2.54.1') %}
 {% set alertmanager_version = s.get('alertmanager_version', '0.27.0') %}
-{% set grafana_release_url = s.get('grafana_release_url', 'https://github.com/w-index-m/network-lab-emulator/releases/download/grafana/grafana.tar.gz') %}
+{% set grafana_release_url = s.get('grafana_release_url', 'https://github.com/w-index-m/nirvana-lab/releases/download/grafana/grafana.tar.gz') %}
 {% set prom_dir = stack_dir ~ '/prometheus-' ~ prom_version ~ '.linux-amd64' %}
 {% set am_dir = stack_dir ~ '/alertmanager-' ~ alertmanager_version ~ '.linux-amd64' %}
 

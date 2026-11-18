@@ -10,4 +10,4 @@ default['monitoring_stack']['grafana_port'] = 3000
 default['monitoring_stack']['prom_version'] = '2.54.1'
 default['monitoring_stack']['alertmanager_version'] = '0.27.0'
 default['monitoring_stack']['grafana_release_url'] =
-  'https://github.com/w-index-m/network-lab-emulator/releases/download/grafana/grafana.tar.gz'
+  'https://github.com/w-index-m/nirvana-lab/releases/download/grafana/grafana.tar.gz'

@@ -12,4 +12,4 @@
 # python3.11 / linux_x86_64 専用ビルド。別のPython/OS/CPUアーキテクチャ
 # では動かないため、その場合は同じ手順で対象環境向けのwhlを
 # 別途アップロードしてURLを差し替えること。
-torch @ https://github.com/w-index-m/network-lab-emulator/releases/download/torch-cpu-wheel/torch-2.6.0%2Bcpu-cp311-cp311-linux_x86_64.whl
+torch @ https://github.com/w-index-m/nirvana-lab/releases/download/torch-cpu-wheel/torch-2.6.0%2Bcpu-cp311-cp311-linux_x86_64.whl

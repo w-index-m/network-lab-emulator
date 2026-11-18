@@ -264,7 +264,7 @@ async def query_llm(prompt: str, system: str) -> str:
 #   (GROQ_API_KEY等と同じ扱い)。
 # ══════════════════════════════════════════
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "w-index-m/network-lab-emulator")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "w-index-m/nirvana-lab")
 GITHUB_WORKFLOW_FILE = "strix-pentest.yml"
 GITHUB_API_BASE = "https://api.github.com"
 

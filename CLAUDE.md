@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
+**Repository renamed**: the GitHub repository is now `w-index-m/nirvana-lab` (formerly `network-lab-emulator`; GitHub redirects the old URL). The Render URL `network-lab-emulator.onrender.com` is a separate deployment name and was left unchanged. Bare mentions of "network-lab-emulator" in prose/comments are the project's old name and were not rewritten.
+
 A multi-vendor network device CLI/protocol emulator. It's not a "show text
 generator" — several protocols run as real sockets/real packets (OSPF over
 raw IP proto 89, BGP over TCP 179, RIPv2 over UDP 520, SNMP over UDP 161,
@@ -911,7 +913,7 @@ downloaded the official CPU-only wheel
 (`torch-2.6.0+cpu-cp311-cp311-linux_x86_64.whl`) from
 `download.pytorch.org/whl/cpu/` on their own machine (not blocked there)
 and uploaded it as a GitHub Release asset on this repo
-(`w-index-m/network-lab-emulator`, release tag `torch-cpu-wheel`) —
+(`w-index-m/nirvana-lab`, release tag `torch-cpu-wheel`) —
 `github.com`/`objects.githubusercontent.com` are *not* blocked by this
 environment's egress policy, only `download.pytorch.org` is. That
 Release asset URL is now pinned in `requirements-ml.txt` as a direct PEP
@@ -1007,7 +1009,7 @@ NumPy版はtorch不要のデフォルト実装として維持し、こちらは�
 `download.pytorch.org/whl/cpu/`（手元の環境ではブロックされていない）
 から公式CPU専用ホイール
 (`torch-2.6.0+cpu-cp311-cp311-linux_x86_64.whl`)をダウンロードし、この
-リポジトリ(`w-index-m/network-lab-emulator`)のGitHub Releaseアセット
+リポジトリ(`w-index-m/nirvana-lab`)のGitHub Releaseアセット
 (タグ`torch-cpu-wheel`)としてアップロードした — `github.com`/
 `objects.githubusercontent.com`はこの環境のegressポリシーでブロック
 されて**いない**（ブロックされているのは`download.pytorch.org`のみ）。

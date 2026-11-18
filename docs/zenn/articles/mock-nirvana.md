@@ -235,7 +235,7 @@ Prometheus を画面上で「ヴァルハラ」と呼んでいます。理由は
 ## 試し方
 
 ```bash
-git clone https://github.com/w-index-m/network-lab-emulator
+git clone https://github.com/w-index-m/nirvana-lab
 cd network-lab-emulator
 pip install -r requirements.txt
 NETLAB_AUTH_DISABLE=1 python app.py

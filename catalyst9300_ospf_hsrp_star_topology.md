@@ -428,7 +428,7 @@ show ip route ospf
 ## エミュレーター起動
 
 ```bash
-git clone https://github.com/w-index-m/network-lab-emulator.git
+git clone https://github.com/w-index-m/nirvana-lab.git
 cd network-lab-emulator
 pip install -r requirements.txt
 python app.py
