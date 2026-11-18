@@ -25,11 +25,11 @@ import sys
 import urllib.parse
 import urllib.request
 
-from .legacy_sources import parse_mrtg_cfg
+from .legacy_sources import CACTI_RRA_CANDIDATES, MRTG_CFG_CANDIDATES, parse_mrtg_cfg
 from .link_evidence import norm_if
 
-MRTG_CFGS = ['/etc/mrtg.cfg', '/etc/mrtg/*.cfg', '/usr/local/etc/mrtg/*.cfg']
-CACTI_DIRS = ['/var/lib/cacti/rra', '/usr/share/cacti/rra', '/var/www/html/cacti/rra', '/usr/share/cacti/site/rra']
+MRTG_CFGS = MRTG_CFG_CANDIDATES
+CACTI_DIRS = CACTI_RRA_CANDIDATES
 
 
 def http_json(url, timeout=3):
@@ -52,7 +52,8 @@ def detect(prometheus=None, loki=None, zabbix=None, mrtg_cfgs=None, cacti_dirs=N
     get = get or http_json
     env = env if env is not None else os.environ
     found = {'prometheus': None, 'loki': None, 'zabbix': None, 'mrtg': [], 'cacti': [], 'ollama': None, 'ai': None,
-             'devices': {}, 'notes': []}
+             'devices': {}, 'notes': [], 'searched': {'mrtg': [], 'cacti': []}}
+    searched = found['searched']
 
     def dev(key, hostname=None):
         d = found['devices'].setdefault(key, {'hostname': hostname or key, 'mgmt_ip': None, 'ifs': {}, 'from': set()})
@@ -104,12 +105,16 @@ def detect(prometheus=None, loki=None, zabbix=None, mrtg_cfgs=None, cacti_dirs=N
 
     # MRTG
     for pat in mrtg_cfgs if mrtg_cfgs is not None else MRTG_CFGS:
-        for path in sorted(glob.glob(pat)):
+        hits = sorted(glob.glob(pat))
+        searched['mrtg'].append({'pattern': pat, 'matches': hits})
+        for path in hits:
             try:
                 p = parse_mrtg_cfg(open(path, encoding='utf-8', errors='replace').read())
-            except OSError:
+            except OSError as e:
+                found['notes'].append(f'MRTG: {path} を読めません({e.strerror or e})')
                 continue
             if not p['targets']:
+                found['notes'].append(f'MRTG: {path} はありますが Target[...] が1つもありません(cfgmaker で作ると入ります)')
                 continue
             found['mrtg'].append({'cfg': path, 'workdir': p['workdir'], 'targets': len(p['targets'])})
             for t in p['targets'].values():
@@ -128,7 +133,9 @@ def detect(prometheus=None, loki=None, zabbix=None, mrtg_cfgs=None, cacti_dirs=N
 
     # Cacti
     for pat in cacti_dirs if cacti_dirs is not None else CACTI_DIRS:
-        for path in sorted(glob.glob(pat)):
+        hits = sorted(glob.glob(pat))
+        searched['cacti'].append({'pattern': pat, 'matches': hits})
+        for path in hits:
             files = sorted(f for f in os.listdir(path) if f.endswith('.rrd') and 'traffic' in f)
             if files:
                 found['cacti'].append({'rra_dir': path, 'files': files[:200]})
@@ -223,6 +230,10 @@ def summary(found):
     out.append(f"Zabbix     : {found['zabbix']['url'] if found['zabbix'] else 'なし'}")
     out.append(f"MRTG       : {', '.join(m['cfg'] + ' (' + str(m['targets']) + ' 対象)' for m in found['mrtg']) or 'なし'}")
     out.append(f"Cacti      : {', '.join(c['rra_dir'] + ' (' + str(len(c['files'])) + ' RRD)' for c in found['cacti']) or 'なし'}")
+    # 探した場所(見つからなかったときに、どこを探したかが分かるように。--mrtg-cfg / --cacti-rra で足せる)
+    for label, key in (('MRTG', 'mrtg'), ('Cacti', 'cacti')):
+        for sr in found.get('searched', {}).get(key, []):
+            out.append(f"  {label} 候補 {sr['pattern']}: " + (', '.join(sr['matches']) if sr['matches'] else '無い'))
     out.append(f"Ollama     : {found['ollama']['url'] if found['ollama'] else 'なし'}")
     out.append(f"AI         : {found['ai'] or 'なし(ルールで解析)'}")
     out.append(f"装置       : {len(found['devices'])} 台 " + ', '.join(f"{d['hostname']}({'/'.join(sorted(d['from']))})" for d in found['devices'].values()))

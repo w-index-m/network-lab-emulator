@@ -67,12 +67,15 @@ sources:
 
   # MRTG(cfgmaker が作った mrtg.cfg を読み、Target の装置・IF とこの設定の devices を自動で対応づける)。
   # LogFormat が rrdtool なら .rrd を rrdtool fetch で読む(rrdtool コマンドが要る)
+  # 場所の候補: /etc/mrtg.cfg(Debian 系)、/etc/mrtg/mrtg.cfg(RHEL 系)、/usr/local/etc/mrtg/mrtg.cfg(FreeBSD)、
+  #             /usr/local/mrtg-2/conf/mrtg.cfg(ソースから入れた場合)。見つからないときは /api/health の errors に出る
   # mrtg:
   #   cfg: /etc/mrtg.cfg
   #   stale: 900                     # これより古い値(秒)は出さない(MRTG が止まっていても 0 と見せない)
 
   # Cacti(Interface - Traffic のデータソースの RRD。traffic_in / traffic_out)。どのファイルがどの IF かは
   # Cacti の DB にしか無いので、ここに書く(install.sh は見つけたファイルをコメントで下書きに出す)
+  # rra_dir の候補: /var/lib/cacti/rra、/usr/share/cacti/rra、/var/www/html/cacti/rra、/usr/share/cacti/site/rra
   # cacti:
   #   rra_dir: /var/lib/cacti/rra
   #   targets:

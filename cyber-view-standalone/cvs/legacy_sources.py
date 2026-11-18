@@ -25,6 +25,12 @@ import time
 
 from .link_evidence import norm_if
 
+# mrtg.cfg / Cacti の RRD を探す場所の候補(インストーラーと、設定のパスが見つからないときのエラーで使う)。
+# Debian 系は /etc/mrtg.cfg、RHEL 系は /etc/mrtg/mrtg.cfg、FreeBSD は /usr/local/etc/mrtg/mrtg.cfg、
+# MRTG のソースを自分で入れた場合は MRTG の手順書にある /usr/local/mrtg-2/conf/mrtg.cfg が多い
+MRTG_CFG_CANDIDATES = ['/etc/mrtg.cfg', '/etc/mrtg/*.cfg', '/usr/local/etc/mrtg/*.cfg', '/usr/local/mrtg-2/conf/*.cfg']
+CACTI_RRA_CANDIDATES = ['/var/lib/cacti/rra', '/usr/share/cacti/rra', '/var/www/html/cacti/rra', '/usr/share/cacti/site/rra']
+
 _TARGET = re.compile(r'^Target\[([^\]]+)\]:\s*(.+)$', re.I)
 _SETENV = re.compile(r'^SetEnv\[([^\]]+)\]:\s*(.+)$', re.I)
 _WORKDIR = re.compile(r'^(?:WorkDir|LogDir):\s*(\S+)', re.I)
@@ -152,7 +158,10 @@ class LegacyRates:
         m = self.mrtg
         items = []
         parsed = {'workdir': m.get('workdir'), 'logformat': m.get('logformat', 'mrtg'), 'targets': {}}
-        if m.get('cfg') and os.path.exists(m['cfg']):
+        if m.get('cfg') and not os.path.exists(m['cfg']):
+            # 黙って「対象なし」にしない(パスの書き間違いに気づけるよう、候補も添える)
+            raise FileNotFoundError(f"mrtg.cfg が見つかりません: {m['cfg']}(候補: {', '.join(MRTG_CFG_CANDIDATES)})")
+        if m.get('cfg'):
             p = parse_mrtg_cfg(open(m['cfg'], encoding='utf-8', errors='replace').read())
             parsed['targets'] = p['targets']
             parsed['workdir'] = parsed['workdir'] or p['workdir']
@@ -193,6 +202,8 @@ class LegacyRates:
         if self.cacti:
             try:
                 rra = self.cacti.get('rra_dir', '/var/lib/cacti/rra')
+                if not os.path.isdir(rra):
+                    raise FileNotFoundError(f"Cacti の rra_dir が見つかりません: {rra}(候補: {', '.join(CACTI_RRA_CANDIDATES)})")
                 stale = float(self.cacti.get('stale', 900))
                 items, bad = [], []
                 for t in self.cacti.get('targets') or []:

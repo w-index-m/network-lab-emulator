@@ -161,3 +161,37 @@ def test_snmp_negative_request_id_and_ipaddrtable():
     mib = {o: v for o, _t, v in snmp_agent._build_mib('ipad-t')}
     assert mib['1.3.6.1.2.1.4.20.1.2.10.252.2.1'] == '2' and mib['1.3.6.1.2.1.4.20.1.3.10.252.1.1'] == '255.255.255.252'
     assert mib['1.3.6.1.2.1.4.20.1.3.10.252.2.1'] == '255.255.255.0'
+
+
+# ── 候補のパス(探した場所の表示・設定のパスが無いときのエラー) ──
+def test_installer_reports_searched_candidates_and_why_skipped(tmp_path):
+    good = tmp_path / 'good.cfg'
+    good.write_text('WorkDir: /var/www/mrtg\nTarget[r1_1]: 1:public@10.0.0.1:\n')
+    empty = tmp_path / 'empty.cfg'
+    empty.write_text('WorkDir: /var/www/mrtg\n')
+    found = installer.detect(mrtg_cfgs=[str(tmp_path / 'none.cfg'), str(empty), str(good)],
+                             cacti_dirs=[str(tmp_path / 'no-rra')], ollama='http://127.0.0.1:9',
+                             env={}, get=lambda url: None)
+    pats = {x['pattern']: x['matches'] for x in found['searched']['mrtg']}
+    assert pats[str(tmp_path / 'none.cfg')] == [] and pats[str(good)] == [str(good)]
+    assert [m['cfg'] for m in found['mrtg']] == [str(good)]
+    assert any('Target[...] が1つもありません' in n and 'empty.cfg' in n for n in found['notes'])
+    text = installer.summary(found)
+    assert f"MRTG 候補 {tmp_path / 'none.cfg'}: 無い" in text and f"MRTG 候補 {good}: {good}" in text
+    assert 'Cacti 候補' in text and 'no-rra' in text
+
+
+def test_default_candidates_include_common_install_locations():
+    from cvs.legacy_sources import CACTI_RRA_CANDIDATES, MRTG_CFG_CANDIDATES
+    assert '/etc/mrtg.cfg' in MRTG_CFG_CANDIDATES and '/etc/mrtg/*.cfg' in MRTG_CFG_CANDIDATES
+    assert '/var/lib/cacti/rra' in CACTI_RRA_CANDIDATES
+    assert installer.MRTG_CFGS == MRTG_CFG_CANDIDATES and installer.CACTI_DIRS == CACTI_RRA_CANDIDATES
+
+
+def test_missing_mrtg_cfg_and_cacti_dir_are_reported_not_silent(tmp_path):
+    devs = {'r1': {'id': 'r1', 'interfaces': [{'name': 'GigabitEthernet0/0/0', 'ip': '10.0.0.1'}]}}
+    lr = LegacyRates({'sources': {'mrtg': {'cfg': str(tmp_path / 'nope.cfg')}, 'cacti': {'rra_dir': str(tmp_path / 'no-rra')}}},
+                     devs, lambda k: 'r1' if k in ('10.0.0.1', 'r1') else None)
+    assert lr.rates() == {}
+    assert 'mrtg.cfg が見つかりません' in lr.errors['mrtg'] and '/etc/mrtg.cfg' in lr.errors['mrtg']
+    assert 'rra_dir が見つかりません' in lr.errors['cacti'] and '/var/lib/cacti/rra' in lr.errors['cacti']
