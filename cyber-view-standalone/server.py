@@ -56,7 +56,7 @@ def create_app(cfg, start_collector=True):
 
     @app.get('/api/health')
     def ok():
-        return {'ok': True, 'errors': col.errors}
+        return {'ok': True, 'errors': col.errors, 'notes': col.notes}
 
     @app.get('/api/traffic/hosts')
     def hosts(x_session_token: str = Header(None)):

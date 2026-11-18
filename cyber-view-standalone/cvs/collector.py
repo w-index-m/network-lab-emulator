@@ -56,6 +56,7 @@ class Collector:
         self._zbx_hosts = {}
         self._prev_down = {}
         self._prev_lost = set()
+        self.notes = {}                      # エラーではないが知らせたいこと(Cacti の DB から何本対応づけたか 等)
         self.hist = defaultdict(lambda: deque(maxlen=400))
         self.valhalla_alerts = AlertImporter()
         from .legacy_sources import LegacyRates
@@ -172,11 +173,12 @@ class Collector:
         legacy = {}
         if self.legacy.enabled():
             legacy = self.legacy.rates(now)
-            for k in ('mrtg', 'cacti'):
+            for k in ('mrtg', 'cacti', 'cacti_db'):
                 if k in self.legacy.errors:
                     self.errors[k] = self.legacy.errors[k]
                 else:
                     self.errors.pop(k, None)
+            self.notes.update(self.legacy.notes)
 
         def end_rate(dev, ifn):
             """(in_bps, out_bps, 取得元)。Prometheus → Zabbix → MRTG / Cacti の順"""

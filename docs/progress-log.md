@@ -8,6 +8,7 @@ commit は作業ブランチ `claude/affectionate-johnson-rz69wa`。
 | 時刻 | やったこと | 結果 / 見つけたこと | 詳細 |
 |---|---|---|---|
 | 08:00 | TRAP の送信先の書き方を実機どおりに直し、SNMP の ACL を実際に効かせ、IaC に TRAP の経路と `deploy.sh check` を足した | 本物の docker で `check` が OK 8 / NG 0。リンク断を TRAP・SYSLOG・POLL の3経路で検知、許可していない送信元からの snmpget は無応答。udp-port を最後に書くと 162 へ送っていた・ACL が設定だけで効いていない・NX-OS の `ip access-list` が中身を捨てる、を修正 | [nirvana-monitoring-iac.md](nirvana-monitoring-iac.md) |
+| 12:00 | Cacti の RRD と装置・IF の対応を、Cacti の DB から自動で読む(`cvs/cacti_db.py`)。インストーラーが DB 接続情報を探して設定の下書きに書く | 本物の MariaDB に Cacti 1.2.26 の `cacti.sql` を入れ、本物の rrdtool の RRD で確認(3本が自動で対応づき、CPU のデータソースと設定に無い装置は除外・理由つきで通知)。DB 障害中は前回の対応で流量を出し続ける。Cacti 1.x の RRD はサブディレクトリ・数字だけの名前で、以前のインストーラーでは見つからなかったのも直した | [nirvana-data-ingestion.md](nirvana-data-ingestion.md) |
 | 11:00 | ニルヴァーナの紹介を Markdown と PowerPoint で作成。4つの経路・「情」「注」「警」・流量と粒の速さ・スキンを、本物の docker のスタックで撮った画像で説明 | 撮影中に、復旧と SNMP 応答なしに「情」「警」が無い・リンク図が断を最大1分遅れて映す・`no access-list` が効かない、を見つけて修正 | [nirvana-introduction.md](nirvana-introduction.md) |
 
 ## 2026-11-17(夕方)— ICMP Redirect

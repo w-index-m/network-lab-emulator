@@ -16,9 +16,10 @@
 | HTTP で問い合わせる(pull) | Prometheus(ヴァルハラ)、Loki、Zabbix | ニルヴァーナ → 各サーバーの HTTP API |
 | SNMP で問い合わせる(pull) | 装置の経路表・CPU | ニルヴァーナ → 装置の UDP 161 |
 | 受け口で待つ(push を受ける) | SNMP trap、NetFlow / sFlow | 装置 → ニルヴァーナの UDP 1162 / 2055 / 6343 |
-| ローカルのファイルを読む | MRTG、Cacti | ニルヴァーナが動くマシンのファイルシステム(HTTP ではない) |
+| ローカルのファイルを読む | MRTG、Cacti の RRD | ニルヴァーナが動くマシンのファイルシステム(HTTP ではない) |
+| DB に問い合わせる(pull) | Cacti の DB(RRD と装置・IF の対応) | ニルヴァーナ → Cacti の MySQL / MariaDB(`mysql` クライアント経由) |
 
-**MRTG と Cacti は HTTP では取りに行きません。** ニルヴァーナが動いているマシンのファイルを、設定に書いたパスから直接読みます。MRTG・Cacti が別のサーバーにある場合は、次のどちらかにします。
+**MRTG と Cacti の RRD は HTTP では取りに行きません。** ニルヴァーナが動いているマシンのファイルを、設定に書いたパスから直接読みます。MRTG・Cacti が別のサーバーにある場合は、次のどちらかにします。
 
 - そのサーバーでニルヴァーナを動かす
 - NFS・sshfs・docker のボリュームで、WorkDir や rra ディレクトリを共有する
@@ -189,17 +190,74 @@ ifHCInOctets{job="<job>"} / ifHCOutOctets     # 累積カウンタ(IF ごとの�
 | 項目 | 内容 |
 |---|---|
 | 取るもの | IF の入力・出力の bps(Cacti の「Interface - Traffic」のデータソース) |
-| 取り方 | **ローカルの RRD を `rrdtool fetch` で読む**(HTTP ではない) |
-| 単体版の設定 | `sources.cacti: {rra_dir: /var/lib/cacti/rra, targets: [{device: cr1, if: GigabitEthernet0/0/0, file: cr1_traffic_in_12.rrd}]}` |
-| 実装 | `cvs/legacy_sources.py` の `LegacyRates.rates()` と `rrd_last()` |
+| 取り方 | **RRD はローカルのファイルを `rrdtool fetch` で読む**。**RRD と装置・IF の対応は、Cacti の DB(MySQL / MariaDB)から自動で読む** |
+| 単体版の設定 | `sources.cacti: {db: {config: /etc/cacti/debian.php}, stale: 900}`。`rra_dir` は書かなくても動きます(Cacti の設定 `path_rra` を使う) |
+| 実装 | `cvs/cacti_db.py`(DB の読み取りと対応づけ)、`cvs/legacy_sources.py` の `LegacyRates`(RRD の読み取り) |
 
-**Cacti は、RRD のファイル名と IF の対応を設定に書く必要があります。** どのファイルがどの IF かは Cacti のデータベースにしか無く、ファイル名(`<ホスト>_traffic_in_<番号>.rrd`)からは IF が分からないためです。
+### 自動の対応づけの仕組み
 
-- `install.sh` は `rra_dir` で見つけた RRD の一覧を、設定の下書きにコメントで出します。番号と IF の対応は、Cacti の画面(Data Sources)で確かめて `targets` に書いてください。
-- `file` は `rra_dir` からの相対パスでも、絶対パスでも書けます。
-- データソース名は既定で `traffic_in` / `traffic_out` です。違う場合は `ds_in` / `ds_out` で指定します。値はバイト/秒として読み、8倍して bps にします。
-- `stale`(既定900秒)より古い値は表示しません。
-- **`rra_dir` の候補**: `/var/lib/cacti/rra`(Debian 系の既定)、`/usr/share/cacti/rra`、`/var/www/html/cacti/rra`、`/usr/share/cacti/site/rra`。同じく `--detect-only` に「Cacti 候補」として出ます。設定の `rra_dir` が無いときは `errors.cacti` に出ます。
+Cacti 1.x の RRD のファイル名は `<path_rra>/<host_id>/<local_data_id>.rrd` のように数字だけで、名前から IF は分かりません。対応は Cacti の DB にしか無いので、DB を読み取り専用で引きます。
+
+1. **接続先を読む**: `sources.cacti.db.config` の PHP ファイルから `$database_hostname` / `$database_username` / `$database_password` / `$database_default` / `$database_port` を読みます。パスワードはニルヴァーナの設定ファイルには書きません。直接指定したい項目は `host` / `port` / `user` / `password` / `database` で上書きできます。
+2. **`mysql`(または `mariadb`)クライアントで SELECT を1回**流します。パスワードはコマンドラインに載せず、環境変数 `MYSQL_PWD` で渡します(`ps` に出ません)。標準ライブラリだけで動かす方針と、`rrdtool` を呼ぶ既存の作りに合わせた方式です。
+3. **読むテーブル**(Cacti 1.2.26 の `cacti.sql` で確認):
+
+   | テーブル | 使う列 | 目的 |
+   |---|---|---|
+   | `host` | `hostname`(IP か名前)、`description`、`disabled` | 装置 |
+   | `data_local` | `host_id`、`snmp_query_id`、`snmp_index`(= ifIndex) | データソースと装置・IF の結びつき |
+   | `data_template_data` | `data_source_path`(`<path_rra>/…rrd`) | RRD のファイル |
+   | `data_template_rrd` | `data_source_name` | `traffic_in` と `traffic_out` の両方を持つものだけ(CPU など他のデータソースを除く) |
+   | `host_snmp_cache` | `field_name`(`ifName` / `ifDescr` / `ifIP`)、`field_value`、`snmp_index` | IF の名前と IP |
+
+4. **設定の装置・IF と照合**します。装置は、Cacti のホスト名(IP か名前)か説明が、設定の装置の `id` / `hostname` / `mgmt_ip` / `zabbix_host` / `loki_host` のどれかと一致するもの。IF は、`ifName` か `ifDescr` が設定の IF 名と一致するか(`Gi0/0/0` と `GigabitEthernet0/0/0` のような略記の違いは吸収します)、`ifIP` が設定の IF の IP と一致するもの。
+5. `<path_rra>` を実際のディレクトリ(`rra_dir`、書かなければ Cacti の設定 `path_rra`)に置き換え、`rrdtool fetch` で最新の値を読みます。
+
+### 運用
+
+- DB は `db_ttl` 秒(既定300)に1回だけ引きます。RRD の読み取りは毎回です。
+- **対応づけの結果は `GET /api/health` の `notes.cacti` に出ます**。対応づけできなかったものは理由つきです。
+  ```
+  DB に traffic の RRD が 4 本、装置・IF に対応づけ 3 本。対応づけできなかった 1 本: OLD-SW Fa0/1(装置が設定に無い: 10.9.9.9)
+  ```
+- **DB に繋がらないとき**は `errors.cacti_db` に理由が出ます。前回の対応を使い続けるので、流量の表示は止まりません。接続情報のファイルが無いときは `errors.cacti` に候補つきで出ます。
+- **同じ装置・IF を `targets` に手で書いたときは、手書きが優先**されます。DB に無い RRD や、対応づけできなかったものは、`targets` で補えます(`file` は `rra_dir` からの相対でも可、`ds_in` / `ds_out` でデータソース名を変更)。
+- DB を使わないなら、これまでどおり `targets: [{device, if, file}]` を手で書きます。
+- DB の接続は、Cacti とは別のサーバーでも構いません(`$database_hostname` の先へ繋ぎます)。ただし RRD は、ニルヴァーナが動くマシンから読めるパスにある必要があります。
+- **必要なもの**: `mysql` クライアント(`mariadb-client` か `mysql-client`)と `rrdtool`。**Docker の単体版のイメージには、どちらも入っていません**(イメージを作り直すか、ホストで動かしてください)。DB のユーザーは `SELECT` だけで足ります。
+
+### 接続情報のファイルの場所(インストーラーが探す順)
+
+| 場所 | 環境 |
+|---|---|
+| `/etc/cacti/db.php` | RHEL / Rocky / Alma(EPEL) |
+| `/etc/cacti/debian.php` | Debian / Ubuntu(`/usr/share/cacti/site/include/config.php` はこれへの symlink) |
+| `/usr/share/cacti/site/include/config.php` | Debian 系(上の symlink) |
+| `/var/www/html/cacti/include/config.php` | ソースから入れた場合 |
+| `/usr/share/cacti/include/config.php` | 古い配置 |
+
+`./install.sh --detect-only` に「Cacti DB 候補」として出ます。別の場所なら `--cacti-db-config <パス>` で渡します。見つかると、設定の下書きに `sources.cacti.db.config` を書きます。RRD はサブディレクトリの中も数えます(以前は直下の `traffic` を含む名前しか数えず、Cacti 1.x では見つかりませんでした)。
+
+### 本物で確かめた結果
+
+**本物の MariaDB 10.11 に、Cacti 1.2.26 の `cacti.sql` をそのまま読み込み**、Cacti 1.x と同じ形(`<path_rra>/<host_id>/<id>.rrd`、`host_snmp_cache` に ifName / ifDescr / ifIP)でデータを入れ、本物の `rrdtool` で作った RRD を読みました。CPU のデータソースと、設定に無い装置を混ぜています。
+
+```
+$ python3 -c '... LegacyRates({"sources":{"cacti":{"db":{"config":"debian.php"}}}}, devs, lookup).rates(now)'
+('cr1', 'gi0/0/0')  in=2000000 bps  out=1920000 bps  src=cacti      ← RRD は 250000 B/s・240000 B/s
+('cr1', 'gi0/0/1')  in=8000 bps     out=6400 bps     src=cacti
+('cr2', 'gi0/0/0')  in=1000000 bps  out=1000000 bps  src=cacti
+errors: {}
+notes: {'cacti': 'DB に traffic の RRD が 4 本、装置・IF に対応づけ 3 本。対応づけできなかった 1 本: OLD-SW Fa0/1(装置が設定に無い: 10.9.9.9)'}
+```
+
+- 間違ったパスワード: `errors.cacti` に `Cacti の DB に繋がりません: ERROR 1045 (28000): Access denied …`
+- DB が落ちた間: 前回の対応で流量を出し続け、`errors.cacti_db` に理由。復旧すると消える
+- ニルヴァーナの単体版を Cacti の DB だけを取り込み元にして起動すると、`SOURCE: CACTI` で CR1 ⇄ CR2 が約 1.9 Mbps / 1.0 Mbps と表示された
+
+![Cacti の DB だけを取り込み元にした画面](images/nirvana-intro/7-cacti-db.jpg)
+
+**未確認のこと**: 本物の Cacti(PHP のアプリ)を動かしたものではありません。Cacti のテーブルと列は 1.2.26 の `cacti.sql` で確認しましたが、データの入り方(`data_source_path` の形、`host_snmp_cache` の `ifIP` の有無)は私の知る Cacti 1.x の動きに合わせて作ったものです。実機で `notes.cacti` の本数が合わないときは、`host_snmp_cache` の中身(`SELECT DISTINCT field_name FROM host_snmp_cache`)を見せてください。
 
 ## 8. Zabbix
 

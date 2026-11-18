@@ -27,14 +27,14 @@ PowerPoint 版: [nirvana-introduction.pptx](nirvana-introduction.pptx)
 | syslog | syslog-bridge UDP 5515 → Grafana Loki | ログのプレート、syslog 観点の状態、リンク断の検知、フラップ検知、AI ログ解析 |
 | NetFlow v5 / sFlow v5 | ニルヴァーナ UDP 2055 / 6343 | 通信のプレート、ダークネットに届いた通信の分類、クラウド各リージョン宛ての流量 |
 | MRTG | (既存の MRTG のファイルを読む) | `mrtg.cfg` から `.log` 形式か rrdtool 形式かを自動で判別し、リンクの流量を表示 |
-| Cacti | (既存の RRD ファイルを読む) | `traffic_in` / `traffic_out` を `rrdtool fetch` で読み、リンクの流量を表示 |
+| Cacti | (既存の RRD ファイルと、Cacti の DB) | RRD を `rrdtool fetch` で読み、どの RRD がどの装置・IF かは Cacti の DB から自動で対応づけて、リンクの流量を表示 |
 | Zabbix | Zabbix API | 流量、IF の状態、問題(problem)、ホストの到達性 |
 
 MRTG と Cacti はどちらも、値を RRD(Round Robin Database)に持てます。RRD を扱う道具が rrdtool です。MRTG は独自の `.log` 形式も使えますが、ニルヴァーナはどちらの形式も読めます。設定した秒数より古い値は表示しません。
 
 単体版のインストーラー(`cyber-view-standalone/install.sh`)は、動いている Prometheus・Loki・Zabbix・MRTG・Cacti を探して設定ファイルを作ります。
 
-データ元ごとの取り込み方(投げる PromQL・LogQL、SNMP の OID、受け口のポート、設定に書くこと、受け持つ関数)は [nirvana-data-ingestion.md](nirvana-data-ingestion.md) にまとめました。MRTG と Cacti は HTTP では取りに行かず、ニルヴァーナが動くマシンのローカルのファイルを読みます。MRTG は `mrtg.cfg` のパスだけでファイル名まで決まります。Cacti は RRD のファイル名と IF の対応を設定に書きます。
+データ元ごとの取り込み方(投げる PromQL・LogQL、SNMP の OID、受け口のポート、設定に書くこと、受け持つ関数)は [nirvana-data-ingestion.md](nirvana-data-ingestion.md) にまとめました。MRTG と Cacti の RRD は HTTP では取りに行かず、ニルヴァーナが動くマシンのローカルのファイルを読みます。MRTG は `mrtg.cfg` のパスだけでファイル名まで決まります。Cacti は、どの RRD がどの装置・IF かを Cacti の DB から自動で読みます(読み取りだけ。`mysql` クライアントが要ります)。
 
 ## 2. ヴァルハラ(Prometheus を拡張したもの)との連携
 
