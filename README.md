@@ -13,6 +13,11 @@
   <sub>通常運用 → リンク障害と迂回 → フラップ → 経路の変化(情)。クリックで音楽つきの動画 / normal → link failure and reroute → flapping → route change info. Click for the full video with music.</sub>
 </p>
 
+**ニルヴァーナ(Cyber View)**は、既存の監視(Prometheus・Grafana Loki・SNMP / TRAP・NetFlow / sFlow・MRTG・Cacti・Zabbix)の値を読み、ネットワークのトラフィックと障害を **3D** で見せ、変化を「情」「注」「警」で知らせる監視画面です。実機の監視にも使える単体版(`cyber-view-standalone/`)があります。
+紹介: [docs/nirvana-introduction.md](docs/nirvana-introduction.md) / [PowerPoint](docs/nirvana-introduction.pptx)
+
+<sub>キーワード: ネットワーク可視化 · ネットワーク監視 · トラフィック可視化 · 3D · SNMP · NetFlow · sFlow · Prometheus · Grafana · Loki · MRTG · Cacti · Zabbix · OSPF · ダークネット · network traffic visualization · network monitoring · 3D network view · NIRVANA-style</sub>
+
 > 🇬🇧 **English version: [at the bottom of this page](#english)**
 >
 > 📊 **[実装進捗ダッシュボード](./IMPLEMENTATION_PROGRESS.md)**  
