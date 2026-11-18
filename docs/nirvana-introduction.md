@@ -216,6 +216,14 @@ WORLD(`?view=world`)では、地球儀の上に 都市 → 都市 の通信を�
 
 画像は見本モードで撮ったものです。実データでの表示はまだ確かめていません。詳しくは [world-view.md](world-view.md)。
 
+参考(情報源):
+
+- RIPE Atlas(都市間の経路と遅延): https://atlas.ripe.net/ (API: https://atlas.ripe.net/api/v2)
+- SANS ISC / DShield(攻撃元の IP): https://isc.sans.edu/ (API: https://isc.sans.edu/api)
+- Cloudflare Radar(L3 攻撃): https://developers.cloudflare.com/radar/
+- DB-IP「IP to City Lite」(IP → 都市、CC BY 4.0): https://db-ip.com/
+- MAWI(pcap 再生。この小節の表示には使いません): https://mawi.wide.ad.jp/mawi/
+
 ## 8. スキン(背景)
 
 背景は 標準・金魚鉢・富士山・太陽系 から選べます。画面右の背景ボタンで切り替えるか、URL に `?bg=goldfish` / `?bg=fuji` / `?bg=solar` を付けます。選んだ背景はブラウザに覚えておきます。どの背景でも、リンク・プレート・「警」の表示は同じです。
