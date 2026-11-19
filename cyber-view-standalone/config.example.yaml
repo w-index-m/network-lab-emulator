@@ -114,6 +114,7 @@ sources:
   # SNMP trap(linkDown / linkUp)をこの画面で直接受ける場合
   # snmp_trap:
   #   listen: 0.0.0.0:1162
+  #   stale_after: 90   # linkDown の trap から何秒たっても POLL が up なら、linkUp を取りこぼしたとみなして down を捨てる(秒)
 
 # 地球儀(WORLD): 拠点の位置と、外の情報源(クラウドの IP 範囲・Cloudflare Radar・IIJ IHR・RIPE Atlas・
 # DShield・DB-IP の都市 DB)。届かない元は「取れない」と表示する。CLOUDFLARE_API_TOKEN 等は環境変数で
