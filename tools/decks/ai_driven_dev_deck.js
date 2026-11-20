@@ -1,0 +1,267 @@
+const pptxgen = require('pptxgenjs');
+const { applyTheme } = require('/root/.claude/skills/synced/873d3bbd-f5ee-4b8c-9a98-2572553cb7c0_eea210e2-e365-400d-9ef2-489ddbf84912/pptx/scripts/apply_theme.js');
+
+const OUT = process.argv[2] || 'deck.pptx';
+const THEME = {
+  name: 'Nirvana Behind',
+  headFontFace: 'Meiryo',
+  bodyFontFace: 'Meiryo',
+  colors: {
+    dk1: '070D17', lt1: 'FFFFFF', dk2: '13213A', lt2: 'DBE6F3',
+    accent1: '4FD6E8', accent2: 'F2A93B', accent3: 'FF5A6A', accent4: 'A98BFF',
+    accent5: '5FE0A0', accent6: '8BA0B8', hlink: '4FD6E8', folHlink: 'A98BFF',
+  },
+};
+
+const pres = new pptxgen();
+pres.layout = 'LAYOUT_16x9'; // 10 x 5.625
+pres.theme = { headFontFace: THEME.headFontFace, bodyFontFace: THEME.bodyFontFace };
+pres.title = 'AI ドリブン開発の裏側';
+pres.author = 'Claude Code';
+const C = pres.SchemeColor;
+const SH = pres.shapes;
+
+// ── layouts ──
+pres.defineSlideMaster({
+  title: 'TITLE_DARK',
+  background: { color: C.text1 },
+  objects: [
+    { placeholder: { options: { name: 'title', type: 'title', x: 0.6, y: 1.55, w: 8.8, h: 1.4, fontSize: 36, bold: true, color: C.background1, valign: 'top', align: 'left', margin: 0 }, text: '' } },
+    { placeholder: { options: { name: 'body', type: 'body', x: 0.6, y: 3.05, w: 8.8, h: 1.5, fontSize: 16, color: C.accent1, valign: 'top', align: 'left', margin: 0 }, text: '' } },
+  ],
+});
+pres.defineSlideMaster({
+  title: 'CONTENT_DARK',
+  background: { color: C.text1 },
+  margin: [0.5, 0.5, 0.5, 0.5],
+  objects: [
+    { placeholder: { options: { name: 'title', type: 'title', x: 0.5, y: 0.3, w: 9.0, h: 0.7, fontSize: 26, bold: true, color: C.background1, valign: 'middle', align: 'left', margin: 0 }, text: '' } },
+    { text: { text: 'Nirvana Lab ・ AI ドリブン開発の裏側', options: { x: 0.5, y: 5.2, w: 6, h: 0.3, fontSize: 9, color: C.accent6, margin: 0 } } },
+  ],
+  slideNumber: { x: 9.0, y: 5.2, w: 0.5, h: 0.3, fontSize: 9, color: C.accent6, align: 'right' },
+});
+
+// ── helpers ──
+function hex(slide, x, y, size, color, label, name, labelColor) {
+  slide.addShape(SH.HEXAGON, { x, y, w: size, h: size * 0.88, fill: { color }, line: { color, width: 0 }, objectName: name });
+  if (label) {
+    slide.addText(label, { x, y, w: size, h: size * 0.88, align: 'center', valign: 'middle', fontSize: Math.round(size * 18), bold: true, color: labelColor || C.text1, margin: 0, isTextBox: true, objectName: name + ' label' });
+  }
+}
+function card(slide, x, y, w, h, name) {
+  slide.addShape(SH.ROUNDED_RECTANGLE, { x, y, w, h, rectRadius: 0.08, fill: { color: C.text2 }, line: { color: C.text2, width: 0 }, objectName: name });
+}
+function txt(slide, text, opt) {
+  slide.addText(text, Object.assign({ isTextBox: true, margin: 0, color: C.background2, fontSize: 14, valign: 'top' }, opt));
+}
+
+// 1. タイトル
+pres.addSection({ title: 'はじめに' });
+let s = pres.addSlide({ masterName: 'TITLE_DARK', sectionTitle: 'はじめに' });
+s.addText('AI ドリブン開発の裏側', { placeholder: 'title' });
+s.addText('Claude がニルヴァーナ ラボで、依頼から main への取り込みまで何をしているか', { placeholder: 'body' });
+hex(s, 7.75, 0.45, 0.9, C.accent1, '情', 'motif hex info');
+hex(s, 8.55, 0.95, 0.65, C.accent2, '注', 'motif hex warn');
+hex(s, 7.95, 1.25, 0.5, C.accent3, '警', 'motif hex alert', C.background1);
+txt(s, '2026-11-20', { x: 0.6, y: 4.7, w: 4, h: 0.3, fontSize: 12, color: C.accent6 });
+s.addNotes('このデッキは、ニルヴァーナ ラボの開発で Claude が裏側で何をしているかをまとめたものです。依頼は一言、そこから調査・実装・テスト・本物のツールでの確認・GitHub の CI・main への取り込みまでを Claude が進めます。');
+
+// 2. 要旨
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'はじめに' });
+s.addText('一言の依頼が、確かめられた変更として main に入る', { placeholder: 'title' });
+const pillars = [
+  ['任せる', C.accent1, '人は「何をしたいか」を一言で。Claude がコードを読み、作り、テストを書く'],
+  ['確かめる', C.accent2, '単体テストに加えて、本物のサーバーと本物のツール(snmpwalk・gnmic・ブラウザ)で動きを見る'],
+  ['直し切る', C.accent3, 'テストが落ちたら再実行で済ませず、原因を再現してから直す'],
+];
+pillars.forEach(([head, col, body], i) => {
+  const x = 0.5 + i * 3.05;
+  card(s, x, 1.3, 2.85, 3.5, 'pillar card ' + (i + 1));
+  hex(s, x + 0.3, 1.6, 0.75, col, String(i + 1), 'pillar hex ' + (i + 1));
+  txt(s, head, { x: x + 0.3, y: 2.45, w: 2.3, h: 0.5, fontSize: 20, bold: true, color: C.background1 });
+  txt(s, body, { x: x + 0.3, y: 3.0, w: 2.3, h: 1.65, fontSize: 13 });
+});
+s.addNotes('要点は三つです。任せる、確かめる、直し切る。今日の作業(SNMP のポートカウンタ、gNMI、STP の修正)もこの流れで進めました。');
+
+// 3. 開発ループ
+pres.addSection({ title: '進め方' });
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '進め方' });
+s.addText('1 つの依頼が通る 8 つの工程', { placeholder: 'title' });
+const steps = [
+  ['依頼', '一言で方向を伝える'], ['読む', 'コードを調べる'], ['作る', '実装する'], ['単体テスト', 'テストを書いて回す'],
+  ['本物で確認', '本物のツールで'], ['全体テスト', '約 2,100 件・17 分'], ['PR と CI', 'GitHub で同じテストをもう一度'], ['取り込み', '緑なら main へ'],
+];
+steps.forEach(([h, b], i) => {
+  const row = Math.floor(i / 4), col = i % 4;
+  const x = 0.5 + col * 2.3, y = 1.3 + row * 1.85;
+  hex(s, x, y, 0.6, i === 4 ? C.accent2 : C.accent1, String(i + 1), 'step hex ' + (i + 1));
+  txt(s, h, { x: x + 0.72, y: y + 0.02, w: 1.45, h: 0.35, fontSize: 15, bold: true, color: C.background1 });
+  txt(s, b, { x: x + 0.72, y: y + 0.4, w: 1.45, h: 0.9, fontSize: 11, color: C.background2 });
+});
+txt(s, '落ちたら「読む」に戻る。直してから、もう一度「単体テスト」から', { x: 0.5, y: 4.85, w: 9, h: 0.3, fontSize: 12, italic: true, color: C.accent2 });
+s.addNotes('工程は 8 つです。特徴は 5 番目の「本物で確認」です。単体テストが通っても、実際に起動したサーバーに本物の snmpwalk や gnmic を当てて、数字が期待どおり動くかを見ます。ここで見つかるバグが多いです。');
+
+// 4. テストの 4 層
+pres.addSection({ title: 'テスト' });
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'テスト' });
+s.addText('テストは 4 層。下ほど数が多く、上ほど本物に近い', { placeholder: 'title' });
+const layers = [
+  ['GitHub CI', 'push と PR のたびに自動', C.accent4, 4.4],
+  ['本物のツールで確認', 'snmpwalk・gnmic・Playwright', C.accent2, 5.0],
+  ['シナリオ回帰', '本物のサーバーで 12 シナリオ・62 チェック', C.accent5, 5.6],
+  ['pytest', '172 ファイル・約 2,160 件', C.accent1, 6.2],
+];
+layers.forEach(([h, b, col, w], i) => {
+  const y = 1.2 + i * 0.92;
+  const x = 0.5 + (6.2 - w) / 2;
+  s.addShape(SH.ROUNDED_RECTANGLE, { x, y, w, h: 0.8, rectRadius: 0.08, fill: { color: col }, line: { color: col, width: 0 }, objectName: 'layer ' + h });
+  txt(s, [{ text: h, options: { bold: true, fontSize: 15, breakLine: true } }, { text: b, options: { fontSize: 11 } }],
+      { x, y, w, h: 0.8, align: 'center', valign: 'middle', color: C.text1 });
+});
+txt(s, [
+  { text: 'なぜ 4 層か', options: { bold: true, color: C.background1, fontSize: 15, breakLine: true } },
+  { text: 'pytest は速く何度でも回せるが、作り物の中で完結する。', options: { breakLine: true } },
+  { text: '本物のツールは、実機の監視ツールから見て正しいかを確かめる。', options: { breakLine: true } },
+  { text: 'CI は「自分の環境では通る」を防ぐ最後の関門。', options: {} },
+], { x: 7.0, y: 1.3, w: 2.5, h: 3.5, fontSize: 12, paraSpaceAfter: 8 });
+s.addNotes('テストは 4 層です。一番下の pytest が約 2,160 件。その上のシナリオ回帰は、本物のサーバーを起動して OSPF・BGP・STP などを 12 シナリオで確かめます。さらに本物のツールでの確認、最後に GitHub の CI で同じテストをもう一度回します。');
+
+// 5. 数字
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'テスト' });
+s.addText('今日の全体テスト', { placeholder: 'title' });
+const stats = [
+  ['2,134', 'passed / 失敗 0', C.accent5],
+  ['17 分', '全体テストの所要時間', C.accent1],
+  ['172', 'テストファイル', C.accent4],
+  ['62', 'シナリオの確認項目', C.accent2],
+];
+stats.forEach(([n, l, col], i) => {
+  const x = 0.5 + i * 2.3;
+  card(s, x, 1.35, 2.1, 2.4, 'stat card ' + (i + 1));
+  txt(s, n, { x: x + 0.15, y: 1.65, w: 1.8, h: 1.0, align: 'center', valign: 'middle', fontSize: 40, bold: true, color: col });
+  txt(s, l, { x: x + 0.15, y: 2.8, w: 1.8, h: 0.7, align: 'center', fontSize: 12, color: C.background2 });
+});
+txt(s, '新しく足したテスト: gNMI のカウンタ 5 件・ポートカウンタ 12 件・STP 3 件', { x: 0.5, y: 4.2, w: 9, h: 0.4, fontSize: 14, color: C.background1 });
+s.addNotes('今日の全体テストは 2,134 件が通り、失敗は 0 件でした。所要時間は約 17 分です。今日の作業で新しく足したテストは、gNMI のカウンタ、ポートカウンタ、STP の合わせて 20 件です。');
+
+// 6. 本物のツール
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'テスト' });
+s.addText('本物のツールを当てて確かめる', { placeholder: 'title' });
+const H = { bold: true, color: C.text1, fill: { color: C.accent1 }, fontSize: 13 };
+const R = (a, b, c) => [{ text: a, options: { bold: true, color: C.background1 } }, { text: b }, { text: c, options: { color: C.accent2 } }];
+s.addTable([
+  [{ text: 'ツール', options: H }, { text: '確かめたこと', options: H }, { text: '結果', options: H }],
+  R('snmpwalk / snmpget', '待機中のアップリンクの IF-MIB', 'BPDU が 2 秒ごとに増加'),
+  R('snmpget', 'PC から ping 10 回(1000 B)', 'ユニキャスト 10 個・10,280 B'),
+  R('gnmic', 'gNMI の 1 秒ストリーム', '1 秒ごとに届き、ping の分だけ増加'),
+  R('Playwright', '/cyber-view の演出', '起動演出と FX の切り替え、エラー 0'),
+  R('uvicorn + curl', '本物のサーバーに CLI を流す', 'show の出力と API の値が一致'),
+], { x: 0.5, y: 1.25, w: 9.0, colW: [2.1, 3.4, 3.5], fontSize: 12, color: C.background2, fill: { color: C.text2 }, border: { type: 'solid', pt: 1, color: C.text1 }, rowH: 0.52, valign: 'middle', objectName: 'tools table' });
+s.addNotes('単体テストは作り物の中で完結するので、実機の監視ツールから見て正しいかは別に確かめます。今日は net-snmp の snmpwalk、gnmic、Playwright を使いました。');
+
+// 7. CI が落ちたとき
+pres.addSection({ title: '失敗への対応' });
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '失敗への対応' });
+s.addText('CI が落ちたら、再実行ではなく原因を探す', { placeholder: 'title' });
+const cases = [
+  ['L2 ループ', '裏の定期処理が、テストより先に警報を出していた', 'テスト中は定期処理を止め、検知を直接呼ぶ', C.accent2],
+  ['STP の復旧ログ', 'no shutdown の途中で BPDU がポートを作り直し、相手側の up ログが出ない', 'エミュレータの実バグ。落としたポートは復旧処理だけが作り直す', C.accent3],
+  ['RIP のシナリオ', 'フィルタより先に経路が隣へ届くことがあった', 'distribute-list を network の前に入れる', C.accent2],
+];
+cases.forEach(([h, cause, fix, col], i) => {
+  const x = 0.5 + i * 3.05;
+  card(s, x, 1.25, 2.85, 3.65, 'case card ' + (i + 1));
+  hex(s, x + 0.25, 1.45, 0.5, col, i === 1 ? '警' : '注', 'case hex ' + (i + 1), i === 1 ? C.background1 : C.text1);
+  txt(s, h, { x: x + 0.9, y: 1.5, w: 1.8, h: 0.45, fontSize: 15, bold: true, color: C.background1, valign: 'middle' });
+  txt(s, '原因', { x: x + 0.25, y: 2.15, w: 2.4, h: 0.3, fontSize: 11, bold: true, color: C.accent6 });
+  txt(s, cause, { x: x + 0.25, y: 2.45, w: 2.4, h: 1.05, fontSize: 12 });
+  txt(s, '直し方', { x: x + 0.25, y: 3.5, w: 2.4, h: 0.3, fontSize: 11, bold: true, color: C.accent6 });
+  txt(s, fix, { x: x + 0.25, y: 3.8, w: 2.4, h: 1.0, fontSize: 12, color: C.background1 });
+});
+s.addNotes('今日、GitHub の CI で落ちたのは 3 件です。どれも「時々落ちる」で片付けず、原因を突き止めました。2 件目の STP は、テストではなくエミュレータ自体の実バグでした。');
+
+// 8. 再現してから直す
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '失敗への対応' });
+s.addText('まず同じ失敗を手元で再現する', { placeholder: 'title' });
+card(s, 0.5, 1.25, 4.35, 3.2, 'before card');
+card(s, 5.15, 1.25, 4.35, 3.2, 'after card');
+txt(s, '直す前のコード', { x: 0.8, y: 1.45, w: 3.8, h: 0.4, fontSize: 16, bold: true, color: C.accent3 });
+txt(s, '「ループを閉じた直後に 2.5 秒待つ」をテストに一時的に足すと、CI と全く同じ失敗が毎回起きる', { x: 0.8, y: 1.95, w: 3.8, h: 1.1, fontSize: 13 });
+s.addText('assert (0 == 1)\n1 failed', { x: 0.8, y: 3.2, w: 3.8, h: 0.9, fontFace: 'Courier New', fontSize: 14, color: C.accent3, fill: { color: C.text1 }, margin: 8, isTextBox: true, objectName: 'before output' });
+txt(s, '直した後のコード', { x: 5.45, y: 1.45, w: 3.8, h: 0.4, fontSize: 16, bold: true, color: C.accent5 });
+txt(s, '同じ 2.5 秒の待ちを入れても通る。待ちを外して全体テストと CI でもう一度確かめる', { x: 5.45, y: 1.95, w: 3.8, h: 1.1, fontSize: 13 });
+s.addText('29 passed', { x: 5.45, y: 3.2, w: 3.8, h: 0.9, fontFace: 'Courier New', fontSize: 14, color: C.accent5, fill: { color: C.text1 }, margin: 8, isTextBox: true, objectName: 'after output' });
+txt(s, '再現できない修正は「たまたま通った」と区別がつかない', { x: 0.5, y: 4.65, w: 9, h: 0.35, fontSize: 13, italic: true, color: C.accent2 });
+s.addNotes('時々しか落ちないテストは、落ちる条件を意図的に作って再現します。今回は待ち時間を 2.5 秒足すと、CI と同じ assert (0 == 1) が毎回出ました。直した後は同じ条件でも通ることを確かめています。');
+
+// 9. 見つかった実バグ
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '失敗への対応' });
+s.addText('確かめる中で見つかった実バグ(今日の分)', { placeholder: 'title' });
+const bugs = [
+  ['STP', 'SVI のサブネットが違うと BPDU が届かず、2 台とも「ルート」のまま'],
+  ['STP', 'no shutdown で戻したとき、相手側の up ログが出ず LINK DOWN が残る'],
+  ['カウンタ', '1/30 を 60 回足すと 1.999… になり、LLDP を 1 個少なく数えていた'],
+  ['SNMP', 'L2 のアクセスポートが IF-MIB に出ず、流量を読めなかった'],
+  ['PC', 'ping -c / -s でカウンタが動かず、ifconfig で IP が設定されなかった'],
+  ['単体版', 'linkUp の trap を取りこぼすと、LINK DOWN が消えない'],
+];
+bugs.forEach(([tag, b], i) => {
+  const col = i % 2, row = Math.floor(i / 2);
+  const x = 0.5 + col * 4.6, y = 1.25 + row * 1.2;
+  hex(s, x, y, 0.55, C.accent3, '!', 'bug hex ' + (i + 1), C.background1);
+  txt(s, tag, { x: x + 0.7, y: y + 0.0, w: 3.6, h: 0.3, fontSize: 12, bold: true, color: C.accent3 });
+  txt(s, b, { x: x + 0.7, y: y + 0.3, w: 3.7, h: 0.8, fontSize: 12 });
+});
+s.addNotes('作った機能を本物のツールで確かめると、関係する別の場所のバグも見つかります。今日見つけて直した実バグがこの 6 件です。STP の 1 件目は、SNMP のカウンタを確かめている最中に気づきました。');
+
+// 10. 役割分担
+pres.addSection({ title: 'まとめ' });
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'まとめ' });
+s.addText('人が決めること、Claude が進めること', { placeholder: 'title' });
+card(s, 0.5, 1.25, 4.35, 3.6, 'human card');
+card(s, 5.15, 1.25, 4.35, 3.6, 'claude card');
+hex(s, 0.8, 1.45, 0.55, C.accent2, '人', 'human hex');
+hex(s, 5.45, 1.45, 0.55, C.accent1, 'AI', 'claude hex');
+txt(s, '人', { x: 1.5, y: 1.5, w: 3, h: 0.45, fontSize: 18, bold: true, color: C.background1, valign: 'middle' });
+txt(s, 'Claude', { x: 6.15, y: 1.5, w: 3, h: 0.45, fontSize: 18, bold: true, color: C.background1, valign: 'middle' });
+const humanList = ['何を作るか・優先順位を決める', '画面の見た目を判断する', '自宅の実機(Catalyst)で試す', '「main に取り込んで」と決める'];
+const claudeList = ['コードを読み、実装し、テストを書く', '本物のツールで動きを確かめる', 'CI の失敗の原因を探して直す', 'ドキュメントと変更まとめを書く'];
+txt(s, humanList.map((t, i) => ({ text: t, options: { bullet: true, breakLine: i < humanList.length - 1 } })), { x: 0.8, y: 2.25, w: 3.8, h: 2.4, fontSize: 14, paraSpaceAfter: 8 });
+txt(s, claudeList.map((t, i) => ({ text: t, options: { bullet: true, breakLine: i < claudeList.length - 1 } })), { x: 5.45, y: 2.25, w: 3.8, h: 2.4, fontSize: 14, paraSpaceAfter: 8 });
+s.addNotes('人が決めるのは方向と判断です。何を作るか、見た目はどうか、自宅の実機で試すか、main に取り込むか。手を動かして確かめる部分は Claude が進めます。');
+
+// 11. 安全装置
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'まとめ' });
+s.addText('勝手に進めすぎないための決まり', { placeholder: 'title' });
+const rules = [
+  ['main への取り込みは、人が頼んだときだけ', 'CI が緑でも、指示が無ければマージしない'],
+  ['履歴を書き換えない', '強制 push が止められたときは、普通のマージで対応した'],
+  ['秘密はコミットしない', 'API キーは環境変数。証明書は .gitignore'],
+  ['テストを消して緑にしない', '落ちたテストは原因を直す。スキップや無効化はしない'],
+];
+rules.forEach(([h, b], i) => {
+  const y = 1.25 + i * 0.9;
+  hex(s, 0.5, y, 0.6, C.accent5, String(i + 1), 'rule hex ' + (i + 1));
+  txt(s, h, { x: 1.3, y: y + 0.02, w: 8, h: 0.35, fontSize: 15, bold: true, color: C.background1 });
+  txt(s, b, { x: 1.3, y: y + 0.38, w: 8, h: 0.4, fontSize: 12 });
+});
+s.addNotes('AI に任せる範囲が広いほど、決まりが大事です。今日も、強制 push は環境側で止められ、通常のマージで対応しました。main への取り込みは「取り込んで」と言われたときだけ行います。');
+
+// 12. 次の一手
+s = pres.addSlide({ masterName: 'TITLE_DARK', sectionTitle: 'まとめ' });
+s.addText('次の一手', { placeholder: 'title' });
+s.addText([
+  { text: 'gNMI の 1 秒カウンタをニルヴァーナの画面へ', options: { bullet: true, breakLine: true } },
+  { text: 'Streamlit でカウンタ履歴のページ', options: { bullet: true, breakLine: true } },
+  { text: '全体テストの並列化で 17 分を短く', options: { bullet: true } },
+], { placeholder: 'body', paraSpaceAfter: 6 });
+hex(s, 7.75, 0.45, 0.9, C.accent1, '', 'motif hex 1');
+hex(s, 8.55, 0.95, 0.65, C.accent2, '', 'motif hex 2');
+hex(s, 7.95, 1.25, 0.5, C.accent3, '', 'motif hex 3');
+s.addNotes('次は、今日作った gNMI の 1 秒カウンタをニルヴァーナの画面に取り込むこと、Streamlit でカウンタ履歴のページを作ること、全体テストを並列化して 17 分を短くすることを考えています。');
+
+(async () => {
+  await pres.writeFile({ fileName: OUT });
+  await applyTheme(OUT, THEME);
+  console.log('wrote', OUT);
+})();
