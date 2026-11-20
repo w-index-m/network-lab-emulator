@@ -33,6 +33,19 @@
     background: rgba(4,14,28,0.8); border: 1px solid rgba(255,171,46,0.55); opacity: 0; transition: opacity .3s; pointer-events: none; }
   #bgmToast.show { opacity: 1; }
   #zoom button.on { color: #3dff9a; border-color: rgba(61,255,154,0.55); }
+  /* 起動演出(FX がオンのとき、タブを開いて最初の1回だけ) */
+  #boot { position: fixed; inset: 0; z-index: 30; pointer-events: none; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, #04122a 0%, #02060f 72%); transition: opacity .6s ease; }
+  #boot.gone { opacity: 0; }
+  #bootLog { min-width: min(520px, 88vw); font: 13px/1.75 monospace; color: #33d6ff; text-shadow: 0 0 8px rgba(51,214,255,.7); white-space: pre; }
+  #bootLog .big { font-size: 22px; letter-spacing: .32em; color: #e8f7ff; margin: 6px 0; }
+  #bootLog .ok { color: #3dff9a; } #bootLog .wait { color: #ffab2e; }
+  /* 照準カーソルを出している間は、矢印の代わりに十字 */
+  body.fxon canvas { cursor: crosshair; } body.fxon canvas.drag { cursor: grabbing; }
+  /* 端末の配色: 画面全体を単色の端末風にする(赤・橙・緑の色分けは明るさの差だけになる) */
+  :root[data-term="green"] { filter: grayscale(1) sepia(1) hue-rotate(62deg) saturate(3.2) brightness(.95); }
+  :root[data-term="amber"] { filter: grayscale(1) sepia(1) hue-rotate(-8deg) saturate(4) brightness(.95); }
+  :root[data-term="red"] { filter: grayscale(1) sepia(1) hue-rotate(-48deg) saturate(5) brightness(.9); }
   body.showlist:not(.links) #zoom { right: calc(min(300px, 44vw) + 28px); }
   body.showlist.links #zoom { right: calc(min(380px, 46vw) + 28px); }
   .hud { position: fixed; pointer-events: none; z-index: 2; }
@@ -260,6 +273,7 @@
 </head>
 <body>
 <canvas id="cv"></canvas>
+<div id="boot" aria-hidden="true"><div id="bootLog"></div></div>
 
 <div id="status" class="hud">
   <div class="brand">CYBER VIEW</div>
@@ -269,7 +283,7 @@
 </div>
 
 <div id="cidr" class="hud">0.0.0.0/0</div>
-<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山/太陽系)">◎</button><button id="zMusic" title="BGM を切り替え(なし/ジャズ/レゲエ/アンビエント)">♪</button><button id="zFx" class="on" title="サイバー演出(六角グリッド・データの雨・火の粉・走査線・グリッチ)のオン/オフ">FX</button></div><div id="bgmToast" class="hud"></div>
+<div id="zoom" class="hud"><button id="zIn" title="ズームイン">＋</button><button id="zOut" title="ズームアウト">－</button><button id="zReset" title="視点をリセット(ダブルクリックでも可)">⌂</button><button id="zSpin" class="on" title="自動回転のオン/オフ">⟳</button><button id="zBg" title="背景を切り替え(標準/金魚鉢/富士山/太陽系)">◎</button><button id="zMusic" title="BGM を切り替え(なし/ジャズ/レゲエ/アンビエント)">♪</button><button id="zFx" class="on" title="サイバー演出(六角グリッド・データの雨・火の粉・走査線・グリッチ・レーダー・発光・色ずれ・照準・タイプ表示・起動演出)のオン/オフ">FX</button><button id="zSe" title="効果音(警報・情報・ロックオン)のオン/オフ">SE</button><button id="zTerm" title="配色: サイバー(押すと 緑/琥珀/赤 の端末に切り替え)">◐</button></div><div id="bgmToast" class="hud"></div>
 <div id="bgToast" class="hud"></div>
 <div id="modes" class="hud"><button id="mNet" class="on">NETWORK</button><button id="mLink">ROUTER LINKS</button><button id="mOspf" title="OSPF: 隣接状態・エリア・最短経路ツリー">OSPF</button><button id="mAtk" title="ATT&amp;CK: 組織ごとの攻撃の進行度と、戦術×手法の時系列">ATT&amp;CK</button><button id="mWan" title="WAN: 回線チェック(フレッツ網の PPPoE / IPoE、遅延・ロスの推移)">WAN</button><button id="mDark" title="DARKNET: 使われていない帯に届いた通信(スキャン・DDoS の跳ね返り・設定ミス・リフレクションの準備)">DARKNET</button><button id="mWorld" title="WORLD: 地球儀(クラウド宛ての流量・Cloudflare Radar・IIJ Internet Health Report・MAWI の実トラフィック)">WORLD</button><button id="mBoard" title="ダッシュボード(パネル・変数・時間範囲・自動更新・注釈)">BOARD</button><button id="mExplore" title="問い合わせ(PromQL / LogQL / 内部の時系列とログ)">EXPLORE</button><button id="mAlerts" title="アラートルール・連絡先・履歴">ALERTS</button><button id="mAi" title="AI ログ解析: syslog を AI(LLM / クラウド AI)に読ませて、原因と対処を提案。実行は人が押す">AI</button><button id="mList" title="右脇に文字の一覧を出す">LIST</button><button id="mDemo" title="デモ: 自動シナリオ+合成音楽">DEMO ♪</button></div>
 <div id="demoCap" class="hud"><b>DEMO</b> <span id="demoStep"></span> <button id="demoMute" title="音を消す/戻す">♪</button></div>
@@ -1169,6 +1183,7 @@
     try {
       const d = await api(`/api/traffic/links?window=${w}`);
       linkData = d; layoutRouters(d.links); renderLinkPanel();
+      fxFeedEv(...d.links.slice(0, 10).map(l => `${l.iface_b || ''} ${Math.round((l.ab_bps + l.ba_bps) / 1000)}K`));
       pollHealth();
       document.getElementById('lLast').textContent = new Date(d.now * 1000).toTimeString().slice(0, 8);
       const src = document.getElementById('lSrc');
@@ -1412,7 +1427,7 @@
       const px = c.x + (mode === 'net' && !hostView ? -230 : 0);
       const more = shown[spot] === 3 ? total[spot] - 3 : 0;
       const title = p.title + (p.n > 1 ? ` ×${p.n}` : '') + (more > 0 ? `  +${more}` : '');
-      const r = plateAt(px, c.y, 0.82, p.col, title, p.val, false, t);
+      const r = plateAt(px, c.y, 0.82, p.col, title, fxType(p.val, now - p.born), false, t);
       if (r && p.mark) markHex(px - r.w / 2 - 16, r.y, 17, p.col, p.mark, t);   // 「情」「注」の六角マークをプレートの左に
       ctx.restore();
     }
@@ -3202,7 +3217,7 @@
     v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.55)');
     s.fillStyle = v; s.fillRect(0, 0, W, H);
     fxRain.length = 0;
-    for (let i = 0, n = Math.round(W / 46); i < n; i++) fxRain.push({ x: (i + Math.random()) * 46, y: Math.random() * H, v: 0.4 + Math.random() * 1.2, len: 6 + (Math.random() * 14 | 0) });
+    for (let i = 0, n = Math.round(W / 46); i < n; i++) fxRain.push({ x: (i + Math.random()) * 46, y: Math.random() * H, v: 0.4 + Math.random() * 1.2, len: 6 + (Math.random() * 14 | 0) , w: null });
   }
   // 背景の上・3D の下: 六角グリッドの脈動とデータの雨
   function fxUnder(t, alert) {
@@ -3221,12 +3236,17 @@
       ctx.font = '12px monospace'; ctx.textAlign = 'center';
       for (const d of fxRain) {
         d.y += d.v * (alert ? 2.2 : 1);
-        if (d.y - d.len * 14 > H) { d.y = -10; d.x = Math.random() * W; }
+        if (d.y - d.len * 14 > H) {
+          d.y = -10; d.x = Math.random() * W;
+          d.w = Math.random() < 0.75 ? fxWord() : null;          // 本物の値(装置名・IP・ログの種類・経路など)を流す
+          if (d.w) d.len = Math.min(24, d.w.length + 2);
+        }
         for (let k = 0; k < d.len; k++) {
           const yy = d.y - k * 14; if (yy < -14 || yy > H) continue;
           const a = (1 - k / d.len) * (k ? 0.14 : 0.42);
           ctx.fillStyle = alert ? `rgba(255,${k ? 70 : 200},${k ? 80 : 160},${a})` : `rgba(${k ? 51 : 200},${k ? 214 : 250},255,${a})`;
-          ctx.fillText(FX_GLYPH[(Math.floor(t / 90) + k * 7 + (d.x | 0)) % FX_GLYPH.length], d.x, yy);
+          const wd = d.w, ch = wd ? (k < wd.length ? wd[wd.length - 1 - k] : '') : FX_GLYPH[(Math.floor(t / 90) + k * 7 + (d.x | 0)) % FX_GLYPH.length];
+          if (ch) ctx.fillText(ch, d.x, yy);
         }
       }
     }
@@ -3265,9 +3285,217 @@
     }
     ctx.restore();
   }
+  // ── 追加のサイバー演出 ───────────────────────────────
+  // FX がオンのとき: 起動演出 / レーダー / 発光のにじみ・警報中の色ずれ / 本物のデータの雨 / タイプ表示 / 照準カーソル
+  // 別のボタン: 効果音(SE、既定オフ)と端末の配色(◐)
+  // データの雨に流す本物の値(装置名・IP・IF 名は pollHosts、ログの種類・経路・流れ・警報は届いた順に)
+  const fxFeed = { hosts: [], ev: [] };
+  function fxFeedEv(...xs) {
+    for (const x of xs) { const s = String(x == null ? '' : x).trim(); if (s && s.length <= 26) fxFeed.ev.push(s); }
+    if (fxFeed.ev.length > 120) fxFeed.ev.splice(0, fxFeed.ev.length - 120);
+  }
+  function fxWord() {
+    const a = fxFeed.ev.length && Math.random() < 0.6 ? fxFeed.ev : fxFeed.hosts;
+    return a.length ? a[(Math.random() * a.length) | 0] : null;
+  }
+  // 画面に出ている装置(レーダーと照準の対象)
+  function fxDevPoints() {
+    const out = [];
+    if (!['net', 'link', 'ospf'].includes(mode)) return out;
+    const ids = mode === 'net' ? (hostView ? [] : hosts.map(h => h.id)) : Object.keys(linkPos);
+    for (const id of ids) {
+      const P = posForDevice(id); if (!P) continue;
+      const p = proj(P[0], P[1], P[2]); if (!p) continue;
+      out.push({ id, name: (hostById[id] && hostById[id].hostname) || id, x: P[0], z: P[2], p });
+    }
+    return out;
+  }
+  // 2. レーダー: 床の輪を扇形が回り、通過した装置が一瞬光る
+  const fxPing = {};
+  function fxRadar(t) {
+    if (!fxOn || mode === 'world') return;
+    const R = 16.5, head = (t * 0.0009) % (Math.PI * 2), span = 0.95, N = 8;
+    const rgb = (mode === 'net' && alertLevel) || (health && health.overall === 'crit') ? '255,59,78' : '61,255,154';
+    const at = (a) => proj(R * Math.cos(a), 0.03, R * Math.sin(a));
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const c0 = proj(0, 0.03, 0);
+    if (c0) {
+      for (let k = 0; k < N; k++) {
+        const a0 = head - span * (k + 1) / N, a1 = head - span * k / N;
+        const p1 = at(a0), p2 = at((a0 + a1) / 2), p3 = at(a1);
+        if (!p1 || !p2 || !p3) continue;
+        ctx.fillStyle = `rgba(${rgb},${(0.11 * (1 - k / N)).toFixed(3)})`;
+        ctx.beginPath(); ctx.moveTo(c0.x, c0.y); ctx.lineTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.lineTo(p3.x, p3.y); ctx.closePath(); ctx.fill();
+      }
+      const ph = at(head);
+      if (ph) {
+        // 光のぼかし(shadowBlur)は GPU の無い環境で重いので、太く薄い線 + 細く明るい線の2本で光らせる
+        for (const [lw, a] of [[7, 0.18], [1.6, 0.85]]) {
+          ctx.strokeStyle = `rgba(${rgb},${a})`; ctx.lineWidth = lw;
+          ctx.beginPath(); ctx.moveTo(c0.x, c0.y); ctx.lineTo(ph.x, ph.y); ctx.stroke();
+        }
+      }
+    }
+    for (const d of fxDevPoints()) {
+      const diff = ((head - Math.atan2(d.z, d.x)) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+      if (diff < 0.1 && Math.hypot(d.x, d.z) <= R + 1 && t - (fxPing[d.id] || -1e9) > 900) fxPing[d.id] = t;
+      const age = t - (fxPing[d.id] || -1e9);
+      if (age < 1300) {
+        const u = age / 1300;
+        ctx.strokeStyle = `rgba(${rgb},${(0.9 * (1 - u)).toFixed(3)})`; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.ellipse(d.p.x, d.p.y, 10 + u * 34, (10 + u * 34) * 0.45, 0, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+  // 3. 発光のにじみ(縮小してから拡大して重ねる)と、警報中の色ずれ(赤と青緑の成分を左右にずらす)
+  let fxGlow = null, fxCA = null, fxAlertAt = -1e9, fxGlowTick = 0;     // fxAlertAt: 最後に新しい警報が届いた時刻
+  // 発光のにじみは画面全体を重ねるので、GPU の無い環境などでは重い。1 フレームの平均が 34ms(約 29fps 未満)の
+  // 時間が合わせて 4 秒たまったら、にじみだけを自動で止める(ページを開き直すまで)。速い時間は少しずつ差し引く
+  let fxBloomOn = true, fxFrameEma = 16, fxPrevT = 0, fxSlowMs = 0;
+  const qBloom = new URLSearchParams(location.search).get('bloom');     // ?bloom=1 で常に出す(デモ・撮影用)、?bloom=0 で出さない
+  if (qBloom === '0') fxBloomOn = false;
+  function fxPerf(t) {
+    const dt = fxPrevT ? Math.min(250, t - fxPrevT) : 16; fxPrevT = t;
+    if (!fxBloomOn || qBloom === '1' || document.hidden || dt >= 250) return;   // 裏のタブ・止まっていた後は数えない
+    fxFrameEma = fxFrameEma * 0.92 + dt * 0.08;
+    fxSlowMs = fxFrameEma > 34 ? fxSlowMs + dt : Math.max(0, fxSlowMs - dt * 0.5);
+    if (fxSlowMs > 4000) fxBloomOn = false;
+  }
+  function fxBloom() {
+    const gw = Math.max(1, Math.round(W / 4)), gh = Math.max(1, Math.round(H / 4));
+    if (!fxGlow || fxGlow.width !== gw || fxGlow.height !== gh) { fxGlow = document.createElement('canvas'); fxGlow.width = gw; fxGlow.height = gh; }
+    // 画面全体の縮小は重いので 3 フレームに 1 回だけ作り直す(光り方は数フレームでは大きく変わらない)
+    if ((fxGlowTick = (fxGlowTick + 1) % 3) === 0 || fxGlow._fresh !== true) {
+      const g = fxGlow.getContext('2d');
+      g.globalCompositeOperation = 'source-over'; g.filter = 'brightness(0.85) contrast(1.8)';   // 暗い所はにじませない
+      g.drawImage(cv, 0, 0, gw, gh); g.filter = 'none'; fxGlow._fresh = true;
+    }
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.32; ctx.drawImage(fxGlow, 0, 0, W, H); ctx.restore();
+  }
+  function fxAberration(t, k) {
+    const w = Math.max(1, cv.width >> 1), h = Math.max(1, cv.height >> 1);      // 半分の解像度で作る(重さを 1/4 に)
+    if (!fxCA || fxCA.width !== w || fxCA.height !== h) { fxCA = document.createElement('canvas'); fxCA.width = w; fxCA.height = h; }
+    const g = fxCA.getContext('2d'), s = k * (0.65 + 0.35 * Math.sin(t * 0.006));
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalCompositeOperation = 'lighter';
+    for (const [col, dx] of [['#ff0000', -1], ['#00ffff', 1]]) {
+      g.globalCompositeOperation = 'source-over'; g.drawImage(cv, 0, 0, w, h);
+      g.globalCompositeOperation = 'multiply'; g.fillStyle = col; g.fillRect(0, 0, w, h);
+      ctx.globalAlpha = 0.2 * s; ctx.drawImage(fxCA, dx * 3 * DPR * s, 0, cv.width, cv.height);
+    }
+    ctx.restore();
+  }
+  // 6. タイプ表示: 新しいプレートの値を1文字ずつ(幅が揺れないよう空白で埋める)
+  function fxType(s, age) {
+    if (!fxOn || fxCalm || !s) return s;
+    const n = Math.floor(age / 24);
+    if (n >= s.length) return s;
+    return s.slice(0, n) + (Math.floor(age / 110) % 2 ? '▌' : ' ') + ' '.repeat(Math.max(0, s.length - n - 1));
+  }
+  // 7. 照準カーソル: マウスに十字。装置に近づくと四隅の枠が寄って「LOCK ON」
+  const fxAim = { x: 0, y: 0, on: false, lock: null, lockAt: 0 };
+  const fxFinePointer = !(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);   // タッチの画面では出さない
+  cv.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'mouse' || !fxFinePointer || (e.clientX === 0 && e.clientY === 0)) return;
+    fxAim.x = e.clientX; fxAim.y = e.clientY; fxAim.on = true;
+  });
+  cv.addEventListener('pointerleave', () => { fxAim.on = false; fxAim.lock = null; });
+  function fxReticle(t) {
+    if (!fxAim.on) return;
+    let best = null, bd = 48;
+    for (const d of fxDevPoints()) { const dd = Math.hypot(d.p.x - fxAim.x, d.p.y - fxAim.y); if (dd < bd) { bd = dd; best = d; } }
+    if ((best && best.id) !== (fxAim.lock && fxAim.lock.id)) { fxAim.lock = best; fxAim.lockAt = t; if (best) sfx('lock'); }
+    const { x, y } = fxAim;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(143,233,255,0.85)'; ctx.lineWidth = 1.2; ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI * 2); ctx.stroke();
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { ctx.beginPath(); ctx.moveTo(x + dx * 7, y + dy * 7); ctx.lineTo(x + dx * 21, y + dy * 21); ctx.stroke(); }
+    ctx.shadowBlur = 0; ctx.fillStyle = 'rgba(143,233,255,0.7)'; ctx.font = '10px monospace'; ctx.textAlign = 'left';
+    ctx.fillText(`X${String(Math.round(x)).padStart(4, '0')} Y${String(Math.round(y)).padStart(4, '0')}`, x + 18, y + 26);
+    if (best) {
+      const k = Math.min(1, (t - fxAim.lockAt) / 260), s = 44 - 22 * k, L = 9, px = best.p.x, py = best.p.y;
+      ctx.strokeStyle = k < 1 ? 'rgba(255,171,46,0.9)' : '#ff3b4e'; ctx.lineWidth = 2; ctx.shadowColor = ctx.strokeStyle; ctx.shadowBlur = 10;
+      for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        ctx.beginPath(); ctx.moveTo(px + sx * s, py + sy * (s - L)); ctx.lineTo(px + sx * s, py + sy * s); ctx.lineTo(px + sx * (s - L), py + sy * s); ctx.stroke();
+      }
+      if (k >= 1) {
+        ctx.shadowBlur = 0; ctx.font = '700 12px monospace'; ctx.fillStyle = '#ff6b78';
+        ctx.textAlign = 'center'; ctx.fillText(`LOCK ON ▸ ${best.name}`, px, py + s + 16);   // 装置名(上)と重ならないよう枠の下に
+      }
+    }
+    ctx.restore();
+  }
+  // 4. 効果音(SE): BGM が無くても、警報・情報・ロックオンで鳴らす(既定はオフ。ブラウザは操作なしでは鳴らせない)
+  let seOn = false;
+  try { seOn = localStorage.getItem('cvSe') === '1'; } catch (e) { /* 無くても動く */ }
+  if (new URLSearchParams(location.search).get('se') === '1') seOn = true;
+  const zSe = document.getElementById('zSe');
+  function setSe(on, announce) {
+    seOn = !!on; zSe.classList.toggle('on', seOn);
+    try { localStorage.setItem('cvSe', seOn ? '1' : '0'); } catch (e) { /* 記憶できなくても切り替える */ }
+    if (seOn) { initAudio(); if (AC.state === 'suspended') AC.resume(); }
+    if (announce) { bgmToast(seOn ? '効果音: オン' : '効果音: オフ'); if (seOn) sfx('info'); }
+  }
+  zSe.classList.toggle('on', seOn);
+  zSe.onclick = () => setSe(!seOn, true);
+  if (seOn) {
+    const resume = () => { setSe(true, false); window.removeEventListener('pointerdown', resume); window.removeEventListener('keydown', resume); };
+    window.addEventListener('pointerdown', resume); window.addEventListener('keydown', resume);
+  }
+  // 8. 端末の配色
+  const TERMS = ['cyber', 'green', 'amber', 'red'];
+  const TERM_NAME = { cyber: 'サイバー(標準)', green: '緑の端末', amber: '琥珀の端末', red: '赤の端末' };
+  const zTerm = document.getElementById('zTerm');
+  let term = 'cyber';
+  function setTerm(v, announce) {
+    term = TERMS.includes(v) ? v : 'cyber';
+    if (term === 'cyber') document.documentElement.removeAttribute('data-term'); else document.documentElement.setAttribute('data-term', term);
+    zTerm.title = `配色: ${TERM_NAME[term]}(押すと切り替え)`; zTerm.classList.toggle('on', term !== 'cyber');
+    try { localStorage.setItem('cvTerm', term); } catch (e) { /* 記憶できなくても切り替える */ }
+    if (announce) bgmToast(`配色: ${TERM_NAME[term]}`);
+  }
+  try { term = localStorage.getItem('cvTerm') || 'cyber'; } catch (e) { /* 無くても動く */ }
+  const qTerm = new URLSearchParams(location.search).get('term');
+  if (TERMS.includes(qTerm)) term = qTerm;
+  setTerm(term, false);
+  zTerm.onclick = () => setTerm(TERMS[(TERMS.indexOf(term) + 1) % TERMS.length], true);
+  // 1. 起動演出: 黒い画面に起動ログ(装置数などは実際に取れた値)→「SYSTEM ONLINE」→ フェードして 3D へ。
+  //    タブを開いて最初の1回だけ。?boot=0・FX オフ・動きを減らす設定では出さない。操作は妨げない(クリックは下へ通る)
+  (function fxBoot() {
+    const el = document.getElementById('boot'), log = document.getElementById('bootLog');
+    let skip = !fxOn || fxCalm || new URLSearchParams(location.search).get('boot') === '0';
+    try { if (sessionStorage.getItem('cvBooted') === '1') skip = true; sessionStorage.setItem('cvBooted', '1'); } catch (e) { /* 毎回出しても良い */ }
+    if (skip) { el.remove(); return; }
+    const lines = [
+      ['NIRVANA // CYBER VIEW', null, 'big'],
+      ['BOOT SEQUENCE ............ ', () => ['START', 'ok']],
+      ['RENDER ENGINE ............ ', () => [`OK  ${W}x${H}`, 'ok']],
+      ['TELEMETRY LINK ........... ', () => hosts.length ? [`OK  ${hosts.length} HOSTS`, 'ok'] : ['WAIT', 'wait']],
+      ['EVENT DATABASE ........... ', () => [`OK  ${alerts.length} ALERTS`, 'ok']],
+      ['SENSOR GRID .............. ', () => health ? [`OK  ${String((health.sources && health.sources.metrics) || 'internal').toUpperCase()}`, 'ok'] : ['WAIT', 'wait']],
+      ['SYSTEM ONLINE', null, 'big'],
+    ];
+    let i = 0;
+    const step = () => {
+      if (i >= lines.length) { setTimeout(() => { el.classList.add('gone'); setTimeout(() => el.remove(), 700); }, 420); return; }
+      const [label, fn, cls] = lines[i++], div = document.createElement('div');
+      if (cls) div.className = cls;
+      div.textContent = label;
+      if (fn) { const [v, c] = fn(), sp = document.createElement('span'); sp.className = c; sp.textContent = v; div.appendChild(sp); }
+      log.appendChild(div);
+      setTimeout(step, 240);
+    };
+    step();
+  })();
+  document.body.classList.toggle('fxon', fxOn);
+  window.__cvFxExtra = () => ({ fx: fxOn, boot: !!document.getElementById('boot'), se: seOn, term,
+    lock: fxAim.lock ? fxAim.lock.name : null, feed: fxFeed.hosts.length + fxFeed.ev.length, bloom: fxBloomOn, frameMs: Math.round(fxFrameEma),
+    typing: popups.filter(p => p.val && performance.now() - p.born < p.val.length * 24).length,
+    devices: fxDevPoints().map(d => ({ id: d.id, name: d.name, x: d.p.x, y: d.p.y })) });
   const zFx = document.getElementById('zFx');
   zFx.classList.toggle('on', fxOn);
-  zFx.onclick = () => { window.__cvFx(!fxOn); zFx.classList.toggle('on', fxOn); };
+  zFx.onclick = () => { window.__cvFx(!fxOn); zFx.classList.toggle('on', fxOn); document.body.classList.toggle('fxon', fxOn); };
   window.__cvFx = (on) => { if (on !== undefined) { fxOn = !!on; try { localStorage.setItem('cvFx', fxOn ? '1' : '0'); } catch (e) { /* 保存できなくても切り替える */ } } return { on: fxOn, embers: fxEmbers.length, rain: fxRain.length }; };
 
   function frame(t) {
@@ -3284,6 +3512,7 @@
     if (mode !== 'world') drawFloor();
     const nowSec = Date.now() / 1000;
     if (mode !== 'world') drawGroundRing(t);
+    if (fxOk) fxRadar(t);
     platesBeginFrame();
     if (mode === 'link') { drawLinks(t); drawForecast(t); }
     else if (mode === 'ospf') { drawOspf(t); drawParticles(t); }
@@ -3295,6 +3524,14 @@
     drawPopups(t);
     drawBoard(t);
     if (fxOk) fxOver(t, mode === 'net' ? alertLevel : 0);
+    if (fxOk && fxOn) {
+      fxPerf(t);
+      if (fxBloomOn) fxBloom();
+      // 色ずれは「いま何かが起きた」合図: 新しい警報が届いてから 15 秒だけ(だんだん弱く)
+      const red = Math.max(0, 1 - (performance.now() - fxAlertAt) / 15000);
+      if (red > 0 && !fxCalm) fxAberration(t, red);
+      fxReticle(t);
+    }
     flowLastT = t;
     requestAnimationFrame(frame);
   }
@@ -3480,6 +3717,7 @@
       const d = await api('/api/traffic/hosts');
       hosts = d.hosts; hostById = {}; ipOwner = {};
       for (const h of hosts) { hostById[h.id] = h; for (const i of h.interfaces) ipOwner[i.ip] = h.id; }
+      fxFeed.hosts = hosts.flatMap(h => [h.hostname, ...h.interfaces.flatMap(i => [i.ip, i.name])]).filter(x => x && String(x).length <= 26);
       document.getElementById('sHosts').textContent = hosts.length;
       if (hostView) renderCard();
     } catch (e) { /* 次の周期で再試行 */ }
@@ -3496,6 +3734,8 @@
       }
       events = events.concat(fresh).slice(-3000);
       alerts = alerts.concat(d.alerts || []).slice(-400);
+      fxFeedEv(...fresh.slice(-12).map(e => `${e.src_ip || e.src}>${e.dst_ip || e.dst}`), ...(d.alerts || []).map(a => RULE_CODE[a.rule] || a.rule));
+      if (primed && (d.alerts || []).length) fxAlertAt = performance.now();
       if (primed && (d.alerts || []).length) sfx((d.alerts || []).some(a => a.severity === 'high' || a.severity === 'medium') ? 'alert' : 'warn');
       if (primed) (d.alerts || []).filter(a => a.severity === 'warning').forEach(a =>
         popup(posForDevice(a.src), '#ffab2e', `WARN ${RULE_CODE[a.rule] || String(a.rule || '').toUpperCase()}`, (a.detail || '').split(': ')[0].slice(0, 22), 7000, '注'));
@@ -3549,6 +3789,7 @@
         logSince = Math.max(logSince, r.t);
         if (r.sev > 5) continue;
         const m = r.msg.match(/%[\w-]+-\d-[\w]+/);
+        fxFeedEv(m ? m[0] : '', r.host);
         const col = r.recovery ? '#3dff9a' : r.sev <= 3 ? '#ff3b4e' : r.sev === 4 ? '#ffab2e' : '#7fb2ff';
         const title = r.recovery ? 'RECOVER' : r.sev <= 3 ? 'LOG ERROR' : r.sev === 4 ? 'LOG WARN' : 'LOG';
         popup(posForDevice(r.dev), col, title, (m ? m[0] : r.msg).slice(0, 22), 5200);
@@ -3579,6 +3820,7 @@
         if (evs.length > 3) popup(pos, '#33d6ff', 'INFO ROUTES', `他 ${evs.length - 3} 件`, 6000, '情');
       }
       routeLog = routeLog.concat(d.events).slice(-50);
+      fxFeedEv(...d.events.slice(-10).map(e => `${e.code} ${e.prefix}`));
       if (d.events.length) { renderAlerts(); sfx('info'); }
     } catch (e) { /* 次の周期で再試行 */ }
   }
@@ -3760,9 +4002,10 @@
   }
   // 出来事の効果音(情=高いチャイム、注/警=低い音)
   function sfx(kind) {
-    if (!musicOn || !AC) return;
+    if (!(musicOn || seOn) || !AC) return;
     const t = AC.currentTime + 0.02;
-    if (kind === 'info') { tone(NOTE(88), t, 0.8, 'sine', 0.12, 6000); tone(NOTE(95), t + 0.12, 0.9, 'sine', 0.09, 6000); }
+    if (kind === 'lock') { tone(NOTE(100), t, 0.09, 'square', 0.035, 5000); tone(NOTE(107), t + 0.06, 0.09, 'square', 0.03, 5000); }
+    else if (kind === 'info') { tone(NOTE(88), t, 0.8, 'sine', 0.12, 6000); tone(NOTE(95), t + 0.12, 0.9, 'sine', 0.09, 6000); }
     else if (kind === 'warn') { tone(NOTE(62), t, 0.6, 'square', 0.06, 1200); tone(NOTE(62), t + 0.25, 0.6, 'square', 0.06, 1200); }
     else { tone(NOTE(45), t, 1.2, 'sawtooth', 0.12, 800); tone(NOTE(46), t, 1.2, 'sawtooth', 0.1, 800); }
   }
