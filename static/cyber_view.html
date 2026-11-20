@@ -1447,7 +1447,26 @@
     }
   }
   // NIRVANA 風の漢字六角マーク(赤の「警」に対し、情報は水色の「情」、警告は橙の「注」)
+  // エヴァ風: マークの六角の後ろに、左下へ斜めに小さな六角を階段状に連ね、尾の先からマークへ光を走らせる。
+  // 速さ(せわしなさ)は「警」>「注」「予」>「情」。FX オフでは出さない
+  const HEX_URGENCY = { '警': 2, '注': 1, '予': 1 };
+  function hexCascade(x, y, r, col, ch, t) {
+    if (!fxOn) return;
+    const u = HEX_URGENCY[ch] || 0, speed = [0.004, 0.009, 0.017][u], hw = Math.sqrt(3) * r;
+    const fill = u === 2 ? '230,20,45' : u === 1 ? '255,150,30' : '51,214,255';
+    ctx.save();
+    for (let k = 3; k >= 1; k--) {
+      const cx = x - k * hw * 0.42, cy = y + k * r * 1.02, rr = r * (0.78 - k * 0.13);
+      const ph = fxCalm ? 0.6 : Math.max(0, Math.sin(t * speed + k * 1.15));    // k が大きい(尾の先)ほど先に光る → マークへ走る
+      ctx.globalAlpha = (u ? 0.25 + 0.75 * ph : 0.3 + 0.3 * ph) * (1 - k * 0.15);
+      hexPath(cx, cy, rr);
+      ctx.fillStyle = `rgba(${fill},${u ? 0.6 : 0.3})`; ctx.fill();
+      ctx.strokeStyle = col; ctx.lineWidth = 1.3; ctx.stroke();
+    }
+    ctx.restore();
+  }
   function markHex(x, y, r, col, ch, t, count) {
+    hexCascade(x, y, r, col, ch, t);
     ctx.save();
     hexPath(x, y, r);
     const g = ctx.createRadialGradient(x, y - r * 0.3, r * 0.1, x, y, r);
@@ -1588,7 +1607,7 @@
       if (l.down) sparksAt(mx, Y + 0.3, mz, t, '#ff3b4e');
       if (l.alerts.length) {
         const ap = proj(mx, Y + colH + 2.6, mz);
-        if (ap) { hexPath(ap.x, ap.y, 13); ctx.fillStyle = '#e6142d'; ctx.fill(); ctx.strokeStyle = '#ffb0b8'; ctx.stroke();
+        if (ap) { hexCascade(ap.x, ap.y, 13, '#ff6b78', '警', t); hexPath(ap.x, ap.y, 13); ctx.fillStyle = '#e6142d'; ctx.fill(); ctx.strokeStyle = '#ffb0b8'; ctx.stroke();
           ctx.fillStyle = '#fff'; ctx.font = '700 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
           ctx.fillText('警', ap.x, ap.y); ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic'; }
       }
@@ -3498,31 +3517,51 @@
     devices: fxDevPoints().map(d => ({ id: d.id, name: d.name, x: d.p.x, y: d.p.y })) });
   // 複数の障害が同時に起きたとき: 画面の上下の縁に、赤い六角パネル(EMERGENCY ▲▼)を並べる。
   // 1件なら従来の表現(異常・六角柱・火の粉)のまま。2〜3件で1段、4〜7件で2段、8件以上で3段。
-  // 描くのは canvas の縁だけで、操作できる要素(DOM)は上に載るので邪魔にならない。復旧して件数が減れば段も減る
+  // 右上と左下の角から斜めの帯(エヴァ風)。描くのは canvas だけで、操作できる要素(DOM)は上に載るので邪魔にならない。復旧して件数が減れば段も減る
   let emForce = null, emDrawn = 0;
   function emRows(level) { return level >= 8 ? 3 : level >= 4 ? 2 : level >= 2 ? 1 : 0; }
   function fxEmergency(t, level) {
     const rows = emRows(emForce !== null ? emForce : level);
     emDrawn = 0;
     if (!rows) return;
-    const r = Math.max(24, Math.min(W, H) * 0.04), hw = Math.sqrt(3) * r, dyy = r * 1.5;
+    // エヴァ風: 横一列ではなく、右上と左下の角から斜め(約30°)の帯として六角を階段状に連ねる。
+    // 光の波が帯に沿って速く走り、ところどころ一瞬消える(焦らせる)。数個おきに大きな「警」。段数(帯の太さ)は件数で増える
+    const r = Math.max(22, Math.min(W, H) * 0.036), hw = Math.sqrt(3) * r;
+    // 帯は角に収める(真ん中の装置・プレートを隠さない): 画面幅の約 3 割まで
+    const len = Math.max(4, Math.ceil(Math.min(W * 0.3, H * 0.55) / (0.75 * hw)));
     ctx.save();
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = '700 10px sans-serif';
     const emFont = Math.min(r * 0.3, 10 * (hw * 0.8) / ctx.measureText('EMERGENCY').width);     // 六角の幅に収まる大きさ
+    // 帯の起点と向き [x, y, 横の向き, 縦の向き]。広い画面: 右上→左下 と 左下→右上。
+    // スマホ幅は上に状態表示が詰まっているので、下の両隅から斜め上へ伸ばす V 字にする
+    const sides = W < 640
+      ? [[W + hw * 0.5, H - r * 0.9, -1, -1], [-hw * 0.5, H - r * 0.9, 1, -1]]
+      : [[W + hw * 0.5, r * 0.9, -1, 1], [-hw * 0.5, H - r * 0.9, 1, -1]];
     for (let side = 0; side < 2; side++) {
+      const [ox, oy, dx, dy] = sides[side];
       for (let row = 0; row < rows; row++) {
-        const cy = side ? H - r - row * dyy : r + row * dyy;
-        for (let x = hw / 2 + (row % 2) * hw / 2, k = 0; x < W + hw; x += hw, k++) {
-          const ph = fxCalm ? 1 : 0.5 + 0.5 * Math.sin(t * 0.004 - (k + row * 3 + side * 5) * 0.55);
+        for (let k = 0; k < len; k++) {
+          // 六角の格子(pointy-top)で q+1 と r+1 を交互に進む階段 = 約30°の斜め。段は格子の隣へずらす
+          const q = Math.ceil(k / 2), rr = Math.floor(k / 2);
+          const x = ox + dx * hw * (q + rr / 2 + row / 2);          // 段は画面の内側(中心寄り)の隣へ
+          const y = oy + dy * 1.5 * r * (rr + row);
+          if (x < -hw || x > W + hw || y < -r * 2 || y > H + r * 2) continue;
+          const ph = fxCalm ? 1 : 0.5 + 0.5 * Math.sin(t * 0.011 + (k + row * 2 + side * 7) * 0.85);   // 角から先へ走る波
+          const off = !fxCalm && ((k * 7 + row * 13 + side * 5 + Math.floor(t / 110)) % 13 === 0);       // ときどき一瞬消える
+          if (off) continue;
           ctx.beginPath();
-          for (let i = 0; i < 6; i++) { const ang = Math.PI / 6 + i * Math.PI / 3; ctx.lineTo(x + r * 0.96 * Math.cos(ang), cy + r * 0.96 * Math.sin(ang)); }
+          for (let i = 0; i < 6; i++) { const ang = Math.PI / 6 + i * Math.PI / 3; ctx.lineTo(x + r * 0.96 * Math.cos(ang), y + r * 0.96 * Math.sin(ang)); }
           ctx.closePath();
-          ctx.fillStyle = `rgba(255,50,75,${0.10 + 0.22 * ph})`; ctx.fill();
-          ctx.strokeStyle = `rgba(255,100,115,${0.55 + 0.4 * ph})`; ctx.lineWidth = 1.5; ctx.stroke();
-          ctx.fillStyle = `rgba(255,225,228,${0.55 + 0.4 * ph})`;
-          ctx.font = `700 ${emFont.toFixed(1)}px sans-serif`; ctx.fillText('EMERGENCY', x, cy);
-          ctx.font = `${(r * 0.26).toFixed(1)}px sans-serif`; ctx.fillText('\u25B2', x, cy - r * 0.5); ctx.fillText('\u25BC', x, cy + r * 0.5);
+          ctx.fillStyle = `rgba(255,50,75,${0.12 + 0.3 * ph})`; ctx.fill();
+          ctx.strokeStyle = `rgba(255,100,115,${0.55 + 0.45 * ph})`; ctx.lineWidth = 1.6; ctx.stroke();
+          ctx.fillStyle = `rgba(255,232,235,${0.55 + 0.45 * ph})`;
+          if ((k + row) % 4 === 2) {
+            ctx.font = `900 ${(r * 0.95).toFixed(1)}px sans-serif`; ctx.fillText('警', x, y + 1);
+          } else {
+            ctx.font = `700 ${emFont.toFixed(1)}px sans-serif`; ctx.fillText('EMERGENCY', x, y);
+            ctx.font = `${(r * 0.26).toFixed(1)}px sans-serif`; ctx.fillText('▲', x, y - r * 0.5); ctx.fillText('▼', x, y + r * 0.5);
+          }
           emDrawn++;
         }
       }
