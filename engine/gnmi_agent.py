@@ -124,37 +124,49 @@ def _oc_state(device_id, name: str, info: dict) -> dict:
     状態も IF-MIB と同じ考え方: shutdown なら admin/oper とも DOWN、それ以外は
     リンクがつながっているか IP があれば oper UP。uint64 は RFC 7951 どおり文字列。
     """
-    counters = {'in_pkts': 0, 'out_pkts': 0, 'in_bytes': 0, 'out_bytes': 0}
+    counters = {}
     shutdown = info.get('status') in ('down', 'notconnect', 'disabled', 'administratively down')
     linked = False
+    last_change = None
     try:
         from engine.protocols import dp_engine, vnet
         norm = vnet._norm_iface
         k = norm(name)
+        counters = dp_engine._zero()
         if device_id:
             per_dev = dp_engine.counters.get(device_id, {})
-            hit = per_dev.get(name) or next((v for n, v in per_dev.items() if norm(n) == k), None)
-            if hit:
-                counters = hit
+            key = name if name in per_dev else next((n for n in per_dev if norm(n) == k), None)
+            if key is not None:
+                counters = dp_engine.get_counter(device_id, key)
             shutdown = shutdown or k in {norm(x) for x in vnet.down_interfaces.get(device_id, set())}
             linked = k in {norm(x) for x in vnet.interface_links.get(device_id, {}).values()}
+            last_change = dp_engine.last_change_of(device_id, name)
     except Exception:  # noqa: BLE001  (エンジンが無い単体利用でも値は返す)
         pass
+
+    def n(key):
+        return str(int(counters.get(key, 0)))
     oper_up = (not shutdown) and (linked or bool(info.get('ip')))
-    return {
+    out = {
         'name': name,
         'type': 'iana-if-type:ethernetCsmacd',
         'enabled': not shutdown,
         'admin-status': 'DOWN' if shutdown else 'UP',
         'oper-status': 'UP' if oper_up else 'DOWN',
         'counters': {
-            'in-octets': str(int(counters.get('in_bytes', 0))),
-            'out-octets': str(int(counters.get('out_bytes', 0))),
-            'in-unicast-pkts': str(int(counters.get('in_pkts', 0))),
-            'out-unicast-pkts': str(int(counters.get('out_pkts', 0))),
-            'in-errors': '0', 'out-errors': '0', 'in-discards': '0', 'out-discards': '0',
+            'in-octets': n('in_bytes'), 'out-octets': n('out_bytes'),
+            'in-pkts': n('in_pkts'), 'out-pkts': n('out_pkts'),
+            'in-unicast-pkts': n('in_ucast'), 'out-unicast-pkts': n('out_ucast'),
+            'in-multicast-pkts': n('in_mcast'), 'out-multicast-pkts': n('out_mcast'),
+            'in-broadcast-pkts': n('in_bcast'), 'out-broadcast-pkts': n('out_bcast'),
+            'in-errors': n('in_errors'), 'out-errors': n('out_errors'),
+            'in-discards': n('in_discards'), 'out-discards': n('out_discards'),
+            'in-fcs-errors': n('in_crc'), 'in-unknown-protos': n('in_unknown_protos'),
         },
     }
+    if last_change:
+        out['last-change'] = str(int(last_change * 1e9))     # OpenConfig は UNIX 時刻(ナノ秒)
+    return out
 
 
 def _descend(val, names):

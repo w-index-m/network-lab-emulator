@@ -126,7 +126,7 @@ class VirtualNetwork:
                 port = self.interface_links.get(dev_id, {}).get(peer, peer)
                 # ブロードキャストフレーム増殖: 入力カウンタを大量に加算
                 if _dp:
-                    _dp.bump(dev_id, port, 'in', pkts=100000, size=64)
+                    _dp.bump(dev_id, port, 'in', pkts=100000, size=64, kind='bcast')
                 # ストーム検知ログ（レートが閾値超過）
                 await self.send_to(dev_id, {
                     'type': 'stp_log',
@@ -246,11 +246,29 @@ class VirtualNetwork:
 
     def interface_down(self, device_id: str, iface: str):
         """インターフェースをshutdown状態にする（broadcast_to_neighborsがスキップする）"""
+        changed = iface not in self.down_interfaces[device_id]
         self.down_interfaces[device_id].add(iface)
+        if changed:
+            self._mark_link_change(device_id, iface)
 
     def interface_up(self, device_id: str, iface: str):
         """インターフェースをno shutdown状態に戻す"""
+        changed = iface in self.down_interfaces[device_id]
         self.down_interfaces[device_id].discard(iface)
+        if changed:
+            self._mark_link_change(device_id, iface)
+
+    def _mark_link_change(self, device_id: str, iface: str):
+        """IF-MIB の ifLastChange 用。自分のポートと、つながっている相手のポートの両方(相手も oper が変わる)"""
+        try:
+            now = time.time()
+            dp_engine.mark_change(device_id, iface, now)
+            for peer in self.get_peers_on_interface(device_id, iface):
+                pif = self.interface_links.get(peer, {}).get(device_id)
+                if pif:
+                    dp_engine.mark_change(peer, pif, now)
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def _norm_iface(name: str) -> str:
@@ -6709,8 +6727,10 @@ class DataPlaneEngine:
     def __init__(self):
         # device_id -> {(vlan, mac): MacEntry}
         self.mac_tables: Dict[str, Dict[tuple, MacEntry]] = defaultdict(dict)
-        # device_id -> {iface: {'in_pkts','out_pkts','in_bytes','out_bytes'}}
+        # device_id -> {iface: {COUNTER_KEYS の各値}}
         self.counters: Dict[str, Dict[str, dict]] = defaultdict(dict)
+        # device_id -> {正規化した IF 名: 最後に up/down した時刻}
+        self.last_change: Dict[str, Dict[str, float]] = {}
 
     # ── MAC学習 ──
     def learn(self, device_id: str, mac: str, port: str, vlan: int = 1):
@@ -6798,31 +6818,68 @@ class DataPlaneEngine:
         return out
 
     # ── インターフェースカウンタ ──
+    # 1ポートぶんの値(IF-MIB / show interfaces / gNMI の counters はすべてここを読む)。
+    # in_pkts / out_pkts は合計で、ucast / mcast / bcast はその内訳
+    COUNTER_KEYS = ('in_pkts', 'out_pkts', 'in_bytes', 'out_bytes',
+                    'in_ucast', 'out_ucast', 'in_mcast', 'out_mcast', 'in_bcast', 'out_bcast',
+                    'in_errors', 'out_errors', 'in_discards', 'out_discards',
+                    'in_crc', 'in_giants', 'in_runts', 'in_unknown_protos')
+
+    @classmethod
+    def _zero(cls) -> dict:
+        return {k: 0 for k in cls.COUNTER_KEYS}
+
     def _ctr(self, device_id: str, iface: str) -> dict:
         c = self.counters[device_id].get(iface)
         if c is None:
-            c = {'in_pkts': 0, 'out_pkts': 0, 'in_bytes': 0, 'out_bytes': 0}
+            c = self._zero()
             self.counters[device_id][iface] = c
+        else:
+            for k in self.COUNTER_KEYS:       # 古い形(4項目だけ)の値にも内訳の欄を足す
+                c.setdefault(k, 0)
         return c
 
     def bump(self, device_id: str, iface: str, direction: str,
-             pkts: int = 1, size: int = 100):
+             pkts: int = 1, size: int = 100, kind: str = 'ucast'):
+        """届いた/送ったフレームを数える。kind: ucast(ping 等)/ mcast(BPDU・OSPF Hello・LLDP・CDP)/ bcast(ARP・ストーム)"""
         if not iface:
             return
         c = self._ctr(device_id, iface)
-        if direction == 'in':
-            c['in_pkts'] += pkts
-            c['in_bytes'] += pkts * size
-        else:
-            c['out_pkts'] += pkts
-            c['out_bytes'] += pkts * size
+        d = 'in' if direction == 'in' else 'out'
+        c[f'{d}_pkts'] += pkts
+        c[f'{d}_bytes'] += pkts * size
+        c[f'{d}_{kind if kind in ("ucast", "mcast", "bcast") else "ucast"}'] += pkts
+
+    def drop(self, device_id: str, iface: str, direction: str = 'in', pkts: int = 1, reason: str = 'discard'):
+        """受け取らずに捨てたフレーム。reason: discard(storm-control 等)/ error / crc / giant / runt。
+        実機と同じく、捨てたものは in_pkts / in_bytes には入れない"""
+        if not iface or pkts <= 0:
+            return
+        c = self._ctr(device_id, iface)
+        d = 'in' if direction == 'in' else 'out'
+        if reason == 'discard':
+            c[f'{d}_discards'] += pkts
+            return
+        c[f'{d}_errors'] += pkts
+        if d == 'in' and reason in ('crc', 'giant', 'runt'):
+            c[{'crc': 'in_crc', 'giant': 'in_giants', 'runt': 'in_runts'}[reason]] += pkts
 
     def get_counter(self, device_id: str, iface: str) -> dict:
-        return self.counters.get(device_id, {}).get(
-            iface, {'in_pkts': 0, 'out_pkts': 0, 'in_bytes': 0, 'out_bytes': 0})
+        c = self.counters.get(device_id, {}).get(iface)
+        if c is None:
+            return self._zero()
+        return {**self._zero(), **c}
 
     def clear_counters(self, device_id: str):
         self.counters[device_id] = {}
+
+    # ── ifLastChange(IF-MIB): ポートが最後に up/down した時刻 ──
+    def mark_change(self, device_id: str, iface: str, when: float = None):
+        if iface:
+            self.last_change.setdefault(device_id, {})[vnet._norm_iface(iface)] = when or time.time()
+
+    def last_change_of(self, device_id: str, iface: str):
+        return self.last_change.get(device_id, {}).get(vnet._norm_iface(iface))
 
 
 dp_engine = DataPlaneEngine()
@@ -7062,11 +7119,24 @@ class SnmpAgent:
             ifaces = [('lo0', {'ip': '127.0.0.1', 'prefix': 8})]
         mib.append(('1.3.6.1.2.1.2.1.0', 'INTEGER', str(len(ifaces))))  # ifNumber
         down_ifaces = {vnet._norm_iface(x) for x in vnet.down_interfaces.get(device_id, set())}
+        dtype = d.get('type', '')
+        up_ticks = self._uptime_ticks()
         for i, (ifn, ii) in enumerate(ifaces, 1):
+            bw_kbps = OspfEngine.if_bandwidth_kbps(dtype, ifn)
+            loop = ifn.lower().startswith(('loopback', 'lo'))
             mib.append((f'1.3.6.1.2.1.2.2.1.1.{i}', 'INTEGER', str(i)))            # ifIndex
             mib.append((f'1.3.6.1.2.1.2.2.1.2.{i}', 'STRING', ifn))                # ifDescr
-            mib.append((f'1.3.6.1.2.1.2.2.1.3.{i}', 'INTEGER', '6'))               # ifType ethernetCsmacd
-            mib.append((f'1.3.6.1.2.1.2.2.1.5.{i}', 'Gauge32', '1000000000'))      # ifSpeed 1G
+            # ifType: 6=ethernetCsmacd / 24=softwareLoopback / 53=propVirtual(SVI) / 131=tunnel / 161=ieee8023adLag
+            low = ifn.lower()
+            lag = low.startswith('port-channel') or (low.startswith('po') and low[2:3].isdigit())
+            if_type = ('24' if loop else '53' if low.startswith('vlan') else '131' if low.startswith('tunnel')
+                       else '161' if lag else '6')
+            mib.append((f'1.3.6.1.2.1.2.2.1.3.{i}', 'INTEGER', if_type))           # ifType
+            mib.append((f'1.3.6.1.2.1.2.2.1.4.{i}', 'INTEGER', '1514' if loop else '1500'))   # ifMtu
+            mib.append((f'1.3.6.1.2.1.2.2.1.5.{i}', 'Gauge32', str(min(bw_kbps * 1000, 4294967295))))  # ifSpeed
+            if not loop:                                                           # ifPhysAddress(ループバックは空)
+                h = abs(hash(f'{device_id}:{vnet._norm_iface(ifn)}')) % (16 ** 6)
+                mib.append((f'1.3.6.1.2.1.2.2.1.6.{i}', 'STRING', f'00:a6:ca:{(h >> 16) & 0xff:02x}:{(h >> 8) & 0xff:02x}:{h & 0xff:02x}'))
             # shutdown（vnet.down_interfaces）を反映。CLIでshutdownされていれば
             # admin/operとも down、それ以外はIPの有無で判定（従来動作を維持）
             is_shutdown = vnet._norm_iface(ifn) in down_ifaces
@@ -7082,23 +7152,36 @@ class SnmpAgent:
                 status = '2' if (is_shutdown or not ii.get('ip')) else '1'         # up/down
             mib.append((f'1.3.6.1.2.1.2.2.1.7.{i}', 'INTEGER', str(admin)))        # ifAdminStatus
             mib.append((f'1.3.6.1.2.1.2.2.1.8.{i}', 'INTEGER', status))            # ifOperStatus
-            # ifInOctets / ifOutOctets（データプレーンカウンタ由来）
+            # ifLastChange: 最後に up/down した時の sysUpTime(それ以前なら 0)
+            lc = dp_engine.last_change_of(device_id, ifn)
+            lc_ticks = max(0, min(up_ticks, int((lc - self._start) * 100))) if lc else 0
+            mib.append((f'1.3.6.1.2.1.2.2.1.9.{i}', 'Timeticks', str(lc_ticks)))
+            # 送受信カウンタ(データプレーン: ping のユニキャスト、BPDU/Hello/LLDP/CDP のマルチキャスト、
+            # ストーム等のブロードキャスト、storm-control で捨てた分、エラー)
             c = dp_engine.get_counter(device_id, ifn)
-            mib.append((f'1.3.6.1.2.1.2.2.1.10.{i}', 'Counter32', str(c['in_bytes'] % (1 << 32))))
-            mib.append((f'1.3.6.1.2.1.2.2.1.16.{i}', 'Counter32', str(c['out_bytes'] % (1 << 32))))
+            M32 = 1 << 32
+            for col, val in ((10, c['in_bytes']), (11, c['in_ucast']), (12, c['in_mcast'] + c['in_bcast']),
+                             (13, c['in_discards']), (14, c['in_errors']), (15, c['in_unknown_protos']),
+                             (16, c['out_bytes']), (17, c['out_ucast']), (18, c['out_mcast'] + c['out_bcast']),
+                             (19, c['out_discards']), (20, c['out_errors'])):
+                mib.append((f'1.3.6.1.2.1.2.2.1.{col}.{i}', 'Counter32', str(val % M32)))
             # ── ifXTable (IF-MIB 1.3.6.1.2.1.31.1.1.1) ──
             # 実機Ciscoの監視(Prometheus snmp_exporterのif_mib等)は折り返しの
             # 速いCounter32ではなく64bitの ifHCIn/OutOctets と ifName/ifAlias を使う。
-            # 以前はifXTableが丸ごと無く、ifName等のラベルが空になっていた。
             _desc = (d.get('if_alias') or {}).get(ifn, '')
             xt = '1.3.6.1.2.1.31.1.1.1'
             mib.append((f'{xt}.1.{i}', 'STRING', _snmp_if_name(ifn)))              # ifName
-            mib.append((f'{xt}.6.{i}', 'Counter64', str(c['in_bytes'])))          # ifHCInOctets
-            mib.append((f'{xt}.7.{i}', 'Counter64', str(c.get('in_pkts', 0))))    # ifHCInUcastPkts
-            mib.append((f'{xt}.10.{i}', 'Counter64', str(c['out_bytes'])))        # ifHCOutOctets
-            mib.append((f'{xt}.11.{i}', 'Counter64', str(c.get('out_pkts', 0))))  # ifHCOutUcastPkts
-            mib.append((f'{xt}.15.{i}', 'Gauge32', '1000'))                       # ifHighSpeed(Mbps)
+            for col, val in ((2, c['in_mcast']), (3, c['in_bcast']), (4, c['out_mcast']), (5, c['out_bcast'])):
+                mib.append((f'{xt}.{col}.{i}', 'Counter32', str(val % M32)))      # ifIn/OutMulticast/BroadcastPkts
+            for col, val in ((6, c['in_bytes']), (7, c['in_ucast']), (8, c['in_mcast']), (9, c['in_bcast']),
+                             (10, c['out_bytes']), (11, c['out_ucast']), (12, c['out_mcast']), (13, c['out_bcast'])):
+                mib.append((f'{xt}.{col}.{i}', 'Counter64', str(val)))            # ifHC*
+            mib.append((f'{xt}.14.{i}', 'INTEGER', '2' if ii.get('l2') else '1'))  # ifLinkUpDownTrapEnable
+            mib.append((f'{xt}.15.{i}', 'Gauge32', str(bw_kbps // 1000)))         # ifHighSpeed(Mbps)
+            mib.append((f'{xt}.16.{i}', 'INTEGER', '2'))                          # ifPromiscuousMode false
+            mib.append((f'{xt}.17.{i}', 'INTEGER', '2' if loop or if_type in ('53', '131') else '1'))  # ifConnectorPresent
             mib.append((f'{xt}.18.{i}', 'STRING', _desc))                         # ifAlias
+            mib.append((f'{xt}.19.{i}', 'Timeticks', '0'))                        # ifCounterDiscontinuityTime
         # ── OSPF-MIB (RFC 1850, 1.3.6.1.2.1.14) ──
         # 監視基盤(snmp_exporter → ヴァルハラ)から OSPF の隣接を読めるようにする。
         # ospfRouterId / ospfAdminStat と、ospfNbrTable(index = 隣接のIPアドレス.0)の

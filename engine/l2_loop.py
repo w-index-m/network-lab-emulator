@@ -438,8 +438,9 @@ class LoopEngine:
                 sc = _port_storm(st, ifn)
                 lvl = (sc or {}).get('level')
                 storm_ports.add((d, norm(ifn)))
-                acts.append({'do': 'storm', 'dev': d, 'iface': ifn,
-                             'pps': int(STORM_PPS * (min(lvl, 100) / 100 if lvl is not None else 1))})
+                passed = int(STORM_PPS * (min(lvl, 100) / 100 if lvl is not None else 1))
+                acts.append({'do': 'storm', 'dev': d, 'iface': ifn, 'pps': passed,
+                             'dropped': STORM_PPS - passed})      # storm-control level で捨てた分(ifInDiscards)
                 if dt in ('catalyst', 'nexus', 'srs') and self._due('macflap', d, '', MACFLAP_EVERY, now):
                     pifs = [i for dd, i, _ in ports if dd == d]
                     if len(pifs) >= 2:
