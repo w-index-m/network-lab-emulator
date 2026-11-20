@@ -88,8 +88,8 @@ pres.addSection({ title: '進め方' });
 s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '進め方' });
 s.addText('1 つの依頼が通る 8 つの工程', { placeholder: 'title' });
 const steps = [
-  ['依頼', '一言で方向を伝える'], ['読む', 'コードを調べる'], ['作る', '実装する'], ['単体テスト', 'テストを書いて回す'],
-  ['本物で確認', '本物のツールで'], ['全体テスト', '約 2,100 件・17 分'], ['PR と CI', 'GitHub で同じテストをもう一度'], ['取り込み', '緑なら main へ'],
+  ['依頼', '一言で方向を伝える'], ['読む', 'コードを調べる'], ['作る', '実装する'], ['単体テスト', 'サンドボックス内'],
+  ['本物で確認', 'サンドボックス内の本物のツールで'], ['全体テスト', '約 2,100 件・17 分'], ['PR と CI', 'GitHub で同じテストをもう一度'], ['取り込み', '緑なら main へ'],
 ];
 steps.forEach(([h, b], i) => {
   const row = Math.floor(i / 4), col = i % 4;
@@ -98,8 +98,72 @@ steps.forEach(([h, b], i) => {
   txt(s, h, { x: x + 0.72, y: y + 0.02, w: 1.45, h: 0.35, fontSize: 15, bold: true, color: C.background1 });
   txt(s, b, { x: x + 0.72, y: y + 0.4, w: 1.45, h: 0.9, fontSize: 11, color: C.background2 });
 });
-txt(s, '落ちたら「読む」に戻る。直してから、もう一度「単体テスト」から', { x: 0.5, y: 4.85, w: 9, h: 0.3, fontSize: 12, italic: true, color: C.accent2 });
+txt(s, '4〜6 は LLM サンドボックス(次のスライド)の中で動かす。落ちたら「読む」に戻る', { x: 0.5, y: 4.85, w: 9, h: 0.3, fontSize: 12, italic: true, color: C.accent2 });
 s.addNotes('工程は 8 つです。特徴は 5 番目の「本物で確認」です。単体テストが通っても、実際に起動したサーバーに本物の snmpwalk や gnmic を当てて、数字が期待どおり動くかを見ます。ここで見つかるバグが多いです。');
+
+// 3b. LLM サンドボックス
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '進め方' });
+s.addText('テストを動かす場所: LLM サンドボックス', { placeholder: 'title' });
+// 左: 流れの図
+const flow = [
+  ['Claude', '読む・書く・判断する', C.accent1, 0.95],
+  ['LLM サンドボックス', 'クラウド上の使い捨ての Linux コンテナ', C.accent2, 2.1],
+  ['GitHub', 'push・PR・CI', C.accent4, 3.95],
+];
+flow.forEach(([h, b, col, y], i) => {
+  const hh = i === 1 ? 1.65 : 0.8;
+  s.addShape(SH.ROUNDED_RECTANGLE, { x: 0.5, y: y + 0.25, w: 4.4, h: hh, rectRadius: 0.08, fill: { color: C.text2 }, line: { color: col, width: 1.5 }, objectName: 'flow box ' + (i + 1) });
+  txt(s, h, { x: 0.7, y: y + 0.32, w: 4.0, h: 0.35, fontSize: 15, bold: true, color: col });
+  txt(s, b, { x: 0.7, y: y + 0.65, w: 4.0, h: 0.3, fontSize: 11, color: C.background2 });
+});
+const chips = ['エミュレータ', 'pytest', 'snmpwalk', 'gnmic', 'Playwright'];
+chips.forEach((t, i) => {
+  const cx = 0.7 + (i % 3) * 1.4, cy = 3.05 + Math.floor(i / 3) * 0.38;
+  s.addShape(SH.ROUNDED_RECTANGLE, { x: cx, y: cy, w: 1.3, h: 0.3, rectRadius: 0.05, fill: { color: C.text1 }, line: { color: C.accent2, width: 0.75 }, objectName: 'chip ' + t });
+  txt(s, t, { x: cx, y: cy, w: 1.3, h: 0.3, fontSize: 9, align: 'center', valign: 'middle', color: C.background1 });
+});
+// 右: 特徴
+const feats = [
+  ['隔離されている', 'あなたの PC や実機には触れない'],
+  ['本物を動かせる', 'サーバーを起動し、snmpwalk などを当てる'],
+  ['外への通信は許可制', '一部のサイトは届かない(例: Groq)'],
+  ['使い捨て', '途中で入れ替わることも。残す物は Git へ'],
+];
+feats.forEach(([h, b], i) => {
+  const y = 1.25 + i * 0.92;
+  hex(s, 5.25, y, 0.45, C.accent2, String(i + 1), 'feat hex ' + (i + 1));
+  txt(s, h, { x: 5.85, y: y - 0.02, w: 3.65, h: 0.32, fontSize: 14, bold: true, color: C.background1 });
+  txt(s, b, { x: 5.85, y: y + 0.3, w: 3.65, h: 0.55, fontSize: 11 });
+});
+s.addNotes('4 から 6 の工程は、LLM サンドボックスの中で動いています。クラウド上に用意された使い捨ての Linux コンテナで、Claude はここでエミュレータのサーバーを起動し、net-snmp や gnmic、Playwright を入れて本物のツールを当てます。ユーザーの PC や実機からは隔離されていて、外への通信は許可されたものだけです。コンテナは使い捨てなので、残したい物は Git に push します。今日も途中でコンテナが入れ替わり、依存を入れ直しました。');
+
+// 3c. サンドボックスの中身と、さばける量
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '進め方' });
+s.addText('サンドボックスの中身と、さばける量', { placeholder: 'title' });
+const SPEC = { bold: true, color: C.text1, fill: { color: C.accent2 }, fontSize: 12 };
+const sp = (a, b) => [{ text: a, options: { bold: true, color: C.background1 } }, { text: b }];
+s.addTable([
+  [{ text: '項目', options: SPEC }, { text: '2026-11-20 時点', options: SPEC }],
+  sp('OS', 'Ubuntu 24.04.5 LTS'),
+  sp('CPU', '4 コア(Xeon 2.1 GHz)'),
+  sp('メモリ', '15 GB'),
+  sp('ディスク', '空き 27 GB(使い切ると書き込めない)'),
+  sp('言語', 'Python 3.11 ・ Node 22 ・ Go 1.24'),
+  sp('外への通信', '許可制のプロキシ経由'),
+], { x: 0.5, y: 1.2, w: 4.4, colW: [1.2, 3.2], fontSize: 11, color: C.background2, fill: { color: C.text2 }, border: { type: 'solid', pt: 1, color: C.text1 }, rowH: 0.42, valign: 'middle', objectName: 'spec table' });
+s.addChart(pres.charts.BAR, [{ name: '失敗率(%)', labels: ['20 同時', '50 同時', '200 同時'], values: [0, 0.09, 4.73] }], {
+  x: 5.15, y: 1.15, w: 4.35, h: 2.55, barDir: 'col', objectName: 'k6 failure chart',
+  showTitle: true, title: '同時アクセス数と失敗率(%)', titleFontSize: 11, titleColor: THEME.colors.lt1, titleFontFace: '+mn-lt',
+  chartColors: [THEME.colors.accent3], showValue: true, dataLabelPosition: 'outEnd', dataLabelColor: THEME.colors.lt1, dataLabelFontSize: 10, dataLabelFontFace: '+mn-lt', dataLabelFormatCode: '0.00',
+  catAxisLabelColor: THEME.colors.lt2, valAxisLabelColor: THEME.colors.lt2, catAxisLabelFontSize: 10, valAxisLabelFontSize: 9,
+  catAxisLabelFontFace: '+mn-lt', valAxisLabelFontFace: '+mn-lt',
+  valGridLine: { color: THEME.colors.dk2, size: 0.5 }, catGridLine: { style: 'none' }, showLegend: false,
+});
+card(s, 5.15, 3.85, 4.35, 1.15, 'cps card');
+txt(s, '約 100/秒', { x: 5.35, y: 3.92, w: 1.75, h: 0.6, fontSize: 24, bold: true, color: C.accent2, valign: 'middle' });
+txt(s, '新規接続(SSH)の上限。超えると失敗が急増', { x: 7.1, y: 3.95, w: 2.3, h: 0.6, fontSize: 11 });
+txt(s, '壁はサンドボックスでなく、エミュレータの中継の作り', { x: 5.35, y: 4.55, w: 4.05, h: 0.4, fontSize: 10, color: C.accent6 });
+s.addNotes('サンドボックスは Ubuntu 24.04.5 LTS、4 コア、メモリ 15 GB です。以前 k6 で ALB のエミュレータに負荷をかけたとき、同時 20 アクセスなら失敗 0%、50 で 0.09%、200 で 4.73% でした。SSH の新規接続は 1 秒あたり約 100 で頭打ちです。どちらも、壁はサンドボックスの性能ではなく、エミュレータの中継部分が 1 接続ごとにスレッドを 2 本使う作りであることが原因です。数百〜数千の同時接続を試すには、非同期 I/O への作り替えが次の一手になります。');
 
 // 4. テストの 4 層
 pres.addSection({ title: 'テスト' });
