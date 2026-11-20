@@ -2307,8 +2307,8 @@ async def _flap_interface_down(device_id: str, state, iface_for_flap: str):
     if stp_engine.nodes.get(device_id, {}).get('enabled') or any(
             stp_engine.nodes.get(p, {}).get('enabled') for p in peer_ids):
         for _pid in peer_ids:
-            await stp_engine.port_down(device_id, _pid)
-            await stp_engine.port_down(_pid, device_id)
+            await stp_engine.port_down(device_id, _pid, await_up=True)
+            await stp_engine.port_down(_pid, device_id, await_up=True)
     # BGPセッション断（インターフェースダウン / BFD高速検知）→ 冗長ピアへフェイルオーバー
     bn = bgp_engine.nodes.get(device_id)
     if bn and bn.get('enabled'):

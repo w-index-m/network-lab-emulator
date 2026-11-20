@@ -108,3 +108,38 @@ def test_blocking_log_is_not_repeated(triangle):
     time.sleep(6)
     n = [x for x in recorder.logs if x['dev'] in ids and 'PORTDPVSTP' in x['msg'] and 'BLOCKING' in x['msg']]
     assert 1 <= len(n) <= 2, [x['msg'] for x in n]
+
+
+def test_bpdu_rebuild_between_link_up_and_port_up_keeps_peer_up_log(triangle, monkeypatch):
+    """no shutdown は「リンクを up にする → (syslog 送信などの await) → STP port_up」の順。その間に
+    相手側の BPDU 送信(_init_ports)がポートを黙って作り直すと、port_up が「既にある」で抜けて
+    相手側の %LINK-3-UPDOWN ... up が出なかった(CI の全体テストで SYSLOG が down のまま残った)。
+    その割り込みを、復旧時の最初の await(syslog 送信)の中で必ず起こして確かめる"""
+    from engine.protocols import stp_engine
+    c, (a, b, _cc) = triangle
+    time.sleep(1.5)
+    _cli(c, a, 'configure terminal', 'interface GigabitEthernet1/0/1', 'shutdown', 'end')
+    assert not any(p.get('connected_to') == a for p in stp_engine.nodes[b]['ports'].values())
+    real_emit = app_module.syslog_dispatcher.emit
+
+    async def emit_then_bpdu(dev, *args, **kw):
+        stp_engine._init_ports(b)             # 相手側の BPDU 送信が割り込んだのと同じこと
+        return await real_emit(dev, *args, **kw)
+    monkeypatch.setattr(app_module.syslog_dispatcher, 'emit', emit_then_bpdu)
+    recorder.clear()
+    _cli(c, a, 'configure terminal', 'interface GigabitEthernet1/0/1', 'no shutdown', 'end')
+    ups = [r['msg'] for r in recorder.logs if r['dev'] == b and 'changed state to up' in r['msg']]
+    assert ups, [r['msg'] for r in recorder.logs if r['dev'] in (a, b)]
+    assert any(p.get('connected_to') == a for p in stp_engine.nodes[b]['ports'].values())   # ポートは戻る
+
+
+def test_removed_link_can_be_added_again_as_stp_port(triangle):
+    """shutdown 中にリンクごと消して張り直しても、ポートとして戻る(port_up を待ち続けない)"""
+    from engine.protocols import stp_engine
+    c, (a, b, _cc) = triangle
+    time.sleep(1.5)
+    _cli(c, a, 'configure terminal', 'interface GigabitEthernet1/0/1', 'shutdown', 'end')
+    app_module.vnet.remove_link(a, b)
+    _cli(c, a, 'configure terminal', 'interface GigabitEthernet1/0/1', 'no shutdown', 'end')
+    c.post('/api/link', json={'a': a, 'b': b, 'iface_a': 'GigabitEthernet1/0/1', 'iface_b': 'GigabitEthernet1/0/1'})
+    assert _wait(lambda: any(p.get('connected_to') == a for p in stp_engine.nodes[b]['ports'].values()), 6)

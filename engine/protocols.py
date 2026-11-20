@@ -279,6 +279,7 @@ class VirtualNetwork:
     def remove_link(self, a: str, b: str):
         self.links[a].discard(b)
         self.links[b].discard(a)
+        stp_engine._awaiting_up.difference_update({(a, b), (b, a)})
         # STPにポートダウンを通知（後方参照なので_spawn使用）
         try:
             _spawn(stp_engine.port_down(a, b))
@@ -3524,6 +3525,10 @@ def _bid_key(bid: str):
 class StpEngine:
     def __init__(self):
         self.nodes: Dict[str, dict] = {}
+        # shutdown で落としたリンク(装置, 相手)。復旧は port_up だけがポートを作り直す
+        # (BPDU 送信の _init_ports が先に黙って作ると、port_up が「既にある」で抜けて
+        #  相手側の %LINK-3-UPDOWN ... up が出ず、/cyber-view の SYSLOG が down のまま残った)
+        self._awaiting_up: set = set()
         # device_id -> {vlan_id -> node_dict}  (Rapid-PVST+ 独立インスタンス)
         self.pvst_nodes: Dict[str, Dict[int, dict]] = {}
         # device_id -> {port_name -> {'portfast':bool,'bpduguard':bool,'bpdufilter':bool}}
@@ -3749,7 +3754,7 @@ class StpEngine:
         # 接続済みの隣接ノードからポートを生成(shutdown 等で落ちているリンクは除く。
         # 落ちたリンクは port_down がポートを消し、復旧時は port_up が作り直す)
         for i, peer_id in enumerate(vnet.get_neighbors(device_id), 1):
-            if self._link_down(device_id, peer_id):
+            if self._link_down(device_id, peer_id) or (device_id, peer_id) in self._awaiting_up:
                 continue
             port_name = self._port_name_for_peer(device_id, peer_id, f'ether {i}')
             if port_name not in n['ports']:
@@ -4051,7 +4056,7 @@ class StpEngine:
             n['bpdu_task'].cancel()
         n['enabled'] = False
 
-    async def port_down(self, device_id: str, peer_id: str):
+    async def port_down(self, device_id: str, peer_id: str, await_up: bool = False):
         """
         リンク障害発生時の処理（実機STPのTCN/再収束を再現）。
         1. 障害ポートを削除
@@ -4062,6 +4067,8 @@ class StpEngine:
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
             return
+        if await_up:
+            self._awaiting_up.add((device_id, peer_id))
 
         # 障害ポートを特定して削除
         down_port = None
@@ -4214,6 +4221,7 @@ class StpEngine:
 
     async def port_up(self, device_id: str, peer_id: str):
         """リンク回復時の処理"""
+        self._awaiting_up.discard((device_id, peer_id))
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
             return
