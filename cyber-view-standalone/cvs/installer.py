@@ -82,8 +82,26 @@ def detect(prometheus=None, loki=None, zabbix=None, mrtg_cfgs=None, cacti_dirs=N
                 if name:
                     d['ifs'].setdefault(norm_if(name), {'name': name})
                 d['from'].add('prometheus')
-        else:
-            found['notes'].append('Prometheus に snmp を含む job が見つかりません(snmp_exporter の scrape を確認)')
+        # gnmic の prometheus 出力(gNMI の OpenConfig のカウンタ)。装置は source ラベル
+        gjobs = sorted({r['metric'].get('job') for r in _prom(
+            p_url, get, 'count by (job) (interfaces_interface_state_counters_in_octets)') if r['metric'].get('job')})
+        gjob = gjobs[0] if gjobs else None
+        found['prometheus']['gnmic_job'] = gjob
+        if gjob:
+            for r in _prom(p_url, get, f'count by (source, interface_name) '
+                                       f'(interfaces_interface_state_counters_in_octets{{job="{gjob}"}})'):
+                m = r['metric']
+                ip = (m.get('source') or '').split(':')[0]
+                if not ip:
+                    continue
+                d = dev(ip)
+                d['mgmt_ip'] = d['mgmt_ip'] or ip
+                if m.get('interface_name'):
+                    d['ifs'].setdefault(norm_if(m['interface_name']), {'name': m['interface_name']})
+                d['from'].add('gnmic')
+        if not job and not gjob:
+            found['notes'].append('Prometheus に snmp を含む job も gnmic の値も見つかりません'
+                                  '(snmp_exporter / gnmic の scrape を確認)')
     except Exception as e:  # noqa: BLE001
         if prometheus:
             found['notes'].append(f'Prometheus({p_url})に届きません: {e}')
@@ -209,8 +227,12 @@ def build_config(found, title='本番ネットワーク'):
     cfg = {'title': title, 'poll_interval': 10, 'link_speed_bps': 1_000_000_000,
            'devices': list(devices.values()), 'links': infer_links(devices), 'sources': {}}
     src = cfg['sources']
-    if found['prometheus'] and found['prometheus'].get('job'):
-        src['prometheus'] = {'url': found['prometheus']['url'], 'job': found['prometheus']['job']}
+    p = found['prometheus'] or {}
+    if p.get('job') or p.get('gnmic_job'):
+        src['prometheus'] = {'url': p['url'], 'job': p.get('job') or 'snmp'}
+        if p.get('gnmic_job'):
+            src['prometheus']['flavor'] = 'both' if p.get('job') else 'gnmic'
+            src['prometheus']['gnmic_job'] = p['gnmic_job']
     if found['loki']:
         src['loki'] = {'url': found['loki']['url'], 'query': '{job=~".+"}'}
     if found['zabbix']:
@@ -256,7 +278,7 @@ def render_yaml(cfg, found):
 def summary(found):
     out = []
     p = found['prometheus']
-    out.append(f"Prometheus : {p['url'] + ' v' + str(p['version']) + ' job=' + str(p['job']) if p else 'なし'}")
+    out.append(f"Prometheus : {p['url'] + ' v' + str(p['version']) + ' job=' + str(p['job']) + (' gnmic=' + str(p['gnmic_job']) if p.get('gnmic_job') else '') if p else 'なし'}")
     out.append(f"Loki       : {found['loki']['url'] if found['loki'] else 'なし'}")
     out.append(f"Zabbix     : {found['zabbix']['url'] if found['zabbix'] else 'なし'}")
     out.append(f"MRTG       : {', '.join(m['cfg'] + ' (' + str(m['targets']) + ' 対象)' for m in found['mrtg']) or 'なし'}")

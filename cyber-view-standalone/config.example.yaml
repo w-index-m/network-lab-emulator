@@ -54,6 +54,11 @@ sources:
   prometheus:
     url: http://127.0.0.1:9090
     job: cisco-snmp              # snmp_exporter を叩いている scrape job 名
+    # gNMI の値を gnmic(prometheus 出力、gnmic.example.yaml)経由で読むとき:
+    #   flavor: gnmic(gnmic だけ)/ both(snmp_exporter を優先し、無い装置・IF を gnmic で埋める)。既定は snmp
+    # flavor: both
+    # gnmic_job: gnmic           # gnmic を叩いている scrape job 名
+    # gnmic_prefix: ''           # gnmic の outputs.*.metric-prefix を付けたときだけ
 
   # Loki: syslog。ログのラベル(device_labels の順に探す)か本文の装置名で装置を特定する
   loki:

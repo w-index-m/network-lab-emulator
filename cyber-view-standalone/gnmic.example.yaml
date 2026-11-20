@@ -1,0 +1,43 @@
+# gnmic の設定例: Catalyst(IOS XE)の gNMI を購読して、Prometheus の形で公開する
+#
+#   装置 ──gNMI(50052)──▶ gnmic ──:9804/metrics──▶ Prometheus(ヴァルハラ)──▶ ニルヴァーナ
+#
+# 起動:   gnmic --config gnmic.yaml subscribe
+# 確認:   curl -s http://127.0.0.1:9804/metrics | grep in_octets
+# Prometheus 側の scrape(job 名はニルヴァーナの sources.prometheus.gnmic_job と同じにする):
+#   - job_name: gnmic
+#     static_configs: [{targets: ['<gnmic を動かす機械>:9804']}]
+#
+# 装置側(IOS XE 16.x):  netconf-yang / gnmi-yang / gnmi-yang server(暗号化なし・50052)
+# 装置側(IOS XE 17.x):  gnxi / gnxi server
+# ユーザーは privilege 15 で AAA(aaa new-model + aaa authorization exec default local)が要る。
+
+username: ${GNMI_USER}           # 例: export GNMI_USER=admin
+password: ${GNMI_PASSWORD}
+insecure: true                   # gnmi-yang server / gnxi server(TLS なし)。secure-server なら tls-ca 等に変える
+encoding: json_ietf              # IOS XE 16.x は JSON_IETF だけ
+timeout: 10s
+
+targets:
+  # ニルヴァーナの devices[].mgmt_ip と同じ IP にする(装置はこの IP で突き合わせる)
+  192.168.1.1:50052: {}
+  # 192.168.1.2:50052: {}
+
+subscriptions:
+  if-counters:
+    paths: ["/interfaces/interface/state/counters"]
+    stream-mode: sample
+    sample-interval: 10s
+  if-oper:
+    paths: ["/interfaces/interface/state/oper-status"]
+    stream-mode: sample
+    sample-interval: 10s
+
+outputs:
+  prom:
+    type: prometheus
+    listen: 0.0.0.0:9804
+    path: /metrics
+    expiration: 60s
+    strings-as-labels: true      # oper-status(UP / DOWN)を oper_status ラベルにする。ニルヴァーナはこれで断を判定する
+    export-timestamps: true      # gNMI の通知時刻を付ける。状態が変わったとき新しい方を選ぶのに使う

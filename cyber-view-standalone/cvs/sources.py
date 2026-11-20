@@ -1,5 +1,5 @@
 """
-データの取り込み口: Prometheus(snmp_exporter)/ Loki / Zabbix
+データの取り込み口: Prometheus(snmp_exporter・gnmic)/ Loki / Zabbix
 
 どれも標準ライブラリの urllib だけで叩く(追加の依存を増やさない)。監視基盤は同じ構内に
 あることが多いので、既定ではプロキシを通さない(sources.<name>.use_proxy: true で通す)。
@@ -23,11 +23,43 @@ def _get_json(url, timeout, use_proxy=False, headers=None):
 
 
 # ── Prometheus ─────────────────────────────────────────
-class Prometheus:
-    """snmp_exporter(if_mib)が集めた値を読む。instance は装置の管理IP(ポート付きでも可)"""
+# gnmic(prometheus 出力)が公開するメトリクス名。パス /interfaces/interface/state/... の
+# "/" と "-" が "_" になる。装置は source ラベル(gnmic の target、"IP:ポート")、IF は interface_name。
+GNMIC_IN = 'interfaces_interface_state_counters_in_octets'
+GNMIC_OUT = 'interfaces_interface_state_counters_out_octets'
+GNMIC_OPER = 'interfaces_interface_state_oper_status'
 
-    def __init__(self, url, job='snmp', timeout=3.0, use_proxy=False, **_):
+
+class Prometheus:
+    """Prometheus から流量・IF の状態・収集できているかを読む。
+
+    flavor(どの集め方の値を読むか):
+      snmp   snmp_exporter(if_mib)。job のメトリクス ifHCIn/OutOctets・ifOperStatus、ラベル instance・ifName
+      gnmic  gnmic の prometheus 出力(gNMI の OpenConfig)。gnmic_job のメトリクス
+             interfaces_interface_state_counters_in/out_octets・…_oper_status、ラベル source・interface_name。
+             oper-status は文字列なので gnmic 側で strings-as-labels: true にする(oper_status="UP" が付く)。
+             状態の切り替わりを正しく拾うため export-timestamps: true も付ける
+      both   両方読む。同じ装置・IF は snmp を優先し、無いところを gnmic で埋める
+    装置は instance / source の IP(ポートを外したもの)で、設定の devices[].mgmt_ip と突き合わせる。
+    """
+
+    def __init__(self, url, job='snmp', timeout=3.0, use_proxy=False, flavor='snmp',
+                 gnmic_job='gnmic', gnmic_prefix='', **_):
         self.url, self.job, self.timeout, self.use_proxy = url.rstrip('/'), job, timeout, use_proxy
+        self.flavor = (flavor or 'snmp').lower()
+        if self.flavor not in ('snmp', 'gnmic', 'both'):
+            raise ValueError(f'sources.prometheus.flavor は snmp / gnmic / both のどれか: {flavor}')
+        self.gnmic_job = gnmic_job
+        p = (gnmic_prefix.rstrip('_') + '_') if gnmic_prefix else ''
+        self.g_in, self.g_out, self.g_oper = p + GNMIC_IN, p + GNMIC_OUT, p + GNMIC_OPER
+
+    @property
+    def use_snmp(self):
+        return self.flavor in ('snmp', 'both')
+
+    @property
+    def use_gnmic(self):
+        return self.flavor in ('gnmic', 'both')
 
     def query(self, q):
         d = _get_json(self.url + '/api/v1/query?' + urllib.parse.urlencode({'query': q}), self.timeout, self.use_proxy)
@@ -35,44 +67,89 @@ class Prometheus:
             raise RuntimeError(d.get('error') or 'query failed')
         return d['data']['result']
 
-    def _by_if(self, q, conv=float):
+    def _by_if(self, q, conv=float, dev_label='instance', if_label='ifName'):
         out = {}
         for row in self.query(q):
             m = row.get('metric', {})
-            if 'instance' in m and 'ifName' in m:
+            if dev_label in m and if_label in m:
                 try:
-                    out[(m['instance'].split(':')[0], norm_if(m['ifName']))] = conv(row['value'][1])
+                    out[(m[dev_label].split(':')[0], norm_if(m[if_label]))] = conv(row['value'][1])
                 except (TypeError, ValueError):
                     pass
         return out
+
+    def _g_by_if(self, q, conv=float):
+        return self._by_if(q, conv, 'source', 'interface_name')
+
+    @staticmethod
+    def _merge(first, second):
+        out = dict(second)
+        out.update(first)
+        return out
+
+    def _pair(self, snmp_in, snmp_out, g_in, g_out, default=None):
+        rin, rout = {}, {}
+        if self.use_snmp:
+            rin, rout = snmp_in(), snmp_out()
+        if self.use_gnmic:
+            gi, go = g_in(), g_out()
+            keys = set(gi) | set(go)
+            # 同じ装置・IF が snmp で取れていれば、snmp の組をそのまま使う
+            keys -= set(rin) | set(rout)
+            rin = self._merge(rin, {k: gi[k] for k in keys if k in gi})
+            rout = self._merge(rout, {k: go[k] for k in keys if k in go})
+        return {k: (rin.get(k, default), rout.get(k, default)) for k in set(rin) | set(rout)}
 
     def rates(self, window_s=60):
         """{(instance, if): (in_bps, out_bps)}"""
         w = f'{max(60, int(window_s))}s'
         sel = f'{{job="{self.job}"}}'
-        rin = self._by_if(f'rate(ifHCInOctets{sel}[{w}]) * 8')
-        rout = self._by_if(f'rate(ifHCOutOctets{sel}[{w}]) * 8')
-        return {k: (rin.get(k), rout.get(k)) for k in set(rin) | set(rout)}
+        gsel = f'{{job="{self.gnmic_job}"}}'
+        return self._pair(lambda: self._by_if(f'rate(ifHCInOctets{sel}[{w}]) * 8'),
+                          lambda: self._by_if(f'rate(ifHCOutOctets{sel}[{w}]) * 8'),
+                          lambda: self._g_by_if(f'rate({self.g_in}{gsel}[{w}]) * 8'),
+                          lambda: self._g_by_if(f'rate({self.g_out}{gsel}[{w}]) * 8'))
 
     def counters(self):
         sel = f'{{job="{self.job}"}}'
-        cin = self._by_if(f'ifHCInOctets{sel}')
-        cout = self._by_if(f'ifHCOutOctets{sel}')
-        return {k: (cin.get(k, 0), cout.get(k, 0)) for k in set(cin) | set(cout)}
+        gsel = f'{{job="{self.gnmic_job}"}}'
+        return self._pair(lambda: self._by_if(f'ifHCInOctets{sel}'),
+                          lambda: self._by_if(f'ifHCOutOctets{sel}'),
+                          lambda: self._g_by_if(f'{self.g_in}{gsel}'),
+                          lambda: self._g_by_if(f'{self.g_out}{gsel}'), default=0)
 
     def oper_status(self):
-        """{(instance, if): 'up'|'down'}(IF-MIB 1=up、2=down・7=lowerLayerDown。それ以外は判定に使わない)"""
+        """{(instance, if): 'up'|'down'}(IF-MIB 1=up、2=down・7=lowerLayerDown。OpenConfig は UP / DOWN・
+        LOWER_LAYER_DOWN。それ以外は判定に使わない)"""
         out = {}
-        for k, v in self._by_if(f'ifOperStatus{{job="{self.job}"}}', lambda x: int(float(x))).items():
-            if v == 1:
-                out[k] = 'up'
-            elif v in (2, 7):
-                out[k] = 'down'
+        if self.use_gnmic:
+            # 状態が変わると、古い oper_status の系列も gnmic の expiration まで残る。系列ごとの
+            # 最後の時刻(gnmic の export-timestamps: true で gNMI の通知時刻)が新しい方を採る
+            m = f'{self.g_oper}{{job="{self.gnmic_job}"}}'
+            q = f'topk by (source, interface_name) (1, timestamp({m}) and ({m} == 1))'
+            for row in self.query(q):
+                m = row.get('metric', {})
+                st = (m.get('oper_status') or '').upper()
+                if 'source' in m and 'interface_name' in m:
+                    k = (m['source'].split(':')[0], norm_if(m['interface_name']))
+                    if st == 'UP':
+                        out[k] = 'up'
+                    elif st in ('DOWN', 'LOWER_LAYER_DOWN'):
+                        out[k] = 'down'
+        if self.use_snmp:
+            for k, v in self._by_if(f'ifOperStatus{{job="{self.job}"}}', lambda x: int(float(x))).items():
+                if v == 1:
+                    out[k] = 'up'
+                elif v in (2, 7):
+                    out[k] = 'down'
         return out
 
     def targets_up(self):
-        """{instance: True/False}(収集できているか)"""
+        """{instance: True/False}(収集できているか)。gnmic は装置ごとの up を出さないので、
+        snmp の分だけ(gnmic だけのときは空 = 応答なしの判定はしない)"""
         out = {}
+        if not self.use_snmp:
+            return out
         for row in self.query(f'up{{job="{self.job}"}}'):
             inst = row.get('metric', {}).get('instance')
             v = float(row['value'][1])
