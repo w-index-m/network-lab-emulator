@@ -40,3 +40,47 @@ def _cleanup():
     _cancel_all()
     yield
     _cancel_all()
+
+
+# ── 試験の様子をニルヴァーナの画面へ送る(NETLAB_ACTIVITY_URL を指定したときだけ) ──
+# 例: NETLAB_ACTIVITY_URL=http://127.0.0.1:8000 pytest tests/ -q
+#     → 起動中のニルヴァーナ(/cyber-view)の TEST RUN パネルに 1 件ごとの合否が流れる。
+#     ログインが要るサーバーなら NETLAB_ACTIVITY_TOKEN にセッショントークンを入れる。
+#     届かなくなったら以降は送らない(試験そのものは止めない)
+_ACT_URL = os.environ.get('NETLAB_ACTIVITY_URL', '').rstrip('/')
+_ACT_RUN = f"pytest-{os.getpid()}"
+_act_on = bool(_ACT_URL)
+
+
+def _act_send(**ev):
+    global _act_on
+    if not _act_on:
+        return
+    import json as _json
+    import urllib.request as _ur
+    headers = {'Content-Type': 'application/json'}
+    if os.environ.get('NETLAB_ACTIVITY_TOKEN'):
+        headers['X-Session-Token'] = os.environ['NETLAB_ACTIVITY_TOKEN']
+    try:
+        req = _ur.Request(_ACT_URL + '/api/testrun/event', headers=headers,
+                          data=_json.dumps({'suite': 'pytest', 'run': _ACT_RUN, **ev}).encode())
+        _ur.urlopen(req, timeout=2).read()
+    except Exception:  # noqa: BLE001
+        _act_on = False
+
+
+def pytest_sessionstart(session):
+    _act_send(kind='start', name='pytest')
+
+
+def pytest_runtest_logreport(report):
+    if not _act_on:
+        return
+    if report.when == 'call' or (report.when == 'setup' and not report.passed):
+        kind = 'skip' if report.skipped else 'pass' if report.passed else 'fail'
+        detail = '' if kind == 'pass' else str(getattr(report, 'longreprtext', '') or '').strip().splitlines()[-1:]
+        _act_send(kind=kind, name=report.nodeid, detail=detail[0][:300] if detail else '')
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _act_send(kind='end', name='pytest', detail=f'exit {int(exitstatus)}')

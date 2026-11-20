@@ -11735,6 +11735,32 @@ async def traffic_redirects(since: int = 0, limit: int = 100):
     return {'events': evs, 'seq': _redir.seq}
 
 
+@app.post("/api/testrun/event")
+async def testrun_event(request: Request):
+    """試験の様子を記録する(/cyber-view の「試」プレートと TEST RUN パネル)。
+    本文は 1 件の出来事か、そのリスト(最大 100 件)。形は engine/test_activity.py の説明どおり"""
+    from engine.test_activity import activity
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({'error': 'JSON で送ってください'}, status_code=400)
+    items = body if isinstance(body, list) else [body]
+    if len(items) > 100:
+        return JSONResponse({'error': '1 回に送れるのは 100 件まで'}, status_code=400)
+    try:
+        out = [activity.record(e) for e in items]
+    except ValueError as e:
+        return JSONResponse({'error': str(e)}, status_code=400)
+    return {'ok': True, 'recorded': len(out), 'seq': activity.seq}
+
+
+@app.get("/api/testrun/events")
+async def testrun_events(since: int = 0, limit: int = 200):
+    """/cyber-view 用: 試験の出来事(since=<seq> 以降)と、いま走っている試験の集計"""
+    from engine.test_activity import activity
+    return {'events': activity.since(int(since), max(1, min(int(limit), 500))), **activity.summary()}
+
+
 @app.get("/api/traffic/history")
 async def traffic_history(start: float = None, end: float = None, src: str = None,
                           dst: str = None, result: str = 'all'):

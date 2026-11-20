@@ -218,6 +218,16 @@
   #wanpanel .row { color: var(--ink); font-family: monospace; font-size: 11px; margin: 2px 0; }
   #wanpanel .ok { color: #5dffa8; } #wanpanel .warn { color: #ffab2e; } #wanpanel .bad { color: #ff3b4e; }
   #wanpanel canvas { width: 100%; height: 34px; display: block; margin-top: 3px; position: static; }
+  /* 試験の様子(Claude が裏で回している試験)。試験が動いている間と、終わってから 60 秒だけ出す */
+  #testpanel { left: 16px; bottom: clamp(96px, 11vw, 116px); width: min(340px, 64vw); display: none; font-size: 11px;
+    background: rgba(14,8,34,.86); border: 1px solid #a98bff; padding: 7px 9px; box-shadow: 0 0 16px rgba(169,139,255,.25); }
+  body.testing #testpanel { display: block; }
+  body.board #testpanel, body.atk #testpanel { display: none !important; }
+  #testpanel h4 { margin: 0 0 4px; color: #fff; font-size: 12px; letter-spacing: .08em; display: flex; justify-content: space-between; gap: 8px; }
+  #testpanel h4 small { color: #c9b8ff; font-weight: 400; letter-spacing: 0; }
+  #testpanel .cnt { font-family: monospace; margin-bottom: 4px; } #testpanel .cnt b { margin-right: 10px; }
+  #testpanel .ev { font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+  #testpanel .p { color: #3dff9a; } #testpanel .f { color: #ff3b4e; } #testpanel .s { color: #9aa4b8; } #testpanel .q { color: #c9b8ff; }
   @media (max-width: 640px) { #wanpanel { top: auto; bottom: 60px; right: 8px; width: 70vw; max-height: 34vh; } }
   /* RESPONSE: 警報からの遮断・隔離 */
   #resp { bottom: 64px; left: 50%; transform: translateX(-50%); width: min(620px, 92vw); font-size: 12px; display: none; }
@@ -312,6 +322,7 @@
 <div id="resp" class="hud"></div>
 <div id="atkpanel" class="hud"></div>
 <div id="wanpanel" class="hud"></div>
+<div id="testpanel" class="hud"></div>
 <div id="crumbs" class="hud"></div>
 <div id="alerts" class="hud"></div>
 <div id="card" class="hud"></div>
@@ -1300,7 +1311,7 @@
   // 押し出した横長の六角プレート(画面に正対、奥行き付き)。big=true は脈動+太字
   // ── プレートの置き場所(1フレームごと): 先に置いたプレート・上のメニュー・状態ボード等と重ねない ──
   let plateBoxes = [], plateBlock = [];
-  const PLATE_HUD = ['modes', 'status', 'cidr', 'crumbs', 'zoom', 'resp', 'legend', 'filter', 'alerts', 'worldpanel'];
+  const PLATE_HUD = ['modes', 'status', 'cidr', 'crumbs', 'zoom', 'resp', 'legend', 'filter', 'alerts', 'worldpanel', 'testpanel'];
   function platesBeginFrame() {
     plateBoxes = [];
     plateBlock = [];
@@ -3931,6 +3942,52 @@
   }
   setInterval(pollRedirects, 2000); pollRedirects();
   window.__cvRedirects = () => redirFx.map(f => f.e);
+  // 試験の様子: Claude が裏で回している試験(シナリオ回帰・pytest など)が、どの装置に何を当てて、
+  //   通ったか落ちたか。装置が分かるものはその装置の上に「試」のプレート(落ちたら「警」)、全体は左下の TEST RUN パネル。
+  //   単体版(/api/testrun が無い)では何も出さない
+  let testSeq = -1, testLog = [], testSum = null, testLast = 0, testOff = false;
+  const TEST_COL = { probe: '#a98bff', pass: '#3dff9a', fail: '#ff3b4e', skip: '#9aa4b8' };
+  const TEST_ICON = { probe: '→', pass: '✓', fail: '✗', skip: '·', start: '▶', end: '■' };
+  async function pollTests() {
+    if (testOff) return;
+    try {
+      const d = await api(`/api/testrun/events?since=${Math.max(0, testSeq)}&limit=200`);
+      const first = testSeq < 0;
+      testSeq = d.seq; testSum = d.current;
+      if (!first && d.events.length) {
+        testLast = performance.now();
+        for (const e of d.events) {
+          testLog.push(e);
+          const pos = e.device ? posForDevice(e.device) : null;
+          if (!pos) continue;
+          if (e.kind === 'probe') popup(pos, TEST_COL.probe, 'TEST ' + (e.name || ''), e.command || '', 3500, '試');
+          else if (e.kind === 'pass') popup(pos, TEST_COL.pass, 'TEST PASS', e.name, 4500, '試');
+          else if (e.kind === 'fail') popup(pos, TEST_COL.fail, 'TEST FAIL', e.name, 9000, '警');
+        }
+        testLog = testLog.slice(-40);
+        fxFeedEv(...d.events.slice(-8).map(e => `${TEST_ICON[e.kind] || ''} ${e.command || e.name || ''}`));
+        if (d.events.some(e => e.kind === 'fail')) sfx('warn');
+      }
+      renderTests();
+    } catch (e) { if (String(e).includes('404')) testOff = true; }
+  }
+  function renderTests() {
+    const el = document.getElementById('testpanel');
+    const r = testSum;
+    const live = r && (!r.ended || performance.now() - testLast < 60000) && testLog.length;
+    document.body.classList.toggle('testing', !!live);
+    if (!live) return;
+    const esc = (x) => String(x || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+    const cls = { pass: 'p', fail: 'f', skip: 's', probe: 'q', start: 'q', end: 'q' };
+    const rows = testLog.slice(-6).reverse().map(e =>
+      `<div class="ev"><span class="${cls[e.kind] || 'q'}">${TEST_ICON[e.kind] || ''}</span> ` +
+      `${esc(e.device ? e.device + ' ' : '')}${esc(e.kind === 'probe' ? e.command : e.name)}${e.kind === 'fail' && e.detail ? ' — ' + esc(e.detail) : ''}</div>`).join('');
+    el.innerHTML = `<h4><span>TEST RUN ・ ${esc(r.suite)}</span><small>${r.ended ? '終了' : '実行中'}</small></h4>` +
+      `<div class="cnt"><b class="p">PASS ${r.pass}</b><b class="f">FAIL ${r.fail}</b><b class="s">SKIP ${r.skip}</b><b class="q">当てた ${r.probe}</b></div>${rows}`;
+  }
+  setInterval(pollTests, 2000); pollTests();
+  window.__cvTests = () => ({ off: testOff, seq: testSeq, sum: testSum, log: testLog.slice(),
+                              shown: document.body.classList.contains('testing') });
   // 2点の間に持ち上がった弧を描き、u(0..1)の位置の画面座標を返す関数を返す
   function arc3d(A, B, lift, col, width, dash, alpha) {
     const pts = [];
