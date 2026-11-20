@@ -467,12 +467,14 @@ def scenario_rip_distribute_list():
          "interface Loopback0", "ip address 192.168.83.1 255.255.255.0", "no shutdown", "exit",
          "router rip", "version 2", "network 10.0.0.0", "network 192.168.83.0", "exit")
     # (a) prefix-list ベース
+    # distribute-list は network より前に入れる。network で RIP が動き出すと、フィルタを入れる前の
+    # 更新で抑制対象が先に隣へ届くことがあり(実機でも 180 秒で消えるまで残る)、CI で時々落ちていた
     conf("dlb",
          "interface GigabitEthernet0/0/1", "ip address 10.5.12.2 255.255.255.0", "no shutdown", "exit",
          "interface GigabitEthernet0/0/0", "ip address 10.5.23.2 255.255.255.0", "no shutdown", "exit",
          "ip prefix-list BLK83 seq 5 deny 192.168.83.0/24",
          "ip prefix-list BLK83 seq 10 permit 0.0.0.0/0 le 32",
-         "router rip", "version 2", "network 10.0.0.0", "distribute-list BLK83 out", "exit")
+         "router rip", "version 2", "distribute-list BLK83 out", "network 10.0.0.0", "exit")
     time.sleep(7)
     r_pl = cli("dla", "show ip route rip")
     dlb_has = cli("dlb", "show ip route rip")
@@ -498,7 +500,7 @@ def scenario_rip_distribute_list():
          "interface GigabitEthernet0/0/1", "ip address 10.6.12.2 255.255.255.0", "no shutdown", "exit",
          "interface GigabitEthernet0/0/0", "ip address 10.6.23.2 255.255.255.0", "no shutdown", "exit",
          "access-list 20 deny 192.168.93.0 0.0.0.255", "access-list 20 permit any",
-         "router rip", "version 2", "network 10.0.0.0", "distribute-list 20 out", "exit")
+         "router rip", "version 2", "distribute-list 20 out", "network 10.0.0.0", "exit")
     time.sleep(7)
     r_acl = cli("ala", "show ip route rip")
     check("標準ACL distribute-listでALAに192.168.93.0が来ない",
