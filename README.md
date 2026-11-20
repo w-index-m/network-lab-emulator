@@ -13,6 +13,11 @@
   <sub>通常運用 → リンク障害と迂回 → フラップ → 経路の変化(情)。クリックで音楽つきの動画 / normal → link failure and reroute → flapping → route change info. Click for the full video with music.</sub>
 </p>
 
+**ニルヴァーナ(Cyber View)**は、既存の監視(Prometheus・Grafana Loki・SNMP / TRAP・NetFlow / sFlow・MRTG・Cacti・Zabbix)の値を読み、ネットワークのトラフィックと障害を **3D** で見せ、変化を「情」「注」「警」で知らせる監視画面です。実機の監視にも使える単体版(`cyber-view-standalone/`)があります。
+紹介: [docs/nirvana-introduction.md](docs/nirvana-introduction.md) / [PowerPoint](docs/nirvana-introduction.pptx)
+
+<sub>キーワード: ネットワーク可視化 · ネットワーク監視 · トラフィック可視化 · 3D · SNMP · NetFlow · sFlow · Prometheus · Grafana · Loki · MRTG · Cacti · Zabbix · OSPF · ダークネット · network traffic visualization · network monitoring · 3D network view · NIRVANA-style</sub>
+
 > 🇬🇧 **English version: [at the bottom of this page](#english)**
 >
 > 📊 **[実装進捗ダッシュボード](./IMPLEMENTATION_PROGRESS.md)**  
@@ -106,6 +111,8 @@ Hostname Capability・Graceful Restart/LLGR・RPKIにも対応。IPv6アドレ�
 ### 日本語
 
 NICT の NIRVANA改 を参考に作った、ネットワークを 3D で見る画面です。アプリ内では「ニルヴァーナ」と呼んでいます。
+
+**紹介資料**: [docs/nirvana-introduction.md](docs/nirvana-introduction.md)(PowerPoint 版: [docs/nirvana-introduction.pptx](docs/nirvana-introduction.pptx))。取り込めるデータ、ヴァルハラとの連携、「情」「注」「警」の出し方、4つの経路の見え方、流量と粒の動き、スキンをまとめています。
 名前・ロゴは独自のもので、実在の製品のマークは使っていません。Prometheus は画面の上では「ヴァルハラ / VALHALLA」と表示します。
 
 使い方は2通りあります。
@@ -140,6 +147,8 @@ SNMP で取った値・情・警報・ログはメモリだけに置き、長く
 
 A 3D network view inspired by NICT's NIRVANA-Kai, called "Nirvana" in this app. The name and logo are original, and no
 real product marks are used. On screen, Prometheus is labelled "VALHALLA".
+
+Introduction (Japanese): [docs/nirvana-introduction.md](docs/nirvana-introduction.md), PowerPoint: [docs/nirvana-introduction.pptx](docs/nirvana-introduction.pptx).
 
 There are two ways to use it:
 

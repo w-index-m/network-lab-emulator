@@ -30,6 +30,12 @@ from engine.l2_loop import loops, find_rings  # noqa: E402
 G = ['GigabitEthernet1/0/1', 'GigabitEthernet1/0/2']
 P = ['Port1/0/1', 'Port1/0/2']
 
+# 本物の tick。テスト中は A._l2loop_tick を空にして、アプリの裏の定期処理(_l2loop_loop)に
+# 割り込まれないようにする。別のテストモジュールが import 時に client.__enter__() すると
+# lifespan が全体テストの間ずっと動き続け、裏の tick が先にループを検知して警報を出してしまう
+# (CI の全体テストでだけ len(al) == 1 が落ちていた)
+_REAL_TICK = A._l2loop_tick
+
 
 @pytest.fixture(scope='module')
 def client():
@@ -37,7 +43,10 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def _fresh():
+def _fresh(monkeypatch):
+    async def _no_background_tick(now=None):
+        return []
+    monkeypatch.setattr(A, '_l2loop_tick', _no_background_tick)
     loops.reset()
     yield
     loops.reset()
@@ -72,7 +81,7 @@ def _close(c, ids, ifs=G):
 
 
 def _tick(ev, t):
-    return [a for a in ev.run_until_complete(A._l2loop_tick(t)) if a['do'] not in ('storm', 'cpu')]
+    return [a for a in ev.run_until_complete(_REAL_TICK(t)) if a['do'] not in ('storm', 'cpu')]
 
 
 def _mine(acts, ids):

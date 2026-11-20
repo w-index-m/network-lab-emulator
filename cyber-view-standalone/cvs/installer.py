@@ -9,7 +9,7 @@
   - Loki(既定 http://127.0.0.1:3100)
   - Zabbix(/etc/zabbix/web/zabbix.conf.php があるか、--zabbix で URL)。トークンは ${ZABBIX_TOKEN} のまま
   - MRTG(/etc/mrtg.cfg・/etc/mrtg/*.cfg): Target から装置・インタフェース・IP
-  - Cacti(/var/lib/cacti/rra 等): RRD のファイル名から装置。どのファイルがどのインタフェースかは自動では分からない
+  - Cacti(/var/lib/cacti/rra 等と、DB の接続情報 /etc/cacti/db.php 等): RRD と装置・インタフェースの対応は Cacti の DB から自動で読む
     ので、targets は下書き(コメント)として出す
   - Ollama(既定 http://127.0.0.1:11434)と、AI の鍵(ANTHROPIC_API_KEY / GROQ_API_KEY / OPENAI_API_KEY)
 つながり(links)は、同じ /30・/31 に IP がある2台を「推定」として入れる。必ず見直すこと。
@@ -25,11 +25,12 @@ import sys
 import urllib.parse
 import urllib.request
 
-from .legacy_sources import parse_mrtg_cfg
+from .cacti_db import DB_CONFIG_CANDIDATES, _client as _mysql_client, read_db_config
+from .legacy_sources import CACTI_RRA_CANDIDATES, MRTG_CFG_CANDIDATES, parse_mrtg_cfg
 from .link_evidence import norm_if
 
-MRTG_CFGS = ['/etc/mrtg.cfg', '/etc/mrtg/*.cfg', '/usr/local/etc/mrtg/*.cfg']
-CACTI_DIRS = ['/var/lib/cacti/rra', '/usr/share/cacti/rra', '/var/www/html/cacti/rra', '/usr/share/cacti/site/rra']
+MRTG_CFGS = MRTG_CFG_CANDIDATES
+CACTI_DIRS = CACTI_RRA_CANDIDATES
 
 
 def http_json(url, timeout=3):
@@ -48,11 +49,13 @@ def _prom(url, get, q):
     return d['data']['result'] if isinstance(d, dict) and d.get('status') == 'success' else []
 
 
-def detect(prometheus=None, loki=None, zabbix=None, mrtg_cfgs=None, cacti_dirs=None, ollama=None, env=None, get=None):
+def detect(prometheus=None, loki=None, zabbix=None, mrtg_cfgs=None, cacti_dirs=None, ollama=None, env=None, get=None,
+           cacti_db_configs=None):
     get = get or http_json
     env = env if env is not None else os.environ
     found = {'prometheus': None, 'loki': None, 'zabbix': None, 'mrtg': [], 'cacti': [], 'ollama': None, 'ai': None,
-             'devices': {}, 'notes': []}
+             'devices': {}, 'notes': [], 'searched': {'mrtg': [], 'cacti': [], 'cacti_db': []}, 'cacti_db': None}
+    searched = found['searched']
 
     def dev(key, hostname=None):
         d = found['devices'].setdefault(key, {'hostname': hostname or key, 'mgmt_ip': None, 'ifs': {}, 'from': set()})
@@ -104,12 +107,16 @@ def detect(prometheus=None, loki=None, zabbix=None, mrtg_cfgs=None, cacti_dirs=N
 
     # MRTG
     for pat in mrtg_cfgs if mrtg_cfgs is not None else MRTG_CFGS:
-        for path in sorted(glob.glob(pat)):
+        hits = sorted(glob.glob(pat))
+        searched['mrtg'].append({'pattern': pat, 'matches': hits})
+        for path in hits:
             try:
                 p = parse_mrtg_cfg(open(path, encoding='utf-8', errors='replace').read())
-            except OSError:
+            except OSError as e:
+                found['notes'].append(f'MRTG: {path} を読めません({e.strerror or e})')
                 continue
             if not p['targets']:
+                found['notes'].append(f'MRTG: {path} はありますが Target[...] が1つもありません(cfgmaker で作ると入ります)')
                 continue
             found['mrtg'].append({'cfg': path, 'workdir': p['workdir'], 'targets': len(p['targets'])})
             for t in p['targets'].values():
@@ -128,10 +135,30 @@ def detect(prometheus=None, loki=None, zabbix=None, mrtg_cfgs=None, cacti_dirs=N
 
     # Cacti
     for pat in cacti_dirs if cacti_dirs is not None else CACTI_DIRS:
-        for path in sorted(glob.glob(pat)):
-            files = sorted(f for f in os.listdir(path) if f.endswith('.rrd') and 'traffic' in f)
+        hits = sorted(glob.glob(pat))
+        searched['cacti'].append({'pattern': pat, 'matches': hits})
+        for path in hits:
+            # Cacti 1.x は <rra>/<host_id>/<local_data_id>.rrd(サブディレクトリ・数字だけの名前)なので、下も見る
+            files = sorted(os.path.relpath(os.path.join(d, f), path) for d, _s, fs in os.walk(path) for f in fs if f.endswith('.rrd'))
             if files:
-                found['cacti'].append({'rra_dir': path, 'files': files[:200]})
+                found['cacti'].append({'rra_dir': path, 'files': files[:200], 'count': len(files)})
+
+    # Cacti の DB 接続情報(どの RRD がどの装置・IF かは、ここを引けば自動で分かる)
+    for p in cacti_db_configs if cacti_db_configs is not None else DB_CONFIG_CANDIDATES:
+        ok = False
+        if os.path.exists(p):
+            try:
+                c = read_db_config(p)
+                found['cacti_db'] = {'config': p, 'host': c['host'], 'database': c['database'], 'user': c['user'],
+                                     'client': bool(_mysql_client())}
+                ok = True
+            except (OSError, ValueError) as e:
+                found['notes'].append(f'Cacti: {p} は DB 接続情報として読めません({e})')
+        searched['cacti_db'].append({'pattern': p, 'matches': [p] if ok else []})
+        if ok:
+            break
+    if found['cacti_db'] and not found['cacti_db']['client']:
+        found['notes'].append('Cacti の DB を読むには mysql クライアントが要ります(mariadb-client か mysql-client を入れてください)')
 
     # AI
     try:
@@ -190,7 +217,13 @@ def build_config(found, title='本番ネットワーク'):
         src['zabbix'] = {'url': found['zabbix']['url'], 'token': '${ZABBIX_TOKEN}'}
     if found['mrtg']:
         src['mrtg'] = {'cfg': found['mrtg'][0]['cfg']}
-    if found['cacti']:
+    if found['cacti_db']:
+        # RRD と装置・IF の対応は DB から自動で読む(rra_dir は Cacti 自身の設定 path_rra を使うので書かなくてよい。
+        # RRD の置き場所が DB の path_rra と違うときだけ rra_dir を足す)。パスワードはファイルを読むので書かない
+        src['cacti'] = {'db': {'config': found['cacti_db']['config']}}
+        if found['cacti']:
+            src['cacti']['rra_dir'] = found['cacti'][0]['rra_dir']
+    elif found['cacti']:
         src['cacti'] = {'rra_dir': found['cacti'][0]['rra_dir'], 'targets': []}
     return cfg
 
@@ -201,9 +234,14 @@ def render_yaml(cfg, found):
              '# - type は装置の種類(cisco / catalyst / nexus / juniper / sir / yamaha …)に直す',
              '# - links は「同じ /30・/31 に IP がある2台」を推定したもの。足りないつながりは手で足す',
              '# - 秘密は ${ENV} のまま。起動時の環境変数で渡す']
-    if found['cacti']:
+    if found['cacti_db']:
+        lines.append('# - Cacti: RRD と装置・IF の対応は Cacti の DB から自動で読む(読み取りだけ)。装置の IP かホスト名と、'
+                     'インタフェース名(ifName / ifDescr / ifIP)が、この設定の devices と合うものが対応づく。合わないものは')
+        lines.append('#   GET /api/health の notes に出る。DB を使わず手で書くなら sources.cacti.targets に '
+                     '{file: <RRD>, device: <装置 id>, if: <インタフェース名>}')
+    elif found['cacti']:
         c = found['cacti'][0]
-        lines.append('# - Cacti: どの RRD がどのインタフェースかは自動で分からないので、sources.cacti.targets を手で書く。例:')
+        lines.append('# - Cacti: DB の接続情報が見つからないので、どの RRD がどのインタフェースかは sources.cacti.targets を手で書く。例:')
         for f in c['files'][:5]:
             lines.append(f'#     - {{file: {f}, device: <装置 id>, if: <インタフェース名>}}')
     if found['ai']:
@@ -222,7 +260,13 @@ def summary(found):
     out.append(f"Loki       : {found['loki']['url'] if found['loki'] else 'なし'}")
     out.append(f"Zabbix     : {found['zabbix']['url'] if found['zabbix'] else 'なし'}")
     out.append(f"MRTG       : {', '.join(m['cfg'] + ' (' + str(m['targets']) + ' 対象)' for m in found['mrtg']) or 'なし'}")
-    out.append(f"Cacti      : {', '.join(c['rra_dir'] + ' (' + str(len(c['files'])) + ' RRD)' for c in found['cacti']) or 'なし'}")
+    out.append(f"Cacti      : {', '.join(c['rra_dir'] + ' (' + str(c.get('count', len(c['files']))) + ' RRD)' for c in found['cacti']) or 'なし'}")
+    cd = found.get('cacti_db')
+    out.append("Cacti DB   : " + (f"{cd['config']}({cd['user']}@{cd['host']}/{cd['database']}、mysql クライアント: {'あり' if cd['client'] else 'なし'})" if cd else 'なし'))
+    # 探した場所(見つからなかったときに、どこを探したかが分かるように。--mrtg-cfg / --cacti-rra で足せる)
+    for label, key in (('MRTG', 'mrtg'), ('Cacti', 'cacti'), ('Cacti DB', 'cacti_db')):
+        for sr in found.get('searched', {}).get(key, []):
+            out.append(f"  {label} 候補 {sr['pattern']}: " + (', '.join(sr['matches']) if sr['matches'] else '無い'))
     out.append(f"Ollama     : {found['ollama']['url'] if found['ollama'] else 'なし'}")
     out.append(f"AI         : {found['ai'] or 'なし(ルールで解析)'}")
     out.append(f"装置       : {len(found['devices'])} 台 " + ', '.join(f"{d['hostname']}({'/'.join(sorted(d['from']))})" for d in found['devices'].values()))
@@ -240,9 +284,10 @@ def main(argv=None):
     ap.add_argument('--zabbix')
     ap.add_argument('--mrtg-cfg', action='append')
     ap.add_argument('--cacti-rra', action='append')
+    ap.add_argument('--cacti-db-config', action='append', help='Cacti の DB 接続情報(db.php / debian.php / include/config.php)')
     ap.add_argument('--ollama')
     a = ap.parse_args(argv)
-    found = detect(a.prometheus, a.loki, a.zabbix, a.mrtg_cfg, a.cacti_rra, a.ollama)
+    found = detect(a.prometheus, a.loki, a.zabbix, a.mrtg_cfg, a.cacti_rra, a.ollama, cacti_db_configs=a.cacti_db_config)
     print(summary(found))
     if not a.write:
         return 0

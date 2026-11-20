@@ -58,7 +58,7 @@ Get-Item .\Qwen2.5-1.5B-Instruct-Q4_K_M.gguf | Select-Object Name, Length
 
 ## 2. GitHub Releaseへのアップロード
 
-`w-index-m/network-lab-emulator` のGitHubページ → Releases →
+`w-index-m/nirvana-lab` のGitHubページ → Releases →
 （Grafanaの時に使った既存のReleaseか、新規Release）→
 「Attach binaries」でダウンロードした `.gguf` ファイルをドラッグ&ドロップ。
 
@@ -68,7 +68,7 @@ AI実行環境側で以下を自動的に行う:
 ```bash
 # ── AI実行環境側（Claudeが実行する） ─────────────────────
 curl -sL -o model.gguf \
-  "https://github.com/w-index-m/network-lab-emulator/releases/download/<tag>/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
+  "https://github.com/w-index-m/nirvana-lab/releases/download/<tag>/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
 
 cat > Modelfile << 'EOF'
 FROM ./model.gguf
@@ -125,7 +125,7 @@ Windows PC側でのGGUFダウンロード → GitHub Releaseアップロード �
 
 `https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF` から
 `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`（約986MB、f16は2GB超で不可のため
-量子化版を選択）をダウンロードし、`w-index-m/network-lab-emulator` の
+量子化版を選択）をダウンロードし、`w-index-m/nirvana-lab` の
 Releaseタグ `Qwen2.5` にアセットとしてアップロード。
 
 ### 2. AI実行環境側（実際に実行したコマンド）
@@ -133,7 +133,7 @@ Releaseタグ `Qwen2.5` にアセットとしてアップロード。
 ```bash
 # --- GGUFの取得とsha256検証 ---
 curl -sL -o Qwen2.5-1.5B-Instruct-Q4_K_M.gguf \
-  "https://github.com/w-index-m/network-lab-emulator/releases/download/Qwen2.5/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
+  "https://github.com/w-index-m/nirvana-lab/releases/download/Qwen2.5/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
 sha256sum Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
 # → 1adf0b11065d8ad2e8123ea110d1ec956dab4ab038eab665614adba04b6c337
 #   GitHub Release側のasset digestと完全一致、破損なしを確認

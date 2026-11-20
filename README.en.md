@@ -122,8 +122,8 @@ Recovered      O  172.31.2.2/32 [110/20] via 10.90.1.2, GigabitEthernet1/0/1   <
 ## Getting started
 
 ```bash
-git clone https://github.com/w-index-m/network-lab-emulator.git
-cd network-lab-emulator
+git clone https://github.com/w-index-m/nirvana-lab.git
+cd nirvana-lab
 pip install -r requirements.txt
 python app.py
 ```
@@ -253,7 +253,7 @@ There are 75 documents under `docs/`, **mostly in Japanese**. Start here:
 ## Layout
 
 ```
-network-lab-emulator/
+nirvana-lab/
 ├── app.py                      # FastAPI server (entry point for CLI dispatch)
 ├── engine/
 │   ├── protocols.py            # Protocol engines (RIP/OSPF/BGP/EIGRP/STP/vPC/MPLS…)

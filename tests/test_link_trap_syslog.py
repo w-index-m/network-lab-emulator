@@ -32,7 +32,8 @@ def capture_dispatches(monkeypatch):
         calls['syslog'].append((host, port, severity, hostname, msg))
         return True
 
-    async def fake_trap(host, port, community, hostname, trap_oid, description):
+    async def fake_trap(host, port, community, hostname, trap_oid, description, *_extra, **_kw):
+        # _extra = 送信元 IP(trap-source)・ifDescr・ifIndex
         calls['trap'].append((host, port, community, hostname, trap_oid, description))
         return True
 

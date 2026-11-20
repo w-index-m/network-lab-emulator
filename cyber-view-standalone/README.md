@@ -127,6 +127,19 @@ sources:
   snmp: {community: netlab-ro, interval: 60, traffic: true}
 ```
 
+### SNMP trap(linkDown / linkUp)の受け方
+
+`sources.snmp_trap: {listen: 0.0.0.0:1162}` を書くと、UDP 1162 で trap を待つ。装置側は
+`snmp-server enable traps snmp linkdown linkup` と `snmp-server host <このPCのIP> version 2c <community> udp-port 1162`。
+
+- 解釈するのは **SNMPv2c の trap だけ**(v1 と inform は無視)。community は照合しない。`linkDown` / `linkUp` 以外は捨てる
+- 装置は、送信元 IP が `mgmt_ip` か `interfaces` の IP と一致したものにする。IF 名は trap の `ifDescr` / `ifName` を使う(`Gi0/4` と `GigabitEthernet0/4` は同じ)。
+  Catalyst なら、送信元をそろえるために `snmp-server trap-source <管理IF>` も入れておく
+- リンクの検知経路 `TRAP` が down になり、次の収集周期(`poll_interval`)で `LINK DOWN`・SYSTEM STATUS「異常」・アラート `リンク断` が出る
+- trap は UDP なので `linkUp` を取りこぼすことがある。**linkDown の trap から `stale_after` 秒(既定 90)以上たっても、POLL
+  (ifOperStatus の読み取り)が up を返しているなら、その down は捨てる**。新しい linkDown(POLL の更新が追いついていない間)と、
+  POLL が取れていないときは、そのまま down とする。秒数は `sources.snmp_trap.stale_after`
+
 ### ATT&CK・ネクサス・ダークネット・フロー・外部センサー・回線チェック
 
 - **ATT&CK**: 警報を ATT&CK の戦術・手法に結びつけ、拠点・装置ごとの進行度を出す(設定不要)
@@ -228,6 +241,7 @@ Every key is explained in `config.example.yaml`. In short:
 - **links**: `a` / `a_if` / `b` / `b_if`, `speed` (bps, the denominator of utilization)
 - **sources**: only the ones you use. Pass tokens through environment variables, e.g. `${ZABBIX_TOKEN}`
 - **sources.snmp**: `community`, `interval`, `full_every`, `cpu: {high: 80, jump: 20, hold: 2}` (thresholds are adjustable)
+- **sources.snmp_trap**: `listen`, `stale_after` (default 90 s: a linkDown trap older than this is dropped when POLL reports the interface up, so a lost linkUp trap cannot leave a link "down" forever)
 - **auth.token** (optional): when set, open the page as `http://host:8090/?token=...`
 
 ### What is saved (when updating with `git pull`)

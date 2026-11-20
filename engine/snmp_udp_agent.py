@@ -236,14 +236,15 @@ class SnmpDeviceProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport):
         self.transport = transport
 
-    def datagram_received(self, data: bytes, addr):
+    def datagram_received(self, data: bytes, addr):  # noqa: C901
         # SNMPv3(USM)は別の処理へ(engine/snmp_v3.py)
         from engine import snmp_usm
         if snmp_usm.is_v3(data):
             import sys
             from engine import snmp_v3
             try:
-                response = snmp_v3.process(data, self.device_id, self.snmp_agent, sys.modules[__name__])
+                response = snmp_v3.process(data, self.device_id, self.snmp_agent, sys.modules[__name__],
+                                           src_ip=addr[0] if addr else None)
             except Exception as e:   # 壊れた要求で待ち受けごと落ちないように
                 print(f'[SNMPv3] {self.device_id}: 要求を処理できません: {e}')
                 response = None
@@ -261,6 +262,10 @@ class SnmpDeviceProtocol(asyncio.DatagramProtocol):
         # 以前は GET だけが照合し、GETNEXT/GETBULK は素通りだったので、
         # でたらめなコミュニティで snmpwalk するとMIBが丸ごと読めた。
         if not self.snmp_agent._auth(self.device_id, community):
+            return
+        # コミュニティに付けた ACL(IOS: snmp-server community X RO <ACL>、NX-OS: ... use-ipv4acl <ACL>)。
+        # 許可されていない送信元からの要求は、実機と同じく黙って捨てる
+        if _community_denied(self.device_id, community, addr[0] if addr else None):
             return
 
         varbinds = []
@@ -409,3 +414,18 @@ async def ensure_snmp_agent(device_id: str, device_sessions: dict, snmp_agent,
         print(f'[SNMP] {device_id} ({ip}:{port}) 実UDPエージェントを動的起動しました')
     except Exception as e:
         print(f'[SNMP] {device_id} ({ip}:{port}) 動的起動失敗: {e}')
+
+
+def _community_denied(device_id, community, src_ip):
+    """このコミュニティに ACL が付いていて、送信元が許可されていなければ True"""
+    try:
+        from engine import snmp_v3
+        st = snmp_v3.state_lookup(device_id) if snmp_v3.state_lookup else None
+    except Exception:  # noqa: BLE001
+        return False
+    if st is None:
+        return False
+    for c_ in getattr(st, 'snmp_community', []) or []:
+        if isinstance(c_, dict) and c_.get('name') == community and c_.get('acl'):
+            return snmp_v3.source_denied(device_id, c_['acl'], src_ip)
+    return False

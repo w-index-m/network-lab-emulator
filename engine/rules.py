@@ -10481,6 +10481,23 @@ Key Version         : A
         if c in ('whoami', 'id'):
             return 'root' if c == 'whoami' else 'uid=0(root) gid=0(root) groups=0(root)'
 
+        # ifconfig eth0 <ip> [netmask <mask>]: 実機の Linux(net-tools)と同じく IP を設定する。
+        # 以前は表示だけで設定されず、登録(到達性・SNMP)も変わらなかった
+        m_ifset = re.match(r'^ifconfig\s+(\S+)\s+([\d.]+)(?:\s+netmask\s+([\d.]+))?\s*(?:up)?\s*$', c)
+        if m_ifset:
+            ifn, ip, mask = m_ifset.group(1), m_ifset.group(2), m_ifset.group(3)
+            if ifn not in state.interfaces:
+                return f'SIOCSIFADDR: No such device ({ifn})'
+            try:
+                import ipaddress as _ipa
+                _ipa.ip_address(ip)
+                prefix = _ipa.ip_network(f'0.0.0.0/{mask}').prefixlen if mask else state.interfaces[ifn].get('prefix', 24)
+            except ValueError:
+                return f'{ip}: Unknown host'
+            state.interfaces[ifn]['ip'] = ip
+            state.interfaces[ifn]['prefix'] = prefix
+            return ''
+
         # ifconfig
         m_ifconfig = re.match(r'^ifconfig(?:\s+(\S+))?', c)
         if m_ifconfig:
@@ -10612,13 +10629,19 @@ Key Version         : A
         return state.interfaces.get('eth0', {}).get('ip', '192.168.1.10')
 
     def _pc_ping(self, cmd, c, state) -> str:
-        m = re.match(r'^ping\s+(?:-c\s*(\d+)\s+)?([\d.]+)', c)
+        # ping [-c 回数] [-s サイズ] [-i 間隔] ... <宛先>(-s が無ければ実機どおり 56 バイト)
+        m = re.match(r'^ping\s+((?:-[a-z]\s*\S+\s+)*)([\d.]+)\s*$', c)
         if not m:
-            return "Usage: ping [-c count] <destination>"
-        count = int(m.group(1)) if m.group(1) else 5
+            return "Usage: ping [-c count] [-s packetsize] <destination>"
+        opts = dict(re.findall(r'-([a-z])\s*(\S+)', m.group(1)))
+        try:
+            count = min(max(int(opts.get('c', 5)), 1), 100000)
+            payload = min(max(int(opts.get('s', 56)), 0), 65507)
+        except ValueError:
+            return "Usage: ping [-c count] [-s packetsize] <destination>"
         dest  = m.group(2)
         my_ip = self._pc_my_ip(state)
-        lines = [f"PING {dest} ({dest}) 56(84) bytes of data."]
+        lines = [f"PING {dest} ({dest}) {payload}({payload + 28}) bytes of data."]
         # traceroute同様トポロジー(icmp_engine)で到達性を判定する。以前は
         # 常に0% lossを返しており、存在しない宛先や未認証の802.1Xポート
         # 越しでも成功してしまっていた。
@@ -10637,7 +10660,7 @@ Key Version         : A
                           f"100% packet loss, time {count*1000}ms"]
                 return "\n".join(lines)
             for i, rtt in enumerate(r['rtts']):
-                lines.append(f"64 bytes from {dest}: icmp_seq={i+1} ttl={r['ttl']} time={rtt} ms")
+                lines.append(f"{payload + 8} bytes from {dest}: icmp_seq={i+1} ttl={r['ttl']} time={rtt} ms")
             rtts = r['rtts']
             lines += ["", f"--- {dest} ping statistics ---",
                       f"{count} packets transmitted, {count} received, 0% packet loss, time {count*1000}ms",

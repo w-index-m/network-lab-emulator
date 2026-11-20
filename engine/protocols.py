@@ -279,6 +279,7 @@ class VirtualNetwork:
     def remove_link(self, a: str, b: str):
         self.links[a].discard(b)
         self.links[b].discard(a)
+        stp_engine._awaiting_up.difference_update({(a, b), (b, a)})
         # STPにポートダウンを通知（後方参照なので_spawn使用）
         try:
             _spawn(stp_engine.port_down(a, b))
@@ -3524,6 +3525,10 @@ def _bid_key(bid: str):
 class StpEngine:
     def __init__(self):
         self.nodes: Dict[str, dict] = {}
+        # shutdown で落としたリンク(装置, 相手)。復旧は port_up だけがポートを作り直す
+        # (BPDU 送信の _init_ports が先に黙って作ると、port_up が「既にある」で抜けて
+        #  相手側の %LINK-3-UPDOWN ... up が出ず、/cyber-view の SYSLOG が down のまま残った)
+        self._awaiting_up: set = set()
         # device_id -> {vlan_id -> node_dict}  (Rapid-PVST+ 独立インスタンス)
         self.pvst_nodes: Dict[str, Dict[int, dict]] = {}
         # device_id -> {port_name -> {'portfast':bool,'bpduguard':bool,'bpdufilter':bool}}
@@ -3749,7 +3754,7 @@ class StpEngine:
         # 接続済みの隣接ノードからポートを生成(shutdown 等で落ちているリンクは除く。
         # 落ちたリンクは port_down がポートを消し、復旧時は port_up が作り直す)
         for i, peer_id in enumerate(vnet.get_neighbors(device_id), 1):
-            if self._link_down(device_id, peer_id):
+            if self._link_down(device_id, peer_id) or (device_id, peer_id) in self._awaiting_up:
                 continue
             port_name = self._port_name_for_peer(device_id, peer_id, f'ether {i}')
             if port_name not in n['ports']:
@@ -4051,7 +4056,7 @@ class StpEngine:
             n['bpdu_task'].cancel()
         n['enabled'] = False
 
-    async def port_down(self, device_id: str, peer_id: str):
+    async def port_down(self, device_id: str, peer_id: str, await_up: bool = False):
         """
         リンク障害発生時の処理（実機STPのTCN/再収束を再現）。
         1. 障害ポートを削除
@@ -4062,6 +4067,8 @@ class StpEngine:
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
             return
+        if await_up:
+            self._awaiting_up.add((device_id, peer_id))
 
         # 障害ポートを特定して削除
         down_port = None
@@ -4214,6 +4221,7 @@ class StpEngine:
 
     async def port_up(self, device_id: str, peer_id: str):
         """リンク回復時の処理"""
+        self._awaiting_up.discard((device_id, peer_id))
         n = self.nodes.get(device_id)
         if not n or not n['enabled']:
             return
@@ -5409,6 +5417,14 @@ class IcmpEngine:
 
             # 次ホップデバイスとIPを解決
             next_hop_device, next_hop_ip = self._resolve_next_hop_detail(current, dest_ip)
+            if current == src_id:
+                # ホストが ICMP Redirect を受けて覚えた経路(Linux の cache <redirected>)を優先する。
+                # 覚えたゲートウェイへのリンクが落ちていれば使わない
+                from engine import icmp_redirect as _redir
+                _c = _redir.cached_gateway(src_id, dest_ip)
+                if _c and _c.get('gw_dev') and _c['gw_dev'] in (set(vnet.links.get(src_id, set())) | set(self._l2_segment_peers(src_id))) \
+                        and self._find_device_owning_ip(_c['gw_ip']) == _c['gw_dev']:
+                    next_hop_device, next_hop_ip = _c['gw_dev'], _c['gw_ip']
             if not next_hop_device:
                 # 経路なし: 現在デバイスがタイムアウト
                 cur_ip = next(iter(cur_info.get('ips', {})), '?')
@@ -5650,12 +5666,34 @@ class IcmpEngine:
             self._ip_in_network(next_ip, my_ip, prefix)
             for my_ip, prefix in src_info.get('ips', {}).items()
         )
-        if on_src_subnet:
-            self._icmp_stats(first_hop)['redirect_sent'] += count
-            self._icmp_stats(src_id)['redirect_rcvd'] += count
+        if not on_src_subnet:
+            return
+        # R1 が H から受けた IF(H のアドレスを含むサブネットの IF)。その IF に no ip redirects があれば送らない
+        r_if, h_ip = '', ''
+        for name, info in self.device_ips.get(first_hop, {}).get('interfaces', {}).items():
+            if not (isinstance(info, dict) and info.get('ip')):
+                continue
+            for my_ip, prefix in src_info.get('ips', {}).items():
+                if self._ip_in_network(my_ip, info['ip'], int(info.get('prefix', 24))):
+                    r_if, h_ip = name, my_ip
+                    break
+            if r_if:
+                break
+        from engine import icmp_redirect as _redir
+        sent = not _redir.is_disabled(first_hop, r_if)
+        # ホスト(Linux)は最初の Redirect で経路を覚え、残りのパケットは直接 R2 へ行く → Redirect は1回
+        n = (1 if vnet.device_types.get(src_id) in _redir.HOST_TYPES else count) if sent else 0
+        if sent:
+            self._icmp_stats(first_hop)['redirect_sent'] += n
+            self._icmp_stats(src_id)['redirect_rcvd'] += n
+        names = {d: self.device_ips.get(d, {}).get('hostname', d) for d in (first_hop, src_id, next_device)}
+        _redir.record(first_hop, r_if, src_id, h_ip, dest_ip, next_ip, next_device, sent, n or count, names)
 
     def traceroute(self, src_id: str, dest_ip: str) -> dict:
         result = self.trace_path(src_id, dest_ip)
+        if result.get('hops'):
+            # traceroute のプローブも R1 経由なら Redirect を受ける(実機と同じ)
+            self._maybe_generate_redirect(src_id, dest_ip, result['hops'], 1)
         return {'reachable': result['reachable'],
                 'reason': result.get('reason', ''), 'hops': result['hops'],
                 'dest_device': result.get('dest_device')}   # 最後の行(宛先そのもの)の名前に使う
@@ -7008,6 +7046,17 @@ class SnmpAgent:
         # ── interfaces group (1.3.6.1.2.1.2) ──
         info = icmp_engine.device_ips.get(device_id, {})
         ifaces = list(info.get('interfaces', {}).items())
+        # L2 のポート(switchport で IP の無いポート)も実機どおり ifTable に載せる。以前は IP のある
+        # インタフェースしか出ず、アクセスポートの流量・状態を SNMP で読めなかった。IP のあるものの後ろに
+        # 足すので既存の ifIndex は変わらない。状態は「shutdown でなく、リンクがつながっている」なら up
+        have = {vnet._norm_iface(n) for n, _ in ifaces}
+        linked = {vnet._norm_iface(x) for x in vnet.interface_links.get(device_id, {}).values()}
+        for n, admin_up in d.get('all_ifaces', []) or []:
+            k = vnet._norm_iface(n)
+            if k in have:
+                continue
+            have.add(k)
+            ifaces.append((n, {'l2': True, 'admin_up': bool(admin_up), 'linked': k in linked}))
         if not ifaces:
             # device_ips未登録ならインターフェース無し（最低1つlo相当）
             ifaces = [('lo0', {'ip': '127.0.0.1', 'prefix': 8})]
@@ -7024,7 +7073,13 @@ class SnmpAgent:
             admin = d.get('if_admin', {}).get(i)
             if admin is None:
                 admin = '2' if is_shutdown else '1'
-            status = '2' if (is_shutdown or not ii.get('ip')) else '1'             # up/down
+            if ii.get('l2'):
+                is_shutdown = is_shutdown or not ii['admin_up']
+                if d.get('if_admin', {}).get(i) is None:
+                    admin = '2' if is_shutdown else '1'
+                status = '1' if (not is_shutdown and ii['linked']) else '2'        # ケーブルが無ければ down
+            else:
+                status = '2' if (is_shutdown or not ii.get('ip')) else '1'         # up/down
             mib.append((f'1.3.6.1.2.1.2.2.1.7.{i}', 'INTEGER', str(admin)))        # ifAdminStatus
             mib.append((f'1.3.6.1.2.1.2.2.1.8.{i}', 'INTEGER', status))            # ifOperStatus
             # ifInOctets / ifOutOctets（データプレーンカウンタ由来）
@@ -7086,6 +7141,26 @@ class SnmpAgent:
             if ip in if_index:
                 mib.append((f'1.3.6.1.2.1.4.20.1.2.{ip}', 'INTEGER', str(if_index[ip])))      # ipAdEntIfIndex
             mib.append((f'1.3.6.1.2.1.4.20.1.3.{ip}', 'IpAddress', mask))                     # ipAdEntNetMask
+        # ── ICMP グループ(RFC 1213 / IP-MIB の icmp 1.3.6.1.2.1.5)──
+        # show ip traffic と同じ icmp_engine の回数。ICMP Redirect は icmpInRedirects(.7)・icmpOutRedirects(.20)。
+        # 監視側は前回との差(Prometheus なら increase)で Redirect の発生を検知できる
+        st = icmp_engine.icmp_stats.get(device_id, {})
+        g = lambda k: int(st.get(k, 0))  # noqa: E731
+        in_msgs = g('echo_rcvd') + g('echo_reply_rcvd') + g('unreachable_rcvd') + g('redirect_rcvd')
+        out_msgs = g('echo_sent') + g('echo_reply_sent') + g('unreachable_sent') + g('redirect_sent')
+        icmp_cols = {1: in_msgs, 2: 0, 3: g('unreachable_rcvd'), 4: 0, 5: 0, 6: 0, 7: g('redirect_rcvd'),
+                     8: g('echo_rcvd'), 9: g('echo_reply_rcvd'), 10: 0, 11: 0, 12: 0, 13: 0,
+                     14: out_msgs, 15: 0, 16: g('unreachable_sent'), 17: 0, 18: 0, 19: 0, 20: g('redirect_sent'),
+                     21: g('echo_sent'), 22: g('echo_reply_sent'), 23: 0, 24: 0, 25: 0, 26: 0}
+        for col, val in icmp_cols.items():
+            mib.append((f'1.3.6.1.2.1.5.{col}.0', 'Counter32', str(val % (1 << 32))))
+        # icmpMsgStatsTable(5.30.1.<3=InPkts|4=OutPkts>.<ipVersion=1>.<type>): 種類(type)ごとの回数
+        for typ, (i, o) in {0: (g('echo_reply_rcvd'), g('echo_reply_sent')),
+                            3: (g('unreachable_rcvd'), g('unreachable_sent')),
+                            5: (g('redirect_rcvd'), g('redirect_sent')),
+                            8: (g('echo_rcvd'), g('echo_sent'))}.items():
+            mib.append((f'1.3.6.1.2.1.5.30.1.3.1.{typ}', 'Counter32', str(i % (1 << 32))))
+            mib.append((f'1.3.6.1.2.1.5.30.1.4.1.{typ}', 'Counter32', str(o % (1 << 32))))
         # OID を数値順にソート
         def _key(entry):
             return [int(x) if x.isdigit() else 0 for x in entry[0].split('.')]
@@ -7169,6 +7244,7 @@ class SnmpAgent:
         'interfaces': '1.3.6.1.2.1.2', 'ifdescr': '1.3.6.1.2.1.2.2.1.2',
         'ifoperstatus': '1.3.6.1.2.1.2.2.1.8', 'ifnumber': '1.3.6.1.2.1.2.1',
         'ip': '1.3.6.1.2.1.4', 'ipaddrtable': '1.3.6.1.2.1.4.20',
+        'icmp': '1.3.6.1.2.1.5', 'icmpinredirects': '1.3.6.1.2.1.5.7', 'icmpoutredirects': '1.3.6.1.2.1.5.20',
         'mib-2': '1.3.6.1.2.1', 'mib2': '1.3.6.1.2.1',
         # CISCO-PROCESS-MIB（CPU使用率、Cisco系のみ）
         'cpmcputotal5sec': '1.3.6.1.4.1.9.9.109.1.1.1.1.3',
@@ -7243,6 +7319,13 @@ class IpFilterEngine:
         changed = len(keep) != len(rules)
         rules[:] = keep
         return changed
+
+    def delete_acl(self, device_id: str, acl_name: str):
+        """`no access-list <番号>` / `no ip access-list ... <名前>`: ACL を丸ごと消す(実機と同じく、適用先の参照は残る)"""
+        found = acl_name in self.acls.get(device_id, {})
+        self.acls.get(device_id, {}).pop(acl_name, None)
+        self.acl_kind.get(device_id, {}).pop(acl_name, None)
+        return found
 
     def apply_acl(self, device_id: str, iface: str, direction: str, acl_name: str):
         self.applied[device_id][(iface, direction)] = acl_name

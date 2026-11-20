@@ -23,6 +23,7 @@ DISPLAY_NAME = {'prometheus': 'ヴァルハラ'}
 
 EVIDENCE_ORDER = ('STATE', 'SYSLOG', 'TRAP', 'POLL')
 UTIL_WARN, UTIL_CRIT = 0.5, 0.8
+TRAP_STALE_AFTER = 90.0
 
 
 def classify(util, down):
@@ -39,6 +40,9 @@ class Collector:
         self.loki = S.Loki(**src['loki']) if src.get('loki', {}).get('url') else None
         self.zbx = S.Zabbix(**src['zabbix']) if src.get('zabbix', {}).get('url') else None
         self.loki_labels = (src.get('loki') or {}).get('device_labels') or ['device_id', 'host', 'hostname', 'instance']
+        # linkDown の trap から、これだけ経っても POLL が up を返し続けるなら、linkUp の trap を取りこぼしたとみなす(秒)
+        self.trap_stale_after = float((src.get('snmp_trap') or {}).get('stale_after', TRAP_STALE_AFTER))
+        self._stale_traps = {}     # (装置, IF) -> 無効にした linkDown trap の時刻(同じ trap を二度と down に戻さない)
         self.devs = {d['id']: d for d in cfg['devices']}
         self.analytics = Analytics()
         self.analytics.device_type_of = lambda dev: (self.devs.get(dev) or {}).get('type')
@@ -56,6 +60,8 @@ class Collector:
         self._zbx_seen = set()
         self._zbx_hosts = {}
         self._prev_down = {}
+        self._prev_lost = set()
+        self.notes = {}                      # エラーではないが知らせたいこと(Cacti の DB から何本対応づけたか 等)
         self.hist = defaultdict(lambda: deque(maxlen=400))
         self.valhalla_alerts = AlertImporter()
         from .legacy_sources import LegacyRates
@@ -172,11 +178,12 @@ class Collector:
         legacy = {}
         if self.legacy.enabled():
             legacy = self.legacy.rates(now)
-            for k in ('mrtg', 'cacti'):
+            for k in ('mrtg', 'cacti', 'cacti_db'):
                 if k in self.legacy.errors:
                     self.errors[k] = self.legacy.errors[k]
                 else:
                     self.errors.pop(k, None)
+            self.notes.update(self.legacy.notes)
 
         sn = self.snmp.traffic_snapshot(window) if self.snmp.traffic_on else {'rates': {}, 'oper': {}, 'counters': {}, 'lost': {}}
 
@@ -218,6 +225,18 @@ class Collector:
                     note('POLL', dev, ifn, now, z['oper'])
         for (dev, ifn), st in sn['oper'].items():
             note('POLL', dev, ifn, now, st)
+        # trap は UDP なので linkUp を取りこぼすことがある。それで「down」が残り続けないよう、
+        # linkDown から trap_stale_after 秒以上たっても POLL(いまの状態の読み取り)が up なら、その trap の down は捨てる。
+        # 新しい linkDown(POLL の更新が追いついていない間)は、そのまま down とする。POLL が無いときも捨てない。
+        # 一度捨てた linkDown は覚えておき、あとで POLL が取れなくなっても(応答なし)down に戻さない。
+        # それより新しい linkDown が届いたら、そちらは改めて判定する
+        for (src, dev, ifn), (t, st) in list(seen.items()):
+            if src == 'TRAP' and st == 'down':
+                poll = seen.get(('POLL', dev, ifn))
+                if self._stale_traps.get((dev, ifn)) == t or (
+                        poll and poll[1] == 'up' and now - t >= self.trap_stale_after):
+                    self._stale_traps[(dev, ifn)] = t
+                    del seen[(src, dev, ifn)]
         lost = dict(sn['lost'])
         for inst, ok in up.items():
             d = self.dev_of(inst)
@@ -302,7 +321,19 @@ class Collector:
                 self.analytics.fire('link_down', f"{ln['a']}|{ln['iface_a']}", ln['a'], ln['b'],
                                     f"{ln['host_a']} {ln['iface_a']} ⇄ {ln['host_b']} {ln['iface_b']} が down "
                                     f"(検知: {' / '.join(ln['down_sources'])})", now=now)
+            elif was and not ln['down']:      # 復旧は「情」
+                self.snmp.watch.note(ln['a'], ln['host_a'], 'link_up',
+                                     f"{ln['iface_a']} ⇄ {ln['host_b']} {ln['iface_b']}", code='LINK', now=now)
             self._prev_down[key] = ln['down']
+        # ヴァルハラの取得で応答しなくなった装置は「警」、戻ったら「情」
+        cur = {u['id']: u for u in snap['unreachable']}
+        for d, u in cur.items():
+            if d not in self._prev_lost:
+                self.analytics.fire('snmp_lost', d, d, None, f"{u['hostname']} が SNMP に応答しない({u['instance']})", now=now)
+        for d in self._prev_lost - set(cur):
+            if d in self.devs:
+                self.snmp.watch.note(d, self.devs[d]['hostname'], 'snmp_ok', 'SNMP の応答が戻った', code='SNMP', now=now)
+        self._prev_lost = set(cur)
         return snap
 
     def start(self):

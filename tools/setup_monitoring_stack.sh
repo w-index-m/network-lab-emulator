@@ -38,7 +38,7 @@ SYSLOG_BRIDGE_PORT="${SYSLOG_BRIDGE_PORT:-5514}"
 PROM_VERSION="2.54.1"
 ALERTMANAGER_VERSION="0.27.0"
 LOKI_VERSION="3.2.0"
-GRAFANA_RELEASE_URL="${GRAFANA_RELEASE_URL:-https://github.com/w-index-m/network-lab-emulator/releases/download/grafana/grafana.tar.gz}"
+GRAFANA_RELEASE_URL="${GRAFANA_RELEASE_URL:-https://github.com/w-index-m/nirvana-lab/releases/download/grafana/grafana.tar.gz}"
 LOKI_RELEASE_URL="${LOKI_RELEASE_URL:-https://github.com/grafana/loki/releases/download/v${LOKI_VERSION}/loki-linux-amd64.zip}"
 
 mkdir -p "$STACK_DIR"

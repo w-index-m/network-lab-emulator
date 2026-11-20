@@ -130,7 +130,8 @@ _RE_USER_IOS = re.compile(
     r'^snmp-server\s+user\s+(\S+)\s+(\S+)\s+v3'
     r'(?:\s+(?:encrypted\s+)?auth\s+(md5|sha|sha224|sha256|sha384|sha512)\s+(\S+)'
     r'(?:\s+priv\s+(des|3des|aes(?:\s+(?:128|192|256))?|aes128|aes192|aes256)\s+(\S+))?)?'
-    r'(?:\s+access\s+\S+)?\s*$', re.I)
+    r'(?:\s+access\s+(\S+))?\s*$', re.I)
+_RE_USER_NX_ACL = re.compile(r'^snmp-server\s+user\s+(\S+)\s+use-(?:ipv4)?acl\s+(\S+)\s*$', re.I)
 _RE_USER_NX = re.compile(
     r'^snmp-server\s+user\s+(\S+)(?:\s+(?!auth\b)(\S+))?'
     r'(?:\s+auth\s+(md5|sha|sha-224|sha-256|sha-384|sha-512)\s+(\S+)'
@@ -209,7 +210,7 @@ def _config(device_id, state, cmd, low, nx):
     if not nx:
         m = _RE_USER_IOS.match(cmd)
         if m:
-            name, group, auth, apw, priv, ppw = m.groups()
+            name, group, auth, apw, priv, ppw, uacl = m.groups()
             if priv and priv.lower() == '3des':
                 raise ValueError('3DES はこのエミュレータでは未対応です(des / aes 128|192|256 を使ってください)')
             if priv:
@@ -219,10 +220,18 @@ def _config(device_id, state, cmd, low, nx):
                 if state.device_type == 'arista' and p in ('aes192', 'aes256'):
                     priv = p      # EOS は Blumenthal(net-snmp の AES192 / AES256 と同じ)
             _make_user(cfg, name, group, auth, apw, priv, ppw)
+            if uacl:
+                cfg['users'][name]['acl'] = uacl       # access <ACL>: このユーザーで問い合わせてよい送信元
             if group not in cfg['groups']:
                 return f'% Warning: グループ {group} はまだありません(snmp-server group {group} v3 ... で作ってください)'
             return ''
         return None
+    m = _RE_USER_NX_ACL.match(cmd)
+    if m:   # NX-OS: snmp-server user <名前> use-ipv4acl <ACL>
+        if m.group(1) not in cfg['users']:
+            raise ValueError(f'ユーザー {m.group(1)} はまだありません')
+        cfg['users'][m.group(1)]['acl'] = m.group(2)
+        return ''
     m = _RE_USER_NX.match(cmd)
     if m:
         name, role, auth, apw, aes, ppw, loc = m.groups()
@@ -230,7 +239,10 @@ def _config(device_id, state, cmd, low, nx):
         if not apw:
             raise ValueError('NX-OS の SNMPv3 ユーザーには auth <方式> <パスワード> が必要です')
         priv = ('aes128' if aes else 'des') if ppw else None
+        _old_acl = (cfg['users'].get(name) or {}).get('acl')
         _make_user(cfg, name, role or 'network-operator', auth, apw, priv, ppw, localized=bool(loc))
+        if _old_acl:
+            cfg['users'][name]['acl'] = _old_acl
         return ''
     return None
 
@@ -258,7 +270,8 @@ def _show(device_id, state, low):
                    f'{"____":<30}{"____":<8}{"_____________":<14}{"______":<31}__________']
             for n, u in sorted(users.items()):
                 pv = {'aes128': 'aes-128(no)', 'des': 'des(no)'}.get(u.get('priv'), 'no')
-                out.append(f'{n:<30}{(u.get("auth") or "no"):<8}{pv:<14}{u["group"]}')
+                out.append(f'{n:<30}{(u.get("auth") or "no"):<8}{pv:<14}{u["group"]:<31}'
+                           f'{("ipv4:" + u["acl"]) if u.get("acl") else ""}'.rstrip())
             return '\n'.join(out)
         out = []
         for n, u in sorted(users.items()):
@@ -310,6 +323,8 @@ def running_config_lines(state, nxos=False):
                     s += f' priv{" aes-128" if u["priv"] == "aes128" else ""} 0x{u["priv_key"]}'
                 s += ' localizedkey'
             out.append(s)
+            if u.get('acl'):
+                out.append(f'snmp-server user {n} use-ipv4acl {u["acl"]}')
     return out
 
 
@@ -325,10 +340,22 @@ def _count(device_id, oid):
 
 
 def stats(device_id):
-    return {usm.REPORT_NAMES[k]: v for k, v in _STATS.get(device_id, {}).items()}
+    return {usm.REPORT_NAMES.get(k, k): v for k, v in _STATS.get(device_id, {}).items()}
 
 
-def process(data, device_id, snmp_agent, enc):
+def source_denied(device_id, acl, src_ip):
+    """SNMP のアクセス制限 ACL でこの送信元を拒否するか。
+    実機と同じく、存在しない ACL 名を指定しただけなら素通し(ipfilter_engine.check_source)"""
+    if not acl or not src_ip:
+        return False
+    try:
+        from engine.protocols import ipfilter_engine
+        return not ipfilter_engine.check_source(device_id, acl, src_ip)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def process(data, device_id, snmp_agent, enc, src_ip=None):
     """v3 の要求を処理して応答 bytes を返す(捨てるなら None)。
     enc は engine/snmp_udp_agent(_encode_oid / _encode_value / _tlv / _encode_int を借りる)"""
     dev = snmp_agent.devices.get(device_id) or {}
@@ -380,6 +407,12 @@ def process(data, device_id, snmp_agent, enc):
     user = cfg['users'].get(uname)
     if not user:
         return report(usm.OID_UNKNOWN_USER_NAMES, plain_reqid())
+    # 送信元の制限(IOS: user ... access <ACL> / group ... access <ACL>、NX-OS: user ... use-ipv4acl)。
+    # 許可されていない送信元には Report も返さず黙って捨てる(実機と同じ。応答すると手掛かりになる)
+    _g = cfg['groups'].get(user.get('group')) or {}
+    if source_denied(device_id, user.get('acl') or _g.get('access'), src_ip):
+        _count(device_id, 'acl_denied')
+        return None
     if (want_priv and not want_auth) or (want_auth and not user.get('auth')) or (want_priv and not user.get('priv')):
         return report(usm.OID_UNSUPPORTED_SEC_LEVELS, plain_reqid())
     if user.get('engine_id') and user['engine_id'] != cfg['engine_id']:

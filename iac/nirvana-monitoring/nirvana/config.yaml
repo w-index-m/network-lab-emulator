@@ -37,6 +37,7 @@ sources:
     device_labels: [source_ip, host, hostname, instance]
   snmp: {community: netlab-ro, interval: 30, cpu: {high: 80, jump: 20, hold: 2}}   # 経路と CPU の情・注
   flow: {sflow: 6343, netflow: 2055}                                  # 装置の sFlow / NetFlow
+  snmp_trap: {listen: 0.0.0.0:1162}                                   # 装置の linkDown / linkUp trap(直接受ける)
   darknet: {prefixes: [10.250.0.0/24]}                                # 使っていない帯(届いたフローを分類)
   wan_probe:                                                          # 回線チェック(本物の ping)
     - {name: CR1 東京, target: 10.240.12.1}

@@ -43,6 +43,9 @@ RULES = {
     'link_down': {'name': 'リンク断', 'severity': 'medium',
                   'window': 0, 'threshold': 0, 'cooldown': 0,
                   'desc': 'インタフェースのshutdown等でリンクが落ちた'},
+    'snmp_lost': {'name': 'SNMP 応答なし', 'severity': 'medium',
+                  'window': 0, 'threshold': 0, 'cooldown': 0,
+                  'desc': 'ヴァルハラ(Prometheus)の取得で装置が応答しない(up=0)。装置の停止・経路断・SNMP の ACL で拒否'},
     'conn_scan': {'name': '短時間の大量接続(ポートスキャン/総当たりの疑い)', 'severity': 'high',
                   'window': 30, 'threshold': 10, 'cooldown': 60,
                   'desc': '同じ送信元から装置の実リスナー(SSH/Telnet)へ短時間に多数の接続'},
@@ -113,7 +116,7 @@ for _r in _FLAP_RULES + [_ROUTE_FLAP]:
 FLAP_RULE_IDS = {_r['id'] for _r in _FLAP_RULES + [_ROUTE_FLAP]}
 # 検知元(センサー)。/cyber-view の六角形の花びらはこの単位でまとめる
 RULE_SOURCE = {**{_k: 'SYSLOG' for _k in FLAP_RULE_IDS}, 'route_flap': 'NET', 'conn_scan': 'IDS', 'scan': 'IDS', 'unreach_burst': 'IDS', 'flood': 'IDS', 'large_icmp': 'IDS',
-               'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'valhalla': 'VALHALLA', 'nirvana_rule': 'RULE', 'cpu_high': 'NET', 'wan_slow': 'NET', 'wan_loss': 'NET', 'login_brute': 'IDS', 'nexus_finding': 'NEXUS', 'ext_sensor': 'SENSOR', 'login_after_fail': 'IDS', 'exfil': 'IDS',
+               'fw_shun': 'FW', 'syslog_error': 'SYSLOG', 'link_down': 'NET', 'snmp_lost': 'NET', 'valhalla': 'VALHALLA', 'nirvana_rule': 'RULE', 'cpu_high': 'NET', 'wan_slow': 'NET', 'wan_loss': 'NET', 'login_brute': 'IDS', 'nexus_finding': 'NEXUS', 'ext_sensor': 'SENSOR', 'login_after_fail': 'IDS', 'exfil': 'IDS',
                'l2_loop': 'LOOP', 'ihr_outage': 'WORLD', 'ihr_delay': 'WORLD', 'radar_anomaly': 'WORLD', 'ai_finding': 'AI', 'darknet_scan': 'DARKNET', 'darknet_backscatter': 'DARKNET', 'darknet_misconfig': 'DARKNET', 'darknet_reflection': 'DARKNET'}
 SECURITY_SOURCES = {'IDS', 'FW', 'DARKNET', 'SENSOR', 'NEXUS'}
 _TS_PREFIX = re.compile(r'^\*?[A-Z][a-z]{2} +\d+ [\d:.]+: ')

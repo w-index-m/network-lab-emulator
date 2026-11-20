@@ -49,7 +49,7 @@ winget install --id Git.Git -e
 
 ```powershell
 cd $env:USERPROFILE\Documents
-git clone https://github.com/w-index-m/network-lab-emulator.git
+git clone https://github.com/w-index-m/nirvana-lab.git
 cd network-lab-emulator
 
 python -m venv venv
