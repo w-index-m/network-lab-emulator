@@ -126,7 +126,7 @@ chips.forEach((t, i) => {
 const feats = [
   ['隔離されている', 'あなたの PC や実機には触れない'],
   ['本物を動かせる', 'サーバーを起動し、snmpwalk などを当てる'],
-  ['外への通信は許可制', '一部のサイトは届かない(例: Groq)'],
+  ['外への通信は許可制', 'PyTorch の配布元などは届かない'],
   ['使い捨て', '途中で入れ替わることも。残す物は Git へ'],
 ];
 feats.forEach(([h, b], i) => {
@@ -190,6 +190,34 @@ txt(s, [
 ], { x: 7.0, y: 1.3, w: 2.5, h: 3.5, fontSize: 12, paraSpaceAfter: 8 });
 s.addNotes('テストは 4 層です。一番下の pytest が約 2,160 件。その上のシナリオ回帰は、本物のサーバーを起動して OSPF・BGP・STP などを 12 シナリオで確かめます。さらに本物のツールでの確認、最後に GitHub の CI で同じテストをもう一度回します。');
 
+// 4b. pytest と仲間の道具 / PyTorch の位置づけ
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'テスト' });
+s.addText('テストの道具と、テストされる側の PyTorch', { placeholder: 'title' });
+const tools4 = [
+  ['pytest', 'テストを集めて実行する本体'],
+  ['pytest-asyncio', '時間で動く処理(BGP など)'],
+  ['pytest-cov', 'テストがコードのどこまでを通ったか'],
+  ['TestClient', '起動せずに API を呼ぶ'],
+  ['ruff', 'コードの書き方チェック'],
+];
+txt(s, 'テストの道具(CI も同じ一式を入れる)', { x: 0.5, y: 1.15, w: 5.2, h: 0.35, fontSize: 13, bold: true, color: C.accent1 });
+tools4.forEach(([h, b], i) => {
+  const y = 1.6 + i * 0.66;
+  hex(s, 0.5, y, 0.42, C.accent1, '', 'tool hex ' + (i + 1));
+  txt(s, h, { x: 1.05, y: y - 0.02, w: 1.65, h: 0.4, fontSize: 13, bold: true, color: C.background1, valign: 'middle' });
+  txt(s, b, { x: 2.75, y: y - 0.02, w: 3.0, h: 0.4, fontSize: 11, valign: 'middle' });
+});
+card(s, 6.0, 1.15, 3.5, 3.85, 'torch card');
+hex(s, 6.25, 1.35, 0.5, C.accent4, '', 'torch hex');
+txt(s, 'PyTorch', { x: 6.9, y: 1.37, w: 2.4, h: 0.42, fontSize: 16, bold: true, color: C.background1, valign: 'middle' });
+txt(s, [
+  { text: 'テストの道具ではなく、異常検知(CPU などの「いつもと違う」)に使う側', options: { bullet: true, breakLine: true } },
+  { text: '配布元に届かないため、手元で落としたものを GitHub の Release に置いて入れた', options: { bullet: true, breakLine: true } },
+  { text: '本体には不要。入っていなければテスト 8 件を飛ばす', options: { bullet: true, breakLine: true } },
+  { text: '既定は NumPy 版で、こちらは毎回テストしている', options: { bullet: true } },
+], { x: 6.25, y: 2.0, w: 3.05, h: 2.9, fontSize: 11, paraSpaceAfter: 6 });
+s.addNotes('テストの道具は pytest が中心で、時間で動く処理には pytest-asyncio、どこまでテストが通ったかは pytest-cov、サーバーを起動せずに API を呼ぶには FastAPI の TestClient、書き方のチェックに ruff を使います。CI も同じ一式を入れています。PyTorch はテストの道具ではなく、異常検知に使うテストされる側のライブラリです。サンドボックスからは配布元に届かないため、手元で落としたファイルを GitHub の Release 経由で入れる回り道をしました。本体には不要なので、入っていない環境ではそのテストを飛ばします。');
+
 // 5. 数字
 s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'テスト' });
 s.addText('今日の全体テスト', { placeholder: 'title' });
@@ -220,7 +248,9 @@ s.addTable([
   R('gnmic', 'gNMI の 1 秒ストリーム', '1 秒ごとに届き、ping の分だけ増加'),
   R('Playwright', '/cyber-view の演出', '起動演出と FX の切り替え、エラー 0'),
   R('uvicorn + curl', '本物のサーバーに CLI を流す', 'show の出力と API の値が一致'),
-], { x: 0.5, y: 1.25, w: 9.0, colW: [2.1, 3.4, 3.5], fontSize: 12, color: C.background2, fill: { color: C.text2 }, border: { type: 'solid', pt: 1, color: C.text1 }, rowH: 0.52, valign: 'middle', objectName: 'tools table' });
+  R('pyATS / Genie', 'show の出力を実機用の解析器で読む', '読めない形を見つけて直した(以前)'),
+  R('Batfish / GoBGP', '経路計算と本物の BGP と突き合わせ', '食い違いを見つけて直した(以前)'),
+], { x: 0.5, y: 1.25, w: 9.0, colW: [2.1, 3.4, 3.5], fontSize: 12, color: C.background2, fill: { color: C.text2 }, border: { type: 'solid', pt: 1, color: C.text1 }, rowH: 0.45, valign: 'middle', objectName: 'tools table' });
 s.addNotes('単体テストは作り物の中で完結するので、実機の監視ツールから見て正しいかは別に確かめます。今日は net-snmp の snmpwalk、gnmic、Playwright を使いました。');
 
 // 7. CI が落ちたとき
