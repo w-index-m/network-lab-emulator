@@ -132,7 +132,7 @@ winget install --id Ollama.Ollama -e
 
 # 2. GGUF取得（GitHub Releaseから、または直接Hugging Faceから）
 Invoke-WebRequest `
-  -Uri "https://github.com/w-index-m/network-lab-emulator/releases/download/Qwen2.5/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf" `
+  -Uri "https://github.com/w-index-m/nirvana-lab/releases/download/Qwen2.5/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf" `
   -OutFile "$env:USERPROFILE\Downloads\Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
 
 # 3. Modelfile.netops を本ドキュメントの内容で作成し、同じフォルダに保存

@@ -35,6 +35,7 @@ cd iac/nirvana-monitoring
 ./deploy.sh up                                  # ラボを作って、5つのコンテナを起動
 ../cisco-traffic-monitoring/lab/traffic_gen.sh  # トラフィックを流す(Grafana 版と同じスクリプト)
 ./deploy.sh status                              # リンク・ダークネット・回線チェックの状態
+./deploy.sh check                               # 4つの経路と SNMP の許可制限を実際に試す(下記)
 # → http://<ホスト>:8090/
 ./deploy.sh down        # 止める(データは残す)
 ./deploy.sh destroy     # データごと消す
@@ -45,7 +46,7 @@ cd iac/nirvana-monitoring
 - `nirvana/config.yaml` の `devices` / `links`
 - `prometheus/targets/devices.yml`
 
-装置側の設定は [real-catalyst-registration.md](real-catalyst-registration.md) を見てください。このスタックのポートは、syslog が 5515、sFlow が 6343、NetFlow が 2055 です。
+装置側の設定は [real-catalyst-registration.md](real-catalyst-registration.md) を見てください。このスタックのポートは、syslog が 5515、sFlow が 6343、NetFlow が 2055、SNMP trap が 1162 です。
 
 ## ラボ(`lab/provision_nirvana_lab.sh`)
 
@@ -108,9 +109,103 @@ Grafana 版の CR1 / CR2 に、sFlow を出す Nexus の NX1 を足します。
 ### 確認中に見つけて直したこと
 
 - **NX1 が SNMP に応答しない**: Nexus は SNMP を mgmt0(既定 192.168.100.1)で受けるので、データ側の 10.240.23.2 に問い合わせても応答がありませんでした。実機の NX-OS と同じ挙動です。ラボで mgmt0 に 10.240.99.3 を入れ、監視対象もそこにしました。
-- **NX-OS の `snmp-server community <名前> group network-operator` が効かない**: エミュレータは `ro` / `rw` の形だけ受け付けます。ラボでは `snmp-server community netlab-ro ro`(NX-OS でも有効な書き方)を使っています。
+- **NX-OS の `snmp-server community <名前> group network-operator` が効かない**: エミュレータは `ro` / `rw` の形だけ受け付けていました。後の「4つの経路」の作業で `group network-operator|network-admin` も受け付けるようにし、ラボもこの書き方に変えました。
 - **装置が送ったフローが「PING OK undefined/undefined」と出る**: 画面が ping の結果だと思って表示していました。sFlow / NetFlow のフローは「sFlow ICMP 送信元 → 宛先 ・ 量」と出すようにしました。経路上の複数の装置が同じ通信を報告するので、同じ送信元・宛先は10秒に1回だけ出します。
 - **CPU 高負荷の注の見出しが「WARN FLAP」**: 警告の見出しがフラップ前提でした。「WARN CPU HIGH」などルールごとの名前に直しました。
+
+## 4つの経路をまとめて確かめる(SNMP ポーリング・TRAP・syslog・フロー)
+
+装置からニルヴァーナへのデータの流れは、種類ごとに1か所へ送る分担です。
+
+| データ | 装置からの送り先 | ニルヴァーナでの取り込み |
+|---|---|---|
+| SNMP ポーリング | (装置は受けるだけ)snmp_exporter → ヴァルハラ | `sources.prometheus` で読む。経路表と CPU は `sources.snmp` で直接 |
+| SNMP trap | ニルヴァーナ UDP 1162 | `sources.snmp_trap.listen` で直接受ける |
+| syslog | syslog-bridge UDP 5515 → Loki | `sources.loki` で読む |
+| NetFlow / sFlow | ニルヴァーナ UDP 2055 / 6343 | `sources.flow` で直接受ける |
+
+ヴァルハラ(Prometheus)は自分から取りに行くだけなので、trap・syslog・フローは受けられません。
+
+### ラボに足した設定
+
+```
+! CR1 / CR2
+access-list 20 permit 10.240.0.0 0.0.255.255
+snmp-server community netlab-ro RO 20
+snmp-server group NETLAB-V3 v3 priv access 20
+snmp-server trap-source GigabitEthernet0/0/0
+snmp-server enable traps snmp linkdown linkup
+snmp-server host 127.0.0.1 traps version 2c netlab-ro udp-port 1162
+
+! NX1
+ip access-list SNMP-ALLOW
+  10 permit ip 10.240.0.0/16 any
+snmp-server community netlab-ro group network-operator
+snmp-server community netlab-ro use-ipv4acl SNMP-ALLOW
+snmp-server host 127.0.0.1 traps version 2c netlab-ro udp-port 1162
+```
+
+```yaml
+# nirvana/config.yaml
+sources:
+  snmp_trap: {listen: 0.0.0.0:1162}
+```
+
+**ACL の範囲について**: 実機なら「収集サーバー(snmp_exporter・ニルヴァーナ)の IP だけ」を permit します。このラボは1台のホストの lo に全装置の IP が載るので、問い合わせの送信元が宛先の装置 IP そのものになります。そのためラボでは 10.240.0.0/16 を permit しています。
+
+### `./deploy.sh check`
+
+CR1 の Gi0/0/0 を一度 shutdown してから戻し、どの経路で断が見えたかを確かめます。本物の docker で実行した結果です。
+
+```
+[deploy] OK   SNMP ポーリング: ヴァルハラが 3 台から取得
+[deploy] OK   SNMP 許可: 10.240.0.0/16 からは応答
+[deploy] OK   SNMP 制限: 許可していない 10.99.0.9 からは無応答
+[deploy] OK   フロー: NetFlow / sFlow から(フロー 5 件)
+[deploy] CR1 Gi0/0/0 を shutdown しました。ヴァルハラの次の取得(15秒)を待ちます
+[deploy] OK   リンク断を TRAP で検知
+[deploy] OK   リンク断を SYSLOG で検知
+[deploy] OK   リンク断を POLL で検知
+[deploy] CR1 Gi0/0/0 を戻しました
+[deploy] OK   syslog: Loki に UPDOWN が 2 行
+[deploy] 結果: OK 8 / NG 0
+```
+
+画面では、LINK DOWN の下に検知経路の SYSLOG・TRAP・POLL がそろって点灯します(STATE はエミュレータ内部の状態で、単体版には無い経路です)。
+
+![TRAP・SYSLOG・POLL でリンク断を検知](images/nirvana-iac-trap-linkdown.jpg)
+
+SNMP の許可制限は、本物の net-snmp からも確かめました(送信元を `--clientaddr` で変える)。
+
+```
+$ snmpget -v2c -c netlab-ro 10.240.12.1 sysName.0                         → "CR1"
+$ snmpget -v2c -c netlab-ro --clientaddr=10.99.0.9 10.240.12.1 sysName.0  → Timeout: No Response
+$ snmpget -v3 -l authPriv -u netlab-v3 ... 10.240.12.1 sysName.0          → "CR1"
+$ snmpget -v3 ... --clientaddr=10.99.0.9 10.240.12.1 sysName.0            → Timeout
+  (NX1 の 10.240.99.3 も同じ結果)
+```
+
+### このために直したエミュレータのバグ
+
+- **TRAP の送信先ポートが効かない**: `snmp-server host <ip> traps version 2c <community> udp-port 1162` のように実機どおり udp-port を最後に書くと、ポートを読まずに 162 へ送っていました。IP の直後に書いたときだけ効いていました。実機の並びで読むようにし、running-config にも ` udp-port <n>` を出します(古い書き方も引き続き受け付けます)。
+- **SNMP の ACL が効かない**: `snmp-server community X RO <ACL>`・`snmp-server group ... v3 priv access <ACL>` は、設定として残るだけで問い合わせには効いていませんでした。許可していない送信元からの要求を、実機と同じく黙って捨てるようにしました(応答も Report も返しません)。NX-OS の `snmp-server community X use-ipv4acl <ACL>`・`snmp-server user X use-ipv4acl <ACL>` も追加しました(`show snmp user` の acl_filter 列に出ます)。存在しない ACL 名を指定しただけなら、実機と同じく素通しです。
+- **NX-OS の `ip access-list <名前>` が設定モードに入らない**: 中の `10 permit ...` が捨てられていました。拡張 ACL の設定モードに入り、行頭の番号付きの行も登録するようにしました。
+- **TRAP の送信元が装置の IP ではない**: OS 任せの送信元で送っていたので、受け手が送信元 IP で装置を見分けられませんでした。`snmp-server trap-source <IF>` を追加し、指定が無いときは SNMP を受ける管理 IP から送ります。linkDown / linkUp には実機と同じく ifIndex / ifDescr を付けます。
+- **`no snmp-server host` のあとも送り続ける**: 送信先の一覧を消しても送信側に反映していませんでした。
+- **単体版の `/api/traffic/links` の `trap_listen` が常に null**: 実際に待ち受けているアドレスを返すようにしました。
+
+**残っていること**: SNMPv2c の community・trap 送信先・trap-source は、エミュレータの設定の保存(`saved_config.json`)に入っていません(以前からの範囲です)。ラボは `deploy.sh up` のたびに設定し直すので影響はありません。
+
+
+### 画面での見え方と、そのために直したこと(2026-11-18 追記)
+
+各項目が画面でどう出るかは [nirvana-introduction.md](nirvana-introduction.md) の「4つの経路は画面でどう見えるか」に、同じスタックで撮った画像つきでまとめました。撮影の途中で、次の4点を直しました。
+
+- **リンクの復旧と SNMP の応答に「情」「警」が無かった**: リンク断は「警」になるのに、復旧は何も出ませんでした。ヴァルハラで応答しなくなった装置も、灰色の NO RESPONSE になるだけで警報がありませんでした。リンクの復旧を「情 INFO LINK UP」、応答なしを「警 SNMP」(`snmp_lost`、花びら NET)、応答の回復を「情 INFO SNMP OK」にしました(単体版の `Collector.tick` とラボ版の `_note_snmp_reachability` / `_note_link_up`)。どちらも状態が変わったときに1回だけ出ます。
+- **SYSTEM STATUS は断なのに、リンク図は NORMAL のまま**: リンク図は「更新 1分」ごとにしか取り直さないので、断の反映が最大1分遅れていました。リンク断・応答なしの「警」と、復旧の「情」が届いたらすぐ取り直し、断や応答なしのリンクがある間は10秒ごとに取り直すようにしました。
+- **`no access-list 20` が効かない**: 番号付き ACL を丸ごと消すコマンドが黙って無視され、作り直すつもりの行が古い ACL に追記されていました。実機どおり ACL 全体を消すようにしました(`no ip access-list standard|extended <名前>` も同じ)。
+- **撮影の手順の誤り**: ACL で収集元を外した時間がニルヴァーナの判定の周期(10秒)より短く、「警」が出る前に戻していました。「警」が出たのを確かめてから戻すようにしました。
+
 
 ## テスト
 
@@ -121,3 +216,5 @@ Grafana 版の CR1 / CR2 に、sFlow を出す Nexus の NX1 を足します。
 - running-config と show。止めると届かなくなること。
 - Arista の sFlow と、`logging host ... transport udp port` の解釈。
 - IaC のファイル同士の整合: compose の参照先が実在すること、snmp_exporter とヴァルハラのポート、ジョブ名、Loki と syslog のポート、ヴァルハラとニルヴァーナが同じ装置を見ていること、ラボのフロー送出先と受け口の一致。
+- `tests/test_snmp_trap_and_acl.py`: TRAP の送信先の並び・trap-source と ifDescr・本物の UDP で送信元 IP が装置の IP になること・v2c / v3 の ACL(IOS と NX-OS)・NX-OS の `ip access-list`・IaC の TRAP と ACL の設定。
+- `tests/test_nirvana_info_alert_marks.py`: リンク断の「警」と復旧の「情」、SNMP 応答なしの「警」と回復の「情」(単体版・ラボ版)、`no access-list`、画面の新しい「情」とリンク図の取り直し。

@@ -181,12 +181,12 @@ Alertmanagerの `/api/v2/alerts` に `state: active` として反映。
 **注意**: この環境のプロキシは `dl.grafana.com` 等の直接ダウンロードURLを
 ブロックする。回避策として、ユーザー自身のPC（制限なしネットワーク）で
 公式サイトから `grafana-enterprise_<version>_linux_amd64.tar.gz` を
-ダウンロードし、`w-index-m/network-lab-emulator` の GitHub Release
+ダウンロードし、`w-index-m/nirvana-lab` の GitHub Release
 アセットとしてアップロードすれば、`releases/download/...` 経由で
 取得できる（このURLは許可されたCDNにリダイレクトされるため）。
 
 ```bash
-curl -sL https://github.com/w-index-m/network-lab-emulator/releases/download/<tag>/grafana.tar.gz -o grafana.tar.gz
+curl -sL https://github.com/w-index-m/nirvana-lab/releases/download/<tag>/grafana.tar.gz -o grafana.tar.gz
 tar xzf grafana.tar.gz
 ```
 

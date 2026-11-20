@@ -69,16 +69,23 @@ sources:
 
   # MRTG(cfgmaker が作った mrtg.cfg を読み、Target の装置・IF とこの設定の devices を自動で対応づける)。
   # LogFormat が rrdtool なら .rrd を rrdtool fetch で読む(rrdtool コマンドが要る)
+  # 場所の候補: /etc/mrtg.cfg(Debian 系)、/etc/mrtg/mrtg.cfg(RHEL 系)、/usr/local/etc/mrtg/mrtg.cfg(FreeBSD)、
+  #             /usr/local/mrtg-2/conf/mrtg.cfg(ソースから入れた場合)。見つからないときは /api/health の errors に出る
   # mrtg:
   #   cfg: /etc/mrtg.cfg
   #   stale: 900                     # これより古い値(秒)は出さない(MRTG が止まっていても 0 と見せない)
 
-  # Cacti(Interface - Traffic のデータソースの RRD。traffic_in / traffic_out)。どのファイルがどの IF かは
-  # Cacti の DB にしか無いので、ここに書く(install.sh は見つけたファイルをコメントで下書きに出す)
+  # Cacti(Interface - Traffic のデータソースの RRD。traffic_in / traffic_out)。RRD は rrdtool fetch で読む。
+  # どの RRD がどの装置・IF かは Cacti の DB にあるので、db を書けば自動で対応づける(読み取りだけ。mysql クライアントが要る)。
+  # 装置の IP かホスト名と ifName / ifDescr / ifIP が、この設定の devices と合うものが対応づく。結果は GET /api/health の notes に出る
+  # DB 接続情報(PHP)の候補: /etc/cacti/db.php(RHEL)、/etc/cacti/debian.php(Debian / Ubuntu)、<cacti>/include/config.php
+  # rra_dir の候補: /var/lib/cacti/rra、/usr/share/cacti/rra、/var/www/html/cacti/rra、/usr/share/cacti/site/rra(db を使うなら省略可。Cacti の path_rra を使う)
   # cacti:
-  #   rra_dir: /var/lib/cacti/rra
+  #   db: {config: /etc/cacti/debian.php}      # host / port / user / password / database で上書きも可。db: {} なら接続情報を探す
+  #   # db_ttl: 300                             # DB を引き直す間隔(秒)
+  #   # 手で書くとき(db を使わない、または db で対応づかないものを足す。同じ装置・IF は手書きが優先)
   #   targets:
-  #     - {device: cr1, if: GigabitEthernet0/0/0, file: cr1_traffic_in_12.rrd}
+  #     - {device: cr1, if: GigabitEthernet0/0/0, file: 1/11.rrd}    # file は rra_dir からの相対でも可
 
   # SNMP で装置に直接問い合わせ、経路表(IP-FORWARD-MIB)と CPU(CISCO-PROCESS-MIB)を定期取得する。
   # 経路の追加・削除・変更と CPU の急上昇・回復が「情」、CPU が高い状態が続くと「注」(警告)になる

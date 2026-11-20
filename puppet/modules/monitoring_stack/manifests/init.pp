@@ -10,7 +10,7 @@ class monitoring_stack (
   Integer $grafana_port           = 3000,
   String $prom_version            = '2.54.1',
   String $alertmanager_version    = '0.27.0',
-  String $grafana_release_url     = 'https://github.com/w-index-m/network-lab-emulator/releases/download/grafana/grafana.tar.gz',
+  String $grafana_release_url     = 'https://github.com/w-index-m/nirvana-lab/releases/download/grafana/grafana.tar.gz',
 ) {
 
   file { $stack_dir:

@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cvs import config as C  # noqa: E402
 from cvs.collector import Collector  # noqa: E402
+from cvs.link_evidence import traps  # noqa: E402
 
 WEB = Path(__file__).resolve().parent / 'web'
 
@@ -55,7 +56,7 @@ def create_app(cfg, start_collector=True):
 
     @app.get('/api/health')
     def ok():
-        return {'ok': True, 'errors': col.errors}
+        return {'ok': True, 'errors': col.errors, 'notes': col.notes}
 
     @app.get('/api/traffic/hosts')
     def hosts(x_session_token: str = Header(None)):
@@ -71,7 +72,7 @@ def create_app(cfg, start_collector=True):
                 'source': '+'.join(s['sources_used']) or 'none',
                 'prometheus_url': prom.get('url'), 'prometheus_error': col.errors.get('prometheus'),
                 'zabbix_error': col.errors.get('zabbix'), 'sample_interval': cfg['poll_interval'],
-                'trap_listen': None, 'unreachable': s['unreachable']}
+                'trap_listen': traps.listen, 'unreachable': s['unreachable']}
 
     @app.get('/api/traffic/flowmap')
     def flowmap(since: int = 0, alert_since: int = 0, x_session_token: str = Header(None)):

@@ -264,7 +264,7 @@ async def query_llm(prompt: str, system: str) -> str:
 #   (GROQ_API_KEY等と同じ扱い)。
 # ══════════════════════════════════════════
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "w-index-m/network-lab-emulator")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "w-index-m/nirvana-lab")
 GITHUB_WORKFLOW_FILE = "strix-pentest.yml"
 GITHUB_API_BASE = "https://api.github.com"
 
@@ -462,6 +462,8 @@ def _save_config():
             }
             if info.get("routed"):      # no switchport(L2 ループ検知の対象外にする)
                 dev_data["interfaces"][ifname]["routed"] = True
+            if info.get("no_redirects"):   # no ip redirects
+                dev_data["interfaces"][ifname]["no_redirects"] = True
         # ルートテーブルを保存（全デバイス共通）
         routes = getattr(state, "routes", [])
         if routes:
@@ -713,8 +715,13 @@ def _load_config():
                 })
                 if iinfo.get("routed"):
                     state.interfaces[target]["routed"] = True
+                if iinfo.get("no_redirects"):
+                    state.interfaces[target]["no_redirects"] = True
             else:
                 state.interfaces[target] = iinfo
+        if any(isinstance(v, dict) and v.get("no_redirects") for v in state.interfaces.values()):
+            from engine import icmp_redirect as _redir
+            _redir.restore_from_state(dev_id, state)
         # ルートを復元（全デバイス共通）
         if dev_data.get("routes"):
             state.routes = dev_data["routes"]
@@ -1908,6 +1915,12 @@ async def cli_command(body: dict):
     if l2_out is not None:
         return {"output": l2_out, "mode": state.mode, "hostname": state.hostname}
 
+    # ── ICMP Redirect(ルータの no ip redirects、PC の ip route get / ip route flush cache) ──
+    from engine import icmp_redirect as _redir
+    redir_out = _redir.handle_cli(device_id, state, command)
+    if redir_out is not None:
+        return {"output": redir_out, "mode": state.mode, "hostname": state.hostname}
+
     # ── SNMPv3(snmp-server user/group/view/engineID、show snmp user|group|engineID|view) ──
     from engine import snmp_v3 as _snmpv3
     _snmpv3.state_lookup = device_sessions.get
@@ -2196,6 +2209,8 @@ async def cli_command(body: dict):
         for _peer, _pif in list(vnet.interface_links.get(device_id, {}).items()):
             if vnet._norm_iface(_pif) == _n:
                 _flow_recorder.record_link(device_id, _peer, iface_for_flap, _flap_action)
+                if _flap_action == 'up':
+                    _note_link_up(device_id, iface_for_flap, _peer, _pif)
     if _flap_targets and ospf_engine.nodes.get(device_id, {}).get('enabled'):
         # 隣接に関係ないLAN側IFのup/downでも、そのstubの広告/撤回は要る
         _register_icmp(device_id)
@@ -2263,7 +2278,8 @@ async def _flap_interface_down(device_id: str, state, iface_for_flap: str):
     if _sir_trap_enabled(state, 'linkdown'):
         await snmp_dispatcher.emit(device_id, state.hostname,
                                     '1.3.6.1.6.3.1.1.5.3',  # linkDown
-                                    f'{iface_for_flap} down')
+                                    f'{iface_for_flap} down',
+                                    **_trap_meta(device_id, state, iface_for_flap))
     # VRRP/HSRP: このIF上の冗長化グループをInitへ落とす
     # （落とさないと、切れた側がMaster/Activeを名乗ったまま残り、
     #   対向がDead Timerで昇格して両系Master/Activeになる）
@@ -2330,7 +2346,8 @@ async def _flap_interface_up(device_id: str, state, iface_for_flap: str):
     if _sir_trap_enabled(state, 'linkup'):
         await snmp_dispatcher.emit(device_id, state.hostname,
                                     '1.3.6.1.6.3.1.1.5.4',  # linkUp
-                                    f'{iface_for_flap} up')
+                                    f'{iface_for_flap} up',
+                                    **_trap_meta(device_id, state, iface_for_flap))
     # VRRP/HSRP: 復旧したIF上のグループを再選出させる
     await vrrp_engine.interface_up(device_id, iface_for_flap)
     # HSRP object tracking: 復旧したのでpriorityを戻す
@@ -2369,6 +2386,34 @@ async def _flap_interface_up(device_id: str, state, iface_for_flap: str):
 # ══════════════════════════════════════════
 # プロトコルコマンド処理
 # ══════════════════════════════════════════
+
+def _trap_meta(device_id, state, iface=''):
+    """trap の送信元 IP(snmp-server trap-source のIF、無ければ SNMP を受ける管理IP)と、
+    linkDown/linkUp に付ける ifIndex / ifDescr(SNMP の ifTable と同じ番号)"""
+    src = ''
+    ts = getattr(state, 'snmp_trap_source', '')
+    if ts:
+        _n = vnet._norm_iface(ts)
+        for name, info in (state.interfaces or {}).items():
+            if isinstance(info, dict) and vnet._norm_iface(name) == _n and info.get('ip'):
+                src = info['ip']
+                break
+    if not src:
+        try:
+            from engine.snmp_udp_agent import _pick_management_ip
+            src = _pick_management_ip(state) or ''
+        except Exception:  # noqa: BLE001
+            src = ''
+    meta = {'source_ip': src}
+    if iface:
+        names = list(icmp_engine.device_ips.get(device_id, {}).get('interfaces', {}).keys())
+        _n = vnet._norm_iface(iface)
+        for i, name in enumerate(names, 1):
+            if vnet._norm_iface(name) == _n:
+                meta.update({'iface': name, 'if_index': i})
+                break
+    return meta
+
 def orig_groups(m, orig):
     """小文字化したコマンドでのマッチ結果から、大小文字を保った値を取り出す。
 
@@ -3235,6 +3280,13 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         buf.append({'type': 'acl_log',
                     'message': f'access-list {num}: {action} {src}'})
         return
+    # ACL を丸ごと消す: "no access-list 20" / "no ip access-list standard|extended <名前>" / NX-OS "no ip access-list <名前>"
+    # (以前は黙って無視され、作り直すつもりの行が古い ACL に追記されていた)
+    m_no_acl = re.match(r'^no\s+(?:ip\s+access-list(?:\s+(?:standard|extended))?|access-list)\s+(\S+)\s*$', orig, re.I)
+    if m_no_acl:
+        ipfilter_engine.delete_acl(device_id, m_no_acl.group(1))
+        filter_engine.clear_prefix_list(device_id, m_no_acl.group(1))
+        return
     # Cisco拡張ACL: "access-list 100 permit tcp any host 10.0.0.1 eq 80"
     ext_acl = re.match(
         r'^access-list\s+(\d+)\s+(permit|deny)\s+(ip|tcp|udp|icmp)\s+'
@@ -3287,6 +3339,10 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
 
     # Cisco名前付き拡張ACL: "ip access-list extended TEST_ACL" → サブモードへ
     m_named_acl = re.match(r'^ip\s+access-list\s+extended\s+(\S+)', orig, re.I)
+    if not m_named_acl and state.device_type == 'nexus':
+        # NX-OS は standard/extended の区別が無く `ip access-list <名前>` で拡張 ACL の設定モードへ入る
+        # (以前はモードが変わらず、中の行も捨てられていた)
+        m_named_acl = re.match(r'^ip\s+access-list\s+(?!standard\b|extended\b)(\S+)\s*$', orig, re.I)
     if m_named_acl:
         state.mode = 'config-ext-nacl'
         state._current_acl_name = m_named_acl.group(1)
@@ -3295,7 +3351,7 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
     # 名前付き拡張ACLサブモード内: "permit ip 10.0.0.0 0.0.0.255 any" 等
     if state.mode == 'config-ext-nacl':
         m_nacl_rule = re.match(
-            r'^(permit|deny)\s+(ip|tcp|udp|icmp)\s+'
+            r'^(?:\d+\s+)?(permit|deny)\s+(ip|tcp|udp|icmp)\s+'
             r'(\S+(?:\s+[\d.]+)?)\s+(\S+(?:\s+[\d.]+)?)(?:\s+eq\s+(\S+))?', orig, re.I)
         if m_nacl_rule:
             acl_name = getattr(state, '_current_acl_name', None)
@@ -3441,19 +3497,40 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
 
     # ── SNMP 設定（全機種対応）──
     # Cisco: "snmp-server community public ro"
-    snmp_comm = re.match(r'^snmp-server\s+community\s+(\S+)\s+(ro|rw|read-only|read-write)', c)
+    # IOS:    snmp-server community <名前> [view <V>] {RO|RW} [<ACL>]
+    # NX-OS:  snmp-server community <名前> {ro|rw|group network-operator|group network-admin}
+    #         snmp-server community <名前> use-ipv4acl <ACL>(古い版は use-acl)
+    snmp_comm_acl = re.match(r'^snmp-server\s+community\s+(\S+)\s+use-(?:ipv4)?acl\s+(\S+)\s*$', c)
+    if snmp_comm_acl:
+        _og = orig_groups(snmp_comm_acl, orig)
+        for c_ in state.snmp_community:
+            if c_['name'] == _og.group(1):
+                c_['acl'] = _og.group(2)
+                break
+        else:
+            state.snmp_community.append({'name': _og.group(1), 'perm': 'ro', 'acl': _og.group(2)})
+        _register_icmp(device_id)
+        return
+    snmp_comm = re.match(r'^snmp-server\s+community\s+(\S+)(?:\s+view\s+\S+)?\s+'
+                         r'(ro|rw|read-only|read-write|group\s+network-operator|group\s+network-admin)'
+                         r'(?:\s+(\S+))?\s*$', c)
     if snmp_comm:
         _og = orig_groups(snmp_comm, orig)
         name, perm = _og.group(1), snmp_comm.group(2)
-        perm = 'ro' if perm in ('ro', 'read-only') else 'rw'
+        perm = 'ro' if perm in ('ro', 'read-only') or perm.endswith('network-operator') else 'rw'
+        acl = _og.group(3)
         # 既存の名前を再指定したら権限を更新する（実機の挙動）。
         # 以前は既存名を丸ごと無視していたため、ro→rw の変更が効かなかった。
         for c_ in state.snmp_community:
             if c_['name'] == name:
                 c_['perm'] = perm
+                if acl:
+                    c_['acl'] = acl
+                else:
+                    c_.pop('acl', None)
                 break
         else:
-            state.snmp_community.append({'name': name, 'perm': perm})
+            state.snmp_community.append({'name': name, 'perm': perm, **({'acl': acl} if acl else {})})
         # 設定したコミュニティをSNMPエージェント側へ反映する。これが無いと
         # 装置作成時の既定(public)のまま残り、設定したコミュニティでは
         # 読めず public では読めてしまう、という逆の状態になる。
@@ -3465,26 +3542,46 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
         if _lg.handle_config(state, c):
             return ''
     # Cisco: "snmp-server host 192.168.1.200 traps public"
-    snmp_host = re.match(r'^snmp-server\s+host\s+([\d.]+)'
-                         r'(?:\s+udp-port\s+(\d+))?'
-                         r'(?:\s+(traps?|informs?))?\s*(?:version\s+(1|2c|3)\s+)?(\S+)?', c)
+    # 実機 IOS / NX-OS の並び:
+    #   snmp-server host <ip> [traps|informs] [version {1|2c|3 [auth|noauth|priv]}] <community> [udp-port <n>] [種類...]
+    # udp-port は community の後ろに来る。以前は IP の直後しか読まなかったため、実機どおりに書くと
+    # 送信先ポートが無視されて 162 へ送っていた(古い「IP の直後」の書き方も引き続き受け付ける)
+    snmp_host = re.match(r'^snmp-server\s+host\s+([\d.]+)(.*)$', c)
     if snmp_host:
         ip = snmp_host.group(1)
-        # 実機同様 udp-port で送信先ポートを指定できるようにする
-        # （162以外へ飛ばせないと、trap受信の検証が root 権限必須になる）
-        trap_port = int(snmp_host.group(2)) if snmp_host.group(2) else 162
-        trap_type = snmp_host.group(3) or 'traps'
-        version = snmp_host.group(4) or '2c'
-        community = snmp_host.group(5) or 'public'
+        _otoks = orig.split()[3:]
+        trap_port, trap_type, version, sec_level, community, kinds = 162, 'traps', '2c', '', None, []
+        i = 0
+        while i < len(_otoks):
+            t, tl = _otoks[i], _otoks[i].lower()
+            if tl == 'udp-port' and i + 1 < len(_otoks) and _otoks[i + 1].isdigit():
+                trap_port = int(_otoks[i + 1]); i += 2; continue
+            if community is None and tl in ('trap', 'traps', 'inform', 'informs'):
+                trap_type = 'informs' if tl.startswith('inform') else 'traps'; i += 1; continue
+            if community is None and tl == 'version' and i + 1 < len(_otoks):
+                version = _otoks[i + 1].lower(); i += 2
+                if version == '3' and i < len(_otoks) and _otoks[i].lower() in ('auth', 'noauth', 'priv'):
+                    sec_level = _otoks[i].lower(); i += 1
+                continue
+            if community is None:
+                community = t
+            else:
+                kinds.append(tl)
+            i += 1
+        if version not in ('1', '2c', '3'):
+            version = '2c'
+        community = community or 'public'
         entry = next((h for h in state.snmp_hosts if h['host'] == ip), None)
         if entry:
             # 同じホストを再設定した場合は上書きする（syslogと同様）
             entry.update({'community': community, 'version': version,
-                          'traps': trap_type, 'port': trap_port})
+                          'traps': trap_type, 'port': trap_port,
+                          'sec_level': sec_level, 'kinds': kinds})
         else:
             state.snmp_hosts.append({'host': ip, 'community': community,
                                      'version': version, 'traps': trap_type,
-                                     'port': trap_port})
+                                     'port': trap_port, 'sec_level': sec_level,
+                                     'kinds': kinds})
         # snmp_dispatcherに即時登録
         snmp_dispatcher.register(device_id, state.snmp_hosts)
         buf = proto_log_buffer.setdefault(device_id, [])
@@ -3600,10 +3697,19 @@ async def handle_protocol_config(device_id: str, command: str, state: DeviceStat
             state.snmp_community = []
         _register_icmp(device_id)
         return
+    # snmp-server trap-source <IF>(trap の送信元 IP をこの IF の IP にする)
+    _ts = re.match(r'^(no\s+)?snmp-server\s+trap-source(?:\s+(\S+))?\s*$', c)
+    if _ts:
+        if _ts.group(1):
+            state.snmp_trap_source = ''
+        elif _ts.group(2):
+            state.snmp_trap_source = orig.split()[2]
+        return
     # no snmp-server host
     no_snmp = re.match(r'^no\s+snmp-server\s+host\s+([\d.]+)', c)
     if no_snmp:
         state.snmp_hosts = [h for h in state.snmp_hosts if h['host'] != no_snmp.group(1)]
+        snmp_dispatcher.register(device_id, state.snmp_hosts)   # 消した送信先へ送り続けないように
         return
 
     # ── 再配信 (redistribute) ──
@@ -6524,6 +6630,8 @@ def _build_running_config(device_id: str, state) -> str:
                 for _dir in ('in', 'out'):
                     if iinfo.get(f'acl_{_dir}'):
                         lines.append(f' ip access-group {iinfo[f"acl_{_dir}"]} {_dir}')
+                if iinfo.get('no_redirects'):
+                    lines.append(' no ip redirects')
                 if iinfo.get('bandwidth'):
                     lines.append(f' bandwidth {iinfo["bandwidth"]}')
                 if iinfo.get('ospf_cost') is not None:
@@ -6838,21 +6946,27 @@ def _build_running_config(device_id: str, state) -> str:
         hosts = getattr(state, 'snmp_hosts', [])
         loc   = getattr(state, 'snmp_location', '')
         cont  = getattr(state, 'snmp_contact', '')
-        if comms or hosts or loc or cont:
+        if comms or hosts or loc or cont or getattr(state, 'snmp_trap_source', ''):
             lines.append('!')
             if loc:
                 lines.append(f'snmp-server location {loc}')
             if cont:
                 lines.append(f'snmp-server contact {cont}')
             for c in comms:
-                lines.append(f'snmp-server community {c["name"]} {c["perm"].upper()}')
+                lines.append(f'snmp-server community {c["name"]} {c["perm"].upper()}'
+                             + (f' {c["acl"]}' if c.get('acl') else ''))
+            if getattr(state, 'snmp_trap_source', ''):
+                lines.append(f'snmp-server trap-source {state.snmp_trap_source}')
             for h in hosts:
+                _ver = h["version"] + (f' {h["sec_level"]}' if h.get('sec_level') else '')
+                _tail = (f' udp-port {h["port"]}' if int(h.get('port') or 162) != 162 else '')
+                _tail += ''.join(f' {k}' for k in (h.get('kinds') or []))
                 lines.append(f'snmp-server host {h["host"]} {h["traps"]} '
-                              f'version {h["version"]} {h["community"]}')
+                              f'version {_ver} {h["community"]}{_tail}')
         from engine.snmp_v3 import running_config_lines as _v3_lines
         _v3l = _v3_lines(state)
         if _v3l:
-            if not (comms or hosts or loc or cont):
+            if not (comms or hosts or loc or cont or getattr(state, 'snmp_trap_source', '')):
                 lines.append('!')
             lines.extend(_v3l)
         lines.append('!')
@@ -9906,6 +10020,37 @@ _NON_ROUTER_TYPES = {'pc', 'netattest', 'alb'}
 _EVIDENCE_ORDER = ('STATE', 'SYSLOG', 'TRAP', 'POLL')
 
 
+
+def _note_link_up(dev, iface, peer, peer_if):
+    """リンクの復旧を「情」で知らせる(断は link_down の「警」)"""
+    try:
+        from engine.route_watch import watcher as _rw
+        h = getattr(device_sessions.get(dev), 'hostname', dev)
+        ph = getattr(device_sessions.get(peer), 'hostname', peer)
+        _rw.note(dev, h, 'link_up', f'{iface} ⇄ {ph} {peer_if}', code='LINK')
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_snmp_lost_prev = set()
+
+
+def _note_snmp_reachability(lost, nodes, now):
+    """ヴァルハラの取得で応答しなくなった装置を「警」(snmp_lost)、戻った装置を「情」にする"""
+    cur = set(lost)
+    for d in cur - _snmp_lost_prev:
+        _flow_recorder.external_alert('snmp_lost', d, d, None,
+                                      f"{nodes[d]['hostname']} が SNMP に応答しない({lost[d]})", now=now)
+    try:
+        from engine.route_watch import watcher as _rw
+        for d in _snmp_lost_prev - cur:
+            if d in nodes:
+                _rw.note(d, nodes[d]['hostname'], 'snmp_ok', 'SNMP の応答が戻った', code='SNMP', now=now)
+    except Exception:  # noqa: BLE001
+        pass
+    _snmp_lost_prev.clear()
+    _snmp_lost_prev.update(cur)
+
 async def _annotate_link_evidence(links, nodes, now):
     """各リンクに、どの経路(STATE/SYSLOG/TRAP/POLL)が断を示しているかを付ける。
     どれか1つでも「最後に見た状態が down」ならリンクは断(ln['down']=True)。"""
@@ -9964,6 +10109,7 @@ async def _annotate_link_evidence(links, nodes, now):
         ln['down_sources'] = [k for k in _EVIDENCE_ORDER if ev[k] == 'down']
         ln['down'] = bool(ln['down_sources'])
         ln['lost'] = [nodes[d]['hostname'] for d in lost_ends]
+    _note_snmp_reachability(lost, nodes, now)
     return [{'id': d, 'hostname': nodes[d]['hostname'], 'instance': inst} for d, inst in lost.items()]
 
 
@@ -10314,6 +10460,8 @@ async def _l2loop_apply(a, _snmp):
         for peer, pif in list(vnet.interface_links.get(dev, {}).items()):
             if vnet._norm_iface(pif) == n:
                 _flow_recorder.record_link(dev, peer, ifn, 'down' if kind == 'errdisable' else 'up')
+                if kind != 'errdisable':
+                    _note_link_up(dev, ifn, peer, pif)
     elif kind == 'cleared':
         lp = a['loop']
         if lp['resolved_by'].startswith('リンクの切断'):   # ニルヴァーナの RESPONSE で切ったなら、そう書く
@@ -11539,6 +11687,15 @@ async def traffic_routes(since: int = 0, limit: int = 100):
     evs = watcher.since(since, max(1, min(int(limit), 500)))
     return {'events': [{**e, 'text': describe(e)} for e in evs], 'seq': watcher.seq,
             'interval': ROUTE_WATCH_INTERVAL}
+
+
+@app.get("/api/traffic/redirects")
+async def traffic_redirects(since: int = 0, limit: int = 100):
+    """/cyber-view 用: ICMP Redirect の発生記録(since=<seq> 以降)。
+    sent=False は、そのルータの IF に no ip redirects があって送らなかったもの。"""
+    from engine import icmp_redirect as _redir
+    evs = _redir.since(int(since), max(1, min(int(limit), 500)))
+    return {'events': evs, 'seq': _redir.seq}
 
 
 @app.get("/api/traffic/history")

@@ -114,7 +114,8 @@ def _ber_length(data: bytes) -> bytes:
 
 def build_snmp_v2c_trap(community: str, hostname: str,
                          trap_oid: str = '1.3.6.1.6.3.1.1.5.1',
-                         description: str = '') -> bytes:
+                         description: str = '', iface: str = '',
+                         if_index: int = 0) -> bytes:
     """
     SNMP v2c Trap パケット生成（RFC 2272）
     Structure: SEQUENCE { version INTEGER, community OCTET STRING, PDU }
@@ -135,6 +136,12 @@ def build_snmp_v2c_trap(community: str, hostname: str,
     desc_varbind = b'\x30' + _ber_length(desc_oid + desc_val) + desc_oid + desc_val
 
     varbind_list = uptime_varbind + trapoid_varbind + desc_varbind
+    # linkDown / linkUp は実機と同じく ifIndex / ifDescr を付ける(RFC 2863 の linkDown の varbind)
+    if iface and if_index:
+        for _o, _v in ((f'1.3.6.1.2.1.2.2.1.1.{if_index}', _ber_encode_int(if_index)),
+                       (f'1.3.6.1.2.1.2.2.1.2.{if_index}', _ber_encode_string(iface))):
+            _oo = _ber_encode_oid(_o)
+            varbind_list += b'\x30' + _ber_length(_oo + _v) + _oo + _v
     varbinds = b'\x30' + _ber_length(varbind_list) + varbind_list
 
     # SNMPv2c Trap PDU (tag=0xa7)
@@ -153,12 +160,20 @@ def build_snmp_v2c_trap(community: str, hostname: str,
 
 
 def send_snmp_trap(host: str, port: int, community: str,
-                   hostname: str, trap_oid: str, description: str) -> bool:
-    """UDP 162 に SNMP v2c Trap を送信"""
+                   hostname: str, trap_oid: str, description: str,
+                   source_ip: str = '', iface: str = '', if_index: int = 0) -> bool:
+    """UDP 162 に SNMP v2c Trap を送信。
+    source_ip を渡すとその IP から送る(実機の snmp-server trap-source。受信側は送信元 IP で装置を見分ける)。
+    その IP がこのホストに無ければ、黙って OS 任せの送信元に戻す"""
     try:
-        pkt = build_snmp_v2c_trap(community, hostname, trap_oid, description)
+        pkt = build_snmp_v2c_trap(community, hostname, trap_oid, description, iface, if_index)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(1.0)
+            if source_ip:
+                try:
+                    s.bind((source_ip, 0))
+                except OSError:
+                    pass
             s.sendto(pkt, (host, port))
         return True
     except Exception:
@@ -166,10 +181,12 @@ def send_snmp_trap(host: str, port: int, community: str,
 
 
 async def send_snmp_trap_async(host: str, port: int, community: str,
-                                hostname: str, trap_oid: str, description: str) -> bool:
+                                hostname: str, trap_oid: str, description: str,
+                                source_ip: str = '', iface: str = '', if_index: int = 0) -> bool:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        None, send_snmp_trap, host, port, community, hostname, trap_oid, description
+        None, send_snmp_trap, host, port, community, hostname, trap_oid, description,
+        source_ip, iface, if_index
     )
 
 
@@ -279,7 +296,8 @@ class SnmpDispatcher:
         self._targets.pop(device_id, None)
 
     async def emit(self, device_id: str, hostname: str,
-                   trap_oid: str, description: str):
+                   trap_oid: str, description: str,
+                   source_ip: str = '', iface: str = '', if_index: int = 0):
         """SNMP trap を全送信先に送出"""
         targets = self._targets.get(device_id, [])
         if not targets:
@@ -289,7 +307,8 @@ class SnmpDispatcher:
             tasks.append(send_snmp_trap_async(
                 t['host'], t.get('port', 162),
                 t.get('community', 'public'),
-                hostname, trap_oid, description
+                hostname, trap_oid, description,
+                source_ip, iface, if_index
             ))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)

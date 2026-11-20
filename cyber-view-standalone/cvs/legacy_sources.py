@@ -25,6 +25,12 @@ import time
 
 from .link_evidence import norm_if
 
+# mrtg.cfg / Cacti の RRD を探す場所の候補(インストーラーと、設定のパスが見つからないときのエラーで使う)。
+# Debian 系は /etc/mrtg.cfg、RHEL 系は /etc/mrtg/mrtg.cfg、FreeBSD は /usr/local/etc/mrtg/mrtg.cfg、
+# MRTG のソースを自分で入れた場合は MRTG の手順書にある /usr/local/mrtg-2/conf/mrtg.cfg が多い
+MRTG_CFG_CANDIDATES = ['/etc/mrtg.cfg', '/etc/mrtg/*.cfg', '/usr/local/etc/mrtg/*.cfg', '/usr/local/mrtg-2/conf/*.cfg']
+CACTI_RRA_CANDIDATES = ['/var/lib/cacti/rra', '/usr/share/cacti/rra', '/var/www/html/cacti/rra', '/usr/share/cacti/site/rra']
+
 _TARGET = re.compile(r'^Target\[([^\]]+)\]:\s*(.+)$', re.I)
 _SETENV = re.compile(r'^SetEnv\[([^\]]+)\]:\s*(.+)$', re.I)
 _WORKDIR = re.compile(r'^(?:WorkDir|LogDir):\s*(\S+)', re.I)
@@ -125,7 +131,9 @@ class LegacyRates:
         self.lookup = lookup                # (host/ip/name) -> id
         self.rrdtool = shutil.which('rrdtool') or 'rrdtool'
         self.errors = {}
+        self.notes = {}                     # 'cacti' -> DB から対応づけた数と、できなかったもの(エラーではない)
         self.mapping = {}                   # 'mrtg' / 'cacti' -> [(dev, ifname, 読み方)]
+        self._cacti_db = None               # (取得時刻, items, bad) DB の引き直しは db_ttl 秒に1回
 
     def enabled(self):
         return bool(self.mrtg or self.cacti)
@@ -148,11 +156,40 @@ class LegacyRates:
             return ifs[target['ifindex'] - 1]['name']      # 設定の並び順 = ifIndex の順、とみなす(最後の手段)
         return None
 
+    def _cacti_auto(self, now):
+        """Cacti の DB から RRD → 装置・IF を引く(結果は db_ttl 秒(既定300)使い回す。DB に繋がらないときは前回の結果を使う)"""
+        db = self.cacti.get('db', False)
+        if db in (None, False):                 # db: {} / db: true は「設定ファイルを自動で探す」
+            return []
+        if db is True:
+            db = {}
+        ttl = float(self.cacti.get('db_ttl', 300))
+        if self._cacti_db and now - self._cacti_db[0] < ttl:
+            return self._cacti_db[1]
+        from .cacti_db import load_rrds, map_rrds
+        try:
+            rrds = load_rrds(db, self.cacti.get('rra_dir'))
+        except Exception as e:  # noqa: BLE001 - 取れなければ前回の対応を使い続け、理由を出す
+            if self._cacti_db:
+                self._cacti_db = (now, self._cacti_db[1], self._cacti_db[2])
+                self.errors['cacti_db'] = str(e)[:200]
+                return self._cacti_db[1]
+            raise
+        self.errors.pop('cacti_db', None)
+        items, bad = map_rrds(rrds, self.devices, self.lookup)
+        self._cacti_db = (now, items, bad)
+        self.notes['cacti'] = f'DB に traffic の RRD が {len(rrds)} 本、装置・IF に対応づけ {len(items)} 本' + \
+            (f'。対応づけできなかった {len(bad)} 本: ' + ' / '.join(bad[:3]) + (' …' if len(bad) > 3 else '') if bad else '')
+        return items
+
     def map_mrtg(self):
         m = self.mrtg
         items = []
         parsed = {'workdir': m.get('workdir'), 'logformat': m.get('logformat', 'mrtg'), 'targets': {}}
-        if m.get('cfg') and os.path.exists(m['cfg']):
+        if m.get('cfg') and not os.path.exists(m['cfg']):
+            # 黙って「対象なし」にしない(パスの書き間違いに気づけるよう、候補も添える)
+            raise FileNotFoundError(f"mrtg.cfg が見つかりません: {m['cfg']}(候補: {', '.join(MRTG_CFG_CANDIDATES)})")
+        if m.get('cfg'):
             p = parse_mrtg_cfg(open(m['cfg'], encoding='utf-8', errors='replace').read())
             parsed['targets'] = p['targets']
             parsed['workdir'] = parsed['workdir'] or p['workdir']
@@ -193,18 +230,28 @@ class LegacyRates:
         if self.cacti:
             try:
                 rra = self.cacti.get('rra_dir', '/var/lib/cacti/rra')
+                # 既定値のままなら確かめない(DB から対応づけるときは Cacti 自身の設定 path_rra を使うので、書かなくてよい)
+                if (self.cacti.get('rra_dir') or self.cacti.get('targets')) and not os.path.isdir(rra):
+                    raise FileNotFoundError(f"Cacti の rra_dir が見つかりません: {rra}(候補: {', '.join(CACTI_RRA_CANDIDATES)})")
                 stale = float(self.cacti.get('stale', 900))
                 items, bad = [], []
+                explicit = []
                 for t in self.cacti.get('targets') or []:
                     path = t['file'] if os.path.isabs(t['file']) else os.path.join(rra, t['file'])
-                    items.append((t['device'], t['if'], path))
+                    explicit.append((t['device'], t['if'], path, t.get('ds_in', 'traffic_in'), t.get('ds_out', 'traffic_out')))
+                # DB から自動で対応づけたもの(sources.cacti.db)。同じ装置・IF を targets に書いてあればそちらが優先
+                have = {(d, norm_if(i)) for d, i, *_ in explicit}
+                auto = [(d, i, p, 'traffic_in', 'traffic_out') for d, i, p in self._cacti_auto(now)
+                        if (d, norm_if(i)) not in have]
+                for dev, ifn, path, ds_in, ds_out in explicit + auto:
+                    items.append((dev, ifn, path))
                     try:
-                        got = rrd_last(path, t.get('ds_in', 'traffic_in'), t.get('ds_out', 'traffic_out'), self.rrdtool)
+                        got = rrd_last(path, ds_in, ds_out, self.rrdtool)
                     except Exception as e:  # noqa: BLE001 - 1つ読めなくても他は出す
                         bad.append(f'{os.path.basename(path)}: {e}'[:120])
                         continue
                     if got and now - got[0] <= stale:
-                        out[(t['device'], norm_if(t['if']))] = (got[1], got[2], 'cacti', got[0])
+                        out[(dev, norm_if(ifn))] = (got[1], got[2], 'cacti', got[0])
                 self.mapping['cacti'] = items
                 if bad:
                     self.errors['cacti'] = '; '.join(bad)[:200]

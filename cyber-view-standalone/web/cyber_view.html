@@ -366,7 +366,7 @@
   let particles = [];
 
   const octets = (ip) => ip.split('.').map(Number);
-  const RULE_CODE = { valhalla: 'VH', nirvana_rule: 'RULE', conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', fw_shun: 'SHUN', syslog_error: 'ERR',
+  const RULE_CODE = { valhalla: 'VH', nirvana_rule: 'RULE', conn_scan: 'PSCAN', scan: 'SCAN', unreach_burst: 'UNRCH', flood: 'FLOOD', large_icmp: 'MTU', link_down: 'LINK', snmp_lost: 'SNMP', fw_shun: 'SHUN', syslog_error: 'ERR',
     if_flap: 'IF FLAP', ospf_flap: 'OSPF FLAP', bgp_flap: 'BGP FLAP', eigrp_flap: 'EIGRP FLAP', fhrp_flap: 'FHRP FLAP',
     stp_tc_flap: 'STP TC', stp_root_flap: 'STP ROOT', mac_flap: 'MAC FLAP', errdisable_flap: 'ERRDIS', route_flap: 'RT FLAP',
     cpu_high: 'CPU HIGH', wan_slow: 'WAN SLOW', wan_loss: 'WAN LOSS' };
@@ -1193,7 +1193,9 @@
       src.title = d.prometheus_error || (d.prometheus_url ? 'ヴァルハラ(Prometheus): ' + d.prometheus_url
         : 'ヴァルハラ(Prometheus)未接続 — PROMETHEUS_URL 未設定: エミュレータのIFカウンタ(SNMPのifHCOctetsと同じ値)');
     } catch (e) { /* 次の周期で再試行 */ }
-    nextPoll = Date.now() + w * 1000;
+    // 断・応答なしのリンクがある間は10秒ごとに取り直す(検知経路のチップが揃っていく様子と復旧を早く映す)
+    const bad = linkData && (linkData.links || []).some(l => l.down || l.state === 'lost');
+    nextPoll = Date.now() + (bad ? Math.min(10, w) : w) * 1000;
   }
   setInterval(() => {
     if (mode !== 'link') return;
@@ -3270,6 +3272,7 @@
     }
     ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
     ctx.drawImage(fxScan, 0, 0, W, H);
+    fxEmergency(t, alert);
     // グリッチ: 数秒に一度、帯状に横ずれ + 赤/水色のにじみ(警報中は頻度を上げる)
     if (!fxCalm) {
       const period = alert ? 2600 : 7000, ph = t % period;
@@ -3493,6 +3496,40 @@
     lock: fxAim.lock ? fxAim.lock.name : null, feed: fxFeed.hosts.length + fxFeed.ev.length, bloom: fxBloomOn, frameMs: Math.round(fxFrameEma),
     typing: popups.filter(p => p.val && performance.now() - p.born < p.val.length * 24).length,
     devices: fxDevPoints().map(d => ({ id: d.id, name: d.name, x: d.p.x, y: d.p.y })) });
+  // 複数の障害が同時に起きたとき: 画面の上下の縁に、赤い六角パネル(EMERGENCY ▲▼)を並べる。
+  // 1件なら従来の表現(異常・六角柱・火の粉)のまま。2〜3件で1段、4〜7件で2段、8件以上で3段。
+  // 描くのは canvas の縁だけで、操作できる要素(DOM)は上に載るので邪魔にならない。復旧して件数が減れば段も減る
+  let emForce = null, emDrawn = 0;
+  function emRows(level) { return level >= 8 ? 3 : level >= 4 ? 2 : level >= 2 ? 1 : 0; }
+  function fxEmergency(t, level) {
+    const rows = emRows(emForce !== null ? emForce : level);
+    emDrawn = 0;
+    if (!rows) return;
+    const r = Math.max(24, Math.min(W, H) * 0.04), hw = Math.sqrt(3) * r, dyy = r * 1.5;
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '700 10px sans-serif';
+    const emFont = Math.min(r * 0.3, 10 * (hw * 0.8) / ctx.measureText('EMERGENCY').width);     // 六角の幅に収まる大きさ
+    for (let side = 0; side < 2; side++) {
+      for (let row = 0; row < rows; row++) {
+        const cy = side ? H - r - row * dyy : r + row * dyy;
+        for (let x = hw / 2 + (row % 2) * hw / 2, k = 0; x < W + hw; x += hw, k++) {
+          const ph = fxCalm ? 1 : 0.5 + 0.5 * Math.sin(t * 0.004 - (k + row * 3 + side * 5) * 0.55);
+          ctx.beginPath();
+          for (let i = 0; i < 6; i++) { const ang = Math.PI / 6 + i * Math.PI / 3; ctx.lineTo(x + r * 0.96 * Math.cos(ang), cy + r * 0.96 * Math.sin(ang)); }
+          ctx.closePath();
+          ctx.fillStyle = `rgba(255,50,75,${0.10 + 0.22 * ph})`; ctx.fill();
+          ctx.strokeStyle = `rgba(255,100,115,${0.55 + 0.4 * ph})`; ctx.lineWidth = 1.5; ctx.stroke();
+          ctx.fillStyle = `rgba(255,225,228,${0.55 + 0.4 * ph})`;
+          ctx.font = `700 ${emFont.toFixed(1)}px sans-serif`; ctx.fillText('EMERGENCY', x, cy);
+          ctx.font = `${(r * 0.26).toFixed(1)}px sans-serif`; ctx.fillText('\u25B2', x, cy - r * 0.5); ctx.fillText('\u25BC', x, cy + r * 0.5);
+          emDrawn++;
+        }
+      }
+    }
+    ctx.restore();
+  }
+  window.__cvEmergency = (level) => { if (level !== undefined) emForce = level; return { rows: emRows(emForce !== null ? emForce : alertLevel), drawn: emDrawn, level: alertLevel }; };
   const zFx = document.getElementById('zFx');
   zFx.classList.toggle('on', fxOn);
   zFx.onclick = () => { window.__cvFx(!fxOn); zFx.classList.toggle('on', fxOn); document.body.classList.toggle('fxon', fxOn); };
@@ -3521,6 +3558,7 @@
     else if (mode === 'atk') { drawAttack(t); }
     else if (mode === 'wan') { drawWan(t); }
     else { if (hostView) { alertLevel = 0; drawHost(t); } else { drawNetwork(t, nowSec); drawNetFlows(t); } drawParticles(t); }
+    if (mode === 'net' || mode === 'link' || mode === 'ospf') drawRedirects(t);
     drawPopups(t);
     drawBoard(t);
     if (fxOk) fxOver(t, mode === 'net' ? alertLevel : 0);
@@ -3722,6 +3760,7 @@
       if (hostView) renderCard();
     } catch (e) { /* 次の周期で再試行 */ }
   }
+  const LINK_STATE_RULES = new Set(['link_down', 'snmp_lost']);
   async function pollFlows() {
     try {
       const d = await api(`/api/traffic/flowmap?since=${seq}&alert_since=${alertSeq}`);
@@ -3745,6 +3784,8 @@
       document.getElementById('sLinks').textContent = links.length;
       if (fresh.length || (d.alerts || []).length || !primed) { renderAlerts(); if (hostView) renderCard(); }
       if (primed && (d.alerts || []).length) pollHealth();   // 新しいアラートはボードにもすぐ反映
+      // リンク断・応答なしの「警」はリンク図にもすぐ反映(定期の取り直しは1分ごとで、ボードと食い違って見えるため)
+      if (primed && mode === 'link' && (d.alerts || []).some(a => LINK_STATE_RULES.has(a.rule))) pollLinks();
       if (!primed) { primed = true; if (mode === 'net') autoFocus(); }
     } catch (e) { /* 次の周期で再試行 */ }
   }
@@ -3802,7 +3843,8 @@
   // 経路の追加・削除・変更を、その装置の上に INFO プレートで浮かべる
   let routeSeq = -1;
   const ROUTE_STYLE = { add: ['#33d6ff', 'INFO ROUTE ADD'], del: ['#9aa4b8', 'INFO ROUTE DEL'], change: ['#7fb2ff', 'INFO ROUTE CHG'],
-    cpu_up: ['#ffab2e', 'INFO CPU UP'], cpu_ok: ['#3dff9a', 'INFO CPU OK'] };
+    cpu_up: ['#ffab2e', 'INFO CPU UP'], cpu_ok: ['#3dff9a', 'INFO CPU OK'],
+    link_up: ['#3dff9a', 'INFO LINK UP'], snmp_ok: ['#3dff9a', 'INFO SNMP OK'] };
   async function pollRoutes() {
     try {
       const d = await api(`/api/traffic/routes?since=${Math.max(0, routeSeq)}&limit=200`);
@@ -3811,6 +3853,7 @@
       if (first) return;                  // 開いた時点より前の変化は出さない
       const byDev = {};
       for (const e of d.events) (byDev[e.dev] = byDev[e.dev] || []).push(e);
+      if (mode === 'link' && d.events.some(e => e.kind === 'link_up' || e.kind === 'snmp_ok')) pollLinks();   // 復旧の「情」も同じ
       for (const [dev, evs] of Object.entries(byDev)) {
         const pos = posForDevice(dev);
         evs.slice(0, 3).forEach(e => {
@@ -3825,6 +3868,108 @@
     } catch (e) { /* 次の周期で再試行 */ }
   }
   setInterval(pollRoutes, 3000); pollRoutes();
+  // ICMP Redirect: ルータ(R1)がホストに「次から別のゲートウェイ(R2)へ直接送れ」と返した瞬間を描く。
+  //   橙の弧 = R1 → ホストへ戻る Redirect(type 5)、水色の破線 = ホストが覚えた新しい経路(ホスト → R2)
+  //   no ip redirects で送らなかったときは灰色の弧に × を付ける
+  let redirSeq = -1;
+  const redirFx = [];
+  const REDIR_COL = '#ff9f43', REDIR_NEW = '#33d6ff', REDIR_OFF = '#9aa4b8', REDIR_TTL = 9000;
+  async function pollRedirects() {
+    try {
+      const d = await api(`/api/traffic/redirects?since=${Math.max(0, redirSeq)}&limit=50`);
+      const first = redirSeq < 0;
+      redirSeq = d.seq;
+      if (first) return;                  // 開いた時点より前のものは出さない
+      for (const e of d.events) {
+        redirFx.push({ e, born: performance.now() });
+        const pos = posForDevice(e.router);
+        if (e.sent) popup(pos, REDIR_COL, 'ICMP REDIRECT', `${e.host_name || e.host} → gw ${e.gw_dev_name || e.gw_ip}`, 7000, '情');
+        else popup(pos, REDIR_OFF, 'REDIRECT 抑止', `no ip redirects ${shortIf(e.iface || '')}`, 7000, '情');
+      }
+      if (redirFx.length > 30) redirFx.splice(0, redirFx.length - 30);
+      if (d.events.length) sfx('info');
+    } catch (e) { /* 次の周期で再試行 */ }
+  }
+  setInterval(pollRedirects, 2000); pollRedirects();
+  window.__cvRedirects = () => redirFx.map(f => f.e);
+  // 2点の間に持ち上がった弧を描き、u(0..1)の位置の画面座標を返す関数を返す
+  function arc3d(A, B, lift, col, width, dash, alpha) {
+    const pts = [];
+    for (let k = 0; k <= 24; k++) {
+      const u = k / 24;
+      const p = proj(A[0] + (B[0] - A[0]) * u, A[1] + (B[1] - A[1]) * u + Math.sin(Math.PI * u) * lift, A[2] + (B[2] - A[2]) * u);
+      if (!p) return null;
+      pts.push(p);
+    }
+    ctx.save();
+    ctx.globalAlpha = alpha; ctx.strokeStyle = col; ctx.lineWidth = width; ctx.setLineDash(dash || []);
+    ctx.shadowColor = col; ctx.shadowBlur = 12;
+    ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.stroke();
+    ctx.restore();
+    return (u) => pts[Math.max(0, Math.min(24, Math.round(u * 24)))];
+  }
+  function drawRedirects(t) {
+    const now = performance.now();
+    for (let i = redirFx.length - 1; i >= 0; i--) if (now - redirFx[i].born > REDIR_TTL) redirFx.splice(i, 1);
+    for (const f of redirFx) {
+      const e = f.e, age = now - f.born, fade = Math.min(1, (REDIR_TTL - age) / 1500);
+      const R = posForDevice(e.router), G = e.gw_dev ? posForDevice(e.gw_dev) : null;
+      if (!R) continue;
+      let H = posForDevice(e.host);
+      if (!H) {   // ROUTER LINKS 等にホストが居ないときは、R1 の外側に仮置きして印を描く
+        const L = Math.hypot(R[0], R[2]) || 1;
+        H = [R[0] + R[0] / L * 4.5, R[1], R[2] + R[2] / L * 4.5];
+        const hp = proj(H[0], H[1], H[2]);
+        if (hp) {
+          ctx.save(); ctx.globalAlpha = fade;
+          hexPath(hp.x, hp.y, 11); ctx.fillStyle = 'rgba(40,150,255,0.35)'; ctx.fill(); ctx.strokeStyle = '#9fd8ff'; ctx.lineWidth = 1.5; ctx.stroke();
+          ctx.fillStyle = '#fff'; ctx.font = '700 12px monospace'; ctx.textAlign = 'center';
+          ctx.fillText(e.host_name || e.host, hp.x, hp.y + 26);
+          ctx.fillStyle = '#7fb2d0'; ctx.font = '10px monospace'; ctx.fillText(e.host_ip || '', hp.x, hp.y + 39);
+          ctx.restore();
+        }
+      }
+      if (!e.sent) {
+        const at = arc3d(R, H, 2.4, REDIR_OFF, 2, [6, 6], 0.8 * fade);
+        if (at) {
+          const m = at(0.7);
+          ctx.save(); ctx.globalAlpha = fade; ctx.strokeStyle = '#ff3b4e'; ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.moveTo(m.x - 8, m.y - 8); ctx.lineTo(m.x + 8, m.y + 8); ctx.moveTo(m.x + 8, m.y - 8); ctx.lineTo(m.x - 8, m.y + 8); ctx.stroke();
+          ctx.fillStyle = REDIR_OFF; ctx.font = '700 11px monospace'; ctx.textAlign = 'center';
+          ctx.fillText('no ip redirects', m.x, m.y - 14); ctx.restore();
+        }
+        continue;
+      }
+      // R1 → ホスト: Redirect の弧と、その上を走る「5」(ICMP type 5)の粒
+      const at = arc3d(R, H, 3.2, REDIR_COL, 3, null, 0.9 * fade);
+      if (at) {
+        const u = Math.min(1, age / 1600), p = at(u);
+        ctx.save(); ctx.globalAlpha = fade;
+        ctx.beginPath(); ctx.arc(p.x, p.y, 10, 0, Math.PI * 2); ctx.fillStyle = REDIR_COL; ctx.shadowColor = REDIR_COL; ctx.shadowBlur = 16; ctx.fill();
+        ctx.shadowBlur = 0; ctx.fillStyle = '#1a0d00'; ctx.font = '900 12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('5', p.x, p.y + 1);
+        const m = at(0.72); ctx.fillStyle = REDIR_COL; ctx.font = '800 12px monospace'; ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'right';
+        ctx.fillText('ICMP REDIRECT', m.x - 14, m.y - 12);
+        ctx.fillStyle = '#ffd9b0'; ctx.font = '11px monospace';
+        ctx.fillText(`${e.dest} は ${e.gw_ip} へ`, m.x - 14, m.y + 4);
+        ctx.restore();
+      }
+      // ホスト → R2: Redirect を受けて覚えた新しい経路(届いた後に伸びる)
+      if (G && age > 1400) {
+        const g = Math.min(1, (age - 1400) / 1200);
+        const bt = arc3d(H, G, 1.4, REDIR_NEW, 2.5, [10, 6], 0.9 * fade * g);
+        if (bt) {
+          for (let k = 0; k < 4; k++) {
+            const p = bt(((t * 0.0006) + k / 4) % 1);
+            ctx.save(); ctx.globalAlpha = fade * g; ctx.fillStyle = REDIR_NEW; ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+          }
+          const m = bt(0.5);
+          ctx.save(); ctx.globalAlpha = fade * g; ctx.fillStyle = REDIR_NEW; ctx.font = '800 11px monospace'; ctx.textAlign = 'center';
+          ctx.fillText(e.cached ? 'NEW PATH  cache <redirected>' : 'NEW PATH', m.x, m.y - 10); ctx.restore();
+        }
+      }
+    }
+  }
 
   // ── デモ: 自動シナリオ + 合成音楽 ─────────────────────
   // 音楽は外部ファイルを使わず Web Audio でその場で合成する(著作権の心配が無い・オフラインでも鳴る)。

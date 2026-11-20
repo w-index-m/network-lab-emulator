@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
+**Repository renamed**: the GitHub repository is now `w-index-m/nirvana-lab` (formerly `network-lab-emulator`; GitHub redirects the old URL). The Render URL `network-lab-emulator.onrender.com` is a separate deployment name and was left unchanged. Bare mentions of "network-lab-emulator" in prose/comments are the project's old name and were not rewritten.
+
 A multi-vendor network device CLI/protocol emulator. It's not a "show text
 generator" — several protocols run as real sockets/real packets (OSPF over
 raw IP proto 89, BGP over TCP 179, RIPv2 over UDP 520, SNMP over UDP 161,
@@ -911,7 +913,7 @@ downloaded the official CPU-only wheel
 (`torch-2.6.0+cpu-cp311-cp311-linux_x86_64.whl`) from
 `download.pytorch.org/whl/cpu/` on their own machine (not blocked there)
 and uploaded it as a GitHub Release asset on this repo
-(`w-index-m/network-lab-emulator`, release tag `torch-cpu-wheel`) —
+(`w-index-m/nirvana-lab`, release tag `torch-cpu-wheel`) —
 `github.com`/`objects.githubusercontent.com` are *not* blocked by this
 environment's egress policy, only `download.pytorch.org` is. That
 Release asset URL is now pinned in `requirements-ml.txt` as a direct PEP
@@ -1007,7 +1009,7 @@ NumPy版はtorch不要のデフォルト実装として維持し、こちらは�
 `download.pytorch.org/whl/cpu/`（手元の環境ではブロックされていない）
 から公式CPU専用ホイール
 (`torch-2.6.0+cpu-cp311-cp311-linux_x86_64.whl`)をダウンロードし、この
-リポジトリ(`w-index-m/network-lab-emulator`)のGitHub Releaseアセット
+リポジトリ(`w-index-m/nirvana-lab`)のGitHub Releaseアセット
 (タグ`torch-cpu-wheel`)としてアップロードした — `github.com`/
 `objects.githubusercontent.com`はこの環境のegressポリシーでブロック
 されて**いない**（ブロックされているのは`download.pytorch.org`のみ）。
@@ -2898,3 +2900,9 @@ Arista `sflow destination`/`sflow run`、IOS `ip flow-export destination`/`ip fl
 追加(v32): OSPF のコストをインタフェースごとに(`docs/catalyst3-ospf-lab.md` の 4)。`OspfEngine.cost_for_iface`: IF の `ip ospf cost` → 装置全体の `ip ospf cost` → 参照帯域(`_REF_BW_DEFAULT`: IOS 系/juniper 100Mbps、nexus 40000、`auto-cost reference-bandwidth`)÷ 帯域(`if_bandwidth_kbps` の名前表 or `bandwidth`)。arista と帯域を見ない機種は `interface_cost`(10)。stub は `cost_for_net`、transit/p2p は `cost_toward`(vnet.interface_links)。SPF の Type2 は一律 +1 をやめ、DR のそのリンクのコスト。`ip ospf cost`/`bandwidth`/`auto-cost` は running-config に出す。OSPF の設定はもともと保存されない。テストは `tests/test_ospf_interface_cost.py`。
 追加(v33): `/cyber-view` の OSPF 画面にリンク両端のIFコスト札(`costTag`、1超は橙)。`ospf_view.snapshot` の adjacency に `cost_a`/`cost_b`(`eng.cost_for_iface`、無いエンジンは None)。画像は `docs/images/cyber-view-ospf-cost-*.jpg`。
 追加(v34): `/cyber-view` に追加演出 8 種(`docs/cyber-view-3d.md` 末尾)。FX で一括: 起動演出(`#boot`、sessionStorage `cvBooted`、`?boot=0`)・レーダー(`fxRadar`、床の輪 R=16.5、`fxDevPoints` で装置を光らせる)・発光(`fxBloom`、1/4 縮小を lighter で重ねる。遅い環境では `fxPerf` が自動で止める、`?bloom=0|1`)・色ずれ(`fxAberration`、半分の解像度、新しい警報から15秒だけ `fxAlertAt`)・本物のデータの雨(`fxFeed`、`fxWord`)・タイプ表示(`fxType`、プレートの値)・照準(`fxReticle`、`(pointer: coarse)` では出さない)。別ボタン: SE(`#zSe`、`seOn`、`sfx` は BGM なしでも鳴る、`'lock'` 追加)・配色(`#zTerm`、`data-term` に CSS filter)。テスト用フック `window.__cvFxExtra()`。`shadowBlur` は GPU なしで重いので新しい演出では使わない。テストは `tests/test_cyber_view_fx_extras.py`。
+
+追加(v34): ICMP Redirect の記録と表示(`docs/icmp-redirect.md`)。`engine/icmp_redirect.py`(発生記録・ホストの Redirect キャッシュ300秒・`no ip redirects` の IF・CLI: ルータ config-if `no ip redirects`/`ip redirects`、PC `ip route get`/`ip route flush cache`)。`IcmpEngine._maybe_generate_redirect`(ping と traceroute)が R1 の受信 IF を求め、無効なら送らず記録、ホスト(pc)は Redirect 1回でキャッシュ → `trace_path` の最初の次ホップに使う。`GET /api/traffic/redirects`、running-config ` no ip redirects`、`interfaces[*].no_redirects` を保存。/cyber-view は `drawRedirects`(橙の弧+「5」の粒、水色の NEW PATH、抑止は灰色+×、ホストが居ないモードでは R1 の外側に仮置き)。テストは `tests/test_icmp_redirect.py`。
+追加(v35): SNMP で ICMP Redirect を検知(`docs/icmp-redirect.md` の SNMP 節)。`SnmpAgent._build_mib` に ICMP グループ `1.3.6.1.2.1.5.1〜26.0`(icmpInRedirects=.7・icmpOutRedirects=.20、`icmp_engine.icmp_stats` の値)と icmpMsgStatsTable `5.30.1.{3,4}.1.{0,3,5,8}`。IaC `cisco-traffic-monitoring` の snmp.yml に icmpIn/OutRedirects(counter)、alert_rules に `CiscoIcmpRedirectSent`(`increase(icmpOutRedirects[5m]) > 0`、info)。実 snmpget・snmp_exporter v0.28・Prometheus v2.54 で firing まで確認。
+追加(v36): ニルヴァーナへの4つの経路(`docs/nirvana-monitoring-iac.md` の「4つの経路」節)。`snmp-server host <ip> [traps|informs] [version 1|2c|3 [auth|noauth|priv]] <community> [udp-port <n>] [種類...]` をトークンで解釈(以前は udp-port を IP の直後しか読まず 162 へ送っていた。古い並びも可)、running-config に udp-port。`snmp-server trap-source <IF>`(無ければ `_pick_management_ip`)から送り、linkDown/Up に ifIndex/ifDescr(`app._trap_meta`、`send_snmp_trap(source_ip, iface, if_index)`)。SNMP の ACL を実際に効かせる: v2c は `snmp-server community X [view V] RO|RW <ACL>`・NX-OS `use-ipv4acl|use-acl`・`group network-operator|admin`(`snmp_udp_agent._community_denied`)、v3 は IOS `group ... access <ACL>`/`user ... access <ACL>`・NX-OS `snmp-server user X use-ipv4acl`(`snmp_v3.source_denied`、`process(..., src_ip=)`)。拒否は黙って捨てる、未定義 ACL は素通し(`ipfilter_engine.check_source`)。NX-OS の `ip access-list <名前>` は config-ext-nacl へ(行頭の番号付き行も)。IaC: ラボ3台が trap を 127.0.0.1:1162 へ、ニルヴァーナ `sources.snmp_trap.listen`、ACL はラボでは 10.240.0.0/16(lo 上で送信元=宛先 IP になるため)、`./deploy.sh check` が SNMP/ACL/フロー/TRAP・SYSLOG・POLL/Loki を確かめる。v2c の community・trap 送信先は保存対象外(既存の範囲)。テストは `tests/test_snmp_trap_and_acl.py`。
+追加(v37): ニルヴァーナの紹介 `docs/nirvana-introduction.md` と `docs/nirvana-introduction.pptx`(画像は `docs/images/nirvana-intro/`、粒の速さの GIF は `docs/videos/nirvana-flow-speed.gif`。iac/nirvana-monitoring の本物のスタックで撮影)。撮影中に直したこと: (1) 単体版 `Collector.tick` とラボ版 `_note_link_up`/`_note_snmp_reachability` で、リンク復旧を「情」`link_up`、ヴァルハラの応答なしを「警」`snmp_lost`(花びら NET)、回復を「情」`snmp_ok`(どれも route_watch の `note()` の流れ、遷移時に1回)。(2) 画面はリンク断・応答なしの「警」/ 復旧の「情」でリンク図をすぐ取り直し、断・応答なしの間は10秒ごと(以前は1分ごとで SYSTEM STATUS と食い違った)。(3) `no access-list <番号>` / `no ip access-list [standard|extended] <名前>` で ACL を丸ごと削除(`ipfilter_engine.delete_acl`、以前は黙って無視され追記されていた)。テストは `tests/test_nirvana_info_alert_marks.py`。方針: どの経路から入った変化も「情」「注」「警」のどれかで画面に出す。
+追加(v38): Cacti の RRD ↔ 装置・IF を DB から自動で対応づける(`cyber-view-standalone/cvs/cacti_db.py`、`docs/nirvana-data-ingestion.md` の「7. Cacti」)。`sources.cacti.db: {config: <db.php|debian.php|config.php>}`(host/port/user/password/database で上書き可、`db: {}` は接続情報を探す)。`mysql`/`mariadb` クライアントで読み取り専用の SELECT を1回(host・data_local・data_template_data・data_template_rrd・host_snmp_cache。Cacti 1.2.26 の cacti.sql で列を確認。`traffic_in` と `traffic_out` を持つ RRD だけ)、パスワードは `MYSQL_PWD`(argv に載せない)。装置は Cacti のホスト名/説明、IF は ifName/ifDescr/ifIP を設定の devices と照合(`norm_if`)。結果は `LegacyRates.notes['cacti']` → `GET /api/health` の `notes`、DB 障害は `errors['cacti_db']`(前回の対応で流量は出し続ける)。`targets` の手書きが優先、DB は `db_ttl`(既定300秒)で使い回す、`rra_dir` 省略時は Cacti の `settings.path_rra`。installer は DB 接続情報(`--cacti-db-config`)を探し、RRD をサブディレクトリまで数える(Cacti 1.x は `<path_rra>/<host_id>/<id>.rrd`)。確認は本物の MariaDB 10.11 + cacti.sql + rrdtool(本物の Cacti アプリは未確認)。Docker の単体版イメージには rrdtool・mysql クライアントが入っていない(apt をこの環境でビルド確認できず、Dockerfile は変えていない)。テストは `tests/test_cacti_db_mapping.py`。

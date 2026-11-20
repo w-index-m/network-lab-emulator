@@ -9,6 +9,16 @@ groups:
         annotations:
           summary: "{{ $labels.router }} ({{ $labels.instance }}) にSNMPで到達できない"
 
+      # ICMP Redirect を送っている(同じセグメントにゲートウェイが2台あり、遠回りが起きている)。
+      # 1回だけ(ホストが覚えれば止まる)でも気づけるよう、5分の増分で見る
+      - alert: CiscoIcmpRedirectSent
+        expr: increase(icmpOutRedirects{job="cisco-snmp"}[5m]) > 0
+        for: 0m
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.router }} が ICMP Redirect を送信(5分で {{ $value | printf \"%.0f\" }} 回)"
+          description: "ホストの既定ゲートウェイと、宛先への次ホップが同じセグメントにある。経路の見直しか、意図しないなら no ip redirects"
+
       # 管理上 up なのに運用状態が down (ケーブル断・対向shutdown等)
       - alert: CiscoInterfaceDown
         expr: ifAdminStatus{job="cisco-snmp"} == 1 and ifOperStatus{job="cisco-snmp"} == 2

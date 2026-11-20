@@ -39,7 +39,7 @@ Priority 2: ░░░░░░░░░░ 0% (0/3 完了)
 
 **状態**: 完了 ✅  
 **テスト**: 8/8 成功  
-**コミット**: [`af7ac61`](https://github.com/w-index-m/network-lab-emulator/commit/af7ac61)
+**コミット**: [`af7ac61`](https://github.com/w-index-m/nirvana-lab/commit/af7ac61)
 
 #### ビフォーアフター
 
@@ -163,7 +163,7 @@ $ pytest tests/test_ospf_distribute_list.py -v
 
 **状態**: 完了 ✅  
 **テスト**: 7シナリオ実装  
-**コミット**: [`0b38d45`](https://github.com/w-index-m/network-lab-emulator/commit/0b38d45)
+**コミット**: [`0b38d45`](https://github.com/w-index-m/nirvana-lab/commit/0b38d45)
 
 #### ビフォーアフター
 
@@ -374,8 +374,8 @@ GitHub → Network Lab Emulator → IMPLEMENTATION_PROGRESS.md
 
 ```bash
 # クローン
-git clone https://github.com/w-index-m/network-lab-emulator.git
-cd network-lab-emulator
+git clone https://github.com/w-index-m/nirvana-lab.git
+cd nirvana-lab
 
 # ブランチ切り替え
 git checkout claude/affectionate-johnson-rz69wa

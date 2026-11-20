@@ -18,6 +18,7 @@ from .flap_rules import FLAP_RULES, ROUTE_FLAP, match as flap_match
 
 RULES = {
     'link_down': {'name': 'リンク断', 'severity': 'medium', 'cooldown': 0, 'source': 'NET'},
+    'snmp_lost': {'name': 'SNMP 応答なし', 'severity': 'medium', 'cooldown': 0, 'source': 'NET'},
     'syslog_error': {'name': '装置が error 以上のログを出力', 'severity': 'medium', 'cooldown': 60, 'source': 'SYSLOG'},
     'zabbix_problem': {'name': 'Zabbix の問題', 'severity': 'medium', 'cooldown': 0, 'source': 'NET'},
     'valhalla': {'name': 'ヴァルハラ(Prometheus)の警報', 'severity': 'medium', 'cooldown': 0, 'source': 'VALHALLA'},
