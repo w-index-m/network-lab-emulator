@@ -7038,6 +7038,17 @@ class SnmpAgent:
         # ── interfaces group (1.3.6.1.2.1.2) ──
         info = icmp_engine.device_ips.get(device_id, {})
         ifaces = list(info.get('interfaces', {}).items())
+        # L2 のポート(switchport で IP の無いポート)も実機どおり ifTable に載せる。以前は IP のある
+        # インタフェースしか出ず、アクセスポートの流量・状態を SNMP で読めなかった。IP のあるものの後ろに
+        # 足すので既存の ifIndex は変わらない。状態は「shutdown でなく、リンクがつながっている」なら up
+        have = {vnet._norm_iface(n) for n, _ in ifaces}
+        linked = {vnet._norm_iface(x) for x in vnet.interface_links.get(device_id, {}).values()}
+        for n, admin_up in d.get('all_ifaces', []) or []:
+            k = vnet._norm_iface(n)
+            if k in have:
+                continue
+            have.add(k)
+            ifaces.append((n, {'l2': True, 'admin_up': bool(admin_up), 'linked': k in linked}))
         if not ifaces:
             # device_ips未登録ならインターフェース無し（最低1つlo相当）
             ifaces = [('lo0', {'ip': '127.0.0.1', 'prefix': 8})]
@@ -7054,7 +7065,13 @@ class SnmpAgent:
             admin = d.get('if_admin', {}).get(i)
             if admin is None:
                 admin = '2' if is_shutdown else '1'
-            status = '2' if (is_shutdown or not ii.get('ip')) else '1'             # up/down
+            if ii.get('l2'):
+                is_shutdown = is_shutdown or not ii['admin_up']
+                if d.get('if_admin', {}).get(i) is None:
+                    admin = '2' if is_shutdown else '1'
+                status = '1' if (not is_shutdown and ii['linked']) else '2'        # ケーブルが無ければ down
+            else:
+                status = '2' if (is_shutdown or not ii.get('ip')) else '1'         # up/down
             mib.append((f'1.3.6.1.2.1.2.2.1.7.{i}', 'INTEGER', str(admin)))        # ifAdminStatus
             mib.append((f'1.3.6.1.2.1.2.2.1.8.{i}', 'INTEGER', status))            # ifOperStatus
             # ifInOctets / ifOutOctets（データプレーンカウンタ由来）

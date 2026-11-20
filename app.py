@@ -2221,6 +2221,7 @@ async def cli_command(body: dict):
                  r'lan\s+\d+\s+ip\s+address|wan\s+\d+\s+ip\s+address|'
                  r'config\s+ipif|'  # APRESIA: "config ipif System <ip>/<prefix>"
                  r'ip\s+lan\d+\s+address|'  # Yamaha RTX: "ip lan1 address ..."
+                 r'ifconfig\s+\S+\s+[\d.]+|'  # PC: "ifconfig eth0 <ip> netmask <mask>"
                  r'no\s+shutdown|no\s+shut', c_low) or (
             re.search(r'crypto\s+map', c_low) and
             not re.match(r'^no\s+crypto\s+map', c_low)):
@@ -7593,6 +7594,23 @@ async def handle_icmp(device_id: str, command: str, state: DeviceState):
     """ping / traceroute を実到達性判定で処理"""
     c = command.lower().strip()
 
+    # PC(Linux): ping [-c N] [-s SIZE] [-i 秒] ... <宛先>。表示は PC 側(rules の _pc_ping)が作るので、ここでは
+    # 経路上の IF カウンタだけ更新して None を返す。以前は PC の ping ではカウンタが動かず(SNMP の流量に出ない)、
+    # オプション無しの「ping 宛先」は IOS 形式の表示になっていた
+    if state.device_type == 'pc' and re.match(r'^ping\b', c):
+        mp = re.match(r'^ping\s+((?:-[a-z]\s*\S+\s+)*)([\d.]+)\s*$', c)
+        if mp:
+            opts = dict(re.findall(r'-([a-z])\s*(\S+)', mp.group(1)))
+            try:
+                count = min(max(int(opts.get('c', 5)), 1), 100000)
+                payload = min(max(int(opts.get('s', 56)), 0), 65507)
+            except ValueError:
+                return None
+            _register_icmp(device_id)
+            result = icmp_engine.ping(device_id, mp.group(2), count=count)
+            _learn_dataplane(device_id, mp.group(2), result, count=count, size=payload + 28)   # IP + ICMP ヘッダ込み
+        return None
+
     # ping (IPv6)。IPv4のARP/NAT/データプレーン学習は非対象(v1スコープ外)。
     m6 = re.match(r'^ping\s+(?:ipv6\s+)?([0-9A-Fa-f:]+:[0-9A-Fa-f:]*)', c)
     if m6:
@@ -8178,6 +8196,10 @@ def _register_icmp(device_id: str):
         snmp_agent.devices[device_id]['if_alias'] = {
             n: (i.get('desc') or i.get('description') or '')
             for n, i in (getattr(state, 'interfaces', {}) or {}).items()}
+        # 全ポート(L2 のアクセスポートを含む)と、shutdown されていないか。IF-MIB に IP の無いポートも載せるため
+        snmp_agent.devices[device_id]['all_ifaces'] = [
+            (n, i.get('status') in ('up', 'connected'))
+            for n, i in (getattr(state, 'interfaces', {}) or {}).items()]
     # 実UDP SNMPエージェント（snmpget/snmpwalkに応答する側）を動的起動する。
     # start_all_snmp_agents はアプリ起動時に存在した装置しか対象にしないため、
     # これが無いとアプリ起動後に追加した装置はWalk/Getに応答しなかった。
