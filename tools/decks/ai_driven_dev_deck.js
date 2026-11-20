@@ -253,6 +253,48 @@ s.addTable([
 ], { x: 0.5, y: 1.25, w: 9.0, colW: [2.1, 3.4, 3.5], fontSize: 12, color: C.background2, fill: { color: C.text2 }, border: { type: 'solid', pt: 1, color: C.text1 }, rowH: 0.45, valign: 'middle', objectName: 'tools table' });
 s.addNotes('単体テストは作り物の中で完結するので、実機の監視ツールから見て正しいかは別に確かめます。今日は net-snmp の snmpwalk、gnmic、Playwright を使いました。');
 
+// 6b. 試験の全体像
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'テスト' });
+s.addText('試験の全体像: 作り物の中と、外から本物で', { placeholder: 'title' });
+const OV = { bold: true, color: C.text1, fill: { color: C.accent1 }, fontSize: 12 };
+const ov = (a, b, c, inside) => [{ text: a, options: { bold: true, color: C.background1 } }, { text: b },
+  { text: c, options: { color: inside ? C.accent1 : C.accent2 } }];
+s.addTable([
+  [{ text: '試験', options: OV }, { text: '何を確かめるか', options: OV }, { text: '道具', options: OV }],
+  ov('単体・結合', '1 つ 1 つの部品が正しく動くか', 'pytest(約 2,160 件)', true),
+  ov('シナリオ回帰', '本物のサーバーで OSPF・BGP・STP が通しで動くか', 'scenario_regression(12 本)', true),
+  ov('機種×プロトコル', '3 機種 × 4 プロトコルの正常・障害・復旧・フラップ', '総当たり 144 項目', true),
+  ov('LLM による判定', '文字列の一致では書きにくい「意味として正しいか」', 'llm_judge', true),
+  ov('本物のツール', '監視・自動化ツールから見て正しいか', 'snmpwalk・gnmic・pyATS など', false),
+  ov('ルートインジェクター', '外から本物の RIP / BGP を打ち込み、受け取って広めるか', 'route_injector_cli', false),
+  ov('実環境', '自宅の本物の Catalyst で SNMP・trap・応答なし', '単体版 + 実機', false),
+  ov('CI', '「自分の環境では通る」を防ぐ', 'GitHub Actions', false),
+], { x: 0.5, y: 1.15, w: 9.0, colW: [1.9, 4.4, 2.7], fontSize: 11, color: C.background2, fill: { color: C.text2 },
+     border: { type: 'solid', pt: 1, color: C.text1 }, rowH: 0.39, valign: 'middle', objectName: 'overview table' });
+txt(s, [{ text: '水色', options: { color: C.accent1, bold: true } }, { text: ' = 作り物の中で確かめる   ' },
+        { text: '橙', options: { color: C.accent2, bold: true } }, { text: ' = 外から本物で叩く。片方で漏れたバグをもう片方が拾う' }],
+    { x: 0.5, y: 4.82, w: 9, h: 0.3, fontSize: 11 });
+s.addNotes('試験は大きく 8 種類あります。上の 4 つは作り物の中で確かめる試験、下の 4 つは外から本物で叩く試験です。今日の STP の 2 件も、単体試験は通っていて、本物のツールで数値を見て初めて見つかりました。両方あることで漏れが減ります。');
+
+// 6c. 画面で見る試験の様子
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'テスト' });
+s.addText('試験の様子をニルヴァーナの画面で見る', { placeholder: 'title' });
+s.addImage({ path: 'docs/images/cyber-view-test-run.jpg', x: 0.5, y: 1.15, w: 6.2, h: 3.68, objectName: 'test run screenshot',
+             altText: 'ニルヴァーナの ROUTER LINKS 画面。装置の上に紫の「試」・緑の PASS・赤の「警」のプレート、左下に TEST RUN パネル' });
+const legend = [
+  ['試(紫)', 'どの装置に何を当てたか', C.accent4],
+  ['試(緑)', 'チェックが通った', C.accent5],
+  ['警(赤)', 'チェックが落ちた。理由も出す', C.accent3],
+  ['TEST RUN', '件数と直近の結果。終了後 60 秒で消える', C.accent1],
+];
+legend.forEach(([h, b, col], i) => {
+  const y = 1.2 + i * 0.9;
+  hex(s, 6.95, y, 0.42, col, '', 'legend hex ' + (i + 1));
+  txt(s, h, { x: 7.5, y: y - 0.03, w: 2.0, h: 0.32, fontSize: 13, bold: true, color: C.background1 });
+  txt(s, b, { x: 7.5, y: y + 0.28, w: 2.0, h: 0.55, fontSize: 10 });
+});
+s.addNotes('Claude が裏で回している試験を、ニルヴァーナの画面でそのまま見られるようにしました。シナリオ回帰を流すと、装置の上にどのコマンドを当てたかが紫の「試」で、通ったら緑、落ちたら赤の「警」で出ます。左下の TEST RUN パネルには件数と直近の結果が流れます。pytest も環境変数 NETLAB_ACTIVITY_URL を指定すれば同じように流せます。');
+
 // 7. CI が落ちたとき
 pres.addSection({ title: '失敗への対応' });
 s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '失敗への対応' });
@@ -307,6 +349,25 @@ bugs.forEach(([tag, b], i) => {
   txt(s, b, { x: x + 0.7, y: y + 0.3, w: 3.7, h: 0.8, fontSize: 12 });
 });
 s.addNotes('作った機能を本物のツールで確かめると、関係する別の場所のバグも見つかります。今日見つけて直した実バグがこの 6 件です。STP の 1 件目は、SNMP のカウンタを確かめている最中に気づきました。');
+
+// 9b. ある 1 日の実況
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '失敗への対応' });
+s.addText('ある 1 日の実況(2026-11-20)', { placeholder: 'title' });
+const day = [
+  ['CI', '午前の PR で、GitHub の試験が 3 件落ちる', C.accent3],
+  ['再現して直す', '手元で同じ失敗を再現。うち 1 件は STP の実バグ(復旧ログが出ない)', C.accent3],
+  ['依頼', '「各機器のポートの SNMP カウンタを」', C.accent1],
+  ['作る・確かめる', '全体 2,134 件が通る。snmpwalk で「STP が 2 台ともルート」に気づく', C.accent2],
+  ['原因', 'BPDU が「同じ IP サブネットか」の判定に入っていた。外して直す', C.accent3],
+  ['取り込み', '緑を確かめて main へ。この資料にまとめる', C.accent5],
+];
+day.forEach(([h, b, col], i) => {
+  const y = 1.12 + i * 0.64;
+  hex(s, 0.6, y, 0.48, col, String(i + 1), 'day hex ' + (i + 1), col === C.accent3 ? C.background1 : C.text1);
+  txt(s, h, { x: 1.25, y: y + 0.04, w: 1.75, h: 0.35, fontSize: 14, bold: true, color: C.background1 });
+  txt(s, b, { x: 3.0, y: y + 0.04, w: 6.5, h: 0.35, fontSize: 12 });
+});
+s.addNotes('今日 1 日の流れです。午前は、PR の GitHub の試験が 3 件落ちました。手元で同じ失敗を再現して直し、うち 1 件は STP の復旧ログが出ないエミュレータの実バグでした。午後はポートの SNMP カウンタを頼まれて実装し、全体試験も通りました。ところが本物の snmpwalk で数値を見ていると、STP が 2 台ともルートのままになっていることに気づきました。原因は、L2 の BPDU が IP のサブネット判定に入っていたことでした。直して緑を確かめ、main に取り込みました。');
 
 // 10. 役割分担
 pres.addSection({ title: 'まとめ' });
