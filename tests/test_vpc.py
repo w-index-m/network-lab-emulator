@@ -121,6 +121,18 @@ async def test_peer_failure_marks_peer_dead(two_nexus):
 
 
 @pytest.mark.asyncio
+async def test_peer_failure_stays_dead_while_peer_keeps_sending(two_nexus):
+    """ピア障害中は、相手のループが送り続ける Keepalive で alive に戻らない
+    (以前は相手の次の Keepalive ですぐ alive に戻り、CI でたまに落ちていた)"""
+    e = two_nexus
+    await _setup_vpc(e)
+    await e.simulate_peer_failure('n1')
+    await asyncio.sleep(e.domains['n2'].keepalive_interval / 1000.0 * 2.5)
+    assert e.domains['n1'].keepalive_state == 'dead'
+    assert e.domains['n2'].keepalive_state == 'dead'
+
+
+@pytest.mark.asyncio
 async def test_peer_link_failure_marks_link_down(two_nexus):
     """peer-link 障害で peer-link が down になる"""
     e = two_nexus
