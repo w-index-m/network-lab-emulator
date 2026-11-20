@@ -506,12 +506,13 @@ class VirtualNetwork:
                 ifs = self.ifaces_between(src_id, peer_id)
                 if ifs and not self.up_ifaces_between(src_id, peer_id):
                     continue
-            # L2マルチキャスト系プロトコル（RIP/OSPF/STP/VRRP/LACP）は
-            # 同一セグメントのみ届く
+            # IP マルチキャストのプロトコル（RIP/OSPF/EIGRP/VRRP/HSRP）と LACP は
+            # 同一セグメントのみ届く。STP の BPDU は L2 フレーム(01:80:c2:00:00:00)なので
+            # IP のサブネットに関係なくスイッチ間のリンクを渡る(以前はここに含めていたため、
+            # SVI のサブネットが違う 2 台のスイッチで BPDU が届かず、両方がルートのままだった)
             if msg_type in ('rip_update', 'rip_request', 'rip_packet',
                             'eigrp_packet',
                             'ospf_hello', 'ospf_lsa',
-                            'stp_bpdu',
                             'vrrp_advert', 'hsrp_hello',
                             'lacp_pdu'):
                 if not self._shares_segment(src_id, peer_id):

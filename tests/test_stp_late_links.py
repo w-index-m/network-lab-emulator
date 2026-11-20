@@ -143,3 +143,25 @@ def test_removed_link_can_be_added_again_as_stp_port(triangle):
     _cli(c, a, 'configure terminal', 'interface GigabitEthernet1/0/1', 'no shutdown', 'end')
     c.post('/api/link', json={'a': a, 'b': b, 'iface_a': 'GigabitEthernet1/0/1', 'iface_b': 'GigabitEthernet1/0/1'})
     assert _wait(lambda: any(p.get('connected_to') == a for p in stp_engine.nodes[b]['ports'].values()), 6)
+
+
+def test_bpdu_crosses_switches_whose_svis_are_in_different_subnets(client):
+    """BPDU は L2 フレームなので IP のサブネットと関係なく届く。以前は OSPF/RIP と同じ
+    「同じサブネットか」の判定に入っていて、SVI のサブネットが違う 2 台が両方ルートのままだった"""
+    from engine.protocols import stp_engine
+    tag = uuid.uuid4().hex[:4]
+    a, b = f'stb-a-{_RUN}-{tag}', f'stb-b-{_RUN}-{tag}'
+    for d, net in ((a, 61), (b, 62)):
+        client.post('/api/device', json={'id': d, 'type': 'catalyst', 'hostname': d.upper()})
+        _cli(client, d, 'configure terminal', 'interface Vlan10', f'ip address 10.{net}.10.1 255.255.255.0',
+             'exit', 'spanning-tree mode rapid-pvst', 'end')
+    client.post('/api/link', json={'a': a, 'b': b, 'iface_a': 'GigabitEthernet1/0/1', 'iface_b': 'GigabitEthernet1/0/1'})
+
+    def roots():
+        return [d for d in (a, b) if stp_engine.nodes[d]['root_bridge_id'] == stp_engine.nodes[d]['bridge_id']]
+    one = _wait(lambda: roots() if len(roots()) == 1 else None, 10)
+    assert one, [(d, stp_engine.nodes[d]['bridge_id'], stp_engine.nodes[d]['root_bridge_id']) for d in (a, b)]
+    low = min((a, b), key=lambda d: stp_engine.nodes[d]['bridge_id'].split('.', 1)[1])
+    assert one == [low]                                      # 同じ優先度なら MAC の小さい方がルート
+    other = b if low == a else a
+    assert 'This bridge is the root' not in _cli(client, other, 'show spanning-tree')
