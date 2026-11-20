@@ -106,8 +106,84 @@ def path_elems(path):
     return [(e.name, dict(e.key)) for e in path.elem]
 
 
-def get_value(state, elems):
-    """パス要素に対応する値を返す。未対応なら None。"""
+_IF_HEADS = ('ietf-interfaces:interfaces', 'interfaces', 'openconfig-interfaces:interfaces')
+_COUNTER_KEYS = ('in-octets', 'out-octets', 'in-unicast-pkts', 'out-unicast-pkts',
+                 'in-errors', 'out-errors', 'in-discards', 'out-discards')
+
+
+def _bare(name: str) -> str:
+    """"openconfig-interfaces:state" のようなモジュール接頭辞を外す"""
+    return name.split(':', 1)[1] if ':' in name else name
+
+
+def _oc_state(device_id, name: str, info: dict) -> dict:
+    """OpenConfig の interfaces/interface/state(counters 含む)。
+
+    カウンタは SNMP の IF-MIB(ifHCIn/OutOctets 等)と同じデータプレーンのカウンタ
+    (engine.protocols.dp_engine)から取るので、gNMI と SNMP で値が食い違わない。
+    状態も IF-MIB と同じ考え方: shutdown なら admin/oper とも DOWN、それ以外は
+    リンクがつながっているか IP があれば oper UP。uint64 は RFC 7951 どおり文字列。
+    """
+    counters = {}
+    shutdown = info.get('status') in ('down', 'notconnect', 'disabled', 'administratively down')
+    linked = False
+    last_change = None
+    try:
+        from engine.protocols import dp_engine, vnet
+        norm = vnet._norm_iface
+        k = norm(name)
+        counters = dp_engine._zero()
+        if device_id:
+            per_dev = dp_engine.counters.get(device_id, {})
+            key = name if name in per_dev else next((n for n in per_dev if norm(n) == k), None)
+            if key is not None:
+                counters = dp_engine.get_counter(device_id, key)
+            shutdown = shutdown or k in {norm(x) for x in vnet.down_interfaces.get(device_id, set())}
+            linked = k in {norm(x) for x in vnet.interface_links.get(device_id, {}).values()}
+            last_change = dp_engine.last_change_of(device_id, name)
+    except Exception:  # noqa: BLE001  (エンジンが無い単体利用でも値は返す)
+        pass
+
+    def n(key):
+        return str(int(counters.get(key, 0)))
+    oper_up = (not shutdown) and (linked or bool(info.get('ip')))
+    out = {
+        'name': name,
+        'type': 'iana-if-type:ethernetCsmacd',
+        'enabled': not shutdown,
+        'admin-status': 'DOWN' if shutdown else 'UP',
+        'oper-status': 'UP' if oper_up else 'DOWN',
+        'counters': {
+            'in-octets': n('in_bytes'), 'out-octets': n('out_bytes'),
+            'in-pkts': n('in_pkts'), 'out-pkts': n('out_pkts'),
+            'in-unicast-pkts': n('in_ucast'), 'out-unicast-pkts': n('out_ucast'),
+            'in-multicast-pkts': n('in_mcast'), 'out-multicast-pkts': n('out_mcast'),
+            'in-broadcast-pkts': n('in_bcast'), 'out-broadcast-pkts': n('out_bcast'),
+            'in-errors': n('in_errors'), 'out-errors': n('out_errors'),
+            'in-discards': n('in_discards'), 'out-discards': n('out_discards'),
+            'in-fcs-errors': n('in_crc'), 'in-unknown-protos': n('in_unknown_protos'),
+        },
+    }
+    if last_change:
+        out['last-change'] = str(int(last_change * 1e9))     # OpenConfig は UNIX 時刻(ナノ秒)
+    return out
+
+
+def _descend(val, names):
+    for n in names:
+        if not isinstance(val, dict):
+            return None
+        val = val.get(n)
+        if val is None:
+            return None
+    return val
+
+
+def get_value(state, elems, device_id=None):
+    """パス要素に対応する値を返す。未対応なら None。
+
+    device_id を渡すと OpenConfig の state(oper-status・counters)にその装置の
+    カウンタが入る(gNMI サーバは自分の装置 ID を渡す)。"""
     if not elems:
         return None
     head, _ = elems[0]
@@ -120,25 +196,50 @@ def get_value(state, elems):
             return state.hostname
         return None
 
-    if head in ('ietf-interfaces:interfaces', 'interfaces',
-                'openconfig-interfaces:interfaces'):
+    if head in _IF_HEADS:
         ifaces = getattr(state, 'interfaces', {}) or {}
+        # OpenConfig で取りに来たとき(モジュール名付き、または state 以下のパス)は state を付ける
+        with_state = head.startswith('openconfig') or any(_bare(n) == 'state' for n, _ in rest[1:2])
+
+        def entry(n, i):
+            e = _iface_json(n, i)
+            if with_state:
+                e['state'] = _oc_state(device_id, n, i)
+            return e
         if not rest:
-            return {'interface': [_iface_json(n, i) for n, i in ifaces.items()]}
+            return {'interface': [entry(n, i) for n, i in ifaces.items()]}
         name0, keys0 = rest[0]
-        if name0 != 'interface':
+        if _bare(name0) != 'interface':
             return None
         key = keys0.get('name', '')
-        if not key:
-            return {'interface': [_iface_json(n, i) for n, i in ifaces.items()]}
+        if not key or key == '*':
+            if len(rest) == 1:
+                return {'interface': [entry(n, i) for n, i in ifaces.items()]}
+            return None           # 下の階層まで指定したワイルドカードは expand_paths で IF ごとに分ける
         info = ifaces.get(key)
         if info is None:
             return None
-        entry = _iface_json(key, info)
-        if len(rest) >= 2:
-            return entry.get(rest[1][0])
-        return entry
+        return _descend(entry(key, info), [_bare(n) for n, _ in rest[1:]])
     return None
+
+
+def expand_paths(state, elems, device_id=None):
+    """[(具体的なパス要素, 値), ...]。
+
+    /interfaces/interface/state/counters のように IF 名を指定せず下の階層まで取りに
+    来た場合は、実機と同じく IF ごとに interface[name=...] を付けた別々の値に分ける
+    (gnmic の subscribe で 1 秒ごとの IF カウンタを流す定番の使い方)。"""
+    if (len(elems) >= 3 and elems[0][0] in _IF_HEADS and _bare(elems[1][0]) == 'interface'
+            and elems[1][1].get('name', '*') == '*'):
+        out = []
+        for n in (getattr(state, 'interfaces', {}) or {}):
+            e2 = [elems[0], (elems[1][0], {'name': n})] + list(elems[2:])
+            v = get_value(state, e2, device_id)
+            if v is not None:
+                out.append((e2, v))
+        return out
+    v = get_value(state, elems, device_id)
+    return [] if v is None else [(list(elems), v)]
 
 
 def set_value(state, elems, val, delete: bool = False):
@@ -245,16 +346,17 @@ if _HAS_GRPC:
             now = int(time.time() * 1e9)
             for path in request.path:
                 ps = path_to_str(path)
-                val = get_value(self.state, path_elems(path))
-                if val is None:
+                found = expand_paths(self.state, path_elems(path), self.device_id)
+                if not found:
                     context.abort(grpc.StatusCode.NOT_FOUND,
                                   f'path not found: {ps}')
                 notif = resp.notification.add()
                 notif.timestamp = now
                 notif.prefix.CopyFrom(request.prefix)
-                upd = notif.update.add()
-                upd.path.CopyFrom(path)
-                upd.val.json_ietf_val = json.dumps(val).encode()
+                for elems, val in found:
+                    upd = notif.update.add()
+                    upd.path.CopyFrom(_path_from(path, elems))
+                    upd.val.json_ietf_val = json.dumps(val).encode()
             return resp
 
         # -- Set -----------------------------------------
@@ -336,7 +438,7 @@ if _HAS_GRPC:
                         subs.append({'sub': s, 'on_change': on_change, 'period': period,
                                      'next': now + period if period else None,
                                      'suppress': (not on_change) and s.suppress_redundant,
-                                     'last': json.dumps(get_value(self.state, path_elems(s.path)))})
+                                     'last': self._snapshot(s)})
                     tick = 0.2
                     while context.is_active():
                         time.sleep(tick)
@@ -344,7 +446,7 @@ if _HAS_GRPC:
                             return
                         now = time.time()
                         for e in subs:
-                            cur = json.dumps(get_value(self.state, path_elems(e['sub'].path)))
+                            cur = self._snapshot(e['sub'])
                             changed = cur != e['last']
                             due = e['next'] is not None and now >= e['next']
                             send = (changed if e['on_change'] else due and (changed or not e['suppress'])) \
@@ -367,17 +469,21 @@ if _HAS_GRPC:
         def _updates(self, sub_list):
             return self._updates_for(sub_list.subscription)
 
+        def _snapshot(self, sub):
+            return json.dumps(expand_paths(self.state, path_elems(sub.path), self.device_id))
+
         def _updates_for(self, subscriptions):
             now = int(time.time() * 1e9)
             for sub in subscriptions:
-                val = get_value(self.state, path_elems(sub.path))
-                if val is None:
+                found = expand_paths(self.state, path_elems(sub.path), self.device_id)
+                if not found:
                     continue
                 resp = gnmi_pb2.SubscribeResponse()
                 resp.update.timestamp = now
-                u = resp.update.update.add()
-                u.path.CopyFrom(sub.path)
-                u.val.json_ietf_val = json.dumps(val).encode()
+                for elems, val in found:
+                    u = resp.update.update.add()
+                    u.path.CopyFrom(_path_from(sub.path, elems))
+                    u.val.json_ietf_val = json.dumps(val).encode()
                 yield resp
 
         @staticmethod
@@ -385,6 +491,18 @@ if _HAS_GRPC:
             resp = gnmi_pb2.SubscribeResponse()
             resp.sync_response = True
             return resp
+
+    def _path_from(orig, elems):
+        """元のパス(origin・target を保つ)の要素を、IF 名を埋めた elems に置き換えたもの"""
+        p = gnmi_pb2.Path()
+        p.CopyFrom(orig)
+        del p.elem[:]
+        for name, keys in elems:
+            pe = p.elem.add()
+            pe.name = name
+            for k, v in keys.items():
+                pe.key[k] = v
+        return p
 
     def _typed_value(tv):
         """gnmi.TypedValue から素のPython値を取り出す"""

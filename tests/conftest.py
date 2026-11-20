@@ -1,5 +1,6 @@
 import os
 os.environ['NETLAB_FAST_TIMERS'] = '1'
+os.environ.setdefault('NETLAB_CTRL_TRAFFIC', '0')   # BPDU/Hello 等の背景トラフィックは止める(ping の分だけを数えるテストのため)
 os.environ.setdefault('NETLAB_WORLD_FETCH', '0')   # WORLD の外部データ(AWS / Radar / IHR)をテスト中は取りに行かない
 import sys
 import pytest

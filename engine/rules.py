@@ -2080,20 +2080,22 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         return "\n".join(lines)
 
     def _show_int_counters_errors(self, state):
-        """show interfaces counters errors（記事準拠・エラーカウンタ）"""
+        """show interfaces counters errors（IF-MIB の ifInErrors 等と同じカウンタ）"""
         lines = ["",
                  "Port        Align-Err     FCS-Err    Xmit-Err     Rcv-Err  UnderSize  OutDiscards"]
-        phys = [(n,i) for n,i in state.interfaces.items()
+        phys = [(n, i) for n, i in state.interfaces.items()
                 if n.startswith("GigabitEthernet")]
-        for name, iface in phys:
-            short = name.replace("GigabitEthernet","Gi")
-            # 正常時は全部0
-            lines.append(f"{short:<12}{'0':<14}{'0':<11}{'0':<12}{'0':<9}{'0':<11}0")
+        for name, _iface in phys:
+            short = name.replace("GigabitEthernet", "Gi")
+            c = self._port_counter(state, name)
+            lines.append(f"{short:<12}{'0':<14}{c['in_crc']:<11}{c['out_errors']:<12}{c['in_errors']:<9}"
+                         f"{c['in_runts']:<11}{c['out_discards']}")
         lines.append("")
         lines.append("Port      Single-Col  Multi-Col   Late-Col  Excess-Col  Carri-Sen      Runts     Giants")
-        for name, iface in phys:
-            short = name.replace("GigabitEthernet","Gi")
-            lines.append(f"{short:<10}{'0':<12}{'0':<11}{'0':<11}{'0':<12}{'0':<11}{'0':<11}0")
+        for name, _iface in phys:
+            short = name.replace("GigabitEthernet", "Gi")
+            c = self._port_counter(state, name)
+            lines.append(f"{short:<10}{'0':<12}{'0':<11}{'0':<11}{'0':<12}{'0':<11}{c['in_runts']:<11}{c['in_giants']}")
         return "\n".join(lines)
 
     def _sir_show_vlan(self, state):
@@ -2257,33 +2259,33 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
                                  'FastEthernet'))]
 
     def _show_int_counters(self, state):
-        """show interfaces counters（実機同様 In/Out の2テーブル）"""
-        ctrs = {}
+        """show interfaces counters（実機同様 In/Out の2テーブル。SNMP の IF-MIB と同じカウンタ）"""
+        def table(head, d):
+            L = ['', f'{"Port":<18}{head[0]:>9}{head[1]:>15}{head[2]:>15}{head[3]:>15} ']
+            for name, _ in self._phys_ports(state):
+                c = self._port_counter(state, name)
+                L.append(f'{self._abbrev_if(name):<18}{c[d + "_bytes"]:>9}{c[d + "_ucast"]:>15}'
+                         f'{c[d + "_mcast"]:>15}{c[d + "_bcast"]:>15} ')
+            return L
+
+        lines = table(('InOctets', 'InUcastPkts', 'InMcastPkts', 'InBcastPkts'), 'in')
+        lines += table(('OutOctets', 'OutUcastPkts', 'OutMcastPkts', 'OutBcastPkts'), 'out')
+        return "\n".join(lines)
+
+    @staticmethod
+    def _port_counter(state, name):
+        """データプレーンのカウンタ(engine.protocols.dp_engine)。IF-MIB / gNMI と同じ値"""
         try:
             from engine.protocols import dp_engine as _dp
             did = getattr(state, '_device_id', None)
             if did:
-                ctrs = _dp.counters.get(did, {})
-        except Exception:
-            ctrs = {}
-
-        def table(head, keys):
-            L = ['', f'{"Port":<18}{head[0]:>9}{head[1]:>15}{head[2]:>15}{head[3]:>15} ']
-            for name, _ in self._phys_ports(state):
-                c = ctrs.get(name) or {}
-                octets = c.get(keys[0], 0)
-                pkts = c.get(keys[1], 0)
-                # ユニキャスト/マルチキャスト/ブロードキャストの内訳は保持していない
-                # ため、実機同様に合計をユニキャスト列へ寄せる
-                L.append(f'{self._abbrev_if(name):<18}{octets:>9}{pkts:>15}'
-                         f'{0:>15}{0:>15} ')
-            return L
-
-        lines = table(('InOctets', 'InUcastPkts', 'InMcastPkts', 'InBcastPkts'),
-                      ('in_bytes', 'in_pkts'))
-        lines += table(('OutOctets', 'OutUcastPkts', 'OutMcastPkts', 'OutBcastPkts'),
-                       ('out_bytes', 'out_pkts'))
-        return "\n".join(lines)
+                return _dp.get_counter(did, name)
+            return _dp._zero()
+        except Exception:  # noqa: BLE001
+            return {k: 0 for k in ('in_pkts', 'out_pkts', 'in_bytes', 'out_bytes', 'in_ucast', 'out_ucast',
+                                   'in_mcast', 'out_mcast', 'in_bcast', 'out_bcast', 'in_errors', 'out_errors',
+                                   'in_discards', 'out_discards', 'in_crc', 'in_giants', 'in_runts',
+                                   'in_unknown_protos')}
 
     def _show_int_switchport(self, state):
         """show interfaces switchport（実機のポート単位ブロック）"""
@@ -2484,34 +2486,26 @@ System image file is "bootflash:isr4300-universalk9.17.09.01.SPA.bin" """
         # 入力キューの上限はプラットフォーム依存。Catalystスイッチは2000、
         # ルーター系(ISR等)は75（実機のCatalyst 3650で2000を確認）
         _inq_max = 2000 if state.device_type in ('catalyst', 'srs', 'nexus') else 75
-        L.append(f"  Input queue: 0/{_inq_max}/0/0 (size/max/drops/flushes); "
-                 f"Total output drops: 0")
+        # データプレーンの実カウンタを反映(IF-MIB / gNMI と同じ値)
+        c = self._port_counter(state, name)
+        L.append(f"  Input queue: 0/{_inq_max}/{c['in_discards']}/0 (size/max/drops/flushes); "
+                 f"Total output drops: {c['out_discards']}")
         L.append("  Queueing strategy: fifo")
         L.append("  Output queue: 0/40 (size/max)")
-        # データプレーンの実カウンタを反映（無ければ0）
-        _inp = _outp = _inb = _outb = 0
-        try:
-            from engine.protocols import dp_engine as _dp
-            _did = getattr(state, '_device_id', None)
-            if _did:
-                _c = _dp.get_counter(_did, name)
-                _inp, _outp = _c['in_pkts'], _c['out_pkts']
-                _inb, _outb = _c['in_bytes'], _c['out_bytes']
-        except Exception:
-            pass
         L.append("  5 minute input rate 0 bits/sec, 0 packets/sec")
         L.append("  5 minute output rate 0 bits/sec, 0 packets/sec")
-        L.append(f"     {_inp} packets input, {_inb} bytes, 0 no buffer")
-        L.append(f"     Received {_inp} broadcasts ({_inp} multicasts)")
-        L.append("     0 runts, 0 giants, 0 throttles")
-        L.append("     0 input errors, 0 CRC, 0 frame, 0 overrun, 0 ignored")
-        L.append("     0 watchdog, 0 multicast, 0 pause input")
+        L.append(f"     {c['in_pkts']} packets input, {c['in_bytes']} bytes, 0 no buffer")
+        # 実機の "Received N broadcasts (M multicasts)" の N はマルチキャストを含む
+        L.append(f"     Received {c['in_bcast'] + c['in_mcast']} broadcasts ({c['in_mcast']} multicasts)")
+        L.append(f"     {c['in_runts']} runts, {c['in_giants']} giants, 0 throttles")
+        L.append(f"     {c['in_errors']} input errors, {c['in_crc']} CRC, 0 frame, 0 overrun, 0 ignored")
+        L.append(f"     0 watchdog, {c['in_mcast']} multicast, 0 pause input")
         L.append("     0 input packets with dribble condition detected")
-        L.append(f"     {_outp} packets output, {_outb} bytes, 0 underruns")
+        L.append(f"     {c['out_pkts']} packets output, {c['out_bytes']} bytes, 0 underruns")
         # 実機は出力側にもブロードキャスト/マルチキャストの内訳行を出す
         # （実機比較でこの1行だけが丸ごと欠けていた）
-        L.append(f"     Output {_outp} broadcasts (0 multicasts)")
-        L.append("     0 output errors, 0 collisions, 1 interface resets")
+        L.append(f"     Output {c['out_bcast'] + c['out_mcast']} broadcasts ({c['out_mcast']} multicasts)")
+        L.append(f"     {c['out_errors']} output errors, 0 collisions, 1 interface resets")
         L.append("     0 unknown protocol drops")
         L.append("     0 babbles, 0 late collision, 0 deferred")
         L.append("     0 lost carrier, 0 no carrier, 0 pause output")

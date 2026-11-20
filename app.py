@@ -989,6 +989,7 @@ async def lifespan(app: FastAPI):
     link_sample_task = asyncio.create_task(_link_sample_loop())
     route_watch_task = asyncio.create_task(_route_watch_loop())
     l2loop_task = asyncio.create_task(_l2loop_loop())
+    ctrl_traffic_task = asyncio.create_task(_control_traffic_loop())  # noqa: F841  (BPDU/Hello/CDP/LLDP をカウンタへ)
     valhalla_task = asyncio.create_task(_valhalla_alert_loop())
     board_task = asyncio.create_task(_board_loop())
     world_task = asyncio.create_task(_world_loop())
@@ -10447,8 +10448,9 @@ async def _l2loop_apply(a, _snmp):
             lvl = {2: 'critical', 3: 'errors', 4: 'warnings'}.get(a['sev'], 'notifications')
             await syslog_dispatcher.emit(a['dev'], st.hostname, lvl, a['msg'])
     elif kind == 'storm':
-        dp_engine.bump(a['dev'], a['iface'], 'in', pkts=a['pps'], size=64)
-        dp_engine.bump(a['dev'], a['iface'], 'out', pkts=a['pps'], size=64)
+        dp_engine.bump(a['dev'], a['iface'], 'in', pkts=a['pps'], size=64, kind='bcast')
+        dp_engine.bump(a['dev'], a['iface'], 'out', pkts=a['pps'], size=64, kind='bcast')
+        dp_engine.drop(a['dev'], a['iface'], 'in', pkts=a.get('dropped', 0))   # storm-control で捨てた分 → ifInDiscards
     elif kind == 'cpu':
         for d in a['devs']:
             _snmp.add_cpu_load(d, 15)
@@ -10495,6 +10497,19 @@ async def _l2loop_apply(a, _snmp):
         _flow_recorder.record_log(lp['devices'][0], _resp_hostname(lp['devices'][0]), 5,
                                   f"%NIRVANA-5-LOOP_CLEARED: L2ループ解消({lp['duration']}秒): {lp['resolved_by']}",
                                   now=time.time())
+
+
+async def _control_traffic_loop():
+    """制御プレーンのマルチキャスト(STP BPDU・OSPF Hello・CDP・LLDP)を1秒ごとにポートのカウンタへ積む
+    (engine/control_traffic.py)。NETLAB_CTRL_TRAFFIC=0 で止める(テストは止めて、ping の分だけを数える)"""
+    from engine.control_traffic import control_traffic
+    while True:
+        try:
+            if os.environ.get('NETLAB_CTRL_TRAFFIC', '1') != '0':
+                control_traffic.tick(device_sessions, vnet, dp_engine, stp_engine, ospf_engine)
+        except Exception as e:  # noqa: BLE001
+            print(f"[ctrl-traffic] {e}")
+        await asyncio.sleep(1)
 
 
 async def _l2loop_loop():
