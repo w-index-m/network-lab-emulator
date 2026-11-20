@@ -136,6 +136,34 @@ def test_stale_after_is_configurable(fake):
     assert _collector().trap_stale_after == 90               # 既定
 
 
+def test_dropped_trap_does_not_come_back_when_snmp_stops_answering(fake):
+    """ライブ検証で見つけた穴: 一度 POLL の up で捨てた linkDown が、SNMP の応答なし(POLL が取れない)で
+    復活し、リンクが LINK DOWN に戻ってアラートも繰り返し出ていた"""
+    c = _collector()
+    _trap('down', age=200)
+    assert _link(c, fake, oper=1)['down'] is False           # POLL が up → 捨てる
+    fake_fail = SP.SC.walk
+    try:
+        def boom(*a, **k):
+            raise SC.SnmpError('timeout')
+        SP.SC.walk = boom
+        c.snmp.traffic_tick(now=time.time())
+        c.snmp.traffic_tick(now=time.time())                 # 2 回続けて応答なし → lost
+        ln = c._build(60)['links'][0]
+    finally:
+        SP.SC.walk = fake_fail
+    assert ln['state'] == 'lost' and ln['down'] is False and ln['evidence']['TRAP'] is None
+
+
+def test_newer_linkdown_after_a_dropped_one_still_counts():
+    c = _collector()
+    _trap('down', age=200)
+    c._stale_traps[('cat', 'gi0/4')] = traps.snapshot()[-1]['t']   # 前の linkDown は捨てた扱い
+    _trap('down', age=5)                                              # その後に届いた新しい linkDown
+    ln = _link(c, poll=False)
+    assert ln['down'] is True and ln['down_sources'] == ['TRAP']
+
+
 def test_other_interface_trap_is_not_affected_by_polling_a_different_interface(fake):
     c = _collector()
     _trap('down', age=200, ifname='GigabitEthernet0/9')      # links に無い IF

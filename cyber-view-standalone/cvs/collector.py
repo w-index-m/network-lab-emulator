@@ -42,6 +42,7 @@ class Collector:
         self.loki_labels = (src.get('loki') or {}).get('device_labels') or ['device_id', 'host', 'hostname', 'instance']
         # linkDown の trap から、これだけ経っても POLL が up を返し続けるなら、linkUp の trap を取りこぼしたとみなす(秒)
         self.trap_stale_after = float((src.get('snmp_trap') or {}).get('stale_after', TRAP_STALE_AFTER))
+        self._stale_traps = {}     # (装置, IF) -> 無効にした linkDown trap の時刻(同じ trap を二度と down に戻さない)
         self.devs = {d['id']: d for d in cfg['devices']}
         self.analytics = Analytics()
         self.analytics.device_type_of = lambda dev: (self.devs.get(dev) or {}).get('type')
@@ -223,11 +224,15 @@ class Collector:
             note('POLL', dev, ifn, now, st)
         # trap は UDP なので linkUp を取りこぼすことがある。それで「down」が残り続けないよう、
         # linkDown から trap_stale_after 秒以上たっても POLL(いまの状態の読み取り)が up なら、その trap の down は捨てる。
-        # 新しい linkDown(POLL の更新が追いついていない間)は、そのまま down とする。POLL が無いときも捨てない
+        # 新しい linkDown(POLL の更新が追いついていない間)は、そのまま down とする。POLL が無いときも捨てない。
+        # 一度捨てた linkDown は覚えておき、あとで POLL が取れなくなっても(応答なし)down に戻さない。
+        # それより新しい linkDown が届いたら、そちらは改めて判定する
         for (src, dev, ifn), (t, st) in list(seen.items()):
             if src == 'TRAP' and st == 'down':
                 poll = seen.get(('POLL', dev, ifn))
-                if poll and poll[1] == 'up' and now - t >= self.trap_stale_after:
+                if self._stale_traps.get((dev, ifn)) == t or (
+                        poll and poll[1] == 'up' and now - t >= self.trap_stale_after):
+                    self._stale_traps[(dev, ifn)] = t
                     del seen[(src, dev, ifn)]
         lost = dict(sn['lost'])
         for inst, ok in up.items():
