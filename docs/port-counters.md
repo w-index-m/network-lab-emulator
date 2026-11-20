@@ -105,9 +105,11 @@ PC につながった Gi1/0/4。`ping -c 10 -s 1000` の後は、ユニキャス
 gNMI でも同じ値が読めることは、`gnmic get` / `gnmic subscribe --sample-interval 1s` で確認しました
 (1 秒ごとに届き、ping の分だけ in-octets が増える)。
 
-### このとき見つけた、別の既存の問題(未修正)
+### このとき見つけた、別の既存の問題(修正済み)
 
 Catalyst 2 台を同じ優先度(32769)で `spanning-tree mode rapid-pvst` にすると、両方とも
-「This bridge is the root」のままで、ルートが 1 台に決まりませんでした(MAC が小さい方がルートになるはず)。
-片方の優先度を下げた 3 台の三角形(`tests/test_stp_late_links.py`)では Blocking まで決まります。
-カウンタとは別の問題なので、今回は直していません。
+「This bridge is the root」のままで、ルートが 1 台に決まりませんでした。原因は、STP の BPDU が
+OSPF / RIP と同じ「同じ IP サブネットか」の判定に入っていたことです。この 2 台は SVI のサブネットが
+違ったため、BPDU が届いていませんでした。BPDU は L2 フレームなので、この判定から外しました
+(`engine/protocols.py` の `broadcast_to_neighbors`)。MAC の小さい方がルートになることを
+`tests/test_stp_late_links.py` の末尾のテストで確かめています。
