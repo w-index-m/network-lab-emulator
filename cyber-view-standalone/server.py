@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cvs import config as C  # noqa: E402
@@ -86,6 +86,35 @@ def create_app(cfg, start_collector=True):
         evs = [e for e in list(col.sec.flow_events) if e['seq'] > since][-300:]     # NetFlow / sFlow があれば通信の粒
         return {'nodes': list(nodes.values()), 'links': links, 'events': evs, 'alerts': al,
                 'seq': col.sec.flow_seq, 'alert_seq': col.analytics.alert_seq, 'now': time.time()}
+
+    # ── フロー集計(sources.flow.store に保存したフローを、送信元・宛先・通信量でまとめる) ──
+    @app.get('/flows', response_class=HTMLResponse)
+    def flows_page():
+        return HTMLResponse((WEB / 'flows.html').read_text(encoding='utf-8'))
+
+    def _flow_store():
+        st = col.sec.store
+        if st is None:
+            raise HTTPException(status_code=404, detail='フローを保存していません(sources.flow.store を設定してください)')
+        return st
+
+    @app.get('/api/flows/summary')
+    def flows_summary(window: int = 3600, group: str = 'pair', ip: str = None, limit: int = 50,
+                      x_session_token: str = Header(None)):
+        check(x_session_token)
+        now = time.time()
+        try:
+            return _flow_store().summary(now - max(60, window), now, group=group, limit=min(500, limit), ip=ip or None)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from None
+
+    @app.get('/api/flows/export.csv')
+    def flows_export(window: int = 3600, ip: str = None, x_session_token: str = Header(None)):
+        check(x_session_token)
+        now = time.time()
+        body = _flow_store().export_csv(now - max(60, window), now, ip=ip or None)
+        return Response(content=body.encode('utf-8-sig'), media_type='text/csv; charset=utf-8',
+                        headers={'Content-Disposition': 'attachment; filename="flows.csv"'})
 
     @app.get('/api/attack')
     def attack(since: int = 0, window: int = 86400, x_session_token: str = Header(None)):

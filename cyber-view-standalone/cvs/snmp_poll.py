@@ -85,6 +85,7 @@ class SnmpPoller:
         c = src.get('cpu') or {}
         self.cpu_high, self.cpu_jump, self.cpu_hold = float(c.get('high', 80)), float(c.get('jump', 20)), int(c.get('hold', 2))
         self.cpu_oid = c.get('oid')
+        self.cpu_now = {}        # 装置 -> (CPU 使用率, 取った時刻)。画面の表示用
         self.devs = [d for d in cfg['devices'] if d.get('mgmt_ip') and d.get('snmp') is not False]
         t = src.get('traffic')
         self.traffic_on = bool(t)
@@ -186,8 +187,17 @@ class SnmpPoller:
             self._n[d['id']] = num
         v = self.cpu(d, host, comm)
         if v is not None:
+            self.cpu_now[d['id']] = (v, now)
             new += self.observe_cpu(d, v, now)
         return new
+
+    def cpu_of(self, dev, now=None, max_age=None):
+        """最後に取れた CPU 使用率(古すぎる・取れていなければ None)"""
+        got = self.cpu_now.get(dev)
+        if not got:
+            return None
+        age = (now or time.time()) - got[1]
+        return got[0] if age <= (max_age or self.interval * 3) else None
 
     def _fire_cpu(self, dev, host, v, detail, now):
         self.analytics.fire('cpu_high', dev, dev, None, detail, now=now)

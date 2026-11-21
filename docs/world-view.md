@@ -166,3 +166,19 @@ IP → 都市は DB-IP の「IP to City Lite」(CC BY 4.0、毎月更新、キ�
 
 出典: IP Geolocation by DB-IP(https://db-ip.com、CC BY 4.0)、RIPE Atlas(RIPE NCC)、SANS Internet Storm Center / DShield、
 Cloudflare Radar(CC BY-NC 4.0)。
+
+## IIJ Internet Health Report の移転(2026-11-21)
+
+実際の PC から WORLD を開いたところ、IIJ Internet Health Report だけが「取得できません HTTP Error 400: Bad Request」になりました。
+PC からの `curl` で、原因が 2 つ分かりました。
+
+1. `ihr.iijlab.net` は `https://www.ihr.live/ihr/api/...` へ 301 で移転していた。
+2. 新しい API は、知らない項目を `{"error":"invalid_query_params","unexpected":["format"],"allowed":[...]}` の 400 で断る。それまで送っていた `format=json` が断られていた。
+
+`IhrClient` の接続先を `https://www.ihr.live/ihr/api` に変え、`format=json` を送らないようにしました。
+また、400 `invalid_query_params` が返ったときは、断られた項目(`unexpected`)を外して 1 回だけやり直します。
+API の項目がまた変わっても、画面が止まらないようにするためです。
+それ以外のエラーは、返事の中身を付けて「取得できません」に出します。
+
+この作業環境からは `www.ihr.live` にも届かないため、本物の応答での確認はユーザーの PC で行います。
+試験は `tests/test_world_view.py::test_ihr_new_host_and_drops_rejected_params` です。

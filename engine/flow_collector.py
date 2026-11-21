@@ -1,11 +1,14 @@
 """
-NetFlow v5 / sFlow v5 の受け口 — NIRVANA Rapps(ミラーポート・sFlow で実際の通信を見せる)のエッセンス
+NetFlow v5 / v9 / IPFIX / sFlow v5 の受け口 — NIRVANA Rapps(ミラーポート・sFlow で実際の通信を見せる)のエッセンス
 
 スイッチ・ルータ・softflowd などが送るフロー情報を UDP で受け、1件ずつ
 {t, src, dst, proto, sport, dport, bytes, packets, exporter} にして渡す。
 ニルヴァーナは受け取ったフローを、端末どうしの通信の粒(NETWORK)・ダークネット観測・外部への大量送信の検知に使う。
 
 - NetFlow v5(既定 UDP 2055): ヘッダ 24バイト + レコード 48バイト × count
+- NetFlow v9 / IPFIX(同じ口。先頭の版で見分ける): テンプレートを (送り元, ソースID, テンプレートID) ごとに覚え、
+  データを読む。Catalyst 3650/9000 などの Flexible NetFlow は v5 を送れないのでこちら。テンプレートが届くまでのデータは
+  読めない(装置は既定で数分おきにテンプレートを送り直す)
 - sFlow v5(既定 UDP 6343): flow sample(1)/ expanded flow sample(3)の raw packet header(1)から
   Ethernet → IPv4 → TCP/UDP を読み、frame_length × sampling_rate を推定バイト数にする
 
@@ -42,6 +45,121 @@ def parse_netflow_v5(data, exporter='', now=None):
                     'dport': dport, 'bytes': octets, 'packets': pkts, 'tcp_flags': flags, 'exporter': exporter,
                     'via': 'netflow'})
     return out
+
+
+# v9 / IPFIX の情報要素(番号は v9 と IPFIX で同じ)
+F_BYTES, F_PKTS, F_PROTO, F_FLAGS, F_SPORT, F_SRC4, F_DPORT, F_DST4 = 1, 2, 4, 6, 7, 8, 11, 12
+F_OUT_BYTES, F_OUT_PKTS, F_SRC6, F_DST6, F_TOT_BYTES, F_TOT_PKTS = 23, 24, 27, 28, 85, 86
+
+
+def _uint(b):
+    return int.from_bytes(b, 'big')
+
+
+def _record(fields, exporter, now, via):
+    src = fields.get(F_SRC4) or fields.get(F_SRC6)
+    dst = fields.get(F_DST4) or fields.get(F_DST6)
+    if not src or not dst:
+        return None
+    ip = lambda b: _ip(b) if len(b) == 4 else socket.inet_ntop(socket.AF_INET6, b)   # noqa: E731
+    num = lambda *ks: next((_uint(fields[k]) for k in ks if k in fields), 0)          # noqa: E731
+    p = num(F_PROTO)
+    return {'t': now, 'src': ip(src), 'dst': ip(dst), 'proto': PROTO.get(p, str(p)), 'sport': num(F_SPORT),
+            'dport': num(F_DPORT), 'bytes': num(F_BYTES, F_TOT_BYTES, F_OUT_BYTES),
+            'packets': num(F_PKTS, F_TOT_PKTS, F_OUT_PKTS), 'tcp_flags': num(F_FLAGS) & 0xFF,
+            'exporter': exporter, 'via': via}
+
+
+def parse_netflow_v9(data, exporter='', now=None, templates=None):
+    """NetFlow v9(RFC 3954)。templates は呼び出し側が持ち回る辞書(パケットをまたいでテンプレートを覚える)"""
+    return _parse_templated(data, exporter, now, templates, ipfix=False)
+
+
+def parse_ipfix(data, exporter='', now=None, templates=None):
+    """IPFIX(RFC 7011)。企業番号付きの要素・可変長の要素は読み飛ばす"""
+    return _parse_templated(data, exporter, now, templates, ipfix=True)
+
+
+def _parse_templated(data, exporter, now, templates, ipfix):
+    now = time.time() if now is None else now
+    templates = {} if templates is None else templates
+    out = []
+    try:
+        if ipfix:
+            version, length, _t, _seq, domain = struct.unpack('!HHIII', data[:16])
+            if version != 10:
+                return []
+            i, end, tset, oset, via = 16, min(length, len(data)), 2, 3, 'ipfix'
+        else:
+            version, _count, _up, _t, _seq, domain = struct.unpack('!HHIIII', data[:20])
+            if version != 9:
+                return []
+            i, end, tset, oset, via = 20, len(data), 0, 1, 'netflow9'
+        while i + 4 <= end:
+            sid, slen = struct.unpack('!HH', data[i:i + 4])
+            if slen < 4:
+                break
+            body, i = data[i + 4:i + slen], i + slen
+            if sid == tset:
+                j = 0
+                while j + 4 <= len(body):
+                    tid, n = struct.unpack('!HH', body[j:j + 4])
+                    j += 4
+                    if tid < 256:      # 残りは詰め物
+                        break
+                    spec = []
+                    for _ in range(n):
+                        fid, flen = struct.unpack('!HH', body[j:j + 4])
+                        j += 4
+                        if ipfix and fid & 0x8000:      # 企業番号付き
+                            fid, j = None, j + 4
+                        spec.append((fid, flen))
+                    templates[(exporter, domain, tid)] = spec
+            elif sid == oset or sid < 256:
+                continue                       # オプションテンプレート(装置の情報)は使わない
+            else:
+                spec = templates.get((exporter, domain, sid))
+                if not spec:
+                    continue                   # テンプレートがまだ届いていない
+                j = 0
+                while True:
+                    fields, k = {}, j
+                    for fid, flen in spec:
+                        if flen == 0xFFFF:     # 可変長(IPFIX)
+                            if k >= len(body):
+                                break
+                            flen, k = body[k], k + 1
+                            if flen == 255:
+                                flen, k = struct.unpack('!H', body[k:k + 2])[0], k + 2
+                        if k + flen > len(body):
+                            fields = None
+                            break
+                        if fid is not None:
+                            fields[fid] = body[k:k + flen]
+                        k += flen
+                    if not fields or k == j:
+                        break
+                    j = k
+                    r = _record(fields, exporter, now, via)
+                    if r:
+                        out.append(r)
+    except (struct.error, IndexError, ValueError):
+        pass
+    return out
+
+
+def parse_netflow(data, exporter='', now=None, templates=None):
+    """NetFlow の口に来たものを先頭の版で振り分ける(5 / 9 / 10=IPFIX)"""
+    if len(data) < 2:
+        return []
+    v = struct.unpack('!H', data[:2])[0]
+    if v == 5:
+        return parse_netflow_v5(data, exporter, now)
+    if v == 9:
+        return parse_netflow_v9(data, exporter, now, templates)
+    if v == 10:
+        return parse_ipfix(data, exporter, now, templates)
+    return []
 
 
 def _parse_eth_ipv4(h):
@@ -117,7 +235,8 @@ class FlowCollector:
     def __init__(self, on_flow, bind='0.0.0.0', netflow=2055, sflow=6343):
         self.on_flow = on_flow
         self.bind, self.ports = bind, {'netflow': netflow, 'sflow': sflow}
-        self.stats = {'netflow': 0, 'sflow': 0, 'flows': 0, 'errors': {}}
+        self.stats = {'netflow': 0, 'sflow': 0, 'flows': 0, 'errors': {}, 'versions': {}}
+        self.templates = {}      # v9 / IPFIX のテンプレート(送り元ごと)
         self._socks, self._stop = [], threading.Event()
 
     def start(self):
@@ -137,7 +256,6 @@ class FlowCollector:
         return self
 
     def _loop(self, s, kind):
-        parse = parse_netflow_v5 if kind == 'netflow' else parse_sflow_v5
         while not self._stop.is_set():
             try:
                 data, addr = s.recvfrom(65535)
@@ -146,7 +264,12 @@ class FlowCollector:
             except OSError:
                 break
             self.stats[kind] += 1
-            for f in parse(data, addr[0]):
+            if kind == 'netflow' and len(data) >= 2:
+                v = str(struct.unpack('!H', data[:2])[0])
+                self.stats['versions'][v] = self.stats['versions'].get(v, 0) + 1
+            flows = parse_netflow(data, addr[0], templates=self.templates) if kind == 'netflow' \
+                else parse_sflow_v5(data, addr[0])
+            for f in flows:
                 self.stats['flows'] += 1
                 try:
                     self.on_flow(f)

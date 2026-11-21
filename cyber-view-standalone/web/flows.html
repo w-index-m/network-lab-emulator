@@ -1,0 +1,58 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>フロー集計</title>
+<style>
+:root{--bg:#070d17;--card:#10203a;--fg:#dbe6f3;--mute:#8ba0b8;--acc:#4fd6e8;--bar:#2e7fd6}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 "Meiryo","Hiragino Sans",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:20px 16px}
+h1{font-size:20px;margin:0 0 4px;letter-spacing:.05em}p.sub{color:var(--mute);margin:0 0 14px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--card);padding:12px;border-radius:8px}
+select,input,button{background:#0b1526;color:var(--fg);border:1px solid #2a3d5c;border-radius:6px;padding:7px 10px;font-size:14px}
+button{cursor:pointer}button.on{background:var(--acc);color:#04121f;border-color:var(--acc);font-weight:bold}
+.tot{display:flex;gap:24px;margin:14px 0;flex-wrap:wrap}.tot div{background:var(--card);padding:10px 16px;border-radius:8px}
+.tot b{display:block;font-size:20px;color:var(--acc)}
+.wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{padding:7px 8px;border-bottom:1px solid #1d3050;text-align:left;white-space:nowrap}th{color:var(--mute);font-weight:normal}
+td.n{text-align:right}.share{position:relative;min-width:120px}.share i{position:absolute;left:0;top:6px;bottom:6px;background:var(--bar);opacity:.55;border-radius:3px}
+.share span{position:relative}.empty{color:var(--mute);padding:20px 0}
+a{color:var(--acc)}
+</style></head><body><main>
+<h1>フロー集計 <small style="color:var(--mute);font-size:12px">NetFlow / sFlow</small></h1>
+<p class="sub">受けたフローを保存し、送信元・宛先・通信量でまとめます。<a href="/">← ニルヴァーナに戻る</a></p>
+<div class="bar">
+ 期間 <select id="win"><option value="900">15分</option><option value="3600" selected>1時間</option><option value="21600">6時間</option>
+ <option value="86400">24時間</option><option value="604800">7日</option></select>
+ <span id="groups"></span>
+ IP <input id="ip" placeholder="絞り込み(任意)" size="16">
+ <button id="reload">更新</button><button id="csv">CSV で保存</button>
+</div>
+<div class="tot" id="tot"></div>
+<div class="wrap"><table id="t"></table></div>
+</main><script>
+const $=id=>document.getElementById(id);
+let token=null;try{token=localStorage.getItem('netlabToken_v1')}catch(e){}
+const H=token?{'X-Session-Token':token}:{};
+const G={pair:'送信元 → 宛先',src:'送信元ごと',dst:'宛先ごと',service:'サービスごと'};let group='pair';
+$('groups').innerHTML=Object.entries(G).map(([k,v])=>`<button data-g="${k}" class="${k===group?'on':''}">${v}</button>`).join('');
+$('groups').onclick=e=>{const g=e.target.dataset.g;if(!g)return;group=g;[...$('groups').children].forEach(b=>b.classList.toggle('on',b.dataset.g===g));load()};
+const fmtB=b=>{const u=['B','KB','MB','GB','TB'];let i=0;while(b>=1024&&i<4){b/=1024;i++}return (i?b.toFixed(1):b)+' '+u[i]};
+const fmtBps=x=>{const u=['bps','kbps','Mbps','Gbps'];let i=0;while(x>=1000&&i<3){x/=1000;i++}return x.toFixed(i?1:0)+' '+u[i]};
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function q(){const ip=$('ip').value.trim();return `window=${$('win').value}&group=${group}${ip?'&ip='+encodeURIComponent(ip):''}`}
+async function load(){
+  const r=await fetch('/api/flows/summary?'+q(),{headers:H});
+  if(!r.ok){$('t').innerHTML='';$('tot').innerHTML=`<div class="empty">${esc((await r.json()).detail||r.status)}</div>`;return}
+  const d=await r.json(),T=d.total,w=+$('win').value;
+  $('tot').innerHTML=`<div>合計<b>${fmtB(T.bytes)}</b></div><div>平均<b>${fmtBps(T.bytes*8/w)}</b></div><div>パケット<b>${T.packets.toLocaleString()}</b></div><div>フロー<b>${T.flows.toLocaleString()}</b></div>`;
+  if(!d.rows.length){$('t').innerHTML='<tr><td class="empty">この期間のフローはありません(装置の送り先・ファイアウォールを確かめてください)</td></tr>';return}
+  const kh=group==='pair'?'<th>送信元</th><th>宛先</th>':group==='service'?'<th>サービス</th>':`<th>${group==='src'?'送信元':'宛先'}</th>`;
+  const kc=r=>group==='pair'?`<td>${esc(r.src)}</td><td>${esc(r.dst)}</td>`:`<td>${esc(r[group]??r.service)}</td>`;
+  $('t').innerHTML=`<tr><th>#</th>${kh}<th class="n">通信量</th><th>割合</th><th class="n">平均</th><th class="n">パケット</th><th class="n">フロー</th><th>最後</th></tr>`+
+   d.rows.map((r,i)=>{const pct=T.bytes?r.bytes*100/T.bytes:0;return `<tr><td>${i+1}</td>${kc(r)}<td class="n">${fmtB(r.bytes)}</td>
+   <td class="share"><i style="width:${pct.toFixed(1)}%"></i><span>${pct.toFixed(1)}%</span></td><td class="n">${fmtBps(r.bytes*8/w)}</td>
+   <td class="n">${r.packets.toLocaleString()}</td><td class="n">${r.flows.toLocaleString()}</td><td>${new Date(r.last*1000).toLocaleTimeString()}</td></tr>`}).join('');
+}
+$('reload').onclick=load;$('win').onchange=load;$('ip').onchange=load;
+$('csv').onclick=async()=>{const r=await fetch('/api/flows/export.csv?'+q(),{headers:H});if(!r.ok){alert('保存できませんでした');return}
+  const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());a.download=`flows-${new Date().toISOString().slice(0,16).replace(/[:T]/g,'')}.csv`;a.click()};
+load();setInterval(load,15000);
+</script></body></html>

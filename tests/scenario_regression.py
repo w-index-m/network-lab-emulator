@@ -14,12 +14,20 @@
 終了コード: 全PASSで0、1件でも失敗で1。
 """
 import json
+import os
 import sys
 import time
 import urllib.request
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8099"
 _fails = []
+
+# 試験の様子をサーバーへ送る(/cyber-view の「試」プレートと TEST RUN パネル)。
+# どの装置に show / ping を当てたかと、各チェックの合否。NETLAB_TEST_ACTIVITY=0 で送らない
+_RUN = f"scenario-{int(time.time())}"
+_REPORT = os.environ.get("NETLAB_TEST_ACTIVITY", "1") != "0"
+_last_dev = None
+_PROBE_PREFIXES = ("show ", "ping ", "traceroute ")
 
 
 def _post(path, body):
@@ -29,7 +37,22 @@ def _post(path, body):
     return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 
+def _report(**ev):
+    """試験の出来事を送る。サーバーが古くて受け付けなくても、試験そのものは続ける"""
+    global _REPORT
+    if not _REPORT:
+        return
+    try:
+        _post("/api/testrun/event", {"suite": "scenario", "run": _RUN, **ev})
+    except Exception:  # noqa: BLE001
+        _REPORT = False
+
+
 def cli(dev, cmd):
+    global _last_dev
+    if cmd.startswith(_PROBE_PREFIXES):
+        _last_dev = dev
+        _report(kind="probe", name=_scenario, device=dev, command=cmd)
     return _post("/api/cli", {"device_id": dev, "command": cmd}).get("output", "")
 
 
@@ -64,6 +87,11 @@ def check(name, cond, detail=""):
     print(f"  [{status}] {name}" + (f"  ({detail})" if detail and not cond else ""))
     if not cond:
         _fails.append(name)
+    _report(kind="pass" if cond else "fail", name=name, device=_last_dev,
+            detail="" if cond else str(detail)[:300])
+
+
+_scenario = ""
 
 
 # ── シナリオ1: 3台Cisco OSPF チェーン ──────────────────────
@@ -546,21 +574,20 @@ def scenario_ospf_hub():
     check("oh3->oh1 スイッチ越しping成功(逆)", "Success rate is 100" in p31, p31)
 
 
+SCENARIOS = (scenario_ospf_chain, scenario_ospf_hub, scenario_rip_chain, scenario_stp_triangle,
+             scenario_etherchannel, scenario_bgp_aws, scenario_aws_dx_vpn, scenario_bgp_transit,
+             scenario_gre_tunnel, scenario_inter_vlan, scenario_bigip_ltm, scenario_rip_distribute_list)
+
+
 def main():
+    global _scenario, _last_dev
     print(f"リグレッション実行 → {BASE}\n")
-    scenario_ospf_chain()
-    scenario_ospf_hub()
-    scenario_rip_chain()
-    scenario_stp_triangle()
-    scenario_etherchannel()
-    scenario_bgp_aws()
-    scenario_aws_dx_vpn()
-    scenario_bgp_transit()
-    scenario_gre_tunnel()
-    scenario_inter_vlan()
-    scenario_bigip_ltm()
-    scenario_rip_distribute_list()
+    _report(kind="start", name=f"シナリオ回帰 {len(SCENARIOS)} 本")
+    for fn in SCENARIOS:
+        _scenario, _last_dev = fn.__name__.replace("scenario_", ""), None
+        fn()
     print()
+    _report(kind="end", name="シナリオ回帰", detail=f"FAIL {len(_fails)} 件" if _fails else "全 PASS")
     if _fails:
         print(f"結果: FAIL ({len(_fails)}件) -> {_fails}")
         sys.exit(1)

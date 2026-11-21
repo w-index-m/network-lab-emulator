@@ -10050,6 +10050,8 @@ class VpcEngine:
         self.feature_enabled: Dict[str, bool] = {}
         # ピア関係 device_id -> peer_device_id
         self.peers: Dict[str, str] = {}
+        # simulate_peer_failure 中の装置(Keepalive を受けても alive に戻さない)
+        self._failed: set = set()
 
     def enable_feature(self, device_id: str):
         """feature vpc"""
@@ -10080,6 +10082,8 @@ class VpcEngine:
         d.keepalive_dest = dest
         d.keepalive_src = src
         d.keepalive_vrf = vrf
+        # 設定し直したら障害シミュレーションは解除
+        self._failed.discard(device_id)
         # Keepalive開始
         if d.keepalive_task:
             d.keepalive_task.cancel()
@@ -10168,6 +10172,10 @@ class VpcEngine:
                 msg['dest'] != d.keepalive_src:
             return
         peer_id = msg.get('src_id')
+        # ピア障害を模擬中の装置は送りも受けもしない。相手のループが
+        # 送り続けた Keepalive で、すぐ alive に戻っていた
+        if device_id in self._failed or peer_id in self._failed:
+            return
         if peer_id:
             self.peers.setdefault(device_id, peer_id)
         was = d.keepalive_state
@@ -10300,6 +10308,7 @@ class VpcEngine:
             return
         if d.keepalive_task:
             d.keepalive_task.cancel()
+        self._failed.add(device_id)
         d.keepalive_state = 'dead'
         peer_id = self.peers.get(device_id)
         if peer_id:

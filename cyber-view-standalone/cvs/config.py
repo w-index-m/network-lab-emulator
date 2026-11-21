@@ -29,7 +29,9 @@ class ConfigError(ValueError):
 def load(path):
     with open(path, encoding='utf-8') as f:
         raw = yaml.safe_load(f) or {}
-    return validate(_expand(raw))
+    cfg = validate(_expand(raw))
+    cfg.setdefault('_dir', os.path.dirname(os.path.abspath(path)))   # 相対パス(フローの保存先など)の基準
+    return cfg
 
 
 def validate(cfg):

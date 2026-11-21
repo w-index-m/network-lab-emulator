@@ -126,7 +126,7 @@ chips.forEach((t, i) => {
 const feats = [
   ['隔離されている', 'あなたの PC や実機には触れない'],
   ['本物を動かせる', 'サーバーを起動し、snmpwalk などを当てる'],
-  ['外への通信は許可制', '一部のサイトは届かない(例: Groq)'],
+  ['外への通信は許可制', 'PyTorch の配布元などは届かない'],
   ['使い捨て', '途中で入れ替わることも。残す物は Git へ'],
 ];
 feats.forEach(([h, b], i) => {
@@ -190,6 +190,34 @@ txt(s, [
 ], { x: 7.0, y: 1.3, w: 2.5, h: 3.5, fontSize: 12, paraSpaceAfter: 8 });
 s.addNotes('テストは 4 層です。一番下の pytest が約 2,160 件。その上のシナリオ回帰は、本物のサーバーを起動して OSPF・BGP・STP などを 12 シナリオで確かめます。さらに本物のツールでの確認、最後に GitHub の CI で同じテストをもう一度回します。');
 
+// 4b. pytest と仲間の道具 / PyTorch の位置づけ
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'テスト' });
+s.addText('テストの道具と、テストされる側の PyTorch', { placeholder: 'title' });
+const tools4 = [
+  ['pytest', 'テストを集めて実行する本体'],
+  ['pytest-asyncio', '時間で動く処理(BGP など)'],
+  ['pytest-cov', 'テストがコードのどこまでを通ったか'],
+  ['TestClient', '起動せずに API を呼ぶ'],
+  ['ruff', 'コードの書き方チェック'],
+];
+txt(s, 'テストの道具(CI も同じ一式を入れる)', { x: 0.5, y: 1.15, w: 5.2, h: 0.35, fontSize: 13, bold: true, color: C.accent1 });
+tools4.forEach(([h, b], i) => {
+  const y = 1.6 + i * 0.66;
+  hex(s, 0.5, y, 0.42, C.accent1, '', 'tool hex ' + (i + 1));
+  txt(s, h, { x: 1.05, y: y - 0.02, w: 1.65, h: 0.4, fontSize: 13, bold: true, color: C.background1, valign: 'middle' });
+  txt(s, b, { x: 2.75, y: y - 0.02, w: 3.0, h: 0.4, fontSize: 11, valign: 'middle' });
+});
+card(s, 6.0, 1.15, 3.5, 3.85, 'torch card');
+hex(s, 6.25, 1.35, 0.5, C.accent4, '', 'torch hex');
+txt(s, 'PyTorch', { x: 6.9, y: 1.37, w: 2.4, h: 0.42, fontSize: 16, bold: true, color: C.background1, valign: 'middle' });
+txt(s, [
+  { text: 'テストの道具ではなく、異常検知(CPU などの「いつもと違う」)に使う側', options: { bullet: true, breakLine: true } },
+  { text: '配布元に届かないため、手元で落としたものを GitHub の Release に置いて入れた', options: { bullet: true, breakLine: true } },
+  { text: '本体には不要。入っていなければテスト 8 件を飛ばす', options: { bullet: true, breakLine: true } },
+  { text: '既定は NumPy 版で、こちらは毎回テストしている', options: { bullet: true } },
+], { x: 6.25, y: 2.0, w: 3.05, h: 2.9, fontSize: 11, paraSpaceAfter: 6 });
+s.addNotes('テストの道具は pytest が中心で、時間で動く処理には pytest-asyncio、どこまでテストが通ったかは pytest-cov、サーバーを起動せずに API を呼ぶには FastAPI の TestClient、書き方のチェックに ruff を使います。CI も同じ一式を入れています。PyTorch はテストの道具ではなく、異常検知に使うテストされる側のライブラリです。サンドボックスからは配布元に届かないため、手元で落としたファイルを GitHub の Release 経由で入れる回り道をしました。本体には不要なので、入っていない環境ではそのテストを飛ばします。');
+
 // 5. 数字
 s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'テスト' });
 s.addText('今日の全体テスト', { placeholder: 'title' });
@@ -220,8 +248,52 @@ s.addTable([
   R('gnmic', 'gNMI の 1 秒ストリーム', '1 秒ごとに届き、ping の分だけ増加'),
   R('Playwright', '/cyber-view の演出', '起動演出と FX の切り替え、エラー 0'),
   R('uvicorn + curl', '本物のサーバーに CLI を流す', 'show の出力と API の値が一致'),
-], { x: 0.5, y: 1.25, w: 9.0, colW: [2.1, 3.4, 3.5], fontSize: 12, color: C.background2, fill: { color: C.text2 }, border: { type: 'solid', pt: 1, color: C.text1 }, rowH: 0.52, valign: 'middle', objectName: 'tools table' });
+  R('pyATS / Genie', 'show の出力を実機用の解析器で読む', '読めない形を見つけて直した(以前)'),
+  R('Batfish / GoBGP', '経路計算と本物の BGP と突き合わせ', '食い違いを見つけて直した(以前)'),
+], { x: 0.5, y: 1.25, w: 9.0, colW: [2.1, 3.4, 3.5], fontSize: 12, color: C.background2, fill: { color: C.text2 }, border: { type: 'solid', pt: 1, color: C.text1 }, rowH: 0.45, valign: 'middle', objectName: 'tools table' });
 s.addNotes('単体テストは作り物の中で完結するので、実機の監視ツールから見て正しいかは別に確かめます。今日は net-snmp の snmpwalk、gnmic、Playwright を使いました。');
+
+// 6b. 試験の全体像
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'テスト' });
+s.addText('試験の全体像: 作り物の中と、外から本物で', { placeholder: 'title' });
+const OV = { bold: true, color: C.text1, fill: { color: C.accent1 }, fontSize: 12 };
+const ov = (a, b, c, inside) => [{ text: a, options: { bold: true, color: C.background1 } }, { text: b },
+  { text: c, options: { color: inside ? C.accent1 : C.accent2 } }];
+s.addTable([
+  [{ text: '試験', options: OV }, { text: '何を確かめるか', options: OV }, { text: '道具', options: OV }],
+  ov('単体・結合', '1 つ 1 つの部品が正しく動くか', 'pytest(約 2,160 件)', true),
+  ov('シナリオ回帰', '本物のサーバーで OSPF・BGP・STP が通しで動くか', 'scenario_regression(12 本)', true),
+  ov('機種×プロトコル', '3 機種 × 4 プロトコルの正常・障害・復旧・フラップ', '総当たり 144 項目', true),
+  ov('LLM による判定', '文字列の一致では書きにくい「意味として正しいか」', 'llm_judge', true),
+  ov('本物のツール', '監視・自動化ツールから見て正しいか', 'snmpwalk・gnmic・pyATS など', false),
+  ov('ルートインジェクター', '外から本物の RIP / BGP を打ち込み、受け取って広めるか', 'route_injector_cli', false),
+  ov('実環境', '自宅の本物の Catalyst で SNMP・trap・応答なし', '単体版 + 実機', false),
+  ov('CI', '「自分の環境では通る」を防ぐ', 'GitHub Actions', false),
+], { x: 0.5, y: 1.15, w: 9.0, colW: [1.9, 4.4, 2.7], fontSize: 11, color: C.background2, fill: { color: C.text2 },
+     border: { type: 'solid', pt: 1, color: C.text1 }, rowH: 0.39, valign: 'middle', objectName: 'overview table' });
+txt(s, [{ text: '水色', options: { color: C.accent1, bold: true } }, { text: ' = 作り物の中で確かめる   ' },
+        { text: '橙', options: { color: C.accent2, bold: true } }, { text: ' = 外から本物で叩く。片方で漏れたバグをもう片方が拾う' }],
+    { x: 0.5, y: 4.82, w: 9, h: 0.3, fontSize: 11 });
+s.addNotes('試験は大きく 8 種類あります。上の 4 つは作り物の中で確かめる試験、下の 4 つは外から本物で叩く試験です。今日の STP の 2 件も、単体試験は通っていて、本物のツールで数値を見て初めて見つかりました。両方あることで漏れが減ります。');
+
+// 6c. 画面で見る試験の様子
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'テスト' });
+s.addText('試験の様子をニルヴァーナの画面で見る', { placeholder: 'title' });
+s.addImage({ path: 'docs/images/cyber-view-test-run.jpg', x: 0.5, y: 1.15, w: 6.2, h: 3.68, objectName: 'test run screenshot',
+             altText: 'ニルヴァーナの ROUTER LINKS 画面。装置の上に紫の「試」・緑の PASS・赤の「警」のプレート、左下に TEST RUN パネル' });
+const legend = [
+  ['試(紫)', 'どの装置に何を当てたか', C.accent4],
+  ['試(緑)', 'チェックが通った', C.accent5],
+  ['警(赤)', 'チェックが落ちた。理由も出す', C.accent3],
+  ['TEST RUN', '件数と直近の結果。終了後 60 秒で消える', C.accent1],
+];
+legend.forEach(([h, b, col], i) => {
+  const y = 1.2 + i * 0.9;
+  hex(s, 6.95, y, 0.42, col, '', 'legend hex ' + (i + 1));
+  txt(s, h, { x: 7.5, y: y - 0.03, w: 2.0, h: 0.32, fontSize: 13, bold: true, color: C.background1 });
+  txt(s, b, { x: 7.5, y: y + 0.28, w: 2.0, h: 0.55, fontSize: 10 });
+});
+s.addNotes('Claude が裏で回している試験を、ニルヴァーナの画面でそのまま見られるようにしました。シナリオ回帰を流すと、装置の上にどのコマンドを当てたかが紫の「試」で、通ったら緑、落ちたら赤の「警」で出ます。左下の TEST RUN パネルには件数と直近の結果が流れます。pytest も環境変数 NETLAB_ACTIVITY_URL を指定すれば同じように流せます。');
 
 // 7. CI が落ちたとき
 pres.addSection({ title: '失敗への対応' });
@@ -277,6 +349,55 @@ bugs.forEach(([tag, b], i) => {
   txt(s, b, { x: x + 0.7, y: y + 0.3, w: 3.7, h: 0.8, fontSize: 12 });
 });
 s.addNotes('作った機能を本物のツールで確かめると、関係する別の場所のバグも見つかります。今日見つけて直した実バグがこの 6 件です。STP の 1 件目は、SNMP のカウンタを確かめている最中に気づきました。');
+
+// 9b. ある 1 日の実況
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '失敗への対応' });
+s.addText('ある 1 日の実況(2026-11-20)', { placeholder: 'title' });
+const day = [
+  ['CI', '午前の PR で、GitHub の試験が 3 件落ちる', C.accent3],
+  ['再現して直す', '手元で同じ失敗を再現。うち 1 件は STP の実バグ(復旧ログが出ない)', C.accent3],
+  ['依頼', '「各機器のポートの SNMP カウンタを」', C.accent1],
+  ['作る・確かめる', '全体 2,134 件が通る。snmpwalk で「STP が 2 台ともルート」に気づく', C.accent2],
+  ['原因', 'BPDU が「同じ IP サブネットか」の判定に入っていた。外して直す', C.accent3],
+  ['取り込み', '緑を確かめて main へ。この資料にまとめる', C.accent5],
+];
+day.forEach(([h, b, col], i) => {
+  const y = 1.12 + i * 0.64;
+  hex(s, 0.6, y, 0.48, col, String(i + 1), 'day hex ' + (i + 1), col === C.accent3 ? C.background1 : C.text1);
+  txt(s, h, { x: 1.25, y: y + 0.04, w: 1.75, h: 0.35, fontSize: 14, bold: true, color: C.background1 });
+  txt(s, b, { x: 3.0, y: y + 0.04, w: 6.5, h: 0.35, fontSize: 12 });
+});
+s.addNotes('今日 1 日の流れです。午前は、PR の GitHub の試験が 3 件落ちました。手元で同じ失敗を再現して直し、うち 1 件は STP の復旧ログが出ないエミュレータの実バグでした。午後はポートの SNMP カウンタを頼まれて実装し、全体試験も通りました。ところが本物の snmpwalk で数値を見ていると、STP が 2 台ともルートのままになっていることに気づきました。原因は、L2 の BPDU が IP のサブネット判定に入っていたことでした。直して緑を確かめ、main に取り込みました。');
+
+// 9c. 知らないうちに CI/CD
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '失敗への対応' });
+s.addText('知らないうちに CI/CD を回している', { placeholder: 'title' });
+const cicdFlow = [
+  ['人', '「やって」', C.accent2],
+  ['Claude', '作業ブランチに push', C.accent1],
+  ['CI', 'GitHub が全試験を自動で', C.accent5],
+  ['人', '「取り込んで」', C.accent2],
+  ['CD', 'main を Render が公開', C.accent4],
+];
+cicdFlow.forEach(([who, what, col], i) => {
+  const x = 0.55 + i * 1.86;
+  hex(s, x + 0.35, 1.15, 0.62, col, String(i + 1), 'flow hex ' + (i + 1));
+  txt(s, who, { x, y: 1.75, w: 1.32, h: 0.3, fontSize: 13, bold: true, color: C.background1, align: 'center' });
+  txt(s, what, { x, y: 2.05, w: 1.32, h: 0.5, fontSize: 11, align: 'center' });
+  if (i < cicdFlow.length - 1) {
+    s.addShape(SH.RIGHT_ARROW, { x: x + 1.38, y: 1.38, w: 0.4, h: 0.22, fill: { color: C.accent6 }, line: { color: C.accent6, width: 0 }, objectName: 'flow arrow ' + (i + 1) });
+  }
+});
+card(s, 0.5, 2.75, 4.35, 2.05, 'ci card');
+card(s, 5.15, 2.75, 4.35, 2.05, 'cd card');
+txt(s, 'CI(継続的インテグレーション)', { x: 0.75, y: 2.9, w: 3.9, h: 0.35, fontSize: 14, bold: true, color: C.accent5 });
+txt(s, '変更を小さく何度も混ぜ、そのたびに自動で全部試す。ここでは push のたびに GitHub Actions が pytest 約 2,200 件とシナリオ回帰を回す(約 20 分)。赤なら直すまで取り込まない', { x: 0.75, y: 3.3, w: 3.9, h: 1.4, fontSize: 11.5 });
+txt(s, 'CD(継続的デリバリー)', { x: 5.4, y: 2.9, w: 3.9, h: 0.35, fontSize: 14, bold: true, color: C.accent4 });
+txt(s, '試験に通ったものを、いつでも出せる状態に保って出す。ここでは main を常に緑に保ち、Render の公開版(network-lab-emulator.onrender.com)が main から作られる', { x: 5.4, y: 3.3, w: 3.9, h: 1.4, fontSize: 11.5 });
+txt(s, '例: 設定例を変えたのに試験を直し忘れた push を、CI が赤で止めた(11/21)', { x: 0.75, y: 4.2, w: 3.9, h: 0.5, fontSize: 11, color: C.accent5 });
+txt(s, '例: 赤いコミットのある PR は、緑になるまで「取り込んで」を待つ', { x: 5.4, y: 4.2, w: 3.9, h: 0.5, fontSize: 11, color: C.accent4 });
+txt(s, '用語を知らなくても、「やって」と「取り込んで」の 2 つの言葉が CI/CD のスイッチになっている', { x: 0.5, y: 4.88, w: 9, h: 0.3, fontSize: 12, italic: true, color: C.accent2 });
+s.addNotes('CI/CD という言葉を意識しなくても、この開発は CI/CD の形で回っています。人が「やって」と言うと、Claude が作業ブランチに push し、そのたびに GitHub Actions が約 2,200 件の試験とシナリオ回帰を自動で流します。これが CI です。緑になってから人が「取り込んで」と言うと main に入り、公開版は main から作られます。これが CD です。人は用語を知らなくても、2 つの言葉で承認の関門を握っています。');
 
 // 10. 役割分担
 pres.addSection({ title: 'まとめ' });

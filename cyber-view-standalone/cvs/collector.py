@@ -382,7 +382,7 @@ class Collector:
                             'up': st != 'down', 'in_bytes': cin, 'out_bytes': cout})
             if ifs:
                 out.append({'id': d['id'], 'hostname': d['hostname'], 'type': d['type'], 'interfaces': ifs,
-                            'peers': sorted(peers[d['id']])})
+                            'peers': sorted(peers[d['id']]), 'cpu': self.snmp.cpu_of(d['id'])})
         return out
 
     def health(self, window=300):

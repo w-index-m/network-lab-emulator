@@ -1,0 +1,63 @@
+! ニルヴァーナ(設定画面 start-nirvana-gnmi.bat)で Catalyst 3650 / IOS XE 16.12 を見るための設定サンプル
+! <PC_IP> はニルヴァーナを動かしている Windows の PC の IP(PowerShell の ipconfig)、<PASSWORD> は gNMI 用のパスワード。
+! 管理 IP は Vlan1 の 192.168.1.1 の例。最後の write memory を忘れると再起動で消える。
+! 再起動のたびに設定が消える場合は show romvar | include IGNORE を見る(SWITCH_IGNORE_STARTUP_CFG="1" なら
+!   no system ignore startupconfig switch all → write memory)。
+configure terminal
+hostname Switch
+!
+interface Vlan1
+ ip address 192.168.1.1 255.255.255.0
+ no shutdown
+exit
+!
+! ── 1. gNMI(流量・IF 状態。設定画面の「装置の IP」「パスワード」) ──
+aaa new-model
+aaa authentication login default local
+aaa authorization exec default local
+username admin privilege 15 secret <PASSWORD>
+netconf-yang
+gnmi-yang
+gnmi-yang server
+!
+! ── 2. SNMP(CPU・経路表。設定画面の「SNMP community」、既定 public) ──
+ip access-list standard NIRVANA-SNMP
+ permit <PC_IP>
+exit
+snmp-server community public RO NIRVANA-SNMP
+!
+! ── 3. NetFlow(誰と誰が通信しているか。3650 は v9 / IPFIX だけ。ニルヴァーナは UDP 2055 で受ける) ──
+flow record NIRVANA-REC
+ match ipv4 protocol
+ match ipv4 source address
+ match ipv4 destination address
+ match transport source-port
+ match transport destination-port
+ collect transport tcp flags
+ collect counter bytes long
+ collect counter packets long
+exit
+flow exporter NIRVANA-EXP
+ destination <PC_IP>
+ source Vlan1
+ transport udp 2055
+ export-protocol netflow-v9
+ template data timeout 60
+exit
+flow monitor NIRVANA-MON
+ exporter NIRVANA-EXP
+ record NIRVANA-REC
+ cache timeout active 60
+exit
+interface GigabitEthernet1/0/1
+ ip flow monitor NIRVANA-MON input
+exit
+!
+end
+write memory
+!
+! 確かめるコマンド:
+!   show platform software yang-management process   (gNMI: 全部 Running)
+!   show running-config | include snmp
+!   show flow exporter NIRVANA-EXP statistics          (Client: Flow Monitor NIRVANA-MON の送信数が増える)
+!   show flow monitor NIRVANA-MON cache                 (フローがたまっているか)

@@ -54,6 +54,11 @@ sources:
   prometheus:
     url: http://127.0.0.1:9090
     job: cisco-snmp              # snmp_exporter を叩いている scrape job 名
+    # gNMI の値を gnmic(prometheus 出力、gnmic.example.yaml)経由で読むとき:
+    #   flavor: gnmic(gnmic だけ)/ both(snmp_exporter を優先し、無い装置・IF を gnmic で埋める)。既定は snmp
+    # flavor: both
+    # gnmic_job: gnmic           # gnmic を叩いている scrape job 名
+    # gnmic_prefix: ''           # gnmic の outputs.*.metric-prefix を付けたときだけ
 
   # Loki: syslog。ログのラベル(device_labels の順に探す)か本文の装置名で装置を特定する
   loki:
@@ -108,6 +113,8 @@ sources:
 
   # NetFlow v5 / sFlow v5 を受ける(ダークネット観測・通信の粒・外部への大量送信の検知に使う)
   # flow: {netflow: 2055, sflow: 6343, bind: 0.0.0.0}
+  #   store: flows.db    # 受けたフローを保存(SQLite、設定ファイルからの相対パス)→ /flows で送信元・宛先・通信量のまとめと CSV
+  #   keep_days: 30      # これより古いフローは消す
   # ダークネット(使っていない帯)。届いたフローをスキャン・DDoS の跳ね返り等に分類する
   # darknet: {prefixes: [10.250.0.0/24]}
   # 回線チェック: 本物の ping(ICMP)で遅延とロスを測る。"host:port" なら TCP の接続時間
