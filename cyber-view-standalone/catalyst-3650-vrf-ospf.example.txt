@@ -1,0 +1,48 @@
+! 1台の Catalyst の中で OSPF のネイバーを張る(VRF-lite + 折り返しケーブル)
+! Gi1/0/23 と Gi1/0/24 を LAN ケーブルでつなぎ、片方をグローバル、もう片方を VRF RED に入れて、
+! 「スイッチの中の2台のルータ」として OSPF を張らせる。PC 側の準備(WSL・仮想マシン)は要らない。
+! 3650 はライセンス(LAN Base / IP Base / IP Services)で VRF・OSPF の使える範囲が違う。
+!   vrf definition や router ospf 2 vrf RED がエラーになったら show version | include License を見る。
+configure terminal
+vrf definition RED
+ address-family ipv4
+ exit-address-family
+exit
+!
+interface GigabitEthernet1/0/23
+ description to-Gi1/0/24 (global)
+ no switchport
+ ip address 10.255.0.1 255.255.255.252
+ no shutdown
+exit
+interface GigabitEthernet1/0/24
+ description to-Gi1/0/23 (VRF RED)
+ no switchport
+ vrf forwarding RED
+ ip address 10.255.0.2 255.255.255.252
+ no shutdown
+exit
+interface Loopback100
+ vrf forwarding RED
+ ip address 172.16.100.1 255.255.255.255
+exit
+!
+! グローバル側(既にある router ospf 1 に足す)
+router ospf 1
+ network 10.255.0.0 0.0.0.3 area 0
+exit
+! VRF RED 側(別プロセス。router-id はグローバルと違うものにする)
+router ospf 2 vrf RED
+ router-id 10.255.0.2
+ network 10.255.0.0 0.0.0.3 area 0
+ network 172.16.100.1 0.0.0.0 area 0
+exit
+end
+write memory
+!
+! 確かめるコマンド:
+!   show ip ospf neighbor                 (プロセス 1 と 2 の両方で相手が FULL)
+!   show ip route ospf                    (グローバル側に 172.16.100.1/32 が O で入る)
+!   show ip route vrf RED ospf            (RED 側に 192.168.1.0/24 が O で入る)
+!   ping vrf RED 192.168.1.1 source 172.16.100.1
+!   ニルヴァーナの設定画面の「見るポート」に Gi1/0/1,Gi1/0/23,Gi1/0/24 を入れると、折り返しの流量も見える
