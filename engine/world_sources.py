@@ -19,6 +19,7 @@ import json
 import os
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -204,7 +205,9 @@ JP_ASNS = {2497: 'IIJ', 2914: 'NTT Communications', 4713: 'OCN', 17676: 'SoftBan
 
 
 class IhrClient:
-    BASE = 'https://ihr.iijlab.net/ihr/api'
+    # 2026 年に ihr.iijlab.net から www.ihr.live へ移転(旧 URL は 301)。新しい API は知らない項目
+    # (format など)を 400 invalid_query_params で断り、使える項目の一覧(allowed)を返す
+    BASE = 'https://www.ihr.live/ihr/api'
 
     def __init__(self, base=None, fetch=None, asns=None):
         self.base = base or self.BASE
@@ -212,23 +215,38 @@ class IhrClient:
         self.asns = asns or JP_ASNS
 
     def _get(self, path, **params):
-        q = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
-        d = self._fetch(f'{self.base}{path}?{q}')
-        return d.get('results', []) if isinstance(d, dict) else d
+        params = {k: v for k, v in params.items() if v is not None}
+        for _ in range(2):
+            try:
+                d = self._fetch(f'{self.base}{path}?{urllib.parse.urlencode(params)}')
+            except urllib.error.HTTPError as e:
+                # 400 invalid_query_params なら、断られた項目を外して1回だけやり直す(API の項目が変わっても止まらない)
+                try:
+                    body = json.loads(e.read().decode('utf-8', 'replace'))
+                except Exception:  # noqa: BLE001
+                    raise e from None
+                bad = [k for k in body.get('unexpected') or [] if k in params] if isinstance(body, dict) else []
+                if e.code != 400 or not bad:
+                    raise RuntimeError(f'HTTP {e.code}: {body}') from None
+                for k in bad:
+                    params.pop(k)
+                continue
+            return d.get('results', []) if isinstance(d, dict) else d
+        return []
 
     def snapshot(self, hours=24, now=None):
         now = now or datetime.now(timezone.utc)
         since = (now - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
         out = {'status': 'ok', 'fetched': time.time(), 'hours': hours}
         rows = self._get('/network_delay/alarms/', timebin__gte=since, startpoint_type='AS',
-                         startpoint_name='|'.join(str(a) for a in self.asns), ordering='-timebin', format='json')
+                         startpoint_name='|'.join(str(a) for a in self.asns), ordering='-timebin')
         out['delay_alarms'] = [{'t': r.get('timebin'), 'asn': r.get('startpoint_name'),
                                 'as_name': self.asns.get(int(r['startpoint_name'])) if str(r.get('startpoint_name', '')).isdigit() else None,
                                 'to': f"{r.get('endpoint_type', '')}{r.get('endpoint_name', '')}",
                                 'deviation': float(r.get('deviation') or 0)} for r in rows][:50]
-        ev = self._get('/disco/events/', starttime__gte=since, streamname='JP', ordering='-starttime', format='json')
+        ev = self._get('/disco/events/', starttime__gte=since, streamname='JP', ordering='-starttime')
         ev += [e for a in self.asns for e in self._get('/disco/events/', starttime__gte=since, streamname=str(a),
-                                                       ordering='-starttime', format='json')][:20]
+                                                       ordering='-starttime')][:20]
         seen, uniq = set(), []
         for e in ev:                      # 国(JP)と AS の両方で引くので、同じ事象を1つにまとめる
             k = (e.get('streamname'), e.get('starttime'))

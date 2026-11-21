@@ -200,3 +200,30 @@ def test_world_map_data_and_page():
     assert d['countries']['SG'][2] == 1.35 and len(d['lines']) > 500
     html = open(os.path.join(ROOT, 'static', 'cyber_view.html'), encoding='utf-8').read()
     assert 'id="mWorld"' in html and 'function drawWorld' in html and "view') === 'world'" in html
+
+
+def test_ihr_new_host_and_drops_rejected_params():
+    """IHR は www.ihr.live に移転(旧 URL は 301)。新 API は知らない項目を 400 invalid_query_params で断るので、
+    断られた項目を外して1回だけやり直す(実際に format が断られた: 2026-11-21、ユーザーの PC から確認)"""
+    import io
+    import urllib.error
+    assert IhrClient.BASE == 'https://www.ihr.live/ihr/api'
+    urls = []
+
+    def fetch(url, headers=None, timeout=15):
+        urls.append(url)
+        if 'streamtype=bogus' in url:
+            body = json.dumps({'error': 'invalid_query_params', 'unexpected': ['streamtype'],
+                               'allowed': ['streamname', 'starttime__gte', 'ordering']}).encode()
+            raise urllib.error.HTTPError(url, 400, 'Bad Request', {}, io.BytesIO(body))
+        return {'results': [{'ok': 1}]}
+    c = IhrClient(fetch=fetch)
+    assert c._get('/disco/events/', streamname='JP', streamtype='bogus') == [{'ok': 1}]
+    assert 'streamtype' not in urls[-1] and 'streamname=JP' in urls[-1]
+    c.snapshot()
+    assert not any('format=' in u for u in urls)
+
+    def fetch_bad(url, headers=None, timeout=15):
+        raise urllib.error.HTTPError(url, 400, 'Bad Request', {}, io.BytesIO(b'{"error": "other"}'))
+    with pytest.raises(RuntimeError, match='HTTP 400'):
+        IhrClient(fetch=fetch_bad)._get('/disco/events/', streamname='JP')
