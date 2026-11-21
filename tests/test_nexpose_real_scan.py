@@ -54,6 +54,17 @@ def _req(method, path, body=None):
     return json.loads(raw) if raw else None
 
 
+def _control_or_skip(scan_id, action):
+    """pause / stop を送る。スキャンがそれより先に終わっていたら、サーバーは正しく 400
+    (cannot ... a scan in state "finished")を返すので、その場合はスキップする(環境依存の競争)"""
+    try:
+        _req('POST', f'/api/3/scans/{scan_id}/{action}')
+    except AssertionError as e:
+        if '-> 400' in str(e) and 'finished' in str(e):
+            pytest.skip(f'スキャンが{action}より先に終わってしまった(環境依存)')
+        raise
+
+
 def _cli(cmd, dev=DEV):
     return _req('POST', '/api/cli', {'device_id': dev, 'command': cmd})['output']
 
@@ -888,7 +899,7 @@ def test_async_scan_can_really_be_paused_and_resumed(two_device_site):
 
     # すぐpauseする。装置1台の評価には現実の秒数がかかるので、
     # まだ running のうちにpauseが間に合う可能性が高い
-    _req('POST', f'/api/3/scans/{scan_id}/pause')
+    _control_or_skip(scan_id, 'pause')
     scan = _req('GET', f'/api/3/scans/{scan_id}')
     if scan['status'] == 'finished':
         pytest.skip('スキャンがpauseより先に終わってしまった（環境依存）')
@@ -913,7 +924,7 @@ def test_async_scan_can_really_be_stopped(two_device_site):
     scan_id = _req('POST', f'/api/3/sites/{sid}/scans',
                    {'async': True})['id']
 
-    _req('POST', f'/api/3/scans/{scan_id}/stop')
+    _control_or_skip(scan_id, 'stop')
     scan = _req('GET', f'/api/3/scans/{scan_id}')
     if scan['status'] == 'finished':
         pytest.skip('スキャンがstopより先に終わってしまった（環境依存）')
