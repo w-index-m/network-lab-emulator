@@ -138,4 +138,19 @@ GN2 の流量が UP と DOWN の 2 本に分かれました(3.9 Mbps と 1.8 Mbp
 Windows の pygnmi は get は通りましたが、subscribe は `Unsupported subscription list qos selection` で断られました
 (pygnmi が付ける QoS の欄を 16.12 が受け付けない)。gnmic は QoS を付けないので通ります。
 
+## 実機で確かめた(2026-11-21、WS-C3650-24TD / IOS XE 16.12.11)
+
+Windows の PC(192.168.1.100)を Gi1/0/1 に直結し、WSL の Ubuntu で gnmic と Prometheus 2.54.1、Windows の Python でニルヴァーナ単体版(`--port 8091`)を動かしました。
+ROUTER LINKS に Switch ─ PC のリンクが出て、gNMI のカウンタから送受信の流量(数百 bps)と NORMAL、SYSTEM STATUS「総合 正常」、取得元ヴァルハラが表示されました。
+
+途中でつまずいたことと、その対処です(上の各節に反映済み)。
+
+| 起きたこと | 原因 | 対処 |
+|---|---|---|
+| `has missing keys` で購読が断られる | 16.x はポート名(キー)の無いパスを受け付けない | `[name=GigabitEthernet1/0/1]` を付ける |
+| oper-status の購読が `Canceled by operator`(装置に `%MDT_SUBSCRIPTION-4-TERMINATED`) | 16.12 が値 1 つの購読を打ち切る | `/state` をまとめて購読する |
+| Prometheus の `up` は 1 なのに値が空 | `export-timestamps` が装置の時刻(ずれていた)を渡し、Prometheus が捨てた | `export-timestamps` を外し、`expiration: 25s` にする |
+| gnmic のログが空 | `--log` が無いと何も出さない | `--log` を付ける |
+| 前日の設定が消えた | `write memory` をしていなかった | 設定後に `write memory` |
+
 試験は `tests/test_nirvana_gnmic_source.py` です。
