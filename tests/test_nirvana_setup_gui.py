@@ -41,8 +41,8 @@ def test_quickstart_cmd_linux_and_windows(monkeypatch):
     monkeypatch.setattr(G, 'on_windows', lambda: True)
     monkeypatch.setenv('WSLENV', 'FOO')
     argv, stdin, env = G.quickstart_cmd('up', form)
-    assert argv[:5] == ['wsl', '-e', 'bash', '-s', '--'] and argv[5] == 'up'
-    assert '\r' not in stdin and stdin.startswith('#!/usr/bin/env bash')
+    assert argv[:7] == ['wsl', '--cd', '~', '-e', 'bash', '-s', '--'] and argv[7] == 'up'
+    assert isinstance(stdin, bytes) and b'\r' not in stdin and stdin.startswith(b'#!/usr/bin/env bash')
     assert env['WSLENV'].split(':') == ['FOO', 'GNMI_FROM_GUI/u', 'GNMI_PASSWORD/u'] and 'secret' not in argv
 
 

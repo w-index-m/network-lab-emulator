@@ -74,8 +74,11 @@ def on_windows():
     return os.name == 'nt'
 
 
+WSL = ['wsl', '--cd', '~', '-e']
+
+
 def quickstart_cmd(action, form=None):
-    """(argv, stdin文字列 or None, 追加の環境変数) を返す"""
+    """(argv, stdin のバイト列 or None, 追加の環境変数) を返す"""
     args = [action]
     env = {'GNMI_FROM_GUI': '1'}
     if form:
@@ -83,11 +86,13 @@ def quickstart_cmd(action, form=None):
                  '--user', form['user'], '--wait', '90']
         env['GNMI_PASSWORD'] = form['password']
     if on_windows():
-        # Windows の git は改行を CRLF にすることがあるので、中身を LF にして標準入力で渡す
-        script = QUICKSTART.read_text(encoding='utf-8').replace('\r\n', '\n')
+        # Windows の git は改行を CRLF にすることがあるので、中身を LF にして標準入力で渡す。
+        # 文字列で渡すと Windows の Python が改行を CRLF に戻すので、バイト列で渡す
+        script = QUICKSTART.read_bytes().replace(b'\r\n', b'\n')
         env['WSLENV'] = ':'.join(filter(None, [os.environ.get('WSLENV', ''), 'GNMI_FROM_GUI/u',
                                                 'GNMI_PASSWORD/u' if form else '']))
-        return ['wsl', '-e', 'bash', '-s', '--'] + args, script, env
+        # --cd ~: 呼び出し元の Windows フォルダへ移ろうとして失敗する(chdir ... failed)のを避ける
+        return WSL + ['bash', '-s', '--'] + args, script, env
     return ['bash', str(QUICKSTART)] + args, None, env
 
 
@@ -95,9 +100,8 @@ def run_quickstart(action, form=None, timeout=300):
     argv, stdin, extra = quickstart_cmd(action, form)
     env = dict(os.environ, **extra)
     try:
-        p = subprocess.run(argv, input=stdin, capture_output=True, text=True, encoding='utf-8',
-                           errors='replace', timeout=timeout, env=env)
-        out = ANSI.sub('', (p.stdout or '') + (p.stderr or ''))
+        p = subprocess.run(argv, input=stdin, capture_output=True, timeout=timeout, env=env)
+        out = ANSI.sub('', (p.stdout or b'').decode('utf-8', 'replace') + (p.stderr or b'').decode('utf-8', 'replace'))
         return p.returncode == 0, out
     except FileNotFoundError:
         return False, ('WSL が見つかりません。PowerShell で「wsl --install」を実行して Ubuntu を入れてください'
@@ -109,7 +113,7 @@ def run_quickstart(action, form=None, timeout=300):
 def stop_manual():
     """前に手で起動した gnmic / Prometheus を止める(ポートの取り合いを解く)"""
     sh = 'pkill -f "gnmic --config" ; pkill -f "prometheus --config" ; sleep 1 ; echo stopped'
-    argv = ['wsl', '-e', 'bash', '-c', sh] if on_windows() else ['bash', '-c', sh]
+    argv = WSL + ['bash', '-c', sh] if on_windows() else ['bash', '-c', sh]
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=30)
         return True, (p.stdout or '').strip() or '止めました'
