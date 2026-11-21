@@ -67,6 +67,15 @@ snmp-server community public RO NIRVANA-SNMP
 ファイアウォールが聞いてくるので「プライベート ネットワーク」で許可する。
 gNMI・SNMP・NetFlow をまとめた 3650 の設定サンプルは `cyber-view-standalone/catalyst-3650.example.txt`。
 
+版 7: 受けたフローを保存し、送信元・宛先・通信量でまとめる(`cvs/flow_store.py`、`sources.flow.store`)。SQLite に1フロー1行
+(時刻・送り元・送信元/宛先 IP・プロトコル・ポート・バイト・パケット・種類)を2秒ごとにまとめて書き、`keep_days`(既定30日)より古いものは消す。
+ニルヴァーナの `/flows` で、期間(15分〜7日)・まとめ方(送信元→宛先 / 送信元ごと / 宛先ごと / サービスごと=小さいほうのポート)・IP の
+絞り込みを選んで通信量の多い順に見られ、CSV で保存できる(API は `/api/flows/summary`・`/api/flows/export.csv`)。設定画面は
+`~/.nirvana-gnmi/flows.db` に保存し、「フロー集計 ›」のリンクを出す。softflowd の v9 と IPFIX で同じ pcap を送り、まとめの数字
+(例 192.168.1.163→192.168.1.1 が 40 パケット×1240 バイト×2 回 = 99,200 バイト)が合うことを確かめた。
+
+![フロー集計](images/nirvana-flow-summary.png)
+
 3650 の設定が再起動で消えるとき: パスワードリカバリの後は `SWITCH_IGNORE_STARTUP_CFG="1"` のまま残る(`show romvar | include IGNORE`)。
 `no system ignore startupconfig switch all` → `write memory` で `"0"` に戻る(実機で確認)。
 - 「停止」で全部止まります。前に手で起動した gnmic・Prometheus があるときは、「手で起動したものを止める」を押します。

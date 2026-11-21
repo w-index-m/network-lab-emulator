@@ -34,7 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 QUICKSTART = HERE / 'gnmi-quickstart.sh'
 STATE_DIR = Path(os.environ.get('NIRVANA_SETUP_DIR', Path.home() / '.nirvana-gnmi'))
-GUI_VERSION = '6'
+GUI_VERSION = '7'
 NETFLOW_PORT = 2055
 SFLOW_PORT = 6343
 NIRVANA_PORT = int(os.environ.get('NIRVANA_PORT', '8091'))
@@ -177,7 +177,8 @@ def nirvana_config(form):
     lines += ['sources:', '  prometheus:', '    url: http://127.0.0.1:9090', '    flavor: gnmic',
               '    gnmic_job: gnmic']
     # NetFlow v5/v9/IPFIX を UDP 2055、sFlow v5 を UDP 6343 で受ける(装置の送り先をこの PC にすると、NETWORK 画面に通信の粒が出る)
-    lines += ['  flow:', f'    netflow: {NETFLOW_PORT}', f'    sflow: {SFLOW_PORT}']
+    lines += ['  flow:', f'    netflow: {NETFLOW_PORT}', f'    sflow: {SFLOW_PORT}',
+              f'    store: "{(STATE_DIR / "flows.db").as_posix()}"', '    keep_days: 30']   # 保存して /flows でまとめる
     if form.get('community'):
         # SNMP で直接: 経路表・CPU(60秒)と流量・IF 状態(10秒)。community は設定に書かず環境変数で渡す
         lines += ['  snmp:', '    community: ${NIRVANA_SNMP_COMMUNITY}', '    interval: 60',
@@ -328,7 +329,7 @@ a{color:var(--acc)}#open{display:none;font-size:17px}
 <button id="stop">停止</button>
 <button id="free" title="前に手で起動した gnmic・Prometheus を止めます">手で起動したものを止める</button>
 </div></div>
-<div class="card"><div id="badges"></div><p><a id="open" target="_blank">ニルヴァーナの画面を開く ›</a></p>
+<div class="card"><div id="badges"></div><p><a id="open" target="_blank">ニルヴァーナの画面を開く ›</a> <a id="flows" target="_blank" style="display:none;margin-left:16px">フロー集計 ›</a></p>
 <table id="ports_t"></table><pre id="msg"></pre></div>
 </main><script>
 const $=id=>document.getElementById(id);
@@ -340,6 +341,7 @@ async function refresh(){
   const b=(n,v)=>`<span class="badge ${v?'on':'off'}">${n} ${v?'動作中':'停止'}</span>`;
   $('badges').innerHTML=b('gnmic',s.gnmic)+b('Prometheus',s.prometheus)+b('ニルヴァーナ',s.nirvana);
   $('open').href=s.nirvana_url;$('open').style.display=s.nirvana?'inline':'none';
+  $('flows').href=s.nirvana_url.replace(/\/\?.*$/,'/flows');$('flows').style.display=s.nirvana?'inline':'none';
   $('ports_t').innerHTML=s.ports.length?'<tr><th>装置</th><th>ポート</th><th>状態</th><th>受信バイト</th></tr>'+
     s.ports.map(p=>`<tr><td>${p.device}</td><td>${p.port}</td><td>${p.oper}</td><td>${Number(p.in_octets).toLocaleString()}</td></tr>`).join(''):'';
 }

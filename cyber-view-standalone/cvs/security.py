@@ -24,6 +24,7 @@ from . import sensor_syslog
 from .attack_map import AttackTracker
 from .darknet import Darknet
 from .flow_collector import FlowCollector
+from .flow_store import FlowStore
 from .nexus import NexusHub, NexusReporter
 from .wan_watch import WanSeries
 
@@ -113,6 +114,12 @@ class SiteSecurity:
         f = src.get('flow') or {}
         self.flows = FlowCollector(self.on_flow, bind=f.get('bind', '0.0.0.0'), netflow=f.get('netflow', 0),
                                    sflow=f.get('sflow', 0)) if (f.get('netflow') or f.get('sflow')) else None
+        self.store = None       # 受けたフローの保存と、送信元・宛先・通信量のまとめ(sources.flow.store)
+        if f.get('store'):
+            p = os.path.expanduser(str(f['store']))
+            if not os.path.isabs(p):
+                p = os.path.join(cfg.get('_dir', '.'), p)
+            self.store = FlowStore(p, keep_days=f.get('keep_days', 30))
         # 回線チェック
         self.wan = WanSeries(fire=lambda rule, key, detail, now: a.fire(rule, key, key, None, detail, now=now))
         self.probes = src.get('wan_probe') or []
@@ -137,6 +144,8 @@ class SiteSecurity:
             if not s_dev and d_dev:
                 w.peers.observe(fl['src'], 'flow', max(1, int(fl.get('packets', 1))), int(fl.get('bytes', 0)))
         self.flow_seq += 1
+        if self.store:
+            self.store.add(fl)
         pk = max(1, int(fl.get('packets', 1)))
         self.flow_events.append({'seq': self.flow_seq, 't': fl['t'], 'src': s_dev or fl['src'], 'dst': d_dev,
                                  'dst_ip': fl['dst'], 'src_ip': fl['src'], 'path': [x for x in (s_dev, d_dev) if x],
@@ -168,6 +177,8 @@ class SiteSecurity:
                          cpe='THIS-SITE', peer=p['target'], label=p.get('name') or p['target'], ip=p['target'])
 
     def start(self):
+        if self.store:
+            self.store.start()
         if self.flows:
             self.flows.start()
         if self.reporter:
@@ -189,5 +200,7 @@ class SiteSecurity:
         self._stop.set()
         if self.flows:
             self.flows.stop()
+        if self.store:
+            self.store.stop()
         if self.reporter:
             self.reporter.stop()
