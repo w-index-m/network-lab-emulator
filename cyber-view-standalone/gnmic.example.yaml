@@ -23,13 +23,21 @@ targets:
   192.168.1.1:50052: {}
   # 192.168.1.2:50052: {}
 
+# IOS XE 16.x はポート名(キー)を省いた購読を断る:
+#   "has missing keys. All key values must be specified for parent lists"(InvalidArgument)
+# なので監視するポートを 1 つずつ並べる(WS-C3650 16.12.11 で確認)。17.x やラボはキー無し
+# ("/interfaces/interface/state/counters" で全ポート)でも通る。
 subscriptions:
   if-counters:
-    paths: ["/interfaces/interface/state/counters"]
+    paths:
+      - "/interfaces/interface[name=GigabitEthernet1/0/1]/state/counters"
+      # - "/interfaces/interface[name=GigabitEthernet1/0/2]/state/counters"
     stream-mode: sample
     sample-interval: 10s
   if-oper:
-    paths: ["/interfaces/interface/state/oper-status"]
+    paths:
+      - "/interfaces/interface[name=GigabitEthernet1/0/1]/state/oper-status"
+      # - "/interfaces/interface[name=GigabitEthernet1/0/2]/state/oper-status"
     stream-mode: sample
     sample-interval: 10s
 

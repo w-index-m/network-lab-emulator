@@ -43,12 +43,30 @@ bash -c "$(curl -sL https://get-gnmic.openconfig.net)"
 
 ```bash
 export GNMI_USER=admin GNMI_PASSWORD='<パスワード>'
-gnmic --config gnmic.yaml subscribe
+nohup gnmic --config gnmic.yaml --log subscribe > gnmic.log 2>&1 &
 ```
 
 ```bash
 curl -s http://127.0.0.1:9804/metrics | grep in_octets
 ```
+
+IOS XE 16.x では、購読するパスにポート名(キー)を必ず書きます。
+`/interfaces/interface/state/counters` のようにポート名を省くと、次のエラーで断られます(WS-C3650 16.12.11 で確認)。
+17.x とラボはポート名を省いても通ります(全ポート分)。
+
+```
+rpc error: code = InvalidArgument desc = Subscription to filter '/oc-if:interfaces/interface/state/counters' ...
+has missing keys. All key values must be specified for parent lists
+```
+
+監視するポートを 1 つずつ並べたパスは、次のように作れます(例: Gi1/0/1〜24)。
+
+```bash
+for i in $(seq 1 24); do echo "      - \"/interfaces/interface[name=GigabitEthernet1/0/$i]/state/counters\""; done
+```
+
+gnmic は `--log` を付けないと、つながらないときのエラーを何も出しません。最初は `gnmic --config gnmic.yaml --log subscribe` で起動してください。
+WSL では、Ubuntu の画面を閉じると `&` で起動したプログラムも止まります。`nohup` を付けて起動します。
 
 `prometheus` 出力の `strings-as-labels: true` と `export-timestamps: true` は外さないでください。
 

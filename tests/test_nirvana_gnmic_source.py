@@ -146,5 +146,6 @@ def test_example_files_document_the_gnmic_route():
     with open(os.path.join(ROOT, 'cyber-view-standalone', 'gnmic.example.yaml'), encoding='utf-8') as fh:
         g = fh.read()
     for needle in ('type: prometheus', 'strings-as-labels: true', 'export-timestamps: true',
-                   '/interfaces/interface/state/counters', '/interfaces/interface/state/oper-status'):
+                   '/interfaces/interface[name=GigabitEthernet1/0/1]/state/counters',
+                   '/interfaces/interface[name=GigabitEthernet1/0/1]/state/oper-status', 'has missing keys'):
         assert needle in g, needle
