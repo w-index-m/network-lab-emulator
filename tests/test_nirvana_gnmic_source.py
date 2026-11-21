@@ -50,13 +50,13 @@ class FakeProm(S.Prometheus):
 
 def _gnmic_table():
     return {
-        lambda q: q.startswith('rate(interfaces_interface_state_counters_in_octets{job="gnmic"}'):
+        lambda q: q.startswith('rate(max by (source, interface_name) (interfaces_interface_state_counters_in_octets{job="gnmic"})'):
             [_row(_g('192.168.1.1:50052', 'GigabitEthernet1/0/1'), 8000)],
-        lambda q: q.startswith('rate(interfaces_interface_state_counters_out_octets{job="gnmic"}'):
+        lambda q: q.startswith('rate(max by (source, interface_name) (interfaces_interface_state_counters_out_octets{job="gnmic"})'):
             [_row(_g('192.168.1.1:50052', 'GigabitEthernet1/0/1'), 16000)],
-        lambda q: q.startswith('interfaces_interface_state_counters_in_octets{job="gnmic"}'):
+        lambda q: q.startswith('max by (source, interface_name) (interfaces_interface_state_counters_in_octets{job="gnmic"})'):
             [_row(_g('192.168.1.1:50052', 'GigabitEthernet1/0/1'), 46608)],
-        lambda q: q.startswith('interfaces_interface_state_counters_out_octets{job="gnmic"}'):
+        lambda q: q.startswith('max by (source, interface_name) (interfaces_interface_state_counters_out_octets{job="gnmic"})'):
             [_row(_g('192.168.1.1:50052', 'GigabitEthernet1/0/1'), 29318)],
         lambda q: 'interfaces_interface_state_oper_status' in q: [
             _row(_g('192.168.1.1:50052', 'GigabitEthernet1/0/1', oper_status='UP'), 1),
@@ -88,9 +88,9 @@ def test_both_prefers_snmp_and_fills_the_rest_from_gnmic():
         lambda q: q.startswith('ifOperStatus'): [_row(_s('192.168.1.1', 'Gi1/0/2'), 1)],
         lambda q: q.startswith('up{'): [_row({'instance': '192.168.1.1:161'}, 1)],
     })
-    rin = 'rate(interfaces_interface_state_counters_in_octets{job="gnmic"}[60s]) * 8'
+    rin = 'rate(max by (source, interface_name) (interfaces_interface_state_counters_in_octets{job="gnmic"})[60s:15s]) * 8'
     t = {k: v for k, v in t.items() if not k(rin)}          # gnmic の受信だけ差し替える
-    t[lambda q: q.startswith('rate(interfaces_interface_state_counters_in_octets')] = [
+    t[lambda q: q.startswith('rate(max by (source, interface_name) (interfaces_interface_state_counters_in_octets')] = [
         _row(_g('192.168.1.1:50052', 'GigabitEthernet1/0/1'), 8000),
         _row(_g('192.168.1.2:50052', 'GigabitEthernet1/0/1'), 99)]
     p = FakeProm(t, flavor='both', job='cisco-snmp')
@@ -113,7 +113,7 @@ def test_snmp_flavor_is_unchanged_and_bad_flavor_is_rejected():
 def test_gnmic_metric_prefix():
     p = FakeProm({}, flavor='gnmic', gnmic_prefix='cat')
     p.rates(60)
-    assert any(q.startswith('rate(cat_interfaces_interface_state_counters_in_octets') for q in p.asked)
+    assert any(q.startswith('rate(max by (source, interface_name) (cat_interfaces_interface_state_counters_in_octets') for q in p.asked)
 
 
 def test_installer_detects_gnmic_series():
@@ -146,6 +146,6 @@ def test_example_files_document_the_gnmic_route():
     with open(os.path.join(ROOT, 'cyber-view-standalone', 'gnmic.example.yaml'), encoding='utf-8') as fh:
         g = fh.read()
     for needle in ('type: prometheus', 'strings-as-labels: true', 'export-timestamps: true',
-                   '/interfaces/interface[name=GigabitEthernet1/0/1]/state/counters',
-                   '/interfaces/interface[name=GigabitEthernet1/0/1]/state/oper-status', 'has missing keys'):
+                   '"/interfaces/interface[name=GigabitEthernet1/0/1]/state"', 'has missing keys',
+                   'MDT_SUBSCRIPTION-4-TERMINATED', 'clock timezone'):
         assert needle in g, needle

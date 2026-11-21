@@ -78,6 +78,12 @@ class Prometheus:
                     pass
         return out
 
+    def _g_one(self, metric):
+        """装置・IF ごとに 1 本にまとめる。/state をまとめて購読すると、カウンタにも oper_status 等の
+        ラベルが付き、状態が変わるたびに系列が分かれる(古い方も expiration まで残る)。max で 1 本に
+        してから rate を取る(subquery)ので、分かれ目でも流量が途切れず、2 重にも数えない"""
+        return f'max by (source, interface_name) ({metric}{{job="{self.gnmic_job}"}})'
+
     def _g_by_if(self, q, conv=float):
         return self._by_if(q, conv, 'source', 'interface_name')
 
@@ -104,19 +110,17 @@ class Prometheus:
         """{(instance, if): (in_bps, out_bps)}"""
         w = f'{max(60, int(window_s))}s'
         sel = f'{{job="{self.job}"}}'
-        gsel = f'{{job="{self.gnmic_job}"}}'
         return self._pair(lambda: self._by_if(f'rate(ifHCInOctets{sel}[{w}]) * 8'),
                           lambda: self._by_if(f'rate(ifHCOutOctets{sel}[{w}]) * 8'),
-                          lambda: self._g_by_if(f'rate({self.g_in}{gsel}[{w}]) * 8'),
-                          lambda: self._g_by_if(f'rate({self.g_out}{gsel}[{w}]) * 8'))
+                          lambda: self._g_by_if(f'rate({self._g_one(self.g_in)}[{w}:15s]) * 8'),
+                          lambda: self._g_by_if(f'rate({self._g_one(self.g_out)}[{w}:15s]) * 8'))
 
     def counters(self):
         sel = f'{{job="{self.job}"}}'
-        gsel = f'{{job="{self.gnmic_job}"}}'
         return self._pair(lambda: self._by_if(f'ifHCInOctets{sel}'),
                           lambda: self._by_if(f'ifHCOutOctets{sel}'),
-                          lambda: self._g_by_if(f'{self.g_in}{gsel}'),
-                          lambda: self._g_by_if(f'{self.g_out}{gsel}'), default=0)
+                          lambda: self._g_by_if(self._g_one(self.g_in)),
+                          lambda: self._g_by_if(self._g_one(self.g_out)), default=0)
 
     def oper_status(self):
         """{(instance, if): 'up'|'down'}(IF-MIB 1=up、2=down・7=lowerLayerDown。OpenConfig は UP / DOWN・

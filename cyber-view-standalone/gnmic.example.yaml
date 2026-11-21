@@ -23,21 +23,18 @@ targets:
   192.168.1.1:50052: {}
   # 192.168.1.2:50052: {}
 
-# IOS XE 16.x はポート名(キー)を省いた購読を断る:
-#   "has missing keys. All key values must be specified for parent lists"(InvalidArgument)
-# なので監視するポートを 1 つずつ並べる(WS-C3650 16.12.11 で確認)。17.x やラボはキー無し
-# ("/interfaces/interface/state/counters" で全ポート)でも通る。
+# IOS XE 16.x の注意(WS-C3650 16.12.11 で確認):
+# - ポート名(キー)を省いた購読は断られる("has missing keys. All key values must be specified for parent lists")。
+#   監視するポートを 1 つずつ並べる。17.x やラボはキー無し("/interfaces/interface/state")でも通る。
+# - oper-status だけの購読は途中で打ち切られる(装置のログ %MDT_SUBSCRIPTION-4-TERMINATED ... run-time error)。
+#   /state をまとめて購読すれば、oper-status もカウンタも 1 本で届く。
+# - 装置の時計を合わせる(clock timezone JST 9 0 / clock set、本番は ntp server)。export-timestamps は
+#   装置の時刻をそのまま使うので、時計が遅れていると Prometheus で古い値として扱われる。
 subscriptions:
-  if-counters:
+  if-state:
     paths:
-      - "/interfaces/interface[name=GigabitEthernet1/0/1]/state/counters"
-      # - "/interfaces/interface[name=GigabitEthernet1/0/2]/state/counters"
-    stream-mode: sample
-    sample-interval: 10s
-  if-oper:
-    paths:
-      - "/interfaces/interface[name=GigabitEthernet1/0/1]/state/oper-status"
-      # - "/interfaces/interface[name=GigabitEthernet1/0/2]/state/oper-status"
+      - "/interfaces/interface[name=GigabitEthernet1/0/1]/state"
+      # - "/interfaces/interface[name=GigabitEthernet1/0/2]/state"
     stream-mode: sample
     sample-interval: 10s
 

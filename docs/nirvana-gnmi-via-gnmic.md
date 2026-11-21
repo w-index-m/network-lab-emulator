@@ -59,11 +59,21 @@ rpc error: code = InvalidArgument desc = Subscription to filter '/oc-if:interfac
 has missing keys. All key values must be specified for parent lists
 ```
 
+また、`oper-status` だけの購読は、少しすると装置に打ち切られます(装置のログに `%MDT_SUBSCRIPTION-4-TERMINATED ... run-time error`、gnmic に `Canceled by operator`)。
+ポートの `state` をまとめて購読すれば、`oper-status` もカウンタも 1 本で届きます。メトリクス名は同じ(`..._state_oper_status`・`..._state_counters_in_octets`)です。
+
 監視するポートを 1 つずつ並べたパスは、次のように作れます(例: Gi1/0/1〜24)。
 
 ```bash
-for i in $(seq 1 24); do echo "      - \"/interfaces/interface[name=GigabitEthernet1/0/$i]/state/counters\""; done
+for i in $(seq 1 24); do echo "      - \"/interfaces/interface[name=GigabitEthernet1/0/$i]/state\""; done
 ```
+
+`state` をまとめて購読すると、`strings-as-labels` によってカウンタの系列にも `oper_status` や `admin_status` のラベルが付きます。
+そのため、ポートの状態が変わるたびに系列が分かれます(古い方も gnmic の `expiration` まで残ります)。
+ニルヴァーナは装置・ポートごとに `max by (source, interface_name)` で 1 本にまとめてから `rate` を取るので、分かれ目でも流量は途切れず、2 重にも数えません。
+
+装置の時計も合わせてください(`clock timezone JST 9 0` と `clock set`、本番は `ntp server`)。
+`export-timestamps: true` は装置の時刻をそのまま使うので、時計が遅れていると、Prometheus は届いた値を古い値として扱います。
 
 gnmic は `--log` を付けないと、つながらないときのエラーを何も出しません。最初は `gnmic --config gnmic.yaml --log subscribe` で起動してください。
 WSL では、Ubuntu の画面を閉じると `&` で起動したプログラムも止まります。`nohup` を付けて起動します。
@@ -114,6 +124,9 @@ gnmic には装置ごとの `up` が無いので、gnmic だけのときは「�
 | `ping 10.77.0.2 repeat 2000 size 1500` を流す | `in_octets` が増える | 約 8.1 Mbps ずつ(上の画面写真は約 15.3 Mbps)、`source: prometheus`(ヴァルハラ) |
 | GN2 で `shutdown` | `oper_status="DOWN"`(古い UP の系列も残る) | `down: true`・`POLL: down` |
 | `no shutdown` | `oper_status="UP"`(古い DOWN の系列も残る) | `down: false`・`POLL: up` |
+
+実機の 3650 と同じ「`state` をまとめて購読」の形でも確かめました。GN2 の `shutdown` → `no shutdown` のあと、ポートごとにまとめない問い合わせでは
+GN2 の流量が UP と DOWN の 2 本に分かれました(3.9 Mbps と 1.8 Mbps)。まとめる問い合わせでは 1 本(3.5 Mbps)で、断の判定も復旧後は UP に戻りました。
 
 最初は oper_status の問い合わせで `timestamp(... == 1)` と書いていました。比較の結果には問い合わせ時刻が付くため、新旧の系列を区別できませんでした。
 `timestamp(M) and (M == 1)` に直して、断と復旧の両方が正しく切り替わることを確かめています。
