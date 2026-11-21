@@ -149,3 +149,30 @@ def test_example_files_document_the_gnmic_route():
                    '"/interfaces/interface[name=GigabitEthernet1/0/1]/state"', 'has missing keys',
                    'MDT_SUBSCRIPTION-4-TERMINATED', 'up=1'):
         assert needle in g, needle
+
+
+def test_quickstart_script_writes_16x_safe_configs(tmp_path):
+    """gnmi-quickstart.sh config: ポートごとの /state 購読・export-timestamps なし・パスワードは本人だけ・
+    ニルヴァーナの設定が読める(ネットワークには出ない)"""
+    import subprocess
+    import yaml
+    sh = os.path.join(ROOT, 'cyber-view-standalone', 'gnmi-quickstart.sh')
+    r = subprocess.run(['bash', sh, 'config', '--target', '192.168.1.1,10.0.0.2:57400', '--ports', 'Gi1/0/1,Te1/1/1',
+                        '--user', 'admin', '--password', 'p"w', '--dir', str(tmp_path)],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    g = yaml.safe_load((tmp_path / 'gnmic.yaml').read_text())
+    assert g['password'] == 'p"w' and set(g['targets']) == {'192.168.1.1:50052', '10.0.0.2:57400'}
+    assert g['subscriptions']['if-state']['paths'] == [
+        '/interfaces/interface[name=GigabitEthernet1/0/1]/state',
+        '/interfaces/interface[name=TenGigabitEthernet1/1/1]/state']
+    out = g['outputs']['prom']
+    assert out['strings-as-labels'] is True and 'export-timestamps' not in out and out['expiration'] == '25s'
+    assert oct((tmp_path / 'gnmic.yaml').stat().st_mode & 0o777) == '0o600'
+    p = yaml.safe_load((tmp_path / 'prometheus.yml').read_text())
+    assert p['scrape_configs'][0]['job_name'] == 'gnmic'
+    sys.path.insert(0, os.path.join(ROOT, 'cyber-view-standalone'))
+    from cvs import config as C
+    cfg = C.load(str(tmp_path / 'nirvana.yaml'))
+    assert [d['mgmt_ip'] for d in cfg['devices']] == ['192.168.1.1', '10.0.0.2']
+    assert cfg['sources']['prometheus']['flavor'] == 'gnmic'

@@ -14,6 +14,31 @@ snmp_exporter と並べて使えます(`flavor: both` では同じ装置・IF �
 
 ![gNMI の値で描いた ROUTER LINKS](images/nirvana-gnmi-links.jpg)
 
+## いちばん簡単な方法: `gnmi-quickstart.sh`(Linux / WSL)
+
+装置の設定(下の 1)を済ませたら、WSL では次の 1 行で、gnmic と Prometheus の用意・設定・起動・確認まで終わります。
+
+```bash
+cd nirvana-lab/cyber-view-standalone && ./gnmi-quickstart.sh up --target 192.168.1.1 --ports Gi1/0/1
+```
+
+- gnmic が無ければ公式の導入スクリプトで入れ、Prometheus は `~/nirvana-gnmi` に取ってきます。
+- 設定は 16.x の癖に合わせて書きます(ポートごとの `/state` 購読、`export-timestamps` なし、`expiration` は間隔の 2.5 倍)。パスワードを含む `gnmic.yaml` は本人だけが読めるようにします。
+- `nohup` で起動するので、画面を閉じても止まりません。
+- 値が Prometheus まで届いたかを確かめ、だめならログから原因の目安(届かない / 認証 / 購読の打ち切り など)を出します。
+- ニルヴァーナの設定 `~/nirvana-gnmi/nirvana.yaml` も作ります(つながり `links` は手で足します)。
+
+| コマンド | 何をするか |
+|---|---|
+| `./gnmi-quickstart.sh up --target <IP>[,<IP>...] --ports <ポート>[,...]` | 用意して起動し、確かめる。ユーザー・パスワードは聞かれる(`--user`・`--password` や `GNMI_PASSWORD` でも渡せる) |
+| `./gnmi-quickstart.sh status` | 動いているかと、値が届いているか |
+| `./gnmi-quickstart.sh down` | 止める |
+| `./gnmi-quickstart.sh config ...` | 設定ファイルだけ書く(起動しない) |
+
+以下は、スクリプトが中でやっていることを手で行う手順です。
+
+![実機の WS-C3650 の gNMI の値で描いた ROUTER LINKS](images/nirvana-gnmi-3650-real.webp)
+
 ## 1. 装置(Catalyst)の設定
 
 IOS XE 16.x(例: WS-C3650 16.12.11)の場合です。17.x では `gnmi-yang` の代わりに `gnxi` / `gnxi server` を使います。
