@@ -34,7 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 QUICKSTART = HERE / 'gnmi-quickstart.sh'
 STATE_DIR = Path(os.environ.get('NIRVANA_SETUP_DIR', Path.home() / '.nirvana-gnmi'))
-GUI_VERSION = '2'
+GUI_VERSION = '3'
 NIRVANA_PORT = int(os.environ.get('NIRVANA_PORT', '8091'))
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 PORT_RE = re.compile(r'^[A-Za-z][A-Za-z\-]*\d+(?:/\d+)*(?:\.\d+)?$')
@@ -67,7 +67,10 @@ def parse_form(d):
     password = str(d.get('password') or '')
     if not password:
         raise ValueError('パスワードを入れてください')
-    return {'targets': targets, 'ports': ports, 'user': user, 'password': password}
+    community = str(d.get('community', 'public') or '').strip()
+    if community and not re.match(r'^[!-~]{1,64}$', community):
+        raise ValueError('SNMP community に使えない文字があります(空白・日本語は不可)')
+    return {'targets': targets, 'ports': ports, 'user': user, 'password': password, 'community': community}
 
 
 # ── gnmi-quickstart.sh を動かす(Windows は WSL の中で) ──
@@ -123,6 +126,34 @@ def stop_manual():
 
 
 # ── ニルヴァーナ本体 ───────────────────────────────────
+SYS_NAME, SYS_UPTIME = '1.3.6.1.2.1.1.5.0', '1.3.6.1.2.1.1.3.0'
+
+
+def snmp_check(form, timeout=2.0):
+    """各装置に SNMP で sysName を聞く(ニルヴァーナと同じく、この PC から直接)。結果は表示用の文字"""
+    from cvs import snmp_client as SC
+    out, ok = ['==> SNMP を確かめます'], 0
+    for t in form['targets']:
+        host = t.split(':')[0]
+        try:
+            v = SC.get(host, form['community'], [SYS_NAME, SYS_UPTIME], timeout=timeout, retries=1)
+        except Exception as e:  # noqa: BLE001
+            v, err = {}, str(e)
+        else:
+            err = ''
+        if v.get(SYS_NAME) is not None:
+            name = v[SYS_NAME].decode('utf-8', 'replace') if isinstance(v[SYS_NAME], bytes) else v[SYS_NAME]
+            out.append(f' OK SNMP {host}: 応答あり(sysName {name})')
+            ok += 1
+        else:
+            out.append(f' NG SNMP {host}: 応答がありません{(" (" + err + ")") if err else ""}\n'
+                       '    community の綴り・装置の snmp-server community・ACL(この PC の IP を許可しているか)を確かめてください。'
+                       'gNMI の表示はこのまま続けます')
+    if not ok:
+        out.append('    SNMP に応答した装置が無いので、今回は SNMP を使わずに起動します(誤って「応答なし」と出さないため)')
+    return ok > 0, '\n'.join(out)
+
+
 def nirvana_config(form):
     """装置ごとに、選んだポートの先に「相手」を置いてリンクにする(相手は SNMP を持たない)"""
     lines = ['title: gNMI', 'poll_interval: 10', 'devices:']
@@ -141,6 +172,10 @@ def nirvana_config(form):
     lines += ['links:'] + links
     lines += ['sources:', '  prometheus:', '    url: http://127.0.0.1:9090', '    flavor: gnmic',
               '    gnmic_job: gnmic']
+    if form.get('community'):
+        # SNMP で直接: 経路表・CPU(60秒)と流量・IF 状態(10秒)。community は設定に書かず環境変数で渡す
+        lines += ['  snmp:', '    community: ${NIRVANA_SNMP_COMMUNITY}', '    interval: 60',
+                  '    traffic: {interval: 10}']
     return '\n'.join(lines) + '\n'
 
 
@@ -178,7 +213,8 @@ def start_nirvana(form):
                        'もう一度「開始」を押してください')
     log = open(STATE_DIR / 'nirvana.log', 'w', encoding='utf-8')  # noqa: SIM115
     _nirvana['proc'] = subprocess.Popen([sys.executable, str(HERE / 'server.py'), '-c', str(cfg),
-                                         '--port', str(NIRVANA_PORT)], cwd=str(HERE), stdout=log, stderr=log)
+                                         '--port', str(NIRVANA_PORT)], cwd=str(HERE), stdout=log, stderr=log,
+                                        env=dict(os.environ, NIRVANA_SNMP_COMMUNITY=form.get('community', '')))
     (STATE_DIR / 'nirvana.pid').write_text(str(_nirvana['proc'].pid), encoding='utf-8')
     for _ in range(40):
         if _nirvana['proc'].poll() is not None:
@@ -275,6 +311,8 @@ a{color:var(--acc)}#open{display:none;font-size:17px}
 <input id="target" class="big" placeholder="192.168.1.1" value="__TARGET__" autofocus>
 <label for="password">パスワード(装置の gNMI 用のユーザー)</label>
 <input id="password" type="password" autocomplete="current-password">
+<label for="community">SNMP community(読み取り用。空にすると SNMP は使わない。経路表・CPU も見えるようになる)</label>
+<input id="community" value="public" autocomplete="off">
 <details><summary>詳しい設定(ふつうは変えなくてよい)</summary>
 <label for="ports">見るポート(カンマ区切り)</label><input id="ports" value="__PORTS__">
 <label for="user">ユーザー</label><input id="user" value="__USER__">
@@ -301,7 +339,7 @@ async function refresh(){
 }
 $('start').onclick=async()=>{
   busy(true);say('準備しています(初回は gnmic・Prometheus の取得で数分かかることがあります)…');
-  try{const r=await post('/api/up',{target:$('target').value,ports:$('ports').value,user:$('user').value,password:$('password').value});
+  try{const r=await post('/api/up',{target:$('target').value,ports:$('ports').value,user:$('user').value,password:$('password').value,community:$('community').value});
     say((r.ok?'うまくいきました\\n\\n':'うまくいきませんでした\\n\\n')+r.log);
     if(r.ok&&r.nirvana_url)window.open(r.nirvana_url,'_blank');}
   catch(e){say('エラー: '+e)}busy(false);refresh();
@@ -341,6 +379,11 @@ def do_up(body):
             if 'すでに使われています' in log:
                 log += '\n\n→「手で起動したものを止める」を押してから、もう一度「開始」を押してください'
             return {'ok': False, 'log': log}
+        if form.get('community'):
+            snmp_ok, text = snmp_check(form)
+            log += '\n' + text
+            if not snmp_ok:
+                form = dict(form, community='')
         ok2, log2 = start_nirvana(form)
         return {'ok': ok2, 'log': log + '\n' + log2,
                 'nirvana_url': f'http://localhost:{NIRVANA_PORT}/?view=links' if ok2 else None}

@@ -36,6 +36,21 @@ Windows で見つかって直した点: 標準入力に文字列で渡すと Pyt
 WSL が呼び出し元の Windows フォルダへ移ろうとして `chdir ... failed 5` を出す(`wsl --cd ~`)、Windows では SO_REUSEADDR で
 同じポートに2つ目の設定画面が bind でき古い画面が答え続ける(`allow_reuse_address = False` と起動前の確認)。
 
+SNMP も一緒に(版 3): 設定画面の「SNMP community」(既定 `public`、空にすると使わない)を入れて「開始」を押すと、
+ニルヴァーナ(Windows の Python)が装置を SNMP で直接ポーリングする(`sources.snmp`: 経路表・CPU は60秒ごと、流量・IF 状態は10秒ごと)。
+community は設定ファイルに書かず環境変数 `NIRVANA_SNMP_COMMUNITY` で渡す。開始時に sysName を聞いて確かめ、どの装置も応答しなければ
+今回は SNMP を使わずに起動する(誤って「応答なし」を出さないため)。流量・IF 状態は gNMI(Prometheus)が優先で、SNMP は経路表・CPU と
+gNMI に無い IF を補う。送信元は WSL ではなく Windows の PC の IP なので、装置の ACL はその IP を許可する:
+
+```
+ip access-list standard NIRVANA-SNMP
+ permit <PC の IP>
+snmp-server community public RO NIRVANA-SNMP
+```
+
+ラボの模擬 Catalyst(`snmp-server community public RO <ACL>`)で、設定画面の確認が OK(誤った community では NG と SNMP なしで起動)、
+生成した設定でニルヴァーナを起動するとリンクの取得元 `snmp`・POLL `up` になることを確かめた。
+
 3650 の設定が再起動で消えるとき: パスワードリカバリの後は `SWITCH_IGNORE_STARTUP_CFG="1"` のまま残る(`show romvar | include IGNORE`)。
 `no system ignore startupconfig switch all` → `write memory` で `"0"` に戻る(実機で確認)。
 - 「停止」で全部止まります。前に手で起動した gnmic・Prometheus があるときは、「手で起動したものを止める」を押します。
