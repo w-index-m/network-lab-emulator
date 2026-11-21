@@ -58,6 +58,15 @@ snmp-server community public RO NIRVANA-SNMP
 
 ![CPU 使用率の表示](images/nirvana-gnmi-snmp-cpu-links.jpg)
 
+版 5: NetFlow も受ける(UDP 2055、v5 / v9 / IPFIX)。3650 の Flexible NetFlow は v5 を送れないので、`engine/flow_collector.py`
+(= `cvs/flow_collector.py`)に v9(RFC 3954)と IPFIX(RFC 7011)のテンプレート読み取りを足した。テンプレートは送り元・ソースID・
+テンプレートIDごとに覚え、届く前のデータは読めない(装置側で `template data timeout 60` にしておくと早く読めるようになる)。
+本物の送り手 softflowd 1.1.0 で、同じ pcap から v5 / v9 / IPFIX を送り、3つとも同じフロー(192.168.1.10:50000→192.168.1.20:443、
+3280 バイト・7 パケット、逆向き 5640 バイト・6 パケット)になること、設定画面が作る設定でニルヴァーナが v9 を受けて
+`/api/traffic/flowmap` に通信の粒(via netflow9)が出ることを確かめた。Windows では初回に Python の受信を
+ファイアウォールが聞いてくるので「プライベート ネットワーク」で許可する。
+gNMI・SNMP・NetFlow をまとめた 3650 の設定サンプルは `cyber-view-standalone/catalyst-3650.example.txt`。
+
 3650 の設定が再起動で消えるとき: パスワードリカバリの後は `SWITCH_IGNORE_STARTUP_CFG="1"` のまま残る(`show romvar | include IGNORE`)。
 `no system ignore startupconfig switch all` → `write memory` で `"0"` に戻る(実機で確認)。
 - 「停止」で全部止まります。前に手で起動した gnmic・Prometheus があるときは、「手で起動したものを止める」を押します。

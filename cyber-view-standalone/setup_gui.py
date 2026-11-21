@@ -34,7 +34,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 QUICKSTART = HERE / 'gnmi-quickstart.sh'
 STATE_DIR = Path(os.environ.get('NIRVANA_SETUP_DIR', Path.home() / '.nirvana-gnmi'))
-GUI_VERSION = '4'
+GUI_VERSION = '5'
+NETFLOW_PORT = 2055
 NIRVANA_PORT = int(os.environ.get('NIRVANA_PORT', '8091'))
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 PORT_RE = re.compile(r'^[A-Za-z][A-Za-z\-]*\d+(?:/\d+)*(?:\.\d+)?$')
@@ -174,6 +175,8 @@ def nirvana_config(form):
     lines += ['links:'] + links
     lines += ['sources:', '  prometheus:', '    url: http://127.0.0.1:9090', '    flavor: gnmic',
               '    gnmic_job: gnmic']
+    # NetFlow v5/v9/IPFIX を UDP 2055 で受ける(装置の flow exporter の宛先をこの PC にすると、NETWORK 画面に通信の粒が出る)
+    lines += ['  flow:', f'    netflow: {NETFLOW_PORT}']
     if form.get('community'):
         # SNMP で直接: 経路表・CPU(60秒)と流量・IF 状態(10秒)。community は設定に書かず環境変数で渡す
         lines += ['  snmp:', '    community: ${NIRVANA_SNMP_COMMUNITY}', '    interval: 60',

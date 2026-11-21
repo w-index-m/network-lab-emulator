@@ -128,3 +128,37 @@ def test_hosts_carry_cpu_from_snmp():
     with open(os.path.join(ROOT, 'static', 'cyber_view.html'), encoding='utf-8') as fh:
         page = fh.read()
     assert 'hostById[id].cpu' in page and 'CPU ${Math.round(cpu)}%' in page
+
+
+def _v9_packet(tid=256):
+    """NetFlow v9: テンプレート(src,dst,sport,dport,proto,bytes(8),pkts(8))と、それを使うデータ1件"""
+    import socket
+    import struct
+    spec = [(8, 4), (12, 4), (7, 2), (11, 2), (4, 1), (1, 8), (2, 8)]
+    tmpl = struct.pack('!HH', tid, len(spec)) + b''.join(struct.pack('!HH', *f) for f in spec)
+    tset = struct.pack('!HH', 0, 4 + len(tmpl)) + tmpl
+    rec = (socket.inet_aton('192.168.1.10') + socket.inet_aton('192.168.1.20') + struct.pack('!HHB', 50000, 443, 6)
+           + struct.pack('!QQ', 3280, 7))
+    rec += b'\0' * (-len(rec) % 4)
+    dset = struct.pack('!HH', tid, 4 + len(rec)) + rec
+    hdr = struct.pack('!HHIIII', 9, 2, 0, 0, 1, 0)
+    return hdr + tset, struct.pack('!HHIIII', 9, 1, 0, 0, 2, 0) + dset
+
+
+def test_netflow_v9_and_ipfix_are_read_with_templates_and_setup_enables_2055():
+    """3650 等の Flexible NetFlow は v5 を送れないので v9 / IPFIX を読む。テンプレートは送り元ごとに覚える
+    (本物の送り手 softflowd の v5 / v9 / IPFIX で同じフローになることは docs/nirvana-gnmi-via-gnmic.md に記録)"""
+    from cvs import flow_collector as F
+    tmpl_pkt, data_pkt = _v9_packet()
+    t = {}
+    assert F.parse_netflow(data_pkt, '10.0.0.1', templates=t) == []          # テンプレート前のデータは読めない
+    assert F.parse_netflow(tmpl_pkt, '10.0.0.1', templates=t) == []
+    got = F.parse_netflow(data_pkt, '10.0.0.1', templates=t)
+    assert [(g['src'], g['dst'], g['sport'], g['dport'], g['proto'], g['bytes'], g['packets'], g['via']) for g in got] == \
+        [('192.168.1.10', '192.168.1.20', 50000, 443, 'tcp', 3280, 7, 'netflow9')]
+    assert F.parse_netflow(data_pkt, '10.0.0.2', templates=t) == []          # 別の装置のテンプレートは使わない
+    cfg_text = G.nirvana_config(G.parse_form({'target': '192.168.1.1', 'password': 'x', 'community': ''}))
+    assert '  flow:\n    netflow: 2055' in cfg_text
+    with open(os.path.join(ROOT, 'engine', 'flow_collector.py'), encoding='utf-8') as a, \
+            open(os.path.join(ROOT, 'cyber-view-standalone', 'cvs', 'flow_collector.py'), encoding='utf-8') as b:
+        assert a.read() == b.read()
