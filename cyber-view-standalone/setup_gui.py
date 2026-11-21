@@ -34,6 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 QUICKSTART = HERE / 'gnmi-quickstart.sh'
 STATE_DIR = Path(os.environ.get('NIRVANA_SETUP_DIR', Path.home() / '.nirvana-gnmi'))
+GUI_VERSION = '2'
 NIRVANA_PORT = int(os.environ.get('NIRVANA_PORT', '8091'))
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 PORT_RE = re.compile(r'^[A-Za-z][A-Za-z\-]*\d+(?:/\d+)*(?:\.\d+)?$')
@@ -267,7 +268,7 @@ button:disabled{opacity:.5;cursor:wait}
 table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}td,th{padding:4px 6px;text-align:left;border-bottom:1px solid #2a3d5c}
 a{color:var(--acc)}#open{display:none;font-size:17px}
 </style></head><body><main>
-<h1>gNMI で装置を見る</h1>
+<h1>gNMI で装置を見る <small style="font-size:12px;opacity:.5">版 __VER__</small></h1>
 <p class="sub">装置の IP を入れて「開始」を押すだけです。gnmic・Prometheus・ニルヴァーナを用意して起動します。</p>
 <div class="card">
 <label for="target">装置の IP(複数はカンマ区切り)</label>
@@ -314,7 +315,8 @@ refresh();setInterval(refresh,10000);
 def page(defaults):
     return (PAGE.replace('__TARGET__', html.escape(defaults.get('target', '')))
             .replace('__PORTS__', html.escape(defaults.get('ports', 'Gi1/0/1')))
-            .replace('__USER__', html.escape(defaults.get('user', 'admin'))))
+            .replace('__USER__', html.escape(defaults.get('user', 'admin')))
+            .replace('__VER__', GUI_VERSION))
 
 
 def load_defaults():
@@ -380,6 +382,10 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, '{}')
 
 
+class _Server(ThreadingHTTPServer):
+    allow_reuse_address = False   # Windows の SO_REUSEADDR は二重起動を許してしまう
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='gNMI 設定画面')
     ap.add_argument('--port', type=int, default=8092)
@@ -389,9 +395,13 @@ def main(argv=None):
         sys.exit(f'{QUICKSTART} がありません')
     if not on_windows() and not shutil.which('bash'):
         sys.exit('bash がありません')
-    srv = ThreadingHTTPServer(('127.0.0.1', a.port), Handler)   # この PC の中からだけ開ける
+    if port_open(a.port):
+        # Windows では同じポートに2つ目が bind できてしまい、古い設定画面が答え続けることがある
+        sys.exit(f'{a.port} 番はもう使われています。前に開いた設定画面(黒いウィンドウ)をすべて閉じてから、'
+                 'もう一度起動してください')
+    srv = _Server(('127.0.0.1', a.port), Handler)   # この PC の中からだけ開ける
     url = f'http://localhost:{a.port}/'
-    print(f'設定画面: {url}(閉じるときはこの画面で Ctrl + C)', flush=True)
+    print(f'設定画面: {url}(閉じるときはこの画面で Ctrl + C)  版 {GUI_VERSION}', flush=True)
     if not a.no_open:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:
