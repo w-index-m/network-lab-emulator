@@ -145,7 +145,7 @@ def test_example_files_document_the_gnmic_route():
     assert 'flavor:' in cfg and 'gnmic_job' in cfg
     with open(os.path.join(ROOT, 'cyber-view-standalone', 'gnmic.example.yaml'), encoding='utf-8') as fh:
         g = fh.read()
-    for needle in ('type: prometheus', 'strings-as-labels: true', 'export-timestamps: true',
+    for needle in ('type: prometheus', 'strings-as-labels: true', 'expiration: 25s', '# export-timestamps: true',
                    '"/interfaces/interface[name=GigabitEthernet1/0/1]/state"', 'has missing keys',
                    'MDT_SUBSCRIPTION-4-TERMINATED', 'clock timezone'):
         assert needle in g, needle

@@ -78,10 +78,13 @@ for i in $(seq 1 24); do echo "      - \"/interfaces/interface[name=GigabitEther
 gnmic は `--log` を付けないと、つながらないときのエラーを何も出しません。最初は `gnmic --config gnmic.yaml --log subscribe` で起動してください。
 WSL では、Ubuntu の画面を閉じると `&` で起動したプログラムも止まります。`nohup` を付けて起動します。
 
-`prometheus` 出力の `strings-as-labels: true` と `export-timestamps: true` は外さないでください。
+`prometheus` 出力の `strings-as-labels: true` は外さないでください(oper-status を見るのに使います)。
+
+`export-timestamps: true` は、装置の時計が NTP で正確なときだけ付けます。装置の時刻をそのまま Prometheus に渡すため、時計がずれていると値が捨てられます。
+WS-C3650 では、Prometheus の `up` が 1 なのに値が空になりました。付けない場合は `expiration` を短く(25 秒)して、状態が変わったときに古い系列が残る時間を短くします。
 
 - `strings-as-labels: true`: oper-status(文字列)をラベルにします。これが無いと断を判定できません。
-- `export-timestamps: true`: 状態が UP → DOWN に変わると、古い UP の系列も gnmic の `expiration` まで残ります。ニルヴァーナは系列ごとの最新時刻で新しい方を選びます。
+- 状態が UP → DOWN に変わると、古い UP の系列も gnmic の `expiration` まで残ります。ニルヴァーナは系列ごとの最新時刻で新しい方を選びます。`export-timestamps` が無いと両方の時刻が同じになるため、`expiration` のあいだは古い方を選ぶことがあります。
 
 ## 3. Prometheus
 

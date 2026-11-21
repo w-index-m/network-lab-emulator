@@ -28,8 +28,9 @@ targets:
 #   監視するポートを 1 つずつ並べる。17.x やラボはキー無し("/interfaces/interface/state")でも通る。
 # - oper-status だけの購読は途中で打ち切られる(装置のログ %MDT_SUBSCRIPTION-4-TERMINATED ... run-time error)。
 #   /state をまとめて購読すれば、oper-status もカウンタも 1 本で届く。
-# - 装置の時計を合わせる(clock timezone JST 9 0 / clock set、本番は ntp server)。export-timestamps は
-#   装置の時刻をそのまま使うので、時計が遅れていると Prometheus で古い値として扱われる。
+# - export-timestamps は付けない。装置の時刻をそのまま Prometheus に渡すため、装置の時計がずれていると
+#   値が捨てられる(up=1 なのに値が空。WS-C3650 で実際に起きた)。expiration を短くして、状態が変わったとき
+#   古い系列が残る時間を短くする。
 subscriptions:
   if-state:
     paths:
@@ -43,6 +44,6 @@ outputs:
     type: prometheus
     listen: 0.0.0.0:9804
     path: /metrics
-    expiration: 60s
+    expiration: 25s              # 状態が変わったとき、古い oper_status の系列が残る時間(sample-interval の 2.5 倍)
     strings-as-labels: true      # oper-status(UP / DOWN)を oper_status ラベルにする。ニルヴァーナはこれで断を判定する
-    export-timestamps: true      # gNMI の通知時刻を付ける。状態が変わったとき新しい方を選ぶのに使う
+    # export-timestamps: true    # 装置の時計が NTP で正確なときだけ。新旧の系列を時刻で見分けられる
