@@ -90,6 +90,15 @@ PC(WSL)から実機と OSPF を張る試みの結果: WSL はミラーモード�
 
 ![SNMP の直接読み取りによる OSPF 画面](images/nirvana-ospf-direct-snmp.jpg)
 
+版 9: ヴァルハラにも SNMP を貯める(snmp_exporter 0.28.0 を `gnmi-quickstart.sh up --snmp-community <str>` で導入・起動、
+:9116)。それまでの設定画面の構成ではヴァルハラが gnmic の値しか持たず、ROUTER LINKS の「再生」・使用率の予測・CPU の推移が
+使えなかった。モジュールは `iac/cisco-traffic-monitoring/snmp_exporter/snmp.yml` の `cisco_if`(IF・CPU・ICMP・OSPF)をそのまま
+`snmp-modules.yml` に書き、community は本人だけ読める `snmp-auth.yml`(`--config.file` を2つ渡す)。Prometheus に `snmp` ジョブ、
+ニルヴァーナは `flavor: both` / `job: snmp`(同じポートは SNMP を優先し、無いところを gNMI で)。設定画面は SNMP community
+(既定 public)をそのまま quickstart にも渡す(WSLENV)。SNMP が届かなくても gNMI の表示は続ける。ラボの模擬 Cisco と本物の
+gnmic・Prometheus 2.54.1・snmp_exporter 0.28.0 で、`up` が「ヴァルハラが SNMP も取れています(IF 3 本・CPU 16%)」まで通り、
+ニルヴァーナの `/api/valhalla/replay`・`/api/valhalla/forecast` が値を返すことを確かめた。
+
 3650 の設定が再起動で消えるとき: パスワードリカバリの後は `SWITCH_IGNORE_STARTUP_CFG="1"` のまま残る(`show romvar | include IGNORE`)。
 `no system ignore startupconfig switch all` → `write memory` で `"0"` に戻る(実機で確認)。
 - 「停止」で全部止まります。前に手で起動した gnmic・Prometheus があるときは、「手で起動したものを止める」を押します。

@@ -43,7 +43,10 @@ def test_quickstart_cmd_linux_and_windows(monkeypatch):
     argv, stdin, env = G.quickstart_cmd('up', form)
     assert argv[:7] == ['wsl', '--cd', '~', '-e', 'bash', '-s', '--'] and argv[7] == 'up'
     assert isinstance(stdin, bytes) and b'\r' not in stdin and stdin.startswith(b'#!/usr/bin/env bash')
-    assert env['WSLENV'].split(':') == ['FOO', 'GNMI_FROM_GUI/u', 'GNMI_PASSWORD/u'] and 'secret' not in argv
+    assert env['WSLENV'].split(':') == ['FOO', 'GNMI_FROM_GUI/u', 'GNMI_PASSWORD/u', 'GNMI_SNMP_COMMUNITY/u']
+    assert 'secret' not in argv and env['GNMI_SNMP_COMMUNITY'] == 'public'      # 既定 public で snmp_exporter も動かす
+    off = G.parse_form({'target': '192.168.1.1', 'password': 'secret', 'community': ''})
+    assert 'GNMI_SNMP_COMMUNITY' not in G.quickstart_cmd('up', off)[2]
 
 
 def test_nirvana_config_links_each_port_and_loads(tmp_path):
@@ -51,7 +54,9 @@ def test_nirvana_config_links_each_port_and_loads(tmp_path):
     p = tmp_path / 'n.yaml'
     p.write_text(G.nirvana_config(form), encoding='utf-8')
     cfg = C.load(str(p))
-    assert cfg['sources']['prometheus']['flavor'] == 'gnmic'
+    assert cfg['sources']['prometheus']['flavor'] == 'both' and cfg['sources']['prometheus']['job'] == 'snmp'
+    off = G.nirvana_config(G.parse_form({'target': '192.168.1.1', 'password': 'x', 'community': ''}))
+    assert 'flavor: gnmic' in off and 'job: snmp' not in off
     sw = next(d for d in cfg['devices'] if d['id'] == 'sw1')
     assert sw['mgmt_ip'] == '192.168.1.1' and [i['name'] for i in sw['interfaces']] == \
         ['GigabitEthernet1/0/1', 'GigabitEthernet1/0/2', 'mgmt']

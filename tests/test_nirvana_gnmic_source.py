@@ -176,3 +176,33 @@ def test_quickstart_script_writes_16x_safe_configs(tmp_path):
     cfg = C.load(str(tmp_path / 'nirvana.yaml'))
     assert [d['mgmt_ip'] for d in cfg['devices']] == ['192.168.1.1', '10.0.0.2']
     assert cfg['sources']['prometheus']['flavor'] == 'gnmic'
+
+
+def test_quickstart_adds_snmp_exporter_when_community_is_given(tmp_path):
+    """--snmp-community を付けると、ヴァルハラ(Prometheus)が snmp_exporter 経由で SNMP も貯める。
+    community は本人だけ読める別ファイル、モジュールは iac/cisco-traffic-monitoring と同じ(本物の snmp_exporter 0.28 で確認済み)"""
+    import subprocess
+    import yaml
+    sh = os.path.join(ROOT, 'cyber-view-standalone', 'gnmi-quickstart.sh')
+    r = subprocess.run(['bash', sh, 'config', '--target', '192.168.1.1', '--ports', 'Gi1/0/1', '--user', 'admin',
+                        '--password', 'pw', '--snmp-community', 'pu"b', '--dir', str(tmp_path)],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    auth = yaml.safe_load((tmp_path / 'snmp-auth.yml').read_text())
+    assert auth == {'auths': {'nirvana': {'community': 'pu"b', 'version': 2}}}
+    assert oct((tmp_path / 'snmp-auth.yml').stat().st_mode & 0o777) == '0o600'
+    mods = yaml.safe_load((tmp_path / 'snmp-modules.yml').read_text())
+    with open(os.path.join(ROOT, 'iac', 'cisco-traffic-monitoring', 'snmp_exporter', 'snmp.yml'), encoding='utf-8') as fh:
+        assert mods['modules'] == yaml.safe_load(fh)['modules']
+    prom = yaml.safe_load((tmp_path / 'prometheus.yml').read_text())
+    job = next(j for j in prom['scrape_configs'] if j['job_name'] == 'snmp')
+    assert job['params'] == {'module': ['cisco_if'], 'auth': ['nirvana']}
+    assert job['static_configs'][0]['targets'] == ['192.168.1.1']
+    assert job['relabel_configs'][-1]['replacement'] == '127.0.0.1:9116'
+    sys.path.insert(0, os.path.join(ROOT, 'cyber-view-standalone'))
+    from cvs import config as C
+    cfg = C.load(str(tmp_path / 'nirvana.yaml'))
+    assert cfg['sources']['prometheus']['flavor'] == 'both' and cfg['sources']['prometheus']['job'] == 'snmp'
+    r2 = subprocess.run(['bash', sh, 'config', '--target', '192.168.1.1', '--ports', 'Gi1/0/1', '--user', 'admin',
+                         '--password', 'pw', '--dir', str(tmp_path / 'nosnmp')], capture_output=True, text=True, timeout=30)
+    assert r2.returncode == 0 and not (tmp_path / 'nosnmp' / 'snmp-auth.yml').exists()

@@ -34,7 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 QUICKSTART = HERE / 'gnmi-quickstart.sh'
 STATE_DIR = Path(os.environ.get('NIRVANA_SETUP_DIR', Path.home() / '.nirvana-gnmi'))
-GUI_VERSION = '8'
+GUI_VERSION = '9'
 NETFLOW_PORT = 2055
 SFLOW_PORT = 6343
 NIRVANA_PORT = int(os.environ.get('NIRVANA_PORT', '8091'))
@@ -91,12 +91,15 @@ def quickstart_cmd(action, form=None):
         args += ['--target', ','.join(form['targets']), '--ports', ','.join(form['ports']),
                  '--user', form['user'], '--wait', '90']
         env['GNMI_PASSWORD'] = form['password']
+        if form.get('community'):
+            env['GNMI_SNMP_COMMUNITY'] = form['community']   # snmp_exporter も動かし、ヴァルハラに SNMP を貯める
     if on_windows():
         # Windows の git は改行を CRLF にすることがあるので、中身を LF にして標準入力で渡す。
         # 文字列で渡すと Windows の Python が改行を CRLF に戻すので、バイト列で渡す
         script = QUICKSTART.read_bytes().replace(b'\r\n', b'\n')
         env['WSLENV'] = ':'.join(filter(None, [os.environ.get('WSLENV', ''), 'GNMI_FROM_GUI/u',
-                                                'GNMI_PASSWORD/u' if form else '']))
+                                                'GNMI_PASSWORD/u' if form else '',
+                                                'GNMI_SNMP_COMMUNITY/u' if form and form.get('community') else '']))
         # --cd ~: 呼び出し元の Windows フォルダへ移ろうとして失敗する(chdir ... failed)のを避ける
         return WSL + ['bash', '-s', '--'] + args, script, env
     return ['bash', str(QUICKSTART)] + args, None, env
@@ -174,7 +177,9 @@ def nirvana_config(form):
                       '    interfaces:', '      - {name: eth0}']
             links.append(f'  - {{a: sw{n}, a_if: "{expand_if(p)}", b: {peer}, b_if: eth0}}')
     lines += ['links:'] + links
-    lines += ['sources:', '  prometheus:', '    url: http://127.0.0.1:9090', '    flavor: gnmic',
+    lines += ['sources:', '  prometheus:', '    url: http://127.0.0.1:9090',
+              # SNMP が使えるときは snmp_exporter の値もヴァルハラにある(同じポートは SNMP を優先し、無いところを gNMI で)
+              *(['    flavor: both', '    job: snmp'] if form.get('community') else ['    flavor: gnmic']),
               '    gnmic_job: gnmic']
     # NetFlow v5/v9/IPFIX を UDP 2055、sFlow v5 を UDP 6343 で受ける(装置の送り先をこの PC にすると、NETWORK 画面に通信の粒が出る)
     lines += ['  flow:', f'    netflow: {NETFLOW_PORT}', f'    sflow: {SFLOW_PORT}',
