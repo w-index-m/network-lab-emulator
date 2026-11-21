@@ -369,6 +369,36 @@ day.forEach(([h, b, col], i) => {
 });
 s.addNotes('今日 1 日の流れです。午前は、PR の GitHub の試験が 3 件落ちました。手元で同じ失敗を再現して直し、うち 1 件は STP の復旧ログが出ないエミュレータの実バグでした。午後はポートの SNMP カウンタを頼まれて実装し、全体試験も通りました。ところが本物の snmpwalk で数値を見ていると、STP が 2 台ともルートのままになっていることに気づきました。原因は、L2 の BPDU が IP のサブネット判定に入っていたことでした。直して緑を確かめ、main に取り込みました。');
 
+// 9c. 知らないうちに CI/CD
+s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: '失敗への対応' });
+s.addText('知らないうちに CI/CD を回している', { placeholder: 'title' });
+const cicdFlow = [
+  ['人', '「やって」', C.accent2],
+  ['Claude', '作業ブランチに push', C.accent1],
+  ['CI', 'GitHub が全試験を自動で', C.accent5],
+  ['人', '「取り込んで」', C.accent2],
+  ['CD', 'main を Render が公開', C.accent4],
+];
+cicdFlow.forEach(([who, what, col], i) => {
+  const x = 0.55 + i * 1.86;
+  hex(s, x + 0.35, 1.15, 0.62, col, String(i + 1), 'flow hex ' + (i + 1));
+  txt(s, who, { x, y: 1.75, w: 1.32, h: 0.3, fontSize: 13, bold: true, color: C.background1, align: 'center' });
+  txt(s, what, { x, y: 2.05, w: 1.32, h: 0.5, fontSize: 11, align: 'center' });
+  if (i < cicdFlow.length - 1) {
+    s.addShape(SH.RIGHT_ARROW, { x: x + 1.38, y: 1.38, w: 0.4, h: 0.22, fill: { color: C.accent6 }, line: { color: C.accent6, width: 0 }, objectName: 'flow arrow ' + (i + 1) });
+  }
+});
+card(s, 0.5, 2.75, 4.35, 2.05, 'ci card');
+card(s, 5.15, 2.75, 4.35, 2.05, 'cd card');
+txt(s, 'CI(継続的インテグレーション)', { x: 0.75, y: 2.9, w: 3.9, h: 0.35, fontSize: 14, bold: true, color: C.accent5 });
+txt(s, '変更を小さく何度も混ぜ、そのたびに自動で全部試す。ここでは push のたびに GitHub Actions が pytest 約 2,200 件とシナリオ回帰を回す(約 20 分)。赤なら直すまで取り込まない', { x: 0.75, y: 3.3, w: 3.9, h: 1.4, fontSize: 11.5 });
+txt(s, 'CD(継続的デリバリー)', { x: 5.4, y: 2.9, w: 3.9, h: 0.35, fontSize: 14, bold: true, color: C.accent4 });
+txt(s, '試験に通ったものを、いつでも出せる状態に保って出す。ここでは main を常に緑に保ち、Render の公開版(network-lab-emulator.onrender.com)が main から作られる', { x: 5.4, y: 3.3, w: 3.9, h: 1.4, fontSize: 11.5 });
+txt(s, '例: 設定例を変えたのに試験を直し忘れた push を、CI が赤で止めた(11/21)', { x: 0.75, y: 4.2, w: 3.9, h: 0.5, fontSize: 11, color: C.accent5 });
+txt(s, '例: 赤いコミットのある PR は、緑になるまで「取り込んで」を待つ', { x: 5.4, y: 4.2, w: 3.9, h: 0.5, fontSize: 11, color: C.accent4 });
+txt(s, '用語を知らなくても、「やって」と「取り込んで」の 2 つの言葉が CI/CD のスイッチになっている', { x: 0.5, y: 4.88, w: 9, h: 0.3, fontSize: 12, italic: true, color: C.accent2 });
+s.addNotes('CI/CD という言葉を意識しなくても、この開発は CI/CD の形で回っています。人が「やって」と言うと、Claude が作業ブランチに push し、そのたびに GitHub Actions が約 2,200 件の試験とシナリオ回帰を自動で流します。これが CI です。緑になってから人が「取り込んで」と言うと main に入り、公開版は main から作られます。これが CD です。人は用語を知らなくても、2 つの言葉で承認の関門を握っています。');
+
 // 10. 役割分担
 pres.addSection({ title: 'まとめ' });
 s = pres.addSlide({ masterName: 'CONTENT_DARK', sectionTitle: 'まとめ' });
