@@ -34,7 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 QUICKSTART = HERE / 'gnmi-quickstart.sh'
 STATE_DIR = Path(os.environ.get('NIRVANA_SETUP_DIR', Path.home() / '.nirvana-gnmi'))
-GUI_VERSION = '3'
+GUI_VERSION = '4'
 NIRVANA_PORT = int(os.environ.get('NIRVANA_PORT', '8091'))
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 PORT_RE = re.compile(r'^[A-Za-z][A-Za-z\-]*\d+(?:/\d+)*(?:\.\d+)?$')
@@ -164,6 +164,8 @@ def nirvana_config(form):
                   '    interfaces:']
         for p in form['ports']:
             lines.append(f'      - {{name: "{expand_if(p)}"}}')
+        # NETWORK 画面(IP アドレス空間)に置くため、管理 IP を持つ IF を1つ書く(どの IF かは分からないので mgmt)
+        lines.append(f'      - {{name: mgmt, ip: "{host}", prefix: 24}}')
         for k, p in enumerate(form['ports'], 1):
             peer = f'sw{n}p{k}'
             lines += [f'  - id: {peer}', f'    hostname: "{p} の先"', '    type: pc', '    snmp: false',

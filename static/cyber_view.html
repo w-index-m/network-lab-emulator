@@ -1652,6 +1652,11 @@
         ctx.fillStyle = '#fff'; ctx.font = '600 14px monospace'; ctx.textAlign = 'center';
         ctx.fillText(names[id] || id, lp.x, lp.y);
         const ip = devIp(id); if (ip) { ctx.fillStyle = '#7fb2d0'; ctx.font = '11px monospace'; ctx.fillText(ip, lp.x, lp.y + 14); }
+        const cpu = hostById[id] && hostById[id].cpu;   // SNMP で取った CPU 使用率(取れない装置は出さない)
+        if (cpu != null) {
+          ctx.fillStyle = cpu >= 80 ? '#ff4d5e' : cpu >= 50 ? '#ffab2e' : '#3dff9a'; ctx.font = '600 12px monospace';
+          ctx.fillText(`CPU ${Math.round(cpu)}%`, lp.x, lp.y + (ip ? 28 : 14));
+        }
         ctx.textAlign = 'start';
       }
     });
@@ -2832,6 +2837,7 @@
     if (boardView) setBoardView(null);
     if (m !== 'link' && vh.active) { document.body.classList.remove('vhopen'); vh.active = false; document.body.classList.remove('replaying'); }
     mode = m;
+    document.getElementById('empty').style.display = 'none';   // 前の画面の「OSPF が無い」等を残さない
     document.getElementById('mNet').classList.toggle('on', m === 'net');
     document.getElementById('mLink').classList.toggle('on', m === 'link');
     document.getElementById('mOspf').classList.toggle('on', m === 'ospf');

@@ -11804,7 +11804,8 @@ async def traffic_hosts():
                         'in_bytes': c.get('in_bytes', 0), 'out_bytes': c.get('out_bytes', 0)})
         if ifs:
             hosts.append({'id': dev_id, 'hostname': st.hostname, 'type': st.device_type,
-                          'interfaces': ifs, 'peers': sorted(vnet.links.get(dev_id, set()))})
+                          'interfaces': ifs, 'peers': sorted(vnet.links.get(dev_id, set())),
+                          'cpu': snmp_agent._cpu_percent(dev_id, st.device_type)})   # Cisco 系以外は None
     return {'hosts': hosts, 'now': time.time()}
 
 

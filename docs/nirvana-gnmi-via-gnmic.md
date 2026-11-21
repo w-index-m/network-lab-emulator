@@ -51,6 +51,13 @@ snmp-server community public RO NIRVANA-SNMP
 ラボの模擬 Catalyst(`snmp-server community public RO <ACL>`)で、設定画面の確認が OK(誤った community では NG と SNMP なしで起動)、
 生成した設定でニルヴァーナを起動するとリンクの取得元 `snmp`・POLL `up` になることを確かめた。
 
+版 4: SNMP で取れた CPU 使用率(Cisco の cpmCPUTotal5minRev、無ければ hrProcessorLoad。60秒ごと)を ROUTER LINKS の装置名・IP の下に
+`CPU n%` で出す(50% 以上は橙、80% 以上は赤。`/api/traffic/hosts` の `cpu`。ラボ版も模擬 CPU を同じ欄に載せる)。設定画面が作る設定には
+管理 IP を持つ IF(`mgmt`)を1つ足し、NETWORK 画面(IP アドレス空間)にも装置が置かれるようにした。OSPF 画面の「OSPF が動いている
+ルータがありません」が他の画面へ切り替えても残っていたのも直した。
+
+![CPU 使用率の表示](images/nirvana-gnmi-snmp-cpu-links.jpg)
+
 3650 の設定が再起動で消えるとき: パスワードリカバリの後は `SWITCH_IGNORE_STARTUP_CFG="1"` のまま残る(`show romvar | include IGNORE`)。
 `no system ignore startupconfig switch all` → `write memory` で `"0"` に戻る(実機で確認)。
 - 「停止」で全部止まります。前に手で起動した gnmic・Prometheus があるときは、「手で起動したものを止める」を押します。

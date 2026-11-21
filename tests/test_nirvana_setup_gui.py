@@ -54,7 +54,8 @@ def test_nirvana_config_links_each_port_and_loads(tmp_path):
     assert cfg['sources']['prometheus']['flavor'] == 'gnmic'
     sw = next(d for d in cfg['devices'] if d['id'] == 'sw1')
     assert sw['mgmt_ip'] == '192.168.1.1' and [i['name'] for i in sw['interfaces']] == \
-        ['GigabitEthernet1/0/1', 'GigabitEthernet1/0/2']
+        ['GigabitEthernet1/0/1', 'GigabitEthernet1/0/2', 'mgmt']
+    assert sw['interfaces'][-1]['ip'] == '192.168.1.1'     # NETWORK 画面に置くための管理 IP
     assert [(ln['a'], ln['a_if'], ln['b']) for ln in cfg['links']] == \
         [('sw1', 'GigabitEthernet1/0/1', 'sw1p1'), ('sw1', 'GigabitEthernet1/0/2', 'sw1p2')]
     assert all(d.get('snmp') is False for d in cfg['devices'] if d['id'] != 'sw1')
@@ -115,3 +116,15 @@ def test_snmp_check_reports_ok_and_ng(monkeypatch):
     assert ok and 'OK SNMP 10.0.0.1: 応答あり(sysName Switch)' in out and 'NG SNMP 10.0.0.2' in out and 'ACL' in out
     ok, out = G.snmp_check(G.parse_form({'target': '10.0.0.2', 'password': 'x'}))      # 既定は public
     assert not ok and 'SNMP を使わずに起動' in out
+
+
+def test_hosts_carry_cpu_from_snmp():
+    """SNMP で取れた CPU 使用率を /api/traffic/hosts に載せる(ROUTER LINKS の装置名の下に出す)。古い値は出さない"""
+    from cvs.snmp_poll import SnmpPoller
+    p = SnmpPoller({'devices': [], 'sources': {'snmp': {'community': 'x', 'interval': 60}}}, None, {})
+    assert p.cpu_of('sw1') is None
+    p.cpu_now['sw1'] = (37.0, 1000.0)
+    assert p.cpu_of('sw1', now=1100.0) == 37.0 and p.cpu_of('sw1', now=1000.0 + 181) is None
+    with open(os.path.join(ROOT, 'static', 'cyber_view.html'), encoding='utf-8') as fh:
+        page = fh.read()
+    assert 'hostById[id].cpu' in page and 'CPU ${Math.round(cpu)}%' in page
