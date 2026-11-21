@@ -2270,6 +2270,7 @@
       if (back) treeArrows(B, A, Y, t);
       // 両端: それぞれの装置から見た隣接(show ip ospf neighbor の State と Dead Time)
       for (const [P, Q, st, role, dead, cost] of [[A, B, a.state_a, a.role_b, a.dead_a, a.cost_a], [B, A, a.state_b, a.role_a, a.dead_b, a.cost_b]]) {
+        if (st == null) continue;   // 相手側を見ていない(SNMP で読めない相手・同じ装置の VRF など)
         const u = 0.27, ix = P[0] + (Q[0] - P[0]) * u, iz = P[2] + (Q[2] - P[2]) * u;
         const dv = dead == null ? null : Math.max(0, dead - el);
         adjBadge(ix, Y + 0.9, iz, st, role, st === 'Down' ? null : dv, a.dead_interval, st === 'Full' ? OSPF_COL.full : st === 'Down' ? OSPF_COL.down : OSPF_COL.partial, t);
@@ -2279,7 +2280,7 @@
       const mx = (A[0] + B[0]) / 2, mz = (A[2] + B[2]) / 2;
       const title = a.state === 'full' ? 'ADJ FULL' : a.state === 'down' ? 'ADJ DOWN' : 'ADJ ' + (ST_SHORT[a.state_a] || a.state_a) + '/' + (ST_SHORT[a.state_b] || a.state_b);
       if (!small || a.state !== 'full') plate3d(mx, Y + 2.0, mz, a.state === 'full' ? acol : col, title, areaName(a.area), a.state !== 'full', t,
-        a.why.length ? a.why.join(' / ') : `${shortIf(a.iface_a || '?')} ⇄ ${shortIf(a.iface_b || '?')}`);
+        a.why.length ? a.why.join(' / ') : [a.iface_a, a.iface_b].filter(Boolean).map(shortIf).join(' ⇄ ') || null);
       if (a.state === 'down') sparksAt(mx, Y + 0.3, mz, t, '#ff3b4e');
     }
     // 3) ルータ: 六角柱 + Router-ID・ABR・宛先までのコスト

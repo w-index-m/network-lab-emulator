@@ -26,6 +26,7 @@ import threading
 import time
 
 from . import snmp_client as SC
+from . import snmp_ospf
 from .link_evidence import norm_if
 from .route_watch import CpuWatch, RouteWatcher
 
@@ -86,6 +87,7 @@ class SnmpPoller:
         self.cpu_high, self.cpu_jump, self.cpu_hold = float(c.get('high', 80)), float(c.get('jump', 20)), int(c.get('hold', 2))
         self.cpu_oid = c.get('oid')
         self.cpu_now = {}        # 装置 -> (CPU 使用率, 取った時刻)。画面の表示用
+        self.ospf_now = {}       # 装置 -> snmp_ospf.read() の結果(OSPF 画面用)
         self.devs = [d for d in cfg['devices'] if d.get('mgmt_ip') and d.get('snmp') is not False]
         t = src.get('traffic')
         self.traffic_on = bool(t)
@@ -185,6 +187,10 @@ class SnmpPoller:
         if (num is not None and self._n.get(d['id']) != num) or self._tick % self.full_every == 0:
             new = self.watch.observe(d['id'], d['hostname'], self.routes(d, now), now=now)
             self._n[d['id']] = num
+        try:                    # OSPF の隣接(OSPF 画面用)。OSPF-MIB が無い・OSPF が無い装置は None
+            self.ospf_now[d['id']] = snmp_ospf.read(host, comm, **self._kw())
+        except Exception:  # noqa: BLE001
+            self.ospf_now[d['id']] = None
         v = self.cpu(d, host, comm)
         if v is not None:
             self.cpu_now[d['id']] = (v, now)

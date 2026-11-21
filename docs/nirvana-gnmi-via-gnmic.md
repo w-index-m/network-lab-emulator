@@ -76,6 +76,20 @@ gNMI・SNMP・NetFlow をまとめた 3650 の設定サンプルは `cyber-view-
 
 ![フロー集計](images/nirvana-flow-summary.png)
 
+版 8: OSPF 画面を SNMP の直接読み取りでも出す(`cvs/snmp_ospf.py`)。これまでの OSPF 画面はヴァルハラに貯めた OSPF-MIB
+(snmp_exporter)を前提にしていたが、設定画面の構成のヴァルハラは gnmic の値しか持たないので「OSPF 未設定」と出ていた。
+SNMP の community を入れて起動すると、30 秒ごとに ospfRouterId・ospfNbrTable・ospfIfAreaId・ipAddrTable を読み、隣接を
+どの IF の先か・エリアと一緒に出す(取得元 `snmp`。読めていればヴァルハラより先に使う)。設定に無い相手は Router-ID の名前
+(`RID 10.255.0.2` など)で1台として置き、相手側の状態は分からないので片側だけ出す。Cisco の OSPF-MIB はふつうグローバルの
+プロセスだけを見せるので、VRF のプロセスは「相手」として見える。
+
+PC(WSL)から実機と OSPF を張る試みの結果: WSL はミラーモードでも、ファイアウォール(Hyper-V・Windows とも)を開けても、
+外から来る OSPF(IP プロトコル 89)を受けられない(マルチキャストもユニキャストの non-broadcast も `In` が 0 件、相手は INIT)。
+代わりに 3650 1台の中で VRF を使い、折り返しケーブルで OSPF を張った(`catalyst-3650-vrf-ospf.example.txt`、FULL を実機で確認)。
+仮想マシン・実機の Ubuntu で張るなら `ospf-peer.sh up`。
+
+![SNMP の直接読み取りによる OSPF 画面](images/nirvana-ospf-direct-snmp.jpg)
+
 3650 の設定が再起動で消えるとき: パスワードリカバリの後は `SWITCH_IGNORE_STARTUP_CFG="1"` のまま残る(`show romvar | include IGNORE`)。
 `no system ignore startupconfig switch all` → `write memory` で `"0"` に戻る(実機で確認)。
 - 「停止」で全部止まります。前に手で起動した gnmic・Prometheus があるときは、「手で起動したものを止める」を押します。
