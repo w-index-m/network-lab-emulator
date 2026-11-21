@@ -158,7 +158,7 @@ def test_netflow_v9_and_ipfix_are_read_with_templates_and_setup_enables_2055():
         [('192.168.1.10', '192.168.1.20', 50000, 443, 'tcp', 3280, 7, 'netflow9')]
     assert F.parse_netflow(data_pkt, '10.0.0.2', templates=t) == []          # 別の装置のテンプレートは使わない
     cfg_text = G.nirvana_config(G.parse_form({'target': '192.168.1.1', 'password': 'x', 'community': ''}))
-    assert '  flow:\n    netflow: 2055' in cfg_text
+    assert '  flow:\n    netflow: 2055\n    sflow: 6343' in cfg_text
     with open(os.path.join(ROOT, 'engine', 'flow_collector.py'), encoding='utf-8') as a, \
             open(os.path.join(ROOT, 'cyber-view-standalone', 'cvs', 'flow_collector.py'), encoding='utf-8') as b:
         assert a.read() == b.read()
