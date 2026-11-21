@@ -167,3 +167,25 @@ def test_netflow_v9_and_ipfix_are_read_with_templates_and_setup_enables_2055():
     with open(os.path.join(ROOT, 'engine', 'flow_collector.py'), encoding='utf-8') as a, \
             open(os.path.join(ROOT, 'cyber-view-standalone', 'cvs', 'flow_collector.py'), encoding='utf-8') as b:
         assert a.read() == b.read()
+
+
+def test_start_runs_in_background_and_result_is_polled(monkeypatch):
+    """「開始」は裏で動かし、画面は /api/result を取りに来る(ブラウザが長い POST を切っても結果を失わない。
+    二重に押しても1回だけ)。本物の gnmic・Prometheus・snmp_exporter とラボの装置で、途中で画面を開き直しても
+    最後に「うまくいきました」が出ることを Playwright で確かめた"""
+    import threading
+    import time
+    gate = threading.Event()
+    monkeypatch.setattr(G, 'do_up', lambda body: (gate.wait(5), {'ok': True, 'log': 'OK'})[1])
+    G._job.update(running=False, result=None)
+    assert G.start_up({}) == {'started': True, 'running': True}
+    assert G.start_up({}) == {'started': False, 'running': True}           # 走っている間は二重に動かさない
+    assert G._job['running'] and G._job['result'] is None
+    gate.set()
+    for _ in range(50):
+        if not G._job['running']:
+            break
+        time.sleep(0.05)
+    assert G._job['result'] == {'ok': True, 'log': 'OK'}
+    html = G.page({})
+    assert "fetch('/api/result')" in html and 'replace(/\\/\\?' not in html

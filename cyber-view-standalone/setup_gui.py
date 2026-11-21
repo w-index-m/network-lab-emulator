@@ -34,7 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 QUICKSTART = HERE / 'gnmi-quickstart.sh'
 STATE_DIR = Path(os.environ.get('NIRVANA_SETUP_DIR', Path.home() / '.nirvana-gnmi'))
-GUI_VERSION = '9'
+GUI_VERSION = '10'
 NETFLOW_PORT = 2055
 SFLOW_PORT = 6343
 NIRVANA_PORT = int(os.environ.get('NIRVANA_PORT', '8091'))
@@ -346,20 +346,31 @@ async function refresh(){
   const b=(n,v)=>`<span class="badge ${v?'on':'off'}">${n} ${v?'動作中':'停止'}</span>`;
   $('badges').innerHTML=b('gnmic',s.gnmic)+b('Prometheus',s.prometheus)+b('ニルヴァーナ',s.nirvana);
   $('open').href=s.nirvana_url;$('open').style.display=s.nirvana?'inline':'none';
-  $('flows').href=s.nirvana_url.replace(/\/\?.*$/,'/flows');$('flows').style.display=s.nirvana?'inline':'none';
+  $('flows').href=s.nirvana_url.split('?')[0].replace(/[/]$/,'')+'/flows';$('flows').style.display=s.nirvana?'inline':'none';
   $('ports_t').innerHTML=s.ports.length?'<tr><th>装置</th><th>ポート</th><th>状態</th><th>受信バイト</th></tr>'+
     s.ports.map(p=>`<tr><td>${p.device}</td><td>${p.port}</td><td>${p.oper}</td><td>${Number(p.in_octets).toLocaleString()}</td></tr>`).join(''):'';
 }
 $('start').onclick=async()=>{
   busy(true);say('準備しています(初回は gnmic・Prometheus の取得で数分かかることがあります)…');
-  try{const r=await post('/api/up',{target:$('target').value,ports:$('ports').value,user:$('user').value,password:$('password').value,community:$('community').value});
-    say((r.ok?'うまくいきました\\n\\n':'うまくいきませんでした\\n\\n')+r.log);
-    if(r.ok&&r.nirvana_url)window.open(r.nirvana_url,'_blank');}
+  try{await post('/api/up',{target:$('target').value,ports:$('ports').value,user:$('user').value,password:$('password').value,community:$('community').value});
+    await waitResult(true);}
   catch(e){say('エラー: '+e)}busy(false);refresh();
 };
+// 結果は裏で作るので、終わるまで取りに行く(画面を開き直しても続きが見える)
+async function waitResult(open){
+  const t0=Date.now();
+  for(;;){
+    let j;try{j=await (await fetch('/api/result')).json()}catch(e){await new Promise(r=>setTimeout(r,3000));continue}
+    if(!j.running){const r=j.result;if(r){say((r.ok?'うまくいきました\\n\\n':'うまくいきませんでした\\n\\n')+r.log);
+      if(open&&r.ok&&r.nirvana_url)window.open(r.nirvana_url,'_blank');}return}
+    say(`準備しています… ${Math.round((Date.now()-t0)/1000)} 秒(初回はダウンロードで数分かかることがあります)`);refresh();
+    await new Promise(r=>setTimeout(r,3000));
+  }
+}
 $('stop').onclick=async()=>{busy(true);const r=await post('/api/down');say(r.log);busy(false);refresh()};
 $('free').onclick=async()=>{busy(true);const r=await post('/api/free');say(r.log);busy(false);refresh()};
 refresh();setInterval(refresh,10000);
+fetch('/api/result').then(r=>r.json()).then(j=>{if(j.running){busy(true);waitResult(false).then(()=>{busy(false);refresh()})}});
 </script></body></html>"""
 
 
@@ -402,23 +413,48 @@ def do_up(body):
                 'nirvana_url': f'http://localhost:{NIRVANA_PORT}/?view=links' if ok2 else None}
 
 
+_job = {'running': False, 'result': None, 'started': None}
+
+
+def start_up(body):
+    """「開始」を裏で動かす(数分かかることがあるので、画面は /api/result を取りに来る)"""
+    with _lock:
+        if _job['running']:
+            return {'started': False, 'running': True}
+        _job.update(running=True, result=None, started=time.time())
+
+    def work():
+        try:
+            r = do_up(body)
+        except Exception as e:  # noqa: BLE001
+            r = {'ok': False, 'log': f'途中で失敗しました: {e}'}
+        _job.update(running=False, result=r)
+    threading.Thread(target=work, daemon=True).start()
+    return {'started': True, 'running': True}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
     def _send(self, code, body, ctype='application/json; charset=utf-8'):
         data = body.encode('utf-8') if isinstance(body, str) else body
-        self.send_response(code)
-        self.send_header('Content-Type', ctype)
-        self.send_header('Content-Length', str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(code)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError):
+            pass        # ブラウザが先に切った(画面を閉じた・再読み込みした)
 
     def do_GET(self):
         if self.path == '/' or self.path.startswith('/?'):
             return self._send(200, page(load_defaults()), 'text/html; charset=utf-8')
         if self.path == '/api/status':
             return self._send(200, json.dumps(status(), ensure_ascii=False))
+        if self.path == '/api/result':
+            return self._send(200, json.dumps(dict(_job), ensure_ascii=False))
         self._send(404, '{}')
 
     def do_POST(self):
@@ -428,7 +464,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             body = {}
         if self.path == '/api/up':
-            return self._send(200, json.dumps(do_up(body), ensure_ascii=False))
+            return self._send(200, json.dumps(start_up(body), ensure_ascii=False))
         if self.path == '/api/down':
             ok, log = run_quickstart('down')
             return self._send(200, json.dumps({'ok': ok, 'log': log + '\n' + stop_nirvana()}, ensure_ascii=False))
