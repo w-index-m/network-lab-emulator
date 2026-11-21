@@ -147,5 +147,5 @@ def test_example_files_document_the_gnmic_route():
         g = fh.read()
     for needle in ('type: prometheus', 'strings-as-labels: true', 'expiration: 25s', '# export-timestamps: true',
                    '"/interfaces/interface[name=GigabitEthernet1/0/1]/state"', 'has missing keys',
-                   'MDT_SUBSCRIPTION-4-TERMINATED', 'clock timezone'):
+                   'MDT_SUBSCRIPTION-4-TERMINATED', 'up=1'):
         assert needle in g, needle
