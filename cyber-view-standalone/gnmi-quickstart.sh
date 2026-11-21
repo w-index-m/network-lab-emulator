@@ -418,7 +418,8 @@ stop_all() {
   done
 }
 
-port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+# 2 秒で打ち切る(WSL のミラーモードでは、空いているポートへの接続が返ってこないことがある)
+port_busy() { timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1" 2>/dev/null; }
 
 start_all() {
   local p
@@ -466,25 +467,25 @@ diagnose() {
   if grep -q 'code = NotFound' "$log"; then
     hint 'ポート名が装置に無い可能性があります(show interfaces status の名前と比べてください)'
   fi
-  hint "gnmic のログ: tail -20 $DIR/gnmic.log"
+  hint "gnmic のログ: tail -n 20 $DIR/gnmic.log"
 }
 
 prom_query() {
-  curl -s --data-urlencode "query=$1" "http://127.0.0.1:$PROM_LISTEN/api/v1/query" 2>/dev/null
+  curl -s -m 5 --data-urlencode "query=$1" "http://127.0.0.1:$PROM_LISTEN/api/v1/query" 2>/dev/null
 }
 
 check() {
   local i n_gnmic=0 n_prom=0 up=''
   say "値が届くのを待ちます(最大 ${WAIT} 秒)"
   for ((i = 0; i < WAIT; i += 5)); do
-    n_gnmic=$(curl -s "http://127.0.0.1:$GNMIC_LISTEN/metrics" 2>/dev/null | grep -c '^interfaces_interface_state_counters_in_octets{' || true)
+    n_gnmic=$(curl -s -m 5 "http://127.0.0.1:$GNMIC_LISTEN/metrics" 2>/dev/null | grep -c '^interfaces_interface_state_counters_in_octets{' || true)
     up=$(prom_query 'up{job="gnmic"}' | grep -o '"value":\[[^]]*,"[01]"' | grep -o '"[01]"$' | tr -d '"' || true)
     n_prom=$(prom_query 'interfaces_interface_state_counters_in_octets' | grep -o '"interface_name"' | wc -l || true)
     [ "${n_prom:-0}" -gt 0 ] && break
     sleep 5
   done
   if [ "${n_gnmic:-0}" -gt 0 ]; then ok "gnmic が装置から受け取ったポート: $n_gnmic"; else ng 'gnmic が装置から値を受け取れていません'; diagnose; fi
-  if [ "$up" = 1 ]; then ok 'Prometheus が gnmic から取れています(up=1)'; else ng "Prometheus が gnmic を取れていません(up=${up:-なし})"; hint "Prometheus のログ: tail -20 $DIR/prometheus.log"; fi
+  if [ "$up" = 1 ]; then ok 'Prometheus が gnmic から取れています(up=1)'; else ng "Prometheus が gnmic を取れていません(up=${up:-なし})"; hint "Prometheus のログ: tail -n 20 $DIR/prometheus.log"; fi
   [ -z "$SNMP_COMMUNITY" ] || check_snmp
   if [ "${n_prom:-0}" -gt 0 ]; then
     ok "Prometheus に入ったポート: $n_prom"
@@ -510,7 +511,7 @@ check_snmp() {
   else
     ng "ヴァルハラが SNMP を取れていません(up=${sup:-なし})。gNMI の表示はこのまま続けます"
     hint 'community の綴り・装置の snmp-server community・ACL(この PC の IP を許可しているか)を確かめてください'
-    hint "snmp_exporter のログ: tail -20 $DIR/snmp_exporter.log"
+    hint "snmp_exporter のログ: tail -n 20 $DIR/snmp_exporter.log"
   fi
 }
 
