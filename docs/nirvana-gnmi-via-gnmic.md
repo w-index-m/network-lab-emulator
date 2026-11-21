@@ -24,6 +24,20 @@ snmp_exporter と並べて使えます(`flavor: both` では同じ装置・IF �
 - 裏で `gnmi-quickstart.sh up` を動かします。Windows では WSL の中で動かし、gnmic・Prometheus の用意・設定・起動・確認まで行います。
 - 続けてニルヴァーナを 8091 番で起動し、画面を開きます。選んだポートの先に「相手」を置いて、リンクとして表示します。
 - うまくいかないときは、原因の目安を画面に出します(装置に届かない / パスワード / ポートの取り合い など)。
+- PowerShell から起動するときは `.\start-nirvana-gnmi.bat`(先頭の `.\` が要る)。タイトル横の「版」で新しい画面か確かめられる。
+  前の設定画面が残っていると二重起動になるので、そのときは黒いウィンドウを閉じる(残っていたら `taskkill /F /IM python.exe`)。
+
+実機(WS-C3650-24TD、IOS XE 16.12.11)+ Windows 11 + WSL で「開始」を押した結果。gnmic・Prometheus・ニルヴァーナが上がり、
+Gi1/0/1 が UP、受信バイトが届いている:
+
+![実機 3650 で開始した結果](images/nirvana-gnmi-setup-gui-windows-3650.png)
+
+Windows で見つかって直した点: 標準入力に文字列で渡すと Python が改行を CRLF に戻し `set: pipefail\r` で止まる(バイト列で渡す)、
+WSL が呼び出し元の Windows フォルダへ移ろうとして `chdir ... failed 5` を出す(`wsl --cd ~`)、Windows では SO_REUSEADDR で
+同じポートに2つ目の設定画面が bind でき古い画面が答え続ける(`allow_reuse_address = False` と起動前の確認)。
+
+3650 の設定が再起動で消えるとき: パスワードリカバリの後は `SWITCH_IGNORE_STARTUP_CFG="1"` のまま残る(`show romvar | include IGNORE`)。
+`no system ignore startupconfig switch all` → `write memory` で `"0"` に戻る(実機で確認)。
 - 「停止」で全部止まります。前に手で起動した gnmic・Prometheus があるときは、「手で起動したものを止める」を押します。
 - 見るポートとユーザーは「詳しい設定」で変えられます。前回の IP・ポート・ユーザーは覚えますが、パスワードは保存しません。
 - 設定画面はこの PC の中(127.0.0.1)からしか開けません。入力した値は確かめてから渡します(IP の形・ポート名の形)。
