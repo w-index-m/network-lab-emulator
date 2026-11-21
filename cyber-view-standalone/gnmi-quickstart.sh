@@ -303,7 +303,8 @@ case "$cmd" in
   up)
     parse_args "$@"; ask_missing
     install_tools; stop_all; write_configs; start_all
-    if check; then next_steps; else exit 1; fi ;;
+    # 設定画面(setup_gui.py)から呼ぶときは、手で打つ続きの案内は出さない
+    if check; then [ -n "${GNMI_FROM_GUI:-}" ] || next_steps; else exit 1; fi ;;
   config)
     parse_args "$@"; ask_missing; write_configs ;;
   status)

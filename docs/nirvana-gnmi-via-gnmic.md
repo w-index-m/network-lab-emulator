@@ -14,6 +14,24 @@ snmp_exporter と並べて使えます(`flavor: both` では同じ装置・IF �
 
 ![gNMI の値で描いた ROUTER LINKS](images/nirvana-gnmi-links.jpg)
 
+## コマンドを打たない方法: 設定画面(`setup_gui.py`)
+
+装置の設定(下の 1)を済ませたら、Windows では `cyber-view-standalone\start-nirvana-gnmi.bat` をダブルクリックします。
+ブラウザで設定画面(http://localhost:8092/)が開くので、**装置の IP とパスワードを入れて「開始」を押すだけ**です。
+
+![gNMI 設定画面](images/nirvana-gnmi-setup-gui.jpg)
+
+- 裏で `gnmi-quickstart.sh up` を動かします。Windows では WSL の中で動かし、gnmic・Prometheus の用意・設定・起動・確認まで行います。
+- 続けてニルヴァーナを 8091 番で起動し、画面を開きます。選んだポートの先に「相手」を置いて、リンクとして表示します。
+- うまくいかないときは、原因の目安を画面に出します(装置に届かない / パスワード / ポートの取り合い など)。
+- 「停止」で全部止まります。前に手で起動した gnmic・Prometheus があるときは、「手で起動したものを止める」を押します。
+- 見るポートとユーザーは「詳しい設定」で変えられます。前回の IP・ポート・ユーザーは覚えますが、パスワードは保存しません。
+- 設定画面はこの PC の中(127.0.0.1)からしか開けません。入力した値は確かめてから渡します(IP の形・ポート名の形)。
+- 必要なもの: Windows の Python(ニルヴァーナの部品は .bat が初回に入れる)と、WSL の Ubuntu(gnmic を入れるとき sudo のパスワードを聞かれるため、gnmic だけは最初に一度 WSL で入れておくと確実)。
+
+ラボの Catalyst(gNMI 有効)に対して、Linux 上で画面から「開始」→ 約 20 秒で gnmic・Prometheus・ニルヴァーナが動作中になり、ポートの状態が表に出ることを Playwright で確かめました。
+設定画面を強制終了して残ったニルヴァーナも、次の「開始」で入れ替わります。Windows の .bat と WSL 経由の呼び出しは、この作業環境では動かせないため、実機の Windows で確かめてください。
+
 ## いちばん簡単な方法: `gnmi-quickstart.sh`(Linux / WSL)
 
 装置の設定(下の 1)を済ませたら、WSL では次の 1 行で、gnmic と Prometheus の用意・設定・起動・確認まで終わります。
